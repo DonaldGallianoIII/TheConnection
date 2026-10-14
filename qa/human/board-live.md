@@ -41,7 +41,10 @@ Names below are made up.
 A name gets a box once it has an inbox (it was sent mail, or ran
 `tc wait`) or a card. A listener wakes and exits when mail reaches it, the
 same as in a real session, so each send to `b` or `c` below is followed by
-re-arming that listener.
+re-arming that listener. Once the CARDS lane's router is in `tc`, a first
+send to a name may also print `new inbox: nobody has joined as <name>` on
+stderr; that is expected here. Send nothing to `cx` or `far` after step 11:
+their cards route mail to `codex` and `ssh`, which this script never runs.
 
 6. In terminal 4: `./tc send --from b --to a "ready"`
    - Within 3 s a box `a · peer · inferred` appears, reading

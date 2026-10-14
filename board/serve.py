@@ -17,9 +17,10 @@ mailbox is tc's: TC_ROOT if set, else the folder tc lives in.
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
 
-Where each feed key comes from. tc is read at its own commit; `snap` is
-tc.health_snapshot(), which returns time, machine, sessions, listeners,
-watchers and mail:
+Where each feed key comes from. `snap` is tc.health_snapshot(). At this
+lane's base it returns time, machine, sessions, listeners, watchers and
+mail; CARDS adds a `cards` key, and others may follow. feed() reads only
+the keys below and ignores the rest, and never takes cards from health:
 
   at                       snap["time"] (tc's now_iso(): local time, seconds)
   machine.load1            snap["machine"]["load1"]

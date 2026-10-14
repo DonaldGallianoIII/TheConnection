@@ -129,7 +129,7 @@ class FeedLeakTest(unittest.TestCase):
         """1,000 feed() calls on one Board: VmRSS grows less than 2,048 kB, no fd left open.
 
         The mailbox holds three sent messages, WORKERS more pairs written by
-        hand in tc's naming, a codex card, a status line and one proven
+        hand in tc's layout (a .tmp renamed, mail/.seq raised once after), a codex card, a status line and one proven
         listener, so every branch of feed() runs each call. Must reject a
         Board that keeps what it builds: keeping each feed grew RSS about
         42 MB by hand.
@@ -149,7 +149,9 @@ class FeedLeakTest(unittest.TestCase):
             (root.path / "cards").mkdir()
             (root.path / "cards" / "cx.json").write_text(
                 '{"version": 1, "name": "cx", "kind": "codex", "route": "codex", "reports_to": "a"}')
-            for sender, to in (("a", "cx"), ("cx", "a"), ("a", "far")):
+            # Nothing is sent TO cx: its codex card would make CARDS' router
+            # ring `codex`. Sending from it routes by the recipient alone.
+            for sender, to in (("cx", "a"), ("a", "far"), ("far", "a")):
                 code, out, err = root.tc("send", "--from", sender, "--to", to, "leak run")
                 self.assertEqual(code, 0, f"tc send exited {code}: {err}")
             seq = 3
@@ -158,7 +160,10 @@ class FeedLeakTest(unittest.TestCase):
                     seq += 1
                     folder = root.path / "mail" / f"to-{to}" / "read"
                     folder.mkdir(parents=True, exist_ok=True)
-                    (folder / f"{seq:06d}-from-{sender}.md").write_text(f"# #{seq} from {sender} to {to}\n\nhi\n")
+                    tmp = folder / f"{seq:06d}-from-{sender}.tmp"
+                    tmp.write_text(f"# #{seq} from {sender} to {to}\n\nhi\n")
+                    tmp.rename(tmp.with_suffix(".md"))
+            (root.path / "mail" / ".seq").write_text(str(seq))
             code, out, err = root.tc("read", "a")
             self.assertEqual(code, 0, f"tc read exited {code}: {err}")
             code, out, err = root.tc("status", "a", "watching the leak run")

@@ -8,18 +8,20 @@ Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
 
 Cards are written by hand in C1's shape: CARDS' code is not in this tree.
-The main test sends its mail with real `tc send`, so the file names the
-feed parses are tc's own. The shape tests write message files by hand in
-the same naming (`NNNNNN-from-<sender>.md` under `to-<name>/read/`), which
-is all the feed reads of them.
+The main test sends its mail with real `tc send`, between names with no
+card, so the file names the feed parses are tc's own. No test sends to a
+name with a codex or ssh card: once CARDS' router is in tc, that send
+rings `codex` or is refused. The shape tests write message files by hand
+in tc's layout (`NNNNNN-from-<sender>.md` under `to-<name>/read/`, a .tmp
+renamed, mail/.seq raised), and the feed reads only their names.
 
 @interacts  runs ../tc through tests/_root.py under a throwaway TC_ROOT;
             starts two proven `tc wait` listeners and relies on the harness
             to kill them by their own pids. Loads board/serve.py as a
             module; each Board loads tc with TC_ROOT set to the test's root.
             Writes cards, status lines and message files in that root only.
-@deps       python3 stdlib (importlib, json, os, pathlib, sys, threading,
-            time, unittest); tests/_root.py; board/serve.py; ../tc.
+@deps       python3 stdlib (fcntl, importlib, json, os, pathlib, sys,
+            threading, time, unittest); tests/_root.py; board/serve.py; ../tc.
 @complexity O(1) per test: at most 52 message files, 9 names, two
             listeners, and a few feed() calls, each O(n + m + e) in serve.py
             plus tc's health snapshot (tens of ms, most of it nvidia-smi
@@ -28,6 +30,7 @@ is all the feed reads of them.
             are plain dicts dropped at the end of each test.
 """
 
+import fcntl
 import importlib.util
 import json
 import os
@@ -129,17 +132,33 @@ def write_card(root, name, kind="claude", account="work", route="local",
 
 
 def put_message(root, seq, sender, to):
-    """Write one read message as tc names it: mail/to-<to>/read/NNNNNN-from-<sender>.md.
+    """Write one read message the way tc lays one out, without tc's router.
 
-    @interacts  writes one file, making mail/to-<to>/read/ if needed.
-    @deps       pathlib.
+    The file is mail/to-<to>/read/NNNNNN-from-<sender>.md, written to a
+    .tmp sibling and renamed, and mail/.seq is raised to `seq` under its
+    flock, as tc's send does. For mail to or from any name, including one
+    whose card would route a real send elsewhere.
+
+    @interacts  writes one message file and mail/.seq, making
+                mail/to-<to>/read/ if needed.
+    @deps       fcntl, pathlib.
     @complexity O(1).
     @alloc      none retained.
     """
-    folder = pathlib.Path(root) / "mail" / f"to-{to}" / "read"
+    mail = pathlib.Path(root) / "mail"
+    folder = mail / f"to-{to}" / "read"
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / f"{seq:06d}-from-{sender}.md").write_text(
-        f"# #{seq} from {sender} to {to}, 2026-10-14T12:00:00-05:00\n\nhi\n", encoding="utf-8")
+    path = folder / f"{seq:06d}-from-{sender}.md"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(f"# #{seq} from {sender} to {to}, 2026-10-14T12:00:00-05:00\n\nhi\n", encoding="utf-8")
+    tmp.rename(path)
+    with open(mail / ".seq", "a+") as counter:
+        fcntl.flock(counter, fcntl.LOCK_EX)
+        counter.seek(0)
+        top = max(seq, int(counter.read().strip() or 0))
+        counter.seek(0)
+        counter.truncate()
+        counter.write(str(top))
 
 
 def by_id(feed):
@@ -184,10 +203,15 @@ class FeedTest(unittest.TestCase):
         later on its clock, after b's listener is killed: b is down. A new
         Board has seen nobody listening, so b is idle there.
 
+        The three messages run between a and b only. Once CARDS' router is
+        in tc, a send to a name with a codex card rings `codex` and one to
+        an ssh card is refused until the SSH lane builds that route, so no
+        test sends to cx or far; a card alone makes their nodes.
+
         Must reject a feed that opens message bodies: every body is mode
         000 before the first feed.
 
-        @interacts  three `tc send`, one `tc read`; two listeners; three
+        @interacts  three `tc send`, two `tc read`; two listeners; three
                     feed() calls.
         @deps       _root.TcRoot.tc, _root.TcRoot.listener, serve.Board.
         @complexity O(1).
@@ -199,12 +223,13 @@ class FeedTest(unittest.TestCase):
             write_card(root.path, "cx", kind="codex", route="codex", thread_id="t1")
             write_card(root.path, "far", route="ssh",
                        ssh={"target": "u@h", "tc": "~/TheConnection/tc"})
-            sends = (("a", "cx"), ("b", "a"), ("a", "far"))
+            sends = (("a", "b"), ("b", "a"), ("a", "b"))
             for sender, to in sends:
                 code, out, err = root.tc("send", "--from", sender, "--to", to, f"note from {sender}")
                 self.assertEqual(code, 0, f"tc send --from {sender} --to {to} exited {code}: {err}")
-            code, out, err = root.tc("read", "a")
-            self.assertEqual(code, 0, f"tc read a exited {code}: {err}")
+            for name in ("a", "b"):
+                code, out, err = root.tc("read", name)
+                self.assertEqual(code, 0, f"tc read {name} exited {code}: {err}")
             bodies = sorted(root.path.glob("mail/to-*/**/*.md"))
             self.assertEqual(len(bodies), len(sends), f"message files: {bodies}")
             for body in bodies:
@@ -231,7 +256,7 @@ class FeedTest(unittest.TestCase):
                          {"a": "listening", "b": "listening", "cx": "doorbell", "far": "remote"})
         self.assertEqual((nodes["a"]["listener_pid"], nodes["b"]["listener_pid"]), (pid_a, pid_b))
         self.assertEqual([(w["from"], w["to"], w["seq"]) for w in first["wires"]],
-                         [("a", "cx", 1), ("b", "a", 2), ("a", "far", 3)])
+                         [("a", "b", 1), ("b", "a", 2), ("a", "b", 3)])
         for wire in first["wires"]:
             self.assertLessEqual(wire["age_s"], WRITING_WINDOW_S,
                                  f"wire {wire} is past the writing window, so listening "
