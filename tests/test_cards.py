@@ -11,8 +11,10 @@ Status: unreviewed
             env; the harness drops the session's own. Two white-box tests
             load tc as a module (TC_ROOT set to the harness root first, put
             back after) and call cmd_join in process: one wraps os.environ
-            in a recorder, one wraps pathlib.Path.write_text and rename.
-            Both patches end with the test. One test holds the inbox lock
+            in a recorder, one wraps pathlib.Path.write_text, rename and
+            os.open. Both patches end with the test. A third plants a
+            symlink at the card's .tmp name, pointing at a file in the
+            harness's temp folder (DEBT-3). One test holds the inbox lock
             itself and reads /proc/locks (LOW-9).
 @deps       python3 stdlib (argparse, collections.abc, contextlib, fcntl,
             importlib, io, json, os, pathlib, sys, unittest, unittest.mock);
@@ -56,6 +58,8 @@ JOIN_READS = {"CODEX_THREAD_ID", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE
 DEFAULT_REMOTE_TC = "~/TheConnection/tc"
 EXIT_REFUSED = 1
 EXIT_BAD_NAME = 6
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): REC-13's note, written here.
+NOT_BUILT_NOTE = "note: sends to {name} are refused until the ssh route is built\n"
 BAD_NAME_WORDS = ('tc: bad name "{name}": letters, digits, dot, dash, underscore, '
                   '1 to 64, not starting with a dash\n')
 # A planted value that must never reach a card. Made up for the test.
@@ -276,8 +280,33 @@ class CardsTest(unittest.TestCase):
         self.assertEqual(list(card), CARD_FIELDS)
         self.assertEqual((card["route"], card["ssh"]), ("ssh", {"target": "u@h", "tc": DEFAULT_REMOTE_TC}))
         self.assertEqual(out, "card written: x (other, account unknown, route ssh to u@h)\n")
+        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): REC-13, while ssh is not in ROUTES.
+        self.assertEqual(err, NOT_BUILT_NOTE.format(name="x"))
         self.assertEqual(code2, 0, f"tc card y exited {code2}: {err2}")
         self.assertEqual(card2["ssh"], {"target": "h", "tc": "/opt/tc/tc"})
+        self.assertEqual(err2, NOT_BUILT_NOTE.format(name="y"))
+
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13 (CARDS-4 item 3).
+    def test_tc_card_never_takes_this_sessions_account(self):
+        """With CLAUDE_CONFIG_DIR=/x/acct, `tc card x --ssh u@h` gives account `unknown` and kind `other`.
+
+        --account still wins, and a blank --account is `unknown`. Must
+        reject C1's join chain applied to a far name.
+
+        @interacts  one tc card per case, each in its own root.
+        @deps       _root.TcRoot.tc, card_of.
+        @complexity O(1): three cases.
+        @alloc      one TcRoot per case.
+        """
+        cases = [((), "unknown"), (("--account", "far"), "far"), (("--account", "  "), "unknown")]
+        for flags, want in cases:
+            with self.subTest(flags=flags):
+                with _root.TcRoot() as root:
+                    code, out, err = root.tc("card", "x", "--ssh", "u@h", *flags,
+                                             env={"CLAUDE_CONFIG_DIR": "/x/acct"})
+                    card = card_of(root, "x")
+                self.assertEqual(code, 0, f"tc card x {flags} exited {code}: {err}")
+                self.assertEqual((card["account"], card["kind"]), (want, "other"), card)
 
     def test_a_rejoin_overwrites_the_card_and_resets_joined_at(self):
         """A second join of b replaces the card: the new account, a new joined_at, one file.
@@ -362,7 +391,7 @@ class CardsTest(unittest.TestCase):
 
         @interacts  one tc card per case, each in its own root.
         @deps       _root.TcRoot.tc, files_under.
-        @complexity O(1): seven cases.
+        @complexity O(1): nine cases.
         @alloc      one TcRoot per case.
         """
         bad = [
@@ -373,6 +402,9 @@ class CardsTest(unittest.TestCase):
             ("x", "--ssh", "u@h;true"),
             ("x", "--ssh", "u@h", "--remote-tc", "relative/tc"),
             ("x", "--ssh", "u@h", "--remote-tc", "/a b/tc"),
+            # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13, `~` forms are refused.
+            ("x", "--ssh", "u@h", "--remote-tc", "~bob/tc"),
+            ("x", "--ssh", "u@h", "--remote-tc", "~"),
         ]
         for argv in bad:
             with self.subTest(argv=argv):
@@ -449,17 +481,25 @@ class CardsTest(unittest.TestCase):
         """cards/b.json comes only from a rename of a .tmp sibling; nothing writes it in place.
 
         White box, so it fails every run, not by timing luck. Must reject a
-        card written in place.
+        card written in place. Since the CARDS fix round (DEBT-3) the .tmp
+        is made by os.open with O_EXCL and O_NOFOLLOW, so os.open is
+        recorded too, and the .tmp must come from exactly one such call.
 
         @interacts  loads tc in process; wraps pathlib.Path.write_text,
-                    rename and replace for one call to cmd_join.
+                    rename and replace, and os.open, for one call to
+                    cmd_join.
         @deps       load_tc, unittest.mock.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
-        writes, moves = [], []
+        writes, moves, opens = [], [], []
         real_write, real_rename, real_replace = (pathlib.Path.write_text, pathlib.Path.rename,
                                                  pathlib.Path.replace)
+        real_os_open = os.open
+
+        def os_open(path, flags, *a, **k):
+            opens.append((pathlib.Path(path), flags))
+            return real_os_open(path, flags, *a, **k)
 
         def write_text(path, *a, **k):
             writes.append(pathlib.Path(path))
@@ -480,15 +520,54 @@ class CardsTest(unittest.TestCase):
             with mock.patch.object(pathlib.Path, "write_text", write_text), \
                     mock.patch.object(pathlib.Path, "rename", rename), \
                     mock.patch.object(pathlib.Path, "replace", replace), \
+                    mock.patch.object(os, "open", os_open), \
                     contextlib.redirect_stdout(io.StringIO()):
                 tc.cmd_join(args)
             left = sorted(p.name for p in final.parent.iterdir())
         self.assertNotIn(final, writes, "the card was written in place")
+        self.assertNotIn(final, [path for path, _ in opens], "the card was opened in place")
         into_final = [src for src, dst in moves if dst == final]
         self.assertEqual(len(into_final), 1, f"moves into {final.name}: {moves}")
         self.assertEqual(into_final[0].parent, final.parent)
         self.assertTrue(into_final[0].name.endswith(".tmp"), f"renamed from {into_final[0].name}")
+        made = [flags for path, flags in opens if path == into_final[0]]
+        self.assertEqual(len(made), 1, f"the .tmp was not made by one os.open: {opens}")
+        self.assertEqual(made[0] & (os.O_EXCL | os.O_NOFOLLOW), os.O_EXCL | os.O_NOFOLLOW,
+                         "the .tmp was opened without O_EXCL and O_NOFOLLOW")
         self.assertEqual(left, ["b.json"], f"cards/ holds {left}")
+
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): DEBT-3.
+    def test_a_link_planted_at_the_card_tmp_is_refused(self):
+        """In process: a link at cards/b.json.<pid>.tmp makes tc join exit 1 with words; nothing is written through it.
+
+        The .tmp name carries the pid, which in process is this test's own,
+        so the link sits exactly where the join would write. Must reject a
+        .tmp written with Path.write_text, which follows the link.
+
+        @interacts  loads tc in process; plants one symlink and one file in
+                    the harness's temp folder; calls cmd_join once.
+        @deps       load_tc, card_of.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        args = argparse.Namespace(name="b", account="work", kind=None, reports_to=None)
+        with _root.TcRoot() as root:
+            tc = load_tc(root)
+            outside = root.base / "outside.txt"
+            outside.write_text("untouched\n")
+            link = root.path / "cards" / f"b.json.{os.getpid()}.tmp"
+            link.parent.mkdir()
+            link.symlink_to(outside)
+            with self.assertRaises(SystemExit) as caught, \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()) as said:
+                tc.cmd_join(args)
+            kept = outside.read_text()
+            card = card_of(root, "b")
+        self.assertEqual(caught.exception.code, EXIT_REFUSED)
+        self.assertEqual(said.getvalue(), f"tc: could not create {link} (File exists); no card written\n")
+        self.assertEqual(kept, "untouched\n", "the join wrote through the planted link")
+        self.assertIsNone(card, "a card was written past the planted link")
 
     def test_reports_to_is_a_hint_with_c0_names_and_no_self_report(self):
         """--reports-to a is stored; a rejoin without it stores null; b to b and ../x are refused.

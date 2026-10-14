@@ -13,7 +13,9 @@ Status: unreviewed
             Two tests load tc as a module (TC_ROOT set to the harness root
             first, put back after) and call cmd_send or deliver_local in
             process, so they write under that root only. Two tests hold
-            the inbox lock themselves and read /proc/locks (LOW-9).
+            the inbox lock themselves and read /proc/locks (LOW-9). One
+            plants a symlink at a message's .tmp name, pointing at a file
+            in the harness's temp folder (DEBT-3).
 @deps       python3 stdlib (argparse, contextlib, fcntl, importlib, io,
             json, os, pathlib, subprocess, sys, unittest); tests/_root.py;
             RELEASE_CEILING_SECONDS and wait_until_blocked from
@@ -56,6 +58,13 @@ NEW_INBOX_WORDS = "new inbox: nobody has joined as {name}\n"
 # A send that shares the inbox lock with the test lands at once; this much
 # is room for a loaded machine, not a wait anyone expects.
 SHARED_SEND_CEILING_SECONDS = 5
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): the refusals' words,
+# written here. REC-13: the not-built refusal reads like the other two.
+NOT_BUILT_WORDS = "tc send: route {route} is not built yet; nothing sent\n"
+# LOW-15: who fixes a bad card. Never the sender running tc join.
+CARD_FIX_WORDS = ("Ask {to}'s owner to rejoin (tc join {to}, run in {to}'s own session), or, "
+                  "if {to} lives on another machine, write its card with tc card {to} --ssh <target>.")
+EMPTY_WORDS = "tc send: empty message\n"
 
 
 def files_under(root):
@@ -244,8 +253,8 @@ class RouterTest(unittest.TestCase):
             ssh = root.tc("send", "--from", "a", "--to", "x", "hi")
             pigeon = root.tc("send", "--from", "a", "--to", "p", "hi")
             after, seq_after = files_under(root), seq_of(root)
-        self.assertEqual(ssh, (EXIT_REFUSED, "", "route ssh is not built yet\n"))
-        self.assertEqual(pigeon, (EXIT_REFUSED, "", "route pigeon is not built yet\n"))
+        self.assertEqual(ssh, (EXIT_REFUSED, "", NOT_BUILT_WORDS.format(route="ssh")))
+        self.assertEqual(pigeon, (EXIT_REFUSED, "", NOT_BUILT_WORDS.format(route="pigeon")))
         self.assertEqual(after, before, f"a refused route wrote {sorted(set(after) - set(before))}")
         self.assertIsNone(seq_after, "a refused route took a number")
         self.assertIsNone(seq_before)
@@ -267,12 +276,112 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(code, EXIT_REFUSED, f"exited {code}: {err}")
         self.assertIn("b.json is unreadable", err)
         self.assertEqual(after, before, "a send to an unreadable card wrote a file")
+        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-15.
+        self.assertTrue(err.endswith("nothing sent. " + CARD_FIX_WORDS.format(to="b") + "\n"), err)
+
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-10.
+    def test_a_card_with_no_route_is_refused_in_words(self):
+        """A hand-made card with no route, a null route, or route 5: exit 1, the file named, `has no route`, never `None`.
+
+        @interacts  per case: one hand-written card, one send, in its own root.
+        @deps       _root.TcRoot.tc, files_under.
+        @complexity O(1): three cases.
+        @alloc      one TcRoot per case.
+        """
+        for card in ({"name": "n"}, {"name": "n", "route": None}, {"name": "n", "route": 5}):
+            with self.subTest(card=card):
+                with _root.TcRoot() as root:
+                    (root.path / "cards").mkdir()
+                    path = root.path / "cards" / "n.json"
+                    path.write_text(json.dumps(card))
+                    before = files_under(root)
+                    code, out, err = root.tc("send", "--from", "a", "--to", "n", "hi")
+                    after = files_under(root)
+                self.assertEqual(code, EXIT_REFUSED, f"exited {code}: {err}")
+                self.assertEqual(err, f"tc send: the card {path} has no route; nothing sent. "
+                                      f"{CARD_FIX_WORDS.format(to='n')}\n")
+                self.assertNotIn("None", err)
+                self.assertEqual(after, before, f"a card with no route wrote {sorted(set(after) - set(before))}")
+
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-11.
+    def test_an_empty_message_is_refused_through_refuse_with_exit_1(self):
+        """An empty message exits 1 with `tc send: empty message`, in process and as a command.
+
+        In process the exit code is the int EXIT_REFUSED and the words are
+        already on stderr. Must reject sys.exit("..."), whose code is the
+        string itself.
+
+        @interacts  one send as a command; loads tc in process and calls
+                    cmd_send once. Neither writes anything.
+        @deps       load_tc, files_under; _root.TcRoot.tc.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            ran = root.tc("send", "--from", "a", "--to", "b", "  ")
+            tc = load_tc(root)
+            with self.assertRaises(SystemExit) as caught, contextlib.redirect_stderr(io.StringIO()) as said:
+                tc.cmd_send(argparse.Namespace(sender="a", to="b", message="  "))
+            after = files_under(root)
+        self.assertEqual(ran, (EXIT_REFUSED, "", EMPTY_WORDS))
+        self.assertEqual(caught.exception.code, EXIT_REFUSED)
+        self.assertEqual(said.getvalue(), EMPTY_WORDS)
+        self.assertEqual(after, [], f"an empty message wrote {after}")
+
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13, REC-2.
+    def test_the_new_inbox_warning_keys_on_the_card_file(self):
+        """In process: deliver_local(None, ...) to a joined name with no inbox gives no warning.
+
+        The gate (C3) calls deliver_local with no card in hand, so the check
+        must look at cards/b.json on disk. Must reject a check on the
+        `card` argument: it would warn here.
+
+        @interacts  one join; loads tc in process; calls deliver_local once.
+        @deps       load_tc; _root.TcRoot.tc.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            root.tc("join", "b")
+            tc = load_tc(root)
+            got = tc.deliver_local(None, "x", "b", "hi")
+        self.assertEqual(got.exit, 0)
+        self.assertEqual(got.warnings, [], "a joined name got the new-inbox warning")
+
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): DEBT-3.
+    def test_a_link_planted_at_the_message_tmp_is_refused(self):
+        """A link at the next message's .tmp name: the send exits 1 with words, and nothing is written through it.
+
+        Must reject a .tmp written with Path.write_text, which follows the
+        link and writes the message into the file it points at.
+
+        @interacts  two sends; one symlink and one file planted in the temp
+                    folder, outside TC_ROOT's mailbox.
+        @deps       _root.TcRoot.tc.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            root.tc("send", "--from", "a", "--to", "b", "one")
+            outside = root.base / "outside.txt"
+            outside.write_text("untouched\n")
+            link = root.path / "mail" / "to-b" / "000002-from-a.tmp"
+            link.symlink_to(outside)
+            code, out, err = root.tc("send", "--from", "a", "--to", "b", "two")
+            kept = outside.read_text()
+            still_a_link = link.is_symlink()
+            landed = sorted(p.name for p in (root.path / "mail" / "to-b").glob("*.md"))
+        self.assertEqual(code, EXIT_REFUSED, f"exited {code}: {err}")
+        self.assertEqual(err, f"tc send: could not create {link} (File exists); nothing sent\n")
+        self.assertEqual(kept, "untouched\n", "the send wrote through the planted link")
+        self.assertTrue(still_a_link)
+        self.assertEqual(landed, ["000001-from-a.md"])
 
     def test_a_local_card_delivers_where_to_says_and_reports_to_routes_nothing(self):
         """b joins as a Claude reporting to a; mail from c to b lands in to-b only (No hub, D7).
 
-        The stderr of the first send is not checked here: see the CARDS-2
-        pause on the new-inbox warning for a name that has joined.
+        The first send to b finds no inbox, but b has a card, so it does not
+        warn (D13, the CARDS-2 pause settled).
 
         @interacts  one join, one send.
         @deps       _root.TcRoot.tc.
@@ -286,6 +395,7 @@ class RouterTest(unittest.TestCase):
             landed = sorted(p.name for p in (root.path / "mail" / "to-b").glob("*.md"))
         self.assertEqual(code, 0, f"exited {code}: {err}")
         self.assertTrue(out.startswith("sent #1 to b: "), out)
+        self.assertEqual(err, "", "a joined name got the new-inbox warning")
         self.assertEqual(boxes, ["to-b"], f"mail went to {boxes}")
         self.assertEqual(landed, ["000001-from-c.md"])
 

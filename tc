@@ -24,8 +24,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             another process. `send` to a codex card runs `codex queue` (C2).
 @deps       python3 stdlib (argparse, collections, contextlib, fcntl, json,
             pathlib, re, resource, shutil, subprocess, time, datetime, os,
-            sys); Linux only (flock, RLIMIT_AS, /proc). nvidia-smi optional;
-            the codex CLI for the codex route.
+            sys); Linux only (flock, RLIMIT_AS, O_NOFOLLOW, /proc).
+            nvidia-smi optional; the codex CLI for the codex route.
 @complexity send O(b), b body bytes up to SEND_BODY_MAX_BYTES; status O(1).
             read/peek/wait-poll O(u), u unread messages in one inbox,
             single digits in practice. log O(t), t total messages ever,
@@ -82,12 +82,18 @@ EXIT_USAGE = 9
 # folder that means "here" or "up").
 NAME_MAX_CHARS = 64
 NAME_PATTERN = re.compile(rf"[A-Za-z0-9._][A-Za-z0-9._-]{{0,{NAME_MAX_CHARS - 1}}}")
-# A bad name, refused before anything is written (contracts.md, exit codes).
+# Row 6 of the exit table (contracts.md), each refused before anything is
+# written: a bad name under C0, for any name argument including
+# --reports-to; a name that reports to itself (join, card); a bad ssh target
+# or a bad remote tc path (card).
 EXIT_BAD_NAME = 6
 # CARDS R2 (Claude Opus 5.5, unreviewed): address cards, contract C1.
-# Refused with words: an empty message, --kind codex with no thread, a
-# route not built yet (contracts.md, exit codes). Today's empty-message
-# exit already meant this.
+# Row 1 of the exit table, refused with words. send: an empty message, an
+# unreadable card, a card with no route, a route not built yet, a message
+# .tmp that cannot be made. join: --kind codex with no thread, a
+# CODEX_THREAD_ID that is not a thread id. join and card: a card .tmp that
+# cannot be made. card: unread mail here without --force. Today's
+# empty-message exit already meant this.
 EXIT_REFUSED = 1
 # One JSON file per name. A path built from ROOT, like MAIL and STATUS.
 CARDS = ROOT / "cards"
@@ -121,6 +127,12 @@ CODEX_RING_SECONDS = 30
 # --thread, where a leading dash could read as a flag, so nothing of another
 # shape (or type) ever gets there (D14).
 THREAD_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# How a .tmp file is made: create it, fail if anything at all already has
+# that name (O_EXCL), and never follow a link (O_NOFOLLOW). A link planted at
+# a .tmp name someone can guess is refused, never written through (DEBT-3).
+NEW_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+# The new file's mode before the umask, the same as open() gives one.
+NEW_FILE_MODE = 0o666
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -241,6 +253,27 @@ def inbox_lock(name, how=fcntl.LOCK_EX):
         yield
 
 
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): DEBT-3.
+def write_new_file(path, text):
+    """Create `path`, which must not exist yet, and write `text` into it.
+
+    For every .tmp tc renames into place (a message, a card, the ring
+    marker). NEW_FILE_FLAGS fail on anything already at that name and never
+    follow a link, so a link planted at a .tmp name is refused, not written
+    through. Raises OSError (FileExistsError for a planted link or file);
+    the caller refuses with words. The umask applies to NEW_FILE_MODE, and
+    the text is encoded as Path.write_text would.
+
+    @interacts  creates and writes one file; nothing else.
+    @deps       os; NEW_FILE_FLAGS, NEW_FILE_MODE.
+    @complexity O(t) over t characters of `text`.
+    @alloc      the encoded text while written; one descriptor, closed on
+                return.
+    """
+    with open(os.open(path, NEW_FILE_FLAGS, NEW_FILE_MODE), "w") as f:
+        f.write(text)
+
+
 def cmd_send(args):
     """`tc send`: check, then hand the message to the route on the recipient's card (C2).
 
@@ -259,7 +292,7 @@ def cmd_send(args):
                 delivery holds mail/.box-<to>.lock shared and reads the card
                 again; calls one ROUTES function, which writes the message;
                 prints.
-    @deps       require_names, read_body, card_route, inbox_lock,
+    @deps       require_names, read_body, refuse, card_route, inbox_lock,
                 deliver_local, Delivery; fcntl.
     @complexity O(b) over b bytes of body, at most SEND_BODY_MAX_BYTES,
                 plus the route's own work.
@@ -269,7 +302,7 @@ def cmd_send(args):
     # CARDS R3 (Claude Opus 5.5, unreviewed): size, then the card, then the route.
     body = read_body(args.message)
     if not body.strip():
-        sys.exit("tc send: empty message")
+        refuse("tc send: empty message", EXIT_REFUSED)  # CARDS fix round 1: LOW-11
     card, deliver = card_route(args.to)
     if deliver is deliver_local:
         # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-9.
@@ -455,10 +488,10 @@ def refuse_self_report(name, reports_to):
 
 
 def account_label(given):
-    """The card's account: `given`, else CLAUDE_CONFIG_DIR's base name, else UNKNOWN_ACCOUNT.
+    """A `tc join` card's account: `given`, else CLAUDE_CONFIG_DIR's base name, else UNKNOWN_ACCOUNT.
 
     A blank value counts as not given at each step, so the word is never
-    empty (C1).
+    empty (C1). `tc card` uses far_account instead (D13).
 
     @interacts  reads CLAUDE_CONFIG_DIR from the environment when `given`
                 is blank, and nothing else.
@@ -474,22 +507,44 @@ def account_label(given):
     return UNKNOWN_ACCOUNT
 
 
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13 (CARDS-4 item 3).
+def far_account(given):
+    """A `tc card` card's account: `given`, else UNKNOWN_ACCOUNT. Never the environment.
+
+    This session's account says nothing about a name on another machine,
+    so CLAUDE_CONFIG_DIR is not read (C1, D13). A blank value counts as not
+    given, so the word is never empty.
+
+    @interacts  none; string work only.
+    @deps       UNKNOWN_ACCOUNT.
+    @complexity O(c) over the characters of `given`.
+    @alloc      none; returns `given` or the constant.
+    """
+    return given if given is not None and given.strip() else UNKNOWN_ACCOUNT
+
+
 def write_card(card):
-    """Write cards/<name>.json whole: a .tmp sibling, then a rename over the old card.
+    """Write cards/<name>.json whole: a new .tmp sibling, then a rename over the old card.
 
     The .tmp name carries this process's pid, so two joins of one name at
-    once never write into the same file.
+    once never write into the same file. It is made by write_new_file, so
+    a file or link already at that name is refused (exit 1, no card
+    written), never written through.
 
-    @interacts  makes cards/; writes cards/<name>.json.<pid>.tmp and renames
-                it to cards/<name>.json, replacing any card there.
-    @deps       json, os, pathlib.
+    @interacts  makes cards/; creates cards/<name>.json.<pid>.tmp and
+                renames it to cards/<name>.json, replacing any card there;
+                on a .tmp it cannot make, one line to stderr and exit 1.
+    @deps       write_new_file, refuse; json, os, pathlib.
     @complexity O(1): eleven fields.
     @alloc      one JSON string, freed on return; one card file, kept.
     """
     CARDS.mkdir(parents=True, exist_ok=True)
     path = CARDS / f"{card['name']}.json"
     tmp = CARDS / f"{card['name']}.json.{os.getpid()}.tmp"
-    tmp.write_text(json.dumps(card, indent=2) + "\n")
+    try:
+        write_new_file(tmp, json.dumps(card, indent=2) + "\n")
+    except OSError as err:
+        refuse(f"tc: could not create {tmp} ({err.strerror}); no card written", EXIT_REFUSED)
     tmp.rename(path)  # atomic, so a reader never sees half a card
     return path
 
@@ -599,11 +654,13 @@ def cmd_card(args):
                 mail/.box-<name>.lock alone (LOW-9), counts unread mail in
                 mail/to-<name>/ without creating it, refuses (exit 1) when
                 there is any unless --force, and writes cards/<name>.json
-                through write_card; prints one line.
-                Reads CLAUDE_CONFIG_DIR only when --account is blank.
+                through write_card; prints the card line, then on stderr a
+                note when the card's route is not in ROUTES yet. Reads no
+                environment variable: the account is --account, else
+                `unknown` (D13).
     @deps       require_names, refuse_self_report, refuse, inbox_lock,
-                unread_count, account_label, write_card, describe_card,
-                now_iso.
+                unread_count, far_account, write_card, describe_card,
+                now_iso, ROUTES.
     @complexity O(u) over u unread messages for the name (single digits).
     @alloc      one card dict, freed on exit; one card file, kept; one open
                 lock file.
@@ -621,7 +678,7 @@ def cmd_card(args):
         "version": CARD_VERSION,
         "name": args.name,
         "kind": "other",
-        "account": account_label(args.account),
+        "account": far_account(args.account),  # CARDS fix round 1: D13
         "route": "ssh",
         "session_id": None,
         "pid": None,
@@ -640,6 +697,11 @@ def cmd_card(args):
                    f"(tc read {args.name}), or pass --force.", EXIT_REFUSED)
         write_card(card)
     print(f"card written: {describe_card(card)}")
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): REC-13. Silent once
+    # the route's lane adds its line to ROUTES.
+    if card["route"] not in ROUTES:
+        print(f"note: sends to {args.name} are refused until the {card['route']} route is built",
+              file=sys.stderr)
 
 
 def cmd_cards(args):
@@ -694,26 +756,35 @@ def read_card(name):
 def card_route(to):
     """The card for `to` and the ROUTES function its route names. Refuses what it cannot route.
 
-    No card is route local. A card that is not a JSON object, or whose
-    route is not in ROUTES, is refused with words, exit 1, nothing written
-    (C2).
+    No card is route local. Each refusal is words on stderr, exit 1,
+    nothing written: a card that is not a JSON object, a card with no
+    string route (LOW-10), and a route not in ROUTES (C2, REC-13). The
+    first two tell the sender who fixes the card: that name's owner, by
+    rejoining in its own session, or the sender with `tc card` for a name
+    on another machine. Never `tc join` run by the sender, which would
+    write the sender's own identity into the card (LOW-15).
 
     @interacts  reads cards/<to>.json (read_card); on a refusal writes one
                 line to stderr and exits.
-    @deps       read_card, refuse, ROUTES, deliver_local.
+    @deps       read_card, refuse, ROUTES, deliver_local, CARDS.
     @complexity O(1): one small file.
     @alloc      the card dict, returned.
     """
+    fix = (f"Ask {to}'s owner to rejoin (tc join {to}, run in {to}'s own session), or, "
+           f"if {to} lives on another machine, write its card with tc card {to} --ssh <target>.")
     try:
         card = read_card(to)
     except ValueError as problem:
-        refuse(f"tc send: {problem}; nothing sent. Rewrite it with tc join or tc card.", EXIT_REFUSED)
+        refuse(f"tc send: {problem}; nothing sent. {fix}", EXIT_REFUSED)
     if card is None:
         return None, deliver_local
     route = card.get("route")
-    deliver = ROUTES.get(route) if isinstance(route, str) else None
+    if not isinstance(route, str):
+        refuse(f"tc send: the card {CARDS / f'{to}.json'} has no route; nothing sent. {fix}",
+               EXIT_REFUSED)
+    deliver = ROUTES.get(route)
     if deliver is None:
-        refuse(f"route {route} is not built yet", EXIT_REFUSED)
+        refuse(f"tc send: route {route} is not built yet; nothing sent", EXIT_REFUSED)
     return card, deliver
 
 
@@ -743,17 +814,22 @@ def read_body(message):
 
 
 def deliver_local(card, sender, to, body, header_note=None):
-    """Route local: today's send. Seq under flock, write a .tmp, rename into the inbox.
+    """Route local: today's send. Seq under flock, write a new .tmp, rename into the inbox.
 
-    Warns `new inbox: nobody has joined as <to>` when the inbox did not
-    exist before this send (O1). `header_note`, when given, ends the
-    header line after a comma (the gate's, C3). `card` is unused here; the
-    argument keeps every route's shape the same.
+    Warns `new inbox: nobody has joined as <to>` only when the inbox did
+    not exist before this send and the name has no card (O1, D13): a card
+    is the record of a join. It looks for cards/<to>.json on disk, not at
+    `card`, because the gate (C3) calls this directly with no card in
+    hand. `header_note`, when given, ends the header line after a comma
+    (the gate's, C3). The .tmp is made by write_new_file: a file or link
+    already at its name refuses the send (Delivery exit 1, words naming
+    it, nothing written through it; the number is used).
 
     @interacts  takes the mail/.seq flock (next_seq); makes
-                mail/to-<to>/read/; writes NNNNNN-from-<sender>.tmp and
-                renames it to .md in mail/to-<to>/.
-    @deps       next_seq, inbox, now_iso, Delivery.
+                mail/to-<to>/read/; stats cards/<to>.json; creates
+                NNNNNN-from-<sender>.tmp and renames it to .md in
+                mail/to-<to>/.
+    @deps       next_seq, inbox, now_iso, write_new_file, Delivery, CARDS.
     @complexity O(b) over b bytes of body.
     @alloc      the message text while written; one message file, kept.
     """
@@ -762,9 +838,13 @@ def deliver_local(card, sender, to, body, header_note=None):
     path = inbox(to) / f"{n:0{SEQ_WIDTH}d}-from-{sender}.md"
     tmp = path.with_suffix(".tmp")
     header = f"# #{n} from {sender} to {to}, {now_iso()}" + (f", {header_note}" if header_note else "")
-    tmp.write_text(f"{header}\n\n{body.rstrip()}\n")
+    try:  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): DEBT-3
+        write_new_file(tmp, f"{header}\n\n{body.rstrip()}\n")
+    except OSError as err:
+        return Delivery(EXIT_REFUSED, f"tc send: could not create {tmp} ({err.strerror}); nothing sent", [])
     tmp.rename(path)  # atomic, so a waiter never reads a half-written file
-    warnings = [] if box_existed else [f"new inbox: nobody has joined as {to}"]
+    joined = (CARDS / f"{to}.json").exists()  # CARDS fix round 1: D13
+    warnings = [] if box_existed or joined else [f"new inbox: nobody has joined as {to}"]
     return Delivery(0, f"sent #{n} to {to}: {path}", warnings)
 
 
@@ -794,10 +874,10 @@ def deliver_codex(card, sender, to, body, header_note=None):
                 the message through deliver_local. Then, when a ring is
                 owed, rings through ring_codex (one `codex queue` run, at
                 most CODEX_RING_SECONDS) and removes the marker on exit 0,
-                or writes mail/.ring-pending-<to>.<pid>.tmp and renames it
+                or creates mail/.ring-pending-<to>.<pid>.tmp and renames it
                 over the marker.
     @deps       inbox_lock, unread_count, deliver_local, ring_codex,
-                now_iso, Delivery; os.
+                write_new_file, now_iso, Delivery; os.
     @complexity O(u + b) over u unread messages (counted twice) and b
                 bytes of body, plus one codex run of at most
                 CODEX_RING_SECONDS.
@@ -824,7 +904,7 @@ def deliver_codex(card, sender, to, body, header_note=None):
         return Delivery(landed.exit, "\n".join(words), warnings)
     tmp = MAIL / f".ring-pending-{to}.{os.getpid()}.tmp"
     try:
-        tmp.write_text(f"{now_iso()} ring failed: {reason}\n")
+        write_new_file(tmp, f"{now_iso()} ring failed: {reason}\n")
         tmp.rename(marker)  # atomic, like a message
     except OSError as err:
         warnings.append(f"ring failed for {to}: {reason}; the mail is in its inbox; {marker} could not "
@@ -1031,23 +1111,27 @@ def mailbox_summary():
 
 # CARDS R5 (Claude Opus 5.5, unreviewed): the cards tc health shows.
 def cards_summary():
-    """Every card's name, kind, account, route and reports_to, in name order.
+    """Every card's name, kind, account, route, reports_to and ssh_target, in name order.
 
     The name is the file's (cards/<name>.json), the one the router reads.
-    A card that is not a JSON object keeps its name with the other four
-    fields null, so it still shows.
+    ssh_target is an ssh card's target (`u@h`), so `tc health` can say
+    what `tc cards` says; null for any other route (LOW-4). A card that is
+    not a JSON object keeps its name with the other five fields null, so
+    it still shows.
 
     @interacts  reads cards/*.json through all_cards. Writes nothing.
     @deps       all_cards; pathlib.
-    @complexity O(c) over c cards (single digits).
+    @complexity O(c) over c cards (a few dozen).
     @alloc      one list of c small dicts, returned.
     """
     out = []
     for file_name, card in all_cards():
         card = card or {}
+        ssh = card.get("ssh")  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-4
+        target = ssh.get("target") if card.get("route") == "ssh" and isinstance(ssh, dict) else None
         out.append({"name": pathlib.Path(file_name).stem, "kind": card.get("kind"),
                     "account": card.get("account"), "route": card.get("route"),
-                    "reports_to": card.get("reports_to")})
+                    "reports_to": card.get("reports_to"), "ssh_target": target})
     return out
 
 
@@ -1098,8 +1182,12 @@ def cmd_health(args):
     print(f"listeners  {_who(snap['listeners'])}")
     print(f"watchers   {_who(snap['watchers'])}")
     # CARDS R5 (Claude Opus 5.5, unreviewed): one line per card, `?` for a field it lacks.
-    cards = [describe_card({k: ("?" if v is None and k != "reports_to" else v) for k, v in c.items()})
-             for c in snap["cards"]]
+    cards = []
+    for c in snap["cards"]:
+        shown = {k: ("?" if v is None and k != "reports_to" else v) for k, v in c.items()}
+        if c["ssh_target"] is not None:  # CARDS fix round 1: LOW-4, `route ssh to <target>`
+            shown["ssh"] = {"target": c["ssh_target"]}
+        cards.append(describe_card(shown))
     print("cards      " + ("\n           ".join(cards) if cards else "none"))
     rows = []
     for name, b in snap["mail"].items():
