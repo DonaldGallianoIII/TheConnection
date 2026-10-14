@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { layoutLevels, roleTitle, fitTransform, boardView, STATES, CONFIG } from '../board/look.js';
 
+/** One feed node with the fields the layout reads. @complexity O(1)  @alloc one object */
 function n(id, role, source, level, parent, extra) {
   return { id, role, role_source: source, level, parent, state: 'idle', ...extra };
 }
@@ -39,6 +40,7 @@ const SHAPES = {
     n('x1', 'worker', 'inferred', 1, 'x'), n('x2', 'worker', 'inferred', 1, 'x')],
 };
 
+/** True when two node boxes at p and q overlap. @complexity O(1)  @alloc none */
 function overlaps(p, q) {
   return p.x < q.x + CONFIG.NODE_W && q.x < p.x + CONFIG.NODE_W && p.y < q.y + CONFIG.NODE_H && q.y < p.y + CONFIG.NODE_H;
 }

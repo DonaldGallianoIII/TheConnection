@@ -355,6 +355,7 @@ export const LINK_WORDS = Object.freeze({
   notFound: 'not found',
 });
 
+/** Compare two names by code point, as Python's sort does. @complexity O(c) over c characters  @alloc none */
 function byName(p, q) {
   if (p < q) return -1;
   return p > q ? 1 : 0;
@@ -462,17 +463,22 @@ export function hintPath(a, b) {
   return `M ${a.x} ${a.y} C ${a.x} ${a.y + s * dy}, ${b.x} ${b.y - s * dy}, ${b.x} ${b.y}`;
 }
 
+/** One key for a pair of names, whichever way the message ran. @complexity O(1)  @alloc one string */
 function pairKey(p, q) {
   return p < q ? `${p}>${q}` : `${q}>${p}`;
 }
 
-// The two ends of a side-port wire: the upper node first (lower level),
-// then the one further left, then by name, so a wire runs out to in downhill.
+/**
+ * The two ends of a side-port wire: the upper node first (lower level),
+ * then the one further left, then by name, so a wire runs out to in downhill.
+ * @complexity O(1)  @alloc one two-item list
+ */
 function upperFirst(p, q, pos) {
   const order = [p, q].sort((m, n) => (pos[m.id].y - pos[n.id].y) || (pos[m.id].x - pos[n.id].x) || byName(m.id, n.id));
   return order;
 }
 
+/** A node's third line: a reports_to that names no node, else its status. @complexity O(1)  @alloc one string */
 function noteFor(n, known) {
   if (n.reports_to && !known.has(n.reports_to)) return `${LINK_WORDS.reports_to} ${n.reports_to} · ${LINK_WORDS.notFound}`;
   return n.status || '';
@@ -542,14 +548,17 @@ export function boardView(feed) {
 const NODE_FIELDS = ['title', 'state', 'detail', 'note'];
 const EDGE_FIELDS = ['kind', 'from', 'to', 'label', 'arrow', 'flow', 'back', 'down'];
 
+/** True when two points sit at the same place. @complexity O(1)  @alloc none */
 function samePoint(p, q) {
   return p.x === q.x && p.y === q.y;
 }
 
+/** True when two node views would draw the same. @complexity O(1)  @alloc none */
 function sameNode(p, q) {
   return NODE_FIELDS.every((f) => p[f] === q[f]) && samePoint(p.pos, q.pos);
 }
 
+/** True when two edge views would draw the same. @complexity O(1)  @alloc none */
 function sameEdge(p, q) {
   return EDGE_FIELDS.every((f) => p[f] === q[f]) && samePoint(p.a, q.a) && samePoint(p.b, q.b);
 }

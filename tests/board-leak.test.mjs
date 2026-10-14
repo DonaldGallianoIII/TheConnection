@@ -44,7 +44,9 @@ function fakeKit() {
   return kit;
 }
 
+/** One feed node, a listening peer unless `extra` says otherwise. @complexity O(1)  @alloc one object */
 const node = (id, extra) => ({ id, state: 'listening', role: 'peer', role_source: 'inferred', level: 0, parent: null, ...extra });
+/** One mailbox link between two names. @complexity O(1)  @alloc one object */
 const mailbox = (from, to) => ({ from, to, kind: 'mailbox', sent: { [from]: 1, [to]: 1 }, last_age_s: 1 });
 
 const BASE = {
@@ -53,9 +55,12 @@ const BASE = {
   wires: [],
 };
 
-// Step i: the base plus two passing workers, t<i> and t<i+1>, each wired to a,
-// and a fresh message to t<i>. Every step adds one node and one wire and
-// removes one of each.
+/**
+ * Step i: the base plus two passing workers, t<i> and t<i+1>, each wired to a,
+ * and a fresh message to t<i>. Every step adds one node and one wire and
+ * removes one of each.
+ * @complexity O(1)  @alloc one feed object
+ */
 function churn(i) {
   const extra = [`t${i}`, `t${i + 1}`];
   return {

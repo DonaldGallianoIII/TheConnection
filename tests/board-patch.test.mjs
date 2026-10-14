@@ -42,10 +42,12 @@ function fakeKit() {
   return kit;
 }
 
+/** One feed node, a listening peer unless `extra` says otherwise. @complexity O(1)  @alloc one object */
 function node(id, extra) {
   return { id, state: 'listening', role: 'peer', role_source: 'inferred', level: 0, parent: null, unread: 0, ...extra };
 }
 
+/** One mailbox link between two names. @complexity O(1)  @alloc one object */
 function mailbox(from, to) {
   return { from, to, kind: 'mailbox', sent: { [from]: 1, [to]: 1 }, last_age_s: 60 };
 }

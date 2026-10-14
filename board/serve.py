@@ -439,6 +439,13 @@ def levels_of(names, parents):
     level = {}
 
     def walk(root):
+        """Level `root` at 0 and every node below it not yet levelled, breadth first.
+
+        @interacts  writes `level`; reads `children`.
+        @deps       collections.
+        @complexity O(k) over k nodes newly levelled.
+        @alloc      one queue, freed on return.
+        """
         level[root] = 0
         queue = collections.deque([root])
         while queue:
