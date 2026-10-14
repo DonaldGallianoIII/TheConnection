@@ -61,7 +61,9 @@ the rules, and knows the two known bugs.
   named by `tc health --json`; after the context exits its pid is gone. Must
   reject: a harness that returns before the lock is held (assert the pid is
   in `/proc/locks` at yield).
-- **Verify:** `python3 -m unittest tests.test_root -v` shows 2 passed.
+- **Verify:** `python3 -m unittest tests.test_root -v` shows 12 passed
+  (the 2 above, plus 10 the review's fix round added for the env, the
+  fakes, `start()` and teardown).
 - **PR:** Add tests/_root.py: throwaway roots, a proven listener, fake ssh and codex.
 
 ---

@@ -2,6 +2,9 @@
 
 Model:  Claude Opus 5.5 (the GROUND lane agent), 2026-10-14
 Status: unreviewed
+Pause:  settled (architect, 2026-10-14). Option 1, done in the GROUND fix
+        round: `tests/test_root.py` tests `fake_bin` (per-call exit
+        codes, stderr, the record, a fake ahead of the refusing stub).
 
 ## The question
 
