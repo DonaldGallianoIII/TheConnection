@@ -3,7 +3,8 @@
 Model:  Claude Opus 5.5 (the TheConnection architect session); the core
         test specs in CORE are the CRC-Planner session's (Claude Fable 5.1)
         of 2026-10-14, kept as it wrote them where they still fit
-Status: draft, unreviewed
+Status: draft. Reviewed once by the CRC-Planner session (Claude Fable 5.1,
+        2026-10-14, 24 findings, all folded in)
 Date:   2026-10-14
 
 Each task: **files**, **do**, **out of scope**, **test** (property; input;
@@ -74,11 +75,16 @@ Exit: every spec below passes, and each named mutation, applied by hand to
 
 All in `tests/test_mailbox.py`, on `tests/_root.py`.
 
+**If a CORE test finds a real bug in `tc`**, that is the point of it. Do
+not edit `tc` and do not weaken the test. Write a pause naming the test,
+the line in `tc` and what goes wrong; leave the test red on the branch;
+list it in the handoff. The fix goes to CARDS or to its own fix brief.
+
 | # | Property | Input | Expected | Must reject (mutation) |
 |---|---|---|---|---|
 | K1 | A message is read once | send `hi` a to b; read b; read b | first read prints a header starting `# #1 from a to b` and moves the file to `read/`; second prints `no unread mail for b` | a read that prints and leaves the file (comment out the rename) |
-| K2 | A waiter never sees half a file | 2 MB body on stdin while a listener for b polls | listener exits 0 only after the final name exists; `unread()` never lists a `.tmp` | a send that writes the final name directly |
-| K3 | The counter holds under contention | 50 senders at once | 50 distinct numbers, exactly 1 to 50 | the counter read without the flock |
+| K2 | A message appears only whole | load `tc` as a module (as `test_keepalive.py` does); wrap `pathlib.Path.rename` and `Path.write_text`; send once | the `.md` path is created only by a rename from a sibling ending `.tmp`; `unread()` never lists a `.tmp` | a send that writes the final name directly (white box, so it fails every run, not by timing luck) |
+| K3 | The counter waits for its lock | the harness holds an exclusive flock on `mail/.seq`; `tc send` runs | the send has not finished after 1 s; it finishes within 1 s of the release | the counter read without the flock (the send would finish at once). A second check, not a mutation test: 50 senders at once get exactly 1 to 50 |
 | K4 | Wait exit codes | mail waiting; `--timeout 1` with none; a second wait for the same name | 0 and a `MAIL:` line; 2 and a `TIMEOUT:` line; 3 and `ALREADY LISTENING` with the first pid still in `/proc/locks` | a wait that returns 0 with no mail |
 | K5 | Log order is by number across inboxes | a to b, b to a, a to b | `tc log` shows #1, #2, #3 in that order | a log sorted by file time |
 | K6 | Status | post twice; show with none posted | the second post replaces the first; `no status posted` | an append instead of a replace |
@@ -104,9 +110,10 @@ the fake-codex tests always.
 - **Files:** `tc`, `tests/test_names.py`.
 - **Do:** `valid_name()`; every command checks names first; exit 6.
 - **Test:** property: no command writes anything for a bad name. Input:
-  `tc send --from a --to ../x hi`, `tc read "a b"`, `tc wait ..`. Expected:
-  exit 6, the C0 words, the root's file list unchanged. Must reject: a
-  check on `--to` only (also test `--from` and `read`).
+  `tc send --from a --to ../x hi`, `tc read "a b"`, `tc wait ..`,
+  `tc send --from a --to -x hi`. Expected: exit 6, the C0 words, the
+  root's file list unchanged. Must reject: a check on `--to` only (also
+  test `--from` and `read`); a rule that lets a leading dash through.
 - **Verify:** `python3 -m unittest tests.test_names -v`.
 
 ### R2. Cards and `tc join`, `tc card`, `tc cards` (C1)
@@ -117,19 +124,30 @@ the fake-codex tests always.
   gives kind claude, route local, those ids; with neither and no
   `--account`, account is the word `unknown`. `--kind codex` with no
   `CODEX_THREAD_ID`: exit 1, no card. `tc card x --ssh u@h` gives route ssh
-  and the default remote path. Must reject: an empty account; a card
-  written in place (assert no partial file by checking the write goes
-  through a `.tmp`).
+  and the default remote path. A second join of the same name overwrites
+  and resets `joined_at`. `tc card x --ssh u@h` while `to-x` holds unread
+  mail: refused naming the count; with `--force`: written. `tc card x --ssh
+  -oProxyCommand=y`: exit 6, nothing written. With
+  `CLAUDE_CODE_MESSAGING_TOKEN=secret123` in env, no value in the card
+  contains `secret123`. Must reject: an empty account; a card written in
+  place (assert the write goes through a `.tmp`); a join that copies the
+  whole environment.
 - **Verify:** `python3 -m unittest tests.test_cards -v`.
 
 ### R3. The router, `deliver_local`, the two behavior fixes (C2, O1, O2)
 - **Files:** `tc`, `tests/test_router.py`.
-- **Do:** `ROUTES`, `Delivery`, `deliver_local`; the new-inbox warning;
-  read and peek create nothing for an unknown name.
+- **Do:** `ROUTES` (local and codex only), `Delivery(exit, words,
+  warnings)`, `deliver_local`; the size limit (C0); the new-inbox warning;
+  read and peek create nothing for an unknown name; a card naming a route
+  not in `ROUTES` answers `route <route> is not built yet`, exit 1.
 - **Test:** a send to a name with no card behaves exactly as K1 (run CORE's
-  tests against this branch at review); a first send to `nobody` warns
-  once, a second does not; `tc peek ghost` leaves the root's file list
-  unchanged. Must reject: a warning on every send.
+  tests against this branch at review); a first send to `nobody` exits 0,
+  prints the send line on stdout and the warning on stderr; a second send
+  does not warn; `tc peek ghost` leaves the root's file list unchanged; a
+  body of exactly 1 MiB is sent and one byte more is refused with exit 8,
+  no file and no number used; an ssh card answers the not-built sentence.
+  Must reject: a warning on every send; a size check after `next_seq()`
+  (assert `.seq` unchanged after the refusal).
 - **Verify:** `python3 -m unittest tests.test_router tests.test_mailbox -v`.
 
 ### R4. The `codex` route (C2)
@@ -154,7 +172,11 @@ the fake-codex tests always.
 
 ---
 
-## SSH (P3, wave 2, after CARDS merges)
+## SSH (P3, wave 2b, after SHARED merges)
+
+SSH starts from SHARED's merge, not beside it: both edit `main()`'s
+argparse block and `tc`'s doc block, and SHARED is small. SSH adds its
+`"ssh": deliver_ssh` line to `ROUTES`.
 
 Exit: mail crosses to a second machine and back by hand (QA, D4), and a
 key behind `tc gate` can deliver mail and nothing else.
@@ -162,30 +184,42 @@ key behind `tc gate` can deliver mail and nothing else.
 ### S1. `deliver_ssh` and the outbox (C3)
 - **Files:** `tc`, `tests/test_ssh_route.py`.
 - **Test:** with a fake `ssh` exiting 0: the recorded argv is exactly the C3
-  list, the body is the fake's stdin and not in its argv, exit 0. With a
-  name containing a quote: refused by C0 before ssh runs. With the fake
-  exiting 255: exit 4, one file in `outbox/`, stderr names `tc flush`.
-  Must reject: the body on the command line; a remote command built by
-  string joining without `shlex.join` (input: a remote tc path with a
-  space; the fake must receive it as one quoted word).
+  list, `-T` present and `--` right before the target; the body is the
+  fake's stdin and not in its argv; exit 0. A name containing a quote:
+  refused by C0 before ssh runs. Fake exiting 255: exit 4, one file in
+  `outbox/`, stderr names `tc flush`. Fake exiting 7: exit 7, its stderr
+  printed, `outbox/` empty. With one message already queued for the
+  target, a new send does not call ssh at all (assert the recording is
+  empty) and is queued behind it, exit 4. Must reject: the body on the
+  command line; a remote command built by string joining without
+  `shlex.join` (input: a remote tc path containing a quote; the fake must
+  receive it quoted as one word); a refusal queued for retry.
 - **Verify:** `python3 -m unittest tests.test_ssh_route -v`.
 
 ### S2. `tc flush` (C3)
 - **Files:** `tc`, `tests/test_flush.py`.
-- **Test:** three outbox files for one target, fake ssh failing on the
+- **Test:** three outbox files for one target, fake ssh exiting 255 on the
   second: the first moves to `outbox/sent/`, the second and third stay,
-  exit 4. Fake fixed, flush again: all sent in seq order, exit 0. Must
-  reject: a flush that skips a failure and sends the third first.
+  exit 4. Fake fixed, flush again: all sent in seq order, exit 0. A file
+  the far side refuses (fake exiting 6) moves to `outbox/refused/` with its
+  stderr beside it. Must reject: a flush that skips a failure and sends the
+  third first.
 - **Verify:** `python3 -m unittest tests.test_flush -v`.
 
 ### S3. `tc gate` (C3)
 - **Files:** `tc`, `tests/test_gate.py`.
-- **Test:** `SSH_ORIGINAL_COMMAND="/x/tc send --from a --to b"` with a body
-  on stdin delivers to b. Refused with exit 7 and nothing written:
-  `rm -rf /`; `/x/tc send --from a --to b; id`; `/x/tc read b`;
-  `/x/tc send --from a --to ../b`; `env TC_ROOT=/tmp /x/tc send ...`;
-  an empty command. Must reject: a gate that runs anything through a shell
-  (assert no child process is started: patch `subprocess` to fail).
+- **Test:** `tc gate --as homebox-b` with
+  `SSH_ORIGINAL_COMMAND="/x/tc send --from a --to b"` and a body on stdin
+  delivers to b **as from `homebox-b`**, never as `a`, and the header line
+  says `via ssh gate, key homebox-b`. Refused with exit 7 and nothing
+  written: `rm -rf /`; `/x/tc send --from a --to b; id`; `/x/tc read b`;
+  `/x/tc send --from a --to ../b`; `env TC_ROOT=/tmp /x/tc send ...`; an
+  empty command; `tc gate` with no `--as`. A body over 1 MiB: exit 8.
+  Must reject: a gate that runs anything else. Two checks: in process,
+  patch `subprocess.*`, `os.system`, `os.spawn*`, `os.exec*`,
+  `os.posix_spawn*` and `os.fork` to raise; and out of process, run the
+  gate with `PATH` set to an empty folder and assert every refused case
+  still exits 7 and writes nothing.
 - **Verify:** `python3 -m unittest tests.test_gate -v`.
 
 ---
@@ -199,8 +233,9 @@ mailbox (human QA, D4); modes are right by test.
 - **Files:** `tc`, `tests/test_shared.py`.
 - **Test:** in a temp root, `tc init --shared --group <the user's own
   primary group>`: every folder has mode `2775` and that group; a message
-  sent after is mode `0664`; `.shared` holds the group name. A group the user
-  is not in: refused, nothing changed. `tc health` says `mailbox shared with
+  sent after is mode `0664`; a message and `mail/.seq` written **before**
+  init are `0664` after it; `.shared` holds the group name. A group the
+  user is not in: refused, nothing changed. `tc health` says `mailbox shared with
   group <g>`. Must reject: files at `0644` after init (the umask not set
   before the first write).
 - **Verify:** `python3 -m unittest tests.test_shared -v`.
@@ -214,12 +249,15 @@ refuses without the token; it binds nowhere but 127.0.0.1.
 
 ### B1. The feed (C5)
 - **Files:** `board/serve.py` (new), `tests/test_board_feed.py`.
-- **Test:** a temp root with two proven listeners (harness), a codex card,
-  an ssh card and three messages: four nodes, states `listening`,
+- **Test:** a temp root with two proven listeners (harness), a codex card
+  and an ssh card **written by hand in C1's shape** (CARDS' code is not
+  there yet), and three messages: four nodes, states `listening`,
   `listening`, `doorbell`, `remote`; three wires with the right from, to,
-  seq; listener pids equal the harness pids. Must reject: a feed that opens
-  message bodies (make bodies unreadable, mode `000`; the feed must still
-  work).
+  seq; listener pids equal the harness pids. Kill one listener between two
+  `feed()` calls on the same server object: it is `down` on the second. A
+  status file's first line after the header shows, cut at 80. Must reject:
+  a feed that opens message bodies (make bodies unreadable, mode `000`;
+  the feed must still work).
 - **Verify:** `python3 -m unittest tests.test_board_feed -v`.
 
 ### B2. The server (C6)
@@ -250,6 +288,17 @@ refuses without the token; it binds nowhere but 127.0.0.1.
   a message between two test names, see the wire move within 3 s; in
   grayscale every state reads.
 
+### B5. Leaks
+- **Files:** `tests/test_board_leak.py`, `tests/board-leak.test.mjs`.
+- **Test:** 1,000 `feed()` calls on one server object: RSS growth under
+  `FEED_LEAK_LIMIT_KB` (2,048), measured from `/proc/self/status` the way
+  the listener's 13 MB flat measurement was. `patchBoard` over 500 feeds
+  that add and remove nodes: node and wire counts return to the baseline,
+  and no removed node is still held by the board's maps. Must reject: a
+  `last_listening_at` that grows without bound (feed 1,000 distinct names
+  that come and go; the map is pruned past `DOWN_WINDOW_S`).
+- **Verify:** both commands pass.
+
 ---
 
 ## DOCS (P5, wave 3, after every other lane merges)
@@ -266,7 +315,11 @@ talking by following the README alone.
   `tc gate` (the `authorized_keys` line, and a plain warning never to add a
   key without the gate), the shared mailbox. Then commands, the board, limits.
   Keep "why it exists" honest: same-account Claude sessions should use the
-  native path.
+  native path. And say in one sentence why that is not the whole answer even
+  for one account: a session in a different permission mode holds a native
+  message for its user's approval and can let it expire, and the mailbox is
+  a record anyone can read on disk. The ssh section carries the way back
+  (C3) as a numbered step on the far machine.
 - **Verify:** checkers clean; every command shown in the README is run once
   against a temp root and its output matches what the README shows.
 
@@ -287,4 +340,7 @@ talking by following the README alone.
 - **Do:** step by step, what to type and what to see. `two-accounts.md` is
   the planner's measurement: two Claude accounts on this machine, neither
   lists the other with ListAgents, and `tc send` across them wakes the
-  listener. Donald runs these; the result files record what he saw.
+  listener; it also records whether each account runs with its own
+  `CLAUDE_CONFIG_DIR` (C1). `route-ssh.md` includes writing the return
+  card on the far machine. Donald runs these, with real ssh and real
+  codex; agents never do. The result files record what he saw.

@@ -3,8 +3,10 @@
 Model:  Claude Opus 5.5 (the TheConnection architect session), from
         Donald's asks of 2026-10-14 and the plan shape the CRC-Planner
         session (crc-planner-31, Claude Fable 5.1) sent the same day
-Status: draft, unreviewed. Nothing here is built. Every item marked
-        default is Donald's to confirm or overrule (section 11).
+Status: draft. Reviewed once by the CRC-Planner session (Claude Fable
+        5.1, 2026-10-14, 24 findings, all folded in). Nothing here is
+        built. Every item marked default is Donald's to confirm or
+        overrule (section 11).
 Date:   2026-10-14
 
 > **Read this file first.** It says what the plan builds, how the work is
@@ -31,6 +33,11 @@ use when.
 | A separate Linux user per account on one machine | tc, shared mailbox (C4) |
 | Sessions on **another machine** | tc, `ssh` route |
 | Unsure | tc |
+
+Why the native path is not the whole answer even for one account: a
+session in a different permission mode holds a native message for its
+user's approval and can let it expire, and the mailbox is a record anyone
+can read on disk.
 
 Donald's three ways of working, each of which must work by the end:
 
@@ -93,15 +100,14 @@ Ceiling: **3 lanes at once.** Lanes in one wave start together.
 | 1 | CORE | P1 | GROUND merged | medium |
 | 1 | CARDS | P2 | GROUND merged | medium |
 | 1 | BOARD | P4 | GROUND merged (builds against C1 and C5, not CARDS' code) | medium |
-| 2 | SSH | P3 | CARDS merged | medium |
 | 2 | SHARED | P3 | CARDS merged | small |
-| 2 | BOARD (continues if not done) | P4 | | |
+| 2b | SSH | P3 | SHARED merged | medium |
+| 2, 2b | BOARD (continues if not done) | P4 | | |
 | 3 | DOCS | P5 | every other lane merged | medium |
 
 ```
 GROUND --> CORE ------------------------------+
-       \-> CARDS --> SSH ---------------------+--> DOCS
-       |         \-> SHARED ------------------+
+       \-> CARDS --> SHARED --> SSH ----------+--> DOCS
        \-> BOARD -----------------------------+
 ```
 
@@ -110,6 +116,11 @@ first: Donald asked for speed. CORE writes tests only, CARDS changes
 `tc`. The order is kept at the merge instead of at the start: **CORE merges
 first**, and CARDS' review runs CORE's tests against CARDS' branch before
 CARDS merges. A send that CARDS broke fails there.
+
+**Why SHARED before SSH:** both edit `main()`'s argparse block and `tc`'s
+doc block in the same wave. SHARED is small, so it goes first and SSH
+starts from its merge. Costs a little time, saves a merge by hand on the
+one file every lane touches.
 
 **Shared files.** `tc` is one file, and CARDS, SSH and SHARED all edit it.
 Each lane adds its own functions and touches only these shared spots, one
@@ -190,14 +201,16 @@ Pasted into every brief, word for word.
    `git add -A`. The message says what changed and why and ends with
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. The repo is
    personal; commits go out as donaldgallianoiii@gmail.com by path rule.
-3. **No deletion.** No `rm` of tracked files, no `git clean`, no
-   `git reset --hard`, no deleting a branch. No test touches the live
-   `mail/` or `status/`: every test runs under its own `TC_ROOT`.
+3. **No deletion.** No `rm` at all, no `git clean`, no `git reset --hard`,
+   no deleting a branch. The one exception: a test's own
+   `TemporaryDirectory` cleaning itself up in teardown. No test touches the
+   live `mail/` or `status/`: every test runs under its own `TC_ROOT`.
 4. **Never run the Azure CLI (`az`) or anything that touches Azure. Never
    run Docker.**
-5. **Never run real `ssh` or real `codex`** in tests or by hand. Tests put a
-   fake on `PATH` that records its argv. The fake must be asserted called,
-   or the test passes by not checking.
+5. **Agents never run real `ssh` or real `codex`**, in tests or by hand.
+   Tests put a fake on `PATH` that records its argv. The fake must be
+   asserted called, or the test passes by not checking. Donald runs the
+   real ones, in the human QA scripts.
 6. **A listener is proven, not claimed.** Start `tc wait` only in the
    background with a timeout, and prove it by `tc health` naming its pid
    (it reads `/proc/locks`). "Listening" without that is a false claim
@@ -236,6 +249,10 @@ Every task in `phases.md` carries: **files**, **do**, **out of scope**, a
 wrong but plausible output the test must reject), **verify** (a command and
 what its output must show), and a **PR line** for the commit.
 
+**No `qa/bot/` in this plan:** the unittest suite is the scripted
+playthrough for every deterministic loop (send, wait, ring, forward,
+flush, gate, feed). The human scripts in `qa/human/` cover the rest.
+
 **Done** for a task: its verify command shows what the task says, its test
 fails when the named mutation is applied by hand and passes when restored,
 the convention checks are clean, and it is committed. **Done** for a lane:
@@ -269,7 +286,7 @@ verified with the command and its output, and nothing you did not.
 | O4 | Mailbox name rule | `[A-Za-z0-9._-]`, 1 to 64 characters, refused otherwise (C0). Suggested form `<account>-<project>` |
 | O5 | ssh route failure | Mail kept in `outbox/`, `send` exits 4 and says so; `tc flush` retries; no retry loop in the background |
 | O6 | Inbound ssh | Only through `tc gate`. The README never shows an unrestricted key for this |
-| O7 | Board port and poll | `127.0.0.1:8765`, token printed once at start, poll every 3 s |
+| O7 | Board port and poll | `127.0.0.1:8780` (8765 was taken on Donald's machine), token printed once at start, poll every 3 s |
 | O8 | Remote names on the board | Drawn with route `ssh` and the words `remote · not checked`; no SSH from the board in this plan |
 | O9 | Same-account Claude pairs | The board draws them as `native` with the words `native · not observed`, since tc cannot see that traffic |
 
