@@ -3,7 +3,8 @@
 Model:  Claude Opus 5.5 (the TheConnection architect session)
 Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
-        topology) on 2026-10-14, and for the CARDS pauses (D13) the same day.
+        topology) on 2026-10-14, and for the CARDS pauses (D13) and the codex lost wake (D14) the
+        same day.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
 Date:   2026-10-14
@@ -169,15 +170,30 @@ then prints each of `warnings` to stderr whatever the exit, then exits with
   the record of a join, so a joined name gets no warning on its first mail,
   which matters for every Codex name: it never runs `tc wait` (D13). `header_note`, when given, is appended to
   the message's header line (the gate uses it, C3).
-- `deliver_codex`: count unread first, then `deliver_local`. If the count
-  was 0, ring:
-  `codex queue --thread <thread_id> --message "MAIL: <n> unread for <to>. Run: <tc path> read <to>, act on it, reply with <tc path> send --from <to> --to <sender>."`
-  with stdin from `/dev/null` and a timeout of `CODEX_RING_SECONDS` (30).
-  Exit 0 adds the word line `rang codex <to> (queued; delivered when its
-  turn ends or the session is resumed)`. Any other exit or a timeout adds
-  the warning `ring failed for <to>: <first stderr line>; the mail is in its
-  inbox`. **The send still exits 0**: the mail landed. Two senders racing
-  an empty inbox may both ring; accepted, and said in the doc block.
+- `deliver_codex` (amended by D14, so a failed ring is never lost):
+  1. Under the inbox lock `mail/.box-<to>.lock` (flock): count unread,
+     check for the marker `mail/.ring-pending-<to>`, deliver through
+     `deliver_local`, and decide to ring when the count was 0 **or** the
+     marker exists. Release the lock.
+  2. Outside the lock, ring:
+     `codex queue --thread <thread_id> --message "MAIL: <n> unread for <to>. Run: <tc path> read <to>, act on it, reply with <tc path> send --from <to> --to <sender>."`
+     with stdin from `/dev/null` and a timeout of `CODEX_RING_SECONDS`
+     (30). The ring never runs under the lock, so a slow ring cannot
+     block a `tc read`.
+  3. Exit 0: remove the marker if present, and add the word line `rang
+     codex <to> (queued; delivered when its turn ends or the session is
+     resumed)`. Any other exit or a timeout: write the marker (`.tmp`
+     then rename) and add the warning `ring failed for <to>: <first stderr
+     line>; the mail is in its inbox; the next send to <to> rings again`.
+  **The send still exits 0**: the mail landed. A card whose `thread_id` is
+  not a string matching `[A-Za-z0-9][A-Za-z0-9._-]*` is not rung: the
+  warning says `its card's thread_id is not a thread id`, and the marker is
+  written. Two senders racing an empty inbox may both ring; accepted, and
+  said in the doc block.
+
+`tc read` holds the same inbox lock from its glob of the inbox to its
+last rename into `read/`, so a send cannot land a message between them
+and skip its ring (D14). `tc peek` takes no lock: it moves nothing.
 
 `tc read` and `tc peek` on a name with no inbox print `no unread mail for
 <name>` and create nothing (open item O2).

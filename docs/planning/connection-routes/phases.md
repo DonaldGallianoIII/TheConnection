@@ -179,6 +179,16 @@ the fake-codex tests always.
   every send; a send that fails because the ring failed. Also one recorded
   fixture of the real exit codes, labeled `matches Codex 0.162.1,
   2026-10-14` (0 queued, 1 unknown thread).
+  D14 additions: a fake exiting 1 then 0: the first send warns `ring
+  failed ... rings again` and leaves `mail/.ring-pending-<to>`; the second
+  send rings (the recording has two calls) and the marker is gone. A fake
+  that sleeps 5 s: a `tc read` of that inbox started during the ring
+  returns within 1 s. With the test holding `mail/.box-<to>.lock`, a send
+  does not land until the lock is released. A card with `thread_id`
+  `-x` or `7`: no ring call, the warning says not a thread id. `tc join`
+  in a Codex session with `CODEX_THREAD_ID=-x`: exit 1, no card. Must
+  reject: a ring decided on the count alone (the second send would not
+  ring); a ring run under the lock (the read would wait 5 s).
 - **Verify:** `python3 -m unittest tests.test_codex_route -v`.
 
 ### R5. `tc health` shows cards
@@ -384,7 +394,8 @@ talking by following the README alone.
 - **Do:** lead with the routing rule (section 1 of the index), the headline
   case (several accounts, several SSH windows, one mailbox), and a "which
   route am I" chart. Then one section per route: local, codex (with the
-  `--add-dir <mailbox>` line and why), ssh outbound, ssh inbound through
+  `--add-dir <mailbox>` line and why, and what a `ring failed` line means:
+  the next send rings again, D14), ssh outbound, ssh inbound through
   `tc gate` (the `authorized_keys` line, and a plain warning never to add a
   key without the gate, and that the far side's login shell must be POSIX,
   C3), the shared mailbox. Then commands, the board, limits.
