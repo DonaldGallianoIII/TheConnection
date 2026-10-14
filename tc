@@ -19,7 +19,7 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             also read /proc (meminfo, locks, each process's comm and cmdline)
             and run `nvidia-smi` when it exists. They never signal or touch
             another process.
-@deps       python3 stdlib (argparse, fcntl, json, pathlib, resource, shutil,
+@deps       python3 stdlib (argparse, fcntl, json, pathlib, re, resource, shutil,
             subprocess, time, datetime, os, sys); Linux only (flock, RLIMIT_AS,
             /proc). nvidia-smi optional.
 @complexity send/status O(1). read/peek/wait-poll O(u), u unread messages in
@@ -40,6 +40,7 @@ import fcntl
 import json
 import os
 import pathlib
+import re
 import resource
 import shutil
 import subprocess
@@ -61,6 +62,15 @@ EXIT_ALREADY_LISTENING = 3
 # only exists so a bug can never take the machine down with it.
 WAIT_MEMORY_CAP_BYTES = 256 * 1024 * 1024
 EXIT_ALERT = 5
+# CARDS R1 (Claude Opus 5.5, unreviewed): mailbox names, contract C0.
+# A name becomes a folder name here and a word on a remote command line over
+# ssh (C3). So: letters, digits, dot, dash, underscore, at most this many,
+# never a leading dash (it would read as an option), never only dots (a
+# folder that means "here" or "up").
+NAME_MAX_CHARS = 64
+NAME_PATTERN = re.compile(rf"[A-Za-z0-9._][A-Za-z0-9._-]{{0,{NAME_MAX_CHARS - 1}}}")
+# A bad name, refused before anything is written (contracts.md, exit codes).
+EXIT_BAD_NAME = 6
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -95,6 +105,41 @@ def keepalive_seconds():
     return max(MIN_KEEPALIVE_SECONDS, CACHE_TTL_SECONDS - margin)
 
 
+# CARDS R1 (Claude Opus 5.5, unreviewed): the one name check, contract C0.
+def valid_name(name):
+    """True when `name` may be a mailbox name under C0.
+
+    1 to NAME_MAX_CHARS of letters, digits, dot, dash and underscore, no
+    leading dash, not only dots. fullmatch, so a trailing newline fails.
+
+    @interacts  none; string work only.
+    @deps       re (NAME_PATTERN).
+    @complexity O(c) over c characters in `name`, at most NAME_MAX_CHARS
+                before the pattern stops matching.
+    @alloc      the stripped copy for the dots check, freed on return.
+    """
+    return (isinstance(name, str) and NAME_PATTERN.fullmatch(name) is not None
+            and name.strip(".") != "")
+
+
+def require_names(*names):
+    """Exit EXIT_BAD_NAME, with C0's words on stderr, at the first bad name.
+
+    None is skipped (an optional name not given). Every command calls this
+    before it touches the disk, so a bad name writes nothing.
+
+    @interacts  writes one line to stderr and exits on a bad name; else none.
+    @deps       valid_name, sys.
+    @complexity O(n * c) over n names given (one to three) of c characters.
+    @alloc      the message string on a bad name.
+    """
+    for name in names:
+        if name is not None and not valid_name(name):
+            print(f'tc: bad name "{name}": letters, digits, dot, dash, underscore, '
+                  f'1 to {NAME_MAX_CHARS}, not starting with a dash', file=sys.stderr)
+            sys.exit(EXIT_BAD_NAME)
+
+
 def inbox(name):
     box = MAIL / f"to-{name}"
     (box / "read").mkdir(parents=True, exist_ok=True)
@@ -118,6 +163,17 @@ def next_seq():
 
 
 def cmd_send(args):
+    """`tc send`: write one message to mail/to-<to>/ and print where it went.
+
+    @interacts  checks both names first (C0, exit 6, nothing written); reads
+                stdin when no text is given; takes the mail/.seq flock in
+                next_seq(); writes a .tmp sibling and renames it into
+                mail/to-<to>/; prints one line to stdout.
+    @deps       require_names, next_seq, inbox, now_iso.
+    @complexity O(b) over b bytes of body.
+    @alloc      the body string, freed on exit; one message file, kept.
+    """
+    require_names(args.sender, args.to)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     body = args.message if args.message else sys.stdin.read()
     if not body.strip():
         sys.exit("tc send: empty message")
@@ -136,6 +192,16 @@ def show(paths):
 
 
 def cmd_read(args):
+    """`tc read <name>`: print unread mail and move it to read/.
+
+    @interacts  checks the name first (C0, exit 6, nothing written); makes
+                mail/to-<name>/read/ if missing; reads and renames each
+                unread file; prints to stdout.
+    @deps       require_names, unread, show.
+    @complexity O(u) over u unread messages (single digits).
+    @alloc      the list of paths and each file's text while printed.
+    """
+    require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     msgs = unread(args.name)
     if not msgs:
         print(f"no unread mail for {args.name}")
@@ -146,12 +212,37 @@ def cmd_read(args):
 
 
 def cmd_peek(args):
+    """`tc peek <name>`: print unread mail and leave it unread.
+
+    @interacts  checks the name first (C0, exit 6, nothing written); makes
+                mail/to-<name>/read/ if missing; reads each unread file;
+                prints to stdout.
+    @deps       require_names, unread, show.
+    @complexity O(u) over u unread messages (single digits).
+    @alloc      the list of paths and each file's text while printed.
+    """
+    require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     msgs = unread(args.name)
     print(f"{len(msgs)} unread for {args.name}")
     show(msgs)
 
 
 def cmd_wait(args):
+    """`tc wait <name>`: hold the name's lock and poll until mail lands.
+
+    Exit 0 on mail, EXIT_TIMEOUT at the deadline, EXIT_ALREADY_LISTENING
+    when another wait holds the lock.
+
+    @interacts  checks the name first (C0, exit 6, nothing written); caps
+                its own address space; makes mail/ and holds
+                mail/.wait-<name>.lock (flock) until it exits; makes
+                mail/to-<name>/read/ on the first poll; prints one line.
+    @deps       require_names, unread, keepalive_seconds; fcntl, resource.
+    @complexity O(u) per poll over u unread messages; one poll every
+                POLL_SECONDS until the timeout.
+    @alloc      one open lock file for its lifetime; flat at about 13 MB.
+    """
+    require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     resource.setrlimit(resource.RLIMIT_AS, (WAIT_MEMORY_CAP_BYTES, WAIT_MEMORY_CAP_BYTES))
     MAIL.mkdir(parents=True, exist_ok=True)
     lock = open(MAIL / f".wait-{args.name}.lock", "w")
@@ -178,6 +269,16 @@ def cmd_wait(args):
 
 
 def cmd_status(args):
+    """`tc status [<name> <text>]`: post one side's status, or show them all.
+
+    @interacts  checks the name first when one is given (C0, exit 6,
+                nothing written); makes status/; writes status/<name>.md
+                whole, or reads every status file; prints to stdout.
+    @deps       require_names, now_iso.
+    @complexity O(s) over s status files when showing (single digits).
+    @alloc      each file's text while printed.
+    """
+    require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     STATUS.mkdir(parents=True, exist_ok=True)
     if args.text is None:
         files = sorted(STATUS.glob("*.md"))
@@ -399,6 +500,20 @@ def _breaches(m, args, strikes):
 
 
 def cmd_watch(args):
+    """`tc watch <name>`: heartbeat or alert that wakes the session <name>.
+
+    @interacts  checks the name first (C0, exit 6, nothing written); caps
+                its own address space; makes mail/ and holds
+                mail/.watch-<name>.lock (flock) until it exits; reads /proc
+                and runs nvidia-smi each poll (see machine_stats,
+                listeners); prints a HEARTBEAT or ALERT line.
+    @deps       require_names, machine_stats, listeners, session_counts,
+                _breaches; fcntl, resource.
+    @complexity O(p + k + n) per poll, as health (module block); one poll
+                every args.poll seconds until the heartbeat.
+    @alloc      one open lock file for its lifetime; the peaks, a few floats.
+    """
+    require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     resource.setrlimit(resource.RLIMIT_AS, (WAIT_MEMORY_CAP_BYTES, WAIT_MEMORY_CAP_BYTES))
     MAIL.mkdir(parents=True, exist_ok=True)
     lock = open(MAIL / f".watch-{args.name}.lock", "w")
