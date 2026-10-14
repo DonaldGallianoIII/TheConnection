@@ -12,9 +12,25 @@ Names below that exist in `tc` today were read from `tc` at commit
 `cmd_send()`, `cmd_health()`, `listeners()`, `health_snapshot()`, `main()`.
 Everything else is new.
 
-Exit codes in use today: 0 ok, 2 timeout or keepalive, 3 already
-listening, 5 alert. This plan adds **4 kept in outbox**, **6 bad name**,
-**7 refused by the gate**, **8 message too large**.
+**Exit codes.** The one list. A lane that needs a new code writes a
+pause; no lane reuses a number for a new meaning.
+
+| Code | Meaning | Who exits with it | Since |
+|---|---|---|---|
+| 0 | ok (`wait`: mail; `watch`: heartbeat) | every command | today |
+| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet | `send`, `join`, router | today (empty message), this plan |
+| 2 | `wait` timed out or hit its keepalive | `wait` | today |
+| 3 | another listener or watcher already holds this name's lock | `wait`, `watch` | today |
+| 4 | kept in the outbox: ssh could not reach the target, or the target already has a queue | `send` (ssh route), `flush` | this plan (C3) |
+| 5 | alert: load, memory, GPU or a named listener down | `watch` | today |
+| 6 | bad name, under C0, for any name argument including `--reports-to`; also a self-report and a bad ssh target or remote path | every command that takes a name, `card` | this plan (C0, C1) |
+| 7 | refused by the gate | `gate` | this plan (C3) |
+| 8 | message over `SEND_BODY_MAX_BYTES` | `send`, `gate` | this plan (C0) |
+
+Collision, known and not changed by this plan: argparse exits **2** on a
+usage error, the same code as a `wait` timeout. A listener that exits 2
+with a `usage:` line on stderr was mistyped and never listened. JOIN.md
+(task D2) says to read stderr on an exit 2 before re-arming.
 
 ---
 

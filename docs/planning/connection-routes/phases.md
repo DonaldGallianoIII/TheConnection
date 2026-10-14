@@ -276,8 +276,12 @@ refuses without the token; it binds nowhere but 127.0.0.1.
   - a `reports_to` cycle (`p` reports to `q`, `q` to `p`): `p` level 0, `q`
     level 1, and `feed()` returns.
   - a `reports_to` naming nobody: the node is a root and keeps the name.
+  - two orchestrators share a worker (`b` reports to `a` by card, and `x`
+    also mails `b`): `b` appears once, at level 1 under `a`, and the
+    `mailbox` link `b` and `x` is still in `links`.
   Must reject: a feed that picks one root for the whole board (the
-  side-by-side case must give two level 0 nodes); a level walk with no
+  side-by-side case must give two level 0 nodes); a shared worker drawn
+  twice or under the parent it only mails; a level walk with no
   cycle break (run the cycle case under a 2 s timeout); links taken from
   the last `WIRE_HISTORY` only (a pair whose only message is older than
   that must still have its link).
@@ -366,7 +370,9 @@ talking by following the README alone.
 ### D2. JOIN.md and JOIN-CODEX.md
 - **Files:** `JOIN.md`, `JOIN-CODEX.md` (new).
 - **Do:** JOIN.md gains `tc join <name> --account <label> --reports-to
-  <relay>` (the relay that pointed it here) and the proven-listener rule (a listener is live when `tc health` names its pid).
+  <relay>` (the relay that pointed it here), the exit 2 note from the
+  contracts' exit code list (read stderr for `usage:` before re-arming),
+  and the proven-listener rule (a listener is live when `tc health` names its pid).
   JOIN-CODEX.md: `tc join`, no listener, go idle, reply with `tc send`; the
   mail arrives as a queued message.
 
