@@ -1,9 +1,9 @@
 # Connection routes: the plan index
 
 Model:  Claude Opus 5.5 (the TheConnection architect session), from
-        Donald's asks of 2026-10-14 and the plan shape the CRC-Planner
-        session (crc-planner-31, Claude Fable 5.1) sent the same day
-Status: draft. Reviewed once by the CRC-Planner session (Claude Fable
+        Donald's asks of 2026-10-14 and the plan shape a planning
+        session (Claude Fable 5.1) sent the same day
+Status: draft. Reviewed once by the planning session (Claude Fable
         5.1, 2026-10-14, 24 findings, all folded in). Nothing here is
         built. Every item marked default is Donald's to confirm or
         overrule (section 11).
@@ -169,7 +169,7 @@ reviewed and the problem is still there.
 
 | Lane | Worktree | Branch | Board port |
 |---|---|---|---|
-| GROUND | `~/code/personal/TheConnection-lanes/ground` | `Claude-Development-TheConnection-GROUND` | |
+| GROUND | `~/TheConnection-lanes/ground` | `Claude-Development-TheConnection-GROUND` | |
 | CORE | `.../core` | `...-CORE` | |
 | CARDS | `.../cards` | `...-CARDS` | |
 | BOARD | `.../board` | `...-BOARD` | 8766 |
@@ -200,13 +200,13 @@ Pasted into every brief, word for word.
    `main`. Never push, never merge. Commit by path (`git add <paths>`), never
    `git add -A`. The message says what changed and why and ends with
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. The repo is
-   personal; commits go out as donaldgallianoiii@gmail.com by path rule.
+   personal and public; commits go out under its configured personal identity.
 3. **No deletion.** No `rm` at all, no `git clean`, no `git reset --hard`,
    no deleting a branch. The one exception: a test's own
    `TemporaryDirectory` cleaning itself up in teardown. No test touches the
    live `mail/` or `status/`: every test runs under its own `TC_ROOT`.
-4. **Never run the Azure CLI (`az`) or anything that touches Azure. Never
-   run Docker.**
+4. **Never run a cloud provider's CLI or anything that touches a cloud
+   account. Never run Docker.**
 5. **Agents never run real `ssh` or real `codex`**, in tests or by hand.
    Tests put a fake on `PATH` that records its argv. The fake must be
    asserted called, or the test passes by not checking. Donald runs the
@@ -237,10 +237,11 @@ Pasted into every brief, word for word.
     comment saying the same.
 12. **Voice.** No em dashes, no en dashes. No machine register: the
     banned words and phrases are in
-    `~/code/work/crc/CRC-Conventions/tools/voice-rules.yaml`; read it once.
-    Short sentences, concrete nouns. American English. Run
-    `python3 ~/code/work/crc/CRC-Conventions/tools/check_voice.py` and
-    `check_american.py` on every Markdown file you write.
+    `~/Conventions/tools/voice-rules.yaml` (the owner's conventions folder);
+    read it once. Short sentences, concrete nouns. American English. Run
+    `python3 ~/Conventions/tools/check_voice.py <file>` and a spelling check
+    that reads the file you name (`check_american.py` scans only its own
+    folder; the lane briefs name the wrapper) on every Markdown file you write.
 
 ## 10. What every task carries, and what done means
 

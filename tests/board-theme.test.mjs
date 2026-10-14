@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const CSS = readFileSync(new URL('../board/theme.css', import.meta.url), 'utf8');
-// WCAG 2 AA for body text. The TMS measures its Daylight words against it.
+// WCAG 2 AA for body text. Daylight's words are measured against it.
 const MIN_TEXT_CONTRAST = 4.5;
 // Tokens that are not colors, so Daylight has no reason to restate them.
 const NOT_COLORS = /^--tc-(font|mono|radius|bar-w|port|wire-w|dash|gap|flow-speed|pulse-speed)/;
@@ -74,7 +74,7 @@ test('Daylight words clear 4.5 to 1 on the face under them', () => {
 
 test('the contrast helper matches known WCAG values', () => {
   assert.equal(contrast('#000000', '#ffffff').toFixed(1), '21.0');
-  // #007aff on white is the TMS accent the writing line moved off: 4.02.
+  // #007aff on white is the accent the writing line moved off: 4.02.
   assert.ok(contrast('#007aff', '#ffffff') < MIN_TEXT_CONTRAST);
 });
 

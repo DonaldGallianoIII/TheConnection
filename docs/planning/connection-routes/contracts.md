@@ -1,7 +1,7 @@
 # Connection routes: contracts
 
 Model:  Claude Opus 5.5 (the TheConnection architect session)
-Status: draft. Reviewed once by the CRC-Planner session (Claude Fable 5.1,
+Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Fixed once Donald
         approves; a lane that needs a change writes a pause and does not
         edit this file.
@@ -31,7 +31,7 @@ listening, 5 alert. This plan adds **4 kept in outbox**, **6 bad name**,
   letters, digits, dot, dash, underscore, 1 to 64, not starting with a
   dash`, exit 6.
 - Suggested form for many accounts: `<account>-<project>`, for example
-  `work-tms`, `home-football`. A suggestion in the README, not enforced.
+  `work-api`, `home-football`. A suggestion in the README, not enforced.
 
 Why: names become folder names here and words in a remote command line
 over SSH (C3). A leading dash would read as an option there.
@@ -276,8 +276,8 @@ Cost: O(n + m) for n names and m message files scanned, m capped by
 ## C6. The board server
 
 - `python3 board/serve.py [--port 8780]` binds `127.0.0.1` only. The
-  default is 8780 because 8765 was in use on Donald's machine (the TMS docs
-  server) on 2026-10-14; the README says the port is a flag.
+  default is 8780 because 8765 was in use on Donald's machine (another local
+  docs server) on 2026-10-14; the README says the port is a flag.
 - A token from `secrets.token_urlsafe(24)`, made at start, printed once in
   the URL: `http://127.0.0.1:8780/live.html#token=<t>`. The fragment never
   reaches the server's log or another site's referrer.

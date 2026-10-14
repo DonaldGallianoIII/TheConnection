@@ -13,7 +13,7 @@ the way the Greener Pastures node graph does, and every state reads without colo
 3. Watch for 15 seconds.
    - One wire at a time turns dashed and the dashes move. The moving dashes
      always run toward the session reading the message.
-   - An arrowhead sits at the reader's end and a label like `a → b · #781` floats
+   - An arrowhead sits at the reader's end and a label like `a → b · #41` floats
      over the wire.
    - The sender's box gets a thicker border and its second line reads `✎ writing`.
 4. Check each state reads without color (turn your screen to grayscale, or use the
@@ -27,7 +27,7 @@ the way the Greener Pastures node graph does, and every state reads without colo
 6. Turn on reduced motion (OS setting, or devtools "prefers-reduced-motion: reduce").
    - The dashes stop moving, but the dashed line, arrow and label still show which
      wire is active.
-7. Open http://localhost:8765/demo.html?theme=daylight (the CRC TMS light look).
+7. Open http://localhost:8765/demo.html?theme=daylight (the Daylight light look).
    - A steel gray page, white session cards, and dark gunmetal title and footer
      bars with white words.
    - The writing line, the wires and the out ports are blue. `zed · worker` is hot

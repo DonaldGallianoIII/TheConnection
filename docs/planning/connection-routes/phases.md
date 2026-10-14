@@ -1,9 +1,9 @@
 # Connection routes: phases and tasks
 
 Model:  Claude Opus 5.5 (the TheConnection architect session); the core
-        test specs in CORE are the CRC-Planner session's (Claude Fable 5.1)
+        test specs in CORE are a planning session's (Claude Fable 5.1)
         of 2026-10-14, kept as it wrote them where they still fit
-Status: draft. Reviewed once by the CRC-Planner session (Claude Fable 5.1,
+Status: draft. Reviewed once by the planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in)
 Date:   2026-10-14
 
@@ -20,7 +20,7 @@ the rules, and knows the two known bugs.
 
 ### G1. Repo CLAUDE.md
 - **Files:** `CLAUDE.md` (new).
-- **Do:** fill in `~/code/work/crc/CRC-Conventions/templates/CLAUDE.md` for
+- **Do:** fill in `~/Conventions/templates/CLAUDE.md` (the owner's template) for
   this repo: what it is; stdlib only; Linux and WSL2 only; the layout; the
   test commands (`python3 -m unittest discover -s tests -p 'test_*.py'` and
   `node --test tests/*.test.mjs`); the routing rule table from `00-index.md`
@@ -40,8 +40,7 @@ the rules, and knows the two known bugs.
   `test-claimed-that-is-not-in-the-tree` (two commit messages cite 8 tests
   the repo never held; a claim names a file and a command or is not made).
   Note each is a form of the shared catalog's
-  `check-that-passes-by-not-checking` and `written-claim-outlives-the-code`
-  (`~/code/work/crc/CRC-Conventions/code/KNOWN-BUGS.md`).
+  `check-that-passes-by-not-checking` and `written-claim-outlives-the-code`.
 - **Verify:** checkers clean.
 - **PR:** Start the known-bugs index with the two failures seen on 2026-10-14.
 

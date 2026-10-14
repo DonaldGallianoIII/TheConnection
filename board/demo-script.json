@@ -47,8 +47,8 @@
       "state": "listening"
     },
     {
-      "id": "crc",
-      "title": "crc · worker",
+      "id": "docs",
+      "title": "docs · worker",
       "pos": {
         "x": 500,
         "y": 130
@@ -58,8 +58,8 @@
       "detail": "41m"
     },
     {
-      "id": "pac",
-      "title": "pac · worker",
+      "id": "build",
+      "title": "build · worker",
       "pos": {
         "x": 500,
         "y": 230
@@ -89,11 +89,11 @@
     ],
     [
       "a",
-      "crc"
+      "docs"
     ],
     [
       "a",
-      "pac"
+      "build"
     ],
     [
       "a",
@@ -121,7 +121,7 @@
         "b"
       ],
       "writer": "a",
-      "text": "a → b · #781"
+      "text": "a → b · #41"
     },
     {
       "wire": [
@@ -144,18 +144,18 @@
     {
       "wire": [
         "a",
-        "crc"
+        "docs"
       ],
       "writer": "a",
-      "text": "a → crc · #782"
+      "text": "a → docs · #42"
     },
     {
       "wire": [
         "a",
-        "pac"
+        "build"
       ],
-      "writer": "pac",
-      "text": "pac → a · hourly",
+      "writer": "build",
+      "text": "build → a · hourly",
       "back": true
     },
     {

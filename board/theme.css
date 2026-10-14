@@ -14,9 +14,9 @@
  * and a text label. With reduced motion the dashes stop but the arrow and
  * label stay.
  *
- * Two looks. Dark (the notebook's, the default) sits on :root. Daylight,
- * the CRC TMS light look's colors (web/src/styles/themes.css, Daylight Ops),
- * is [data-theme='daylight'] on <html> and overrides only tokens; no rule
+ * Two looks. Dark (the notebook's, the default) sits on :root. Daylight, a
+ * light look from a palette Donald supplied, is [data-theme='daylight'] on
+ * <html> and overrides only tokens; no rule
  * below names a color of its own, so a look is a token set and nothing else.
  */
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
@@ -81,14 +81,13 @@
   --tc-pulse-speed: 2s;
 }
 
-/* Daylight: the CRC TMS light look (Daylight Ops in CRC-TMS
- * web/src/styles/themes.css). White cards on a steel ground, gunmetal bars
- * with white words, the TMS accent blue, and its status set: ok green, warn
- * blue, danger hot pink. The TMS moved off orange and red because they sat on
- * top of the green for red and green colorblindness; this follows it, so the
- * warn dot is blue here, not amber. Every value is a TMS Daylight value
- * except --tc-yellow, --tc-grey and --tc-bar-dim, which the TMS has no match
- * for. Model: Claude Opus 5.5, 2026-10-14. Status: unreviewed. */
+/* Daylight: a light look from a palette Donald supplied. White cards on a
+ * steel ground, gunmetal bars with white words, an accent blue, and a status
+ * set: ok green, warn blue, danger hot pink. The palette moved off orange and
+ * red because they sat on top of the green for red and green colorblindness;
+ * this follows it, so the warn dot is blue here, not amber. Every value is
+ * from that palette except --tc-yellow, --tc-grey and --tc-bar-dim, which it
+ * has no match for. Model: Claude Opus 5.5, 2026-10-14. Status: unreviewed. */
 :root[data-theme='daylight'] {
   color-scheme: light;
   --tc-bg: #e0e3e7;
@@ -102,7 +101,7 @@
   --tc-muted: #474951;
   --tc-dim: #474951;
   /* Dark enough to read as words on white (the writing state's line).
-   * #0066d6 is the TMS accent's hover shade, picked over #007aff because
+   * #0066d6 is the palette accent's hover shade, picked over #007aff because
    * that one is under 4.5 to 1 on white. */
   --tc-cyan: #0066d6;
   --tc-blue: #1659c7;
@@ -126,12 +125,12 @@
   --tc-shadow-sel: 0 8px 24px rgba(0, 0, 0, .12);
   --tc-shadow-port: 0 0 2px rgba(0, 0, 0, .25);
   --tc-wire-rest: .7;
-  /* On the gunmetal bar the light status set reads; these are the TMS dark
-   * look's ok, warn and danger. */
+  /* On the gunmetal bar the light status set reads; these are the palette's
+   * dark ok, warn and danger. */
   --tc-conn-up: #3ee67f;
   --tc-conn-warn: #7fb2ff;
   --tc-conn-down: #ff1493;
-  /* The TMS Daylight bar button's outline, and its pressed words. */
+  /* The palette's bar button outline, and its pressed words. */
   --tc-bar-line: #aeb2b8;
   --tc-bar-pressed-words: #1c1c1e;
 }
