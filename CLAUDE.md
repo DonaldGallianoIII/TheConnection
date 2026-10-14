@@ -96,8 +96,9 @@ Two ideas carry the whole tool.
 The connection routes plan, run in lanes and waves
 (`docs/planning/connection-routes/00-index.md` section 4). Wave 0, GROUND
 (this file, `docs/known-bugs/` and `tests/_root.py`), merged into the dev
-branch at `a029bda`. As of 2026-10-14, wave 1 runs: CORE, CARDS and
-BOARD, each in its own worktree. SHARED, SSH and DOCS come after them.
+branch at `a029bda`, and CORE at `f5f6923`. As of 2026-10-14, CARDS and
+BOARD (the rest of wave 1) run in their own worktrees. SHARED, SSH and
+DOCS come after them.
 
 ### Off limits
 
@@ -291,16 +292,16 @@ names.
 
 The tool runs today on one machine: send, read, peek, wait (with
 `--keepalive`), status, log, health and watch, plus the board look kit.
-No test in the tree tests `tc read`, `tc log` or `tc status`.
-`tests/test_root.py` runs `tc send` and `tc peek` only as harness
-plumbing, and nothing checks that peek leaves mail unread (CORE's K8).
-CORE writes the core mailbox tests.
+`tests/test_mailbox.py` (CORE, K1 to K8) tests send, read, peek, wait,
+log, status and the counter, each test proven by a hand mutation of
+`tc`.
 
 GROUND (P0) built this file (G1), `docs/known-bugs/` (G2) and
 `tests/_root.py` (G3) on its lane branch. After the lane's two review
 rounds, the architect merged it into the dev branch,
 `Claude-Development-TheConnection`, at `a029bda`, with the merge
 approved for the owner as decision D8 allows. `89bdd2e` followed with two
-post-merge fixes. As of 2026-10-14 the P0 phase review (D9) is in its
-fix round, and wave 1 (CORE, CARDS, BOARD) runs. Nothing else in the
-plan is built. `main` stays the owner's alone.
+post-merge fixes, and the P0 phase review (D9) closed with a fix round at
+`ab7bd31`. CORE (P1) merged at `f5f6923`. As of 2026-10-14, CARDS and
+BOARD (wave 1) are in review or in build. Nothing else in the plan is
+built. `main` stays the owner's alone.
