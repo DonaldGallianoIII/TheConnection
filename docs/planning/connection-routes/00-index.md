@@ -270,7 +270,10 @@ Pasted into every brief, word for word.
     message: no keys, tokens or passwords, no real mailbox content, no
     hostnames, IPs or tailnet names, no email beyond the commit author, and
     nothing about the owner's employer or its systems. Test names and demo
-    names are made up.
+    names are made up. Before every push, the pusher scans the whole tree
+    at the branch tip and every new commit message with a pattern list
+    kept outside the repo. A diff scan alone misses a stale tip. A commit
+    message never quotes those patterns.
 
 ## 10. What every task carries, and what done means
 

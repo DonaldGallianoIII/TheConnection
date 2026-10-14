@@ -3,7 +3,8 @@
 Model:  Claude Opus 5.5 (the TheConnection architect session)
 Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
-        topology) on 2026-10-14. Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
+        topology) on 2026-10-14, and for the CARDS pauses (D13) the same day.
+        Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
 Date:   2026-10-14
 
@@ -18,12 +19,12 @@ pause; no lane reuses a number for a new meaning.
 | Code | Meaning | Who exits with it | Since |
 |---|---|---|---|
 | 0 | ok (`wait`: mail; `watch`: heartbeat) | every command | today |
-| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet | `send`, `join`, router | today (empty message), this plan |
+| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force` | `send`, `join`, `card`, router | today (empty message), this plan |
 | 2 | `wait` timed out or hit its keepalive | `wait` | today |
 | 3 | another listener or watcher already holds this name's lock | `wait`, `watch` | today |
 | 4 | kept in the outbox: ssh could not reach the target, or the target already has a queue | `send` (ssh route), `flush` | this plan (C3) |
 | 5 | alert: load, memory, GPU or a named listener down | `watch` | today |
-| 6 | bad name, under C0, for any name argument including `--reports-to`; also a self-report and a bad ssh target or remote path | every command that takes a name, `card` | this plan (C0, C1) |
+| 6 | bad name, under C0, for any name argument including `--reports-to`; also a self-report and a bad ssh target or remote path (including `~` alone or `~user/...`) | every command that takes a name, `card`, the ssh route | this plan (C0, C1, C3) |
 | 7 | refused by the gate | `gate` | this plan (C3) |
 | 8 | message over `SEND_BODY_MAX_BYTES` | `send`, `gate` | this plan (C0) |
 | 9 | usage error: an unknown command, flag or missing argument; the usage text goes to stderr | every command (the parser) | this plan (D12) |
@@ -89,8 +90,8 @@ a `.tmp` and renamed, like a message.
 
 | Field | Values | Set by |
 |---|---|---|
-| `kind` | `claude`, `codex`, `other` | `tc join`: `codex` when `CODEX_THREAD_ID` is set, else `claude` when `CLAUDECODE=1`, else `other`. `--kind` overrides. |
-| `account` | a label, or `unknown` | `--account`; else the base name of `CLAUDE_CONFIG_DIR` if set; else `unknown`. Never empty. |
+| `kind` | `claude`, `codex`, `other` | `tc join`: `codex` when `CODEX_THREAD_ID` is set, else `claude` when `CLAUDECODE=1`, else `other`. `--kind` overrides. `tc card`: `other` (D13). |
+| `account` | a label, or `unknown` | `tc join`: `--account`; else the base name of `CLAUDE_CONFIG_DIR` if set; else `unknown`. `tc card`: `--account`, else `unknown`, since this session's account says nothing about a far name (D13). A blank value counts as not given. Never empty. |
 | `route` | `local`, `codex`, `ssh` | `codex` for kind codex, `ssh` for a card made with `tc card --ssh`, else `local` |
 | `session_id`, `pid` | from `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` | `tc join` in a Claude session; null otherwise |
 | `thread_id` | from `CODEX_THREAD_ID` | `tc join` in a Codex session; required for route `codex` |
@@ -110,8 +111,10 @@ default lands on `unknown` unless each account runs with its own
 **Checks on an ssh card.** `target` matches
 `^[A-Za-z0-9._][A-Za-z0-9._-]*(@[A-Za-z0-9._][A-Za-z0-9._-]*)?$`: user at
 host or host alone, no leading dash on either part, no spaces. The remote
-`tc` path starts with `/` or `~/` and has no whitespace. Otherwise `tc card`
-refuses with words, exit 6, and writes nothing.
+`tc` path starts with `/` or `~/` and has no whitespace; `~` alone and
+`~user/...` are refused, not guessed (D13). Otherwise `tc card` refuses
+with words, exit 6, and writes nothing. If unread mail waits in
+`mail/to-<name>/`, `tc card` refuses with exit 1 unless `--force`.
 
 Commands:
 
@@ -161,8 +164,10 @@ then prints each of `warnings` to stderr whatever the exit, then exits with
 <route> is not built yet`, exit 1, nothing written.
 
 - `deliver_local`: today's behavior. Seq under flock, write `.tmp`, rename.
-  If the inbox did not exist before, add the warning `new inbox: nobody has
-  joined as <to>` (open item O1). `header_note`, when given, is appended to
+  If the inbox did not exist before **and the name has no card**, add the
+  warning `new inbox: nobody has joined as <to>` (open item O1). A card is
+  the record of a join, so a joined name gets no warning on its first mail,
+  which matters for every Codex name: it never runs `tc wait` (D13). `header_note`, when given, is appended to
   the message's header line (the gate uses it, C3).
 - `deliver_codex`: count unread first, then `deliver_local`. If the count
   was 0, ring:
@@ -182,12 +187,22 @@ then prints each of `warnings` to stderr whatever the exit, then exits with
 **Outbound** (`deliver_ssh`, added to `ROUTES` by the SSH lane):
 
 ```python
+path = card["ssh"]["tc"]
+# A quoted ~ never expands on the far side, so a leading ~/ goes bare and
+# only the rest is quoted. Any other ~ form was refused when the card was
+# written, and is refused again here (exit 6) for a hand-made card.
+remote_tc = "~/" + shlex.quote(path[2:]) if path.startswith("~/") else shlex.quote(path)
 argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_CONNECT_SECONDS}",
         "--", card["ssh"]["target"],
-        shlex.join([card["ssh"]["tc"], "send", "--from", sender, "--to", to])]
+        remote_tc + " " + shlex.join(["send", "--from", sender, "--to", to])]
 subprocess.run(argv, input=body, text=True, capture_output=True,
                timeout=SSH_SEND_SECONDS)
 ```
+
+- **The far side's login shell must be POSIX** (sh, bash, dash, zsh). ssh
+  hands the remote command line to that shell, and the quoting above is
+  POSIX quoting; fish or csh as the login shell would break it. The README's
+  ssh section says so (D13).
 
 - `SSH_CONNECT_SECONDS = 10`, `SSH_SEND_SECONDS = 30`,
   `SSH_CONNECT_FAILED = 255` (ssh's own exit for a connection failure).

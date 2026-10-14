@@ -61,9 +61,11 @@ the rules, and knows the two known bugs.
   named by `tc health --json`; after the context exits its pid is gone. Must
   reject: a harness that returns before the lock is held (assert the pid is
   in `/proc/locks` at yield).
-- **Verify:** `python3 -m unittest tests.test_root -v` shows 12 passed
-  (the 2 above, plus 10 the review's fix round added for the env, the
-  fakes, `start()` and teardown).
+- **Verify:** `python3 -m unittest tests.test_root -v` shows 18 passed
+  (the 2 above, plus 10 from the lane review's fix round for the env, the
+  fakes, `start()` and teardown, and 6 from the P0 phase review's fix
+  round for `calls()` after exit, one reap ceiling, the real-path PATH
+  guard, fake names, a listener with no sleep and `start(argv=...)`).
 - **PR:** Add tests/_root.py: throwaway roots, a proven listener, fake ssh and codex.
 
 ---
@@ -132,8 +134,12 @@ the fake-codex tests always.
   `CODEX_THREAD_ID`: exit 1, no card. `tc card x --ssh u@h` gives route ssh
   and the default remote path. A second join of the same name overwrites
   and resets `joined_at`. `tc card x --ssh u@h` while `to-x` holds unread
-  mail: refused naming the count; with `--force`: written. `tc card x --ssh
-  -oProxyCommand=y`: exit 6, nothing written. With
+  mail: refused naming the count, exit 1; with `--force`: written. `tc card
+  x --ssh=-oProxyCommand=y`: exit 6, nothing written (with a space, the
+  parser refuses `-oProxyCommand=y` as a flag first, exit 9; test both).
+  `tc card x --ssh u@h --remote-tc '~bob/tc'` and `--remote-tc '~'`: exit
+  6. With `CLAUDE_CONFIG_DIR=/x/acct` set, `tc card x --ssh u@h` gives
+  account `unknown` and kind `other` (D13). With
   `CLAUDE_CODE_MESSAGING_TOKEN=secret123` in env, no value in the card
   contains `secret123`. `tc join b --reports-to a` stores `"reports_to":
   "a"`; a rejoin of `b` without the flag stores null; `tc join b
@@ -153,7 +159,8 @@ the fake-codex tests always.
 - **Test:** a send to a name with no card behaves exactly as K1 (run CORE's
   tests against this branch at review); a first send to `nobody` exits 0,
   prints the send line on stdout and the warning on stderr; a second send
-  does not warn; `tc peek ghost` leaves the root's file list unchanged; a
+  does not warn; a first send to a name that has a card but no inbox does
+  not warn (D13); `tc peek ghost` leaves the root's file list unchanged; a
   body of exactly 1 MiB is sent and one byte more is refused with exit 8,
   no file and no number used; an ssh card answers the not-built sentence.
   Must reject: a warning on every send; a size check after `next_seq()`
@@ -189,8 +196,9 @@ the fake-codex tests always.
   `TIMEOUT` on stdout; `tc wait b --timeout 1` still exits 2 with
   `TIMEOUT`; `tc` with no command exits 9; `tc frobnicate` exits 9;
   `tc send --to b hi` (no `--from`) exits 9 and writes nothing. Must
-  reject: an override on the top parser only (the `wait` typo goes through
-  the subparser, so it would still exit 2).
+  reject: an override on the top parser only. On Python 3.12 the top parser
+  catches the `wait` typo itself, so the case that bites is a subcommand's
+  own error, such as `tc send` with no `--from`, which would still exit 2.
 - **Verify:** `python3 -m unittest tests.test_usage -v`.
 - **PR:** Make a usage error exit 9, so a mistyped listener cannot pass for a timeout.
 
@@ -206,7 +214,11 @@ key behind `tc gate` can deliver mail and nothing else.
 - **Test:** with a fake `ssh` exiting 0: the recorded argv is exactly the C3
   list, `-T` present and `--` right before the target; the body is the
   fake's stdin and not in its argv; exit 0. A name containing a quote:
-  refused by C0 before ssh runs. Fake exiting 255: exit 4, one file in
+  refused by C0 before ssh runs. A card with the default remote path:
+  the remote command is exactly `~/TheConnection/tc send --from a --to b`
+  (the `~/` bare); a remote path with a space is quoted after the bare
+  `~/`; a hand-made card whose path is `~bob/tc`: exit 6 and the fake is
+  never called (D13). Fake exiting 255: exit 4, one file in
   `outbox/`, stderr names `tc flush`. Fake exiting 7: exit 7, its stderr
   printed, `outbox/` empty. With one message already queued for the
   target, a new send does not call ssh at all (assert the recording is
@@ -374,7 +386,8 @@ talking by following the README alone.
   route am I" chart. Then one section per route: local, codex (with the
   `--add-dir <mailbox>` line and why), ssh outbound, ssh inbound through
   `tc gate` (the `authorized_keys` line, and a plain warning never to add a
-  key without the gate), the shared mailbox. Then commands, the board, limits.
+  key without the gate, and that the far side's login shell must be POSIX,
+  C3), the shared mailbox. Then commands, the board, limits.
   Keep "why it exists" honest: same-account Claude sessions should use the
   native path. And say in one sentence why that is not the whole answer even
   for one account: a session in a different permission mode holds a native
