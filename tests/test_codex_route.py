@@ -22,12 +22,15 @@ thread_id of any other shape never reaches codex's argv.
 @interacts  runs ../tc through tests/_root.py under a throwaway TC_ROOT,
             with a fake `codex` that records its argv. Some tests hold an
             inbox lock themselves and read /proc/locks to see a child
-            blocked on it. One test writes its own fake that sleeps and
-            kills it by its own pid once it has what it needs. Two tests
-            load tc as a module (TC_ROOT set to the harness root first, put
-            back after): one swaps subprocess.run for one call, so nothing
-            runs; one runs the harness's fake with PATH set to the root's
-            for that call.
+            blocked on it. Some tests write a fake of their own (one that
+            sleeps, starts a child, or writes odd bytes) and kill what it
+            started by its own pid once they have what they need. Four
+            tests load tc as a module (TC_ROOT set under the harness root
+            first, put back after): two swap subprocess.Popen (one also
+            os.killpg) for one call, so nothing runs and no signal is sent;
+            two run a fake with PATH set to put it first for that call, one
+            of them with the ring's timeout patched down to
+            SHORT_RING_SECONDS.
 @deps       python3 stdlib (fcntl, importlib, json, os, pathlib, shlex,
             signal, subprocess, sys, tempfile, time, unittest,
             unittest.mock); tests/_root.py; ../tc. test_router.py and
@@ -65,12 +68,15 @@ if str(HERE) not in sys.path:
 
 import _root  # noqa: E402  (needs the path line above)
 
-# Recorded fixture: matches Codex 0.162.1, 2026-10-14.
-# The exit codes of `codex queue`: 0 when the line is queued for the
-# thread, 1 for a thread it does not know. Written from the plan's words
-# (phases.md R4, decisions.md D3), not from a run of codex: agents never
-# run the real one. The fakes below exit with these codes.
-CODEX_FIXTURE_LABEL = "matches Codex 0.162.1, 2026-10-14"
+# The codex fixture: the exit codes of `codex queue`, 0 when the line is
+# queued for the thread, 1 for a thread it does not know. phases.md R4 asks
+# for a fixture recorded from Codex 0.162.1 on 2026-10-14. This is not one:
+# agents never run the real codex, so it is written from the plan's words
+# (phases.md R4, decisions.md D3), and its label says so (CARDS fix round 1,
+# LOW-13). Donald's run (D4) records the real codes. The fakes below exit
+# with these.
+CODEX_FIXTURE_LABEL = ("written from the plan's words (0 queued, 1 unknown thread), "
+                       "not recorded from a run of codex")
 CODEX_QUEUE_EXIT = {"queued": 0, "unknown thread": 1}
 # The fake's stderr on a failed ring. Made up for the test; it is not
 # real codex's wording, which the plan does not record.
@@ -79,8 +85,10 @@ FAKE_UNKNOWN_THREAD_STDERR = "fake codex: no thread t1\n"
 THREAD = "t1"
 TC_PATH = str(_root.TC.resolve())
 RANG_WORDS = "rang codex {to} (queued; delivered when its turn ends or the session is resumed)"
-RING_MESSAGE = ("MAIL: {n} unread for {to}. Run: {tc} read {to}, act on it, "
-                "reply with {tc} send --from {to} --to {sender}.")
+# C2's ring line. Since the CARDS fix round (REC-9) each command carries
+# the mailbox root, and both words are quoted with shlex.quote.
+RING_MESSAGE = ("MAIL: {n} unread for {to}. Run: TC_ROOT={root} {tc} read {to}, act on it, "
+                "reply with TC_ROOT={root} {tc} send --from {to} --to {sender}.")
 # The timeout C2 gives a ring, written here rather than read from tc.
 CODEX_RING_SECONDS = 30
 # C2's words after a ring that did not go through (D14), written here.
@@ -121,6 +129,41 @@ with open(RECORD + ".tmp", "w") as f:
 os.replace(RECORD + ".tmp", RECORD)
 time.sleep(SLEEP)
 """
+# A fake that starts a child of its own, as a node CLI starts a native
+# codex, records both pids, and sleeps; the child sleeps too. The child's
+# command line carries RECORD, so kill_own_fake knows it as this test's.
+SPAWNING_FAKE_BODY = """import json, os, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import sys, time; time.sleep(float(sys.argv[1]))",
+                          str(SLEEP), RECORD])
+with open(RECORD + ".tmp", "w") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "pid": os.getpid(), "child": child.pid}) + "\\n")
+os.replace(RECORD + ".tmp", RECORD)
+time.sleep(SLEEP)
+"""
+# A fake that records its call, writes bytes that are not UTF-8 to its
+# stderr, and exits 1, so the ring has to decode them.
+ODD_BYTES_FAKE_BODY = """import json, os, sys
+with open(RECORD + ".tmp", "w") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "pid": os.getpid()}) + "\\n")
+os.replace(RECORD + ".tmp", RECORD)
+sys.stderr.buffer.write(b"\\xff\\xfe not utf-8\\n")
+sys.exit(1)
+"""
+# The ring's timeout, patched down in process so a test waits this long
+# for the timeout, not CODEX_RING_SECONDS. Long enough for the fake to
+# start its child and record both pids first on a loaded machine.
+SHORT_RING_SECONDS = 2
+# How long the spawning fake and its child sleep: well past
+# SHORT_RING_SECONDS plus BLOCK_CEILING_SECONDS, so a child that outlives
+# the ring is still running when the test looks, and cannot pass for one
+# the ring killed. Either way the test kills both by their own pids.
+ORPHAN_SLEEP_SECONDS = 30
+# A pid for the in-process stand-in for Popen. os.killpg is swapped out in
+# that test, so no signal is ever sent to it.
+STAND_IN_PID = 424242
+# /proc/<pid>/stat: the state letter after the ")" that closes comm. A
+# zombie (Z) has exited and only waits to be reaped.
+ZOMBIE_STATE = "Z"
 
 
 def own_fake(root, body, **constants):
@@ -240,23 +283,48 @@ def wait_for_record(test, record, proc):
     return json.loads(record.read_text().splitlines()[0])
 
 
-def ring_argv(n, to, sender):
-    """The argv a ring must hand codex, after the program name.
+def gone(pid):
+    """True once `pid` has exited: no /proc entry, or a zombie waiting to be reaped.
+
+    Polls until BLOCK_CEILING_SECONDS pass, then answers for the last look.
+
+    @interacts  reads /proc/<pid>/stat.
+    @deps       pathlib, time.
+    @complexity at most BLOCK_CEILING_SECONDS / POLL_SECONDS reads.
+    @alloc      one string per read.
+    """
+    deadline = time.monotonic() + BLOCK_CEILING_SECONDS
+    while True:
+        try:
+            stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+        except FileNotFoundError:
+            return True
+        if stat[stat.rindex(")") + 2:].split()[0] == ZOMBIE_STATE:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(POLL_SECONDS)
+
+
+def ring_argv(root, n, to, sender):
+    """The argv a ring must hand codex, after the program name, for a send under `root`.
 
     @interacts  none.
-    @deps       RING_MESSAGE, TC_PATH.
+    @deps       RING_MESSAGE, TC_PATH; shlex.
     @complexity O(1).
     @alloc      one list, returned.
     """
     return ["queue", "--thread", THREAD, "--message",
-            RING_MESSAGE.format(n=n, to=to, tc=TC_PATH, sender=sender)]
+            RING_MESSAGE.format(n=n, to=to, tc=shlex.quote(TC_PATH), sender=sender,
+                                root=shlex.quote(str(root.path.resolve())))]
 
 
-def load_tc(root):
-    """Load ../tc as a module with TC_ROOT set to `root`, without running main().
+def load_tc(root, where=None):
+    """Load ../tc as a module with TC_ROOT set to `root` (or `where`, inside it), without running main().
 
     tc reads TC_ROOT once, at import, so it is set before the load and the
-    old value is put back after.
+    old value is put back after. `where` is a path under root.path, for a
+    test that needs a root with an awkward name.
 
     @interacts  sets and restores os.environ["TC_ROOT"]; runs tc's top
                 level (constants only, no disk writes).
@@ -265,7 +333,7 @@ def load_tc(root):
     @alloc      one module object, returned.
     """
     old = os.environ.get("TC_ROOT")
-    os.environ["TC_ROOT"] = str(root.path)
+    os.environ["TC_ROOT"] = str(where if where is not None else root.path)
     try:
         loader = importlib.machinery.SourceFileLoader("tc_codex_under_test", str(_root.TC))
         mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
@@ -299,15 +367,21 @@ class CodexRouteTest(unittest.TestCase):
         self.assertEqual(code, 0, f"tc join {name} exited {code}: {err}")
 
     def test_the_fixture_is_labeled(self):
-        """The recorded exit codes carry the plan's label, and the codes the plan names.
+        """The fixture's label says plainly it is written from the plan's words, not recorded from codex.
+
+        The label names the same codes the fakes use (LOW-13). It guards the
+        wording: a label that claims a recording fails here.
 
         @interacts  none.
         @deps       the module constants.
         @complexity O(1).
         @alloc      none.
         """
-        self.assertEqual(CODEX_FIXTURE_LABEL, "matches Codex 0.162.1, 2026-10-14")
+        self.assertEqual(CODEX_FIXTURE_LABEL, "written from the plan's words (0 queued, 1 unknown thread), "
+                                              "not recorded from a run of codex")
         self.assertEqual(CODEX_QUEUE_EXIT, {"queued": 0, "unknown thread": 1})
+        for meaning, code in CODEX_QUEUE_EXIT.items():
+            self.assertIn(f"{code} {meaning}", CODEX_FIXTURE_LABEL)
 
     def test_two_sends_to_an_empty_codex_inbox_ring_once(self):
         """Two sends to c ring once, with the argv C2 gives, and both land.
@@ -334,7 +408,7 @@ class CodexRouteTest(unittest.TestCase):
         self.assertEqual(first[1], f"sent #1 to c: {box / '000001-from-a.md'}\n"
                                    f"{RANG_WORDS.format(to='c')}\n")
         self.assertEqual(second[:2], (0, f"sent #2 to c: {box / '000002-from-a.md'}\n"))
-        self.assertEqual(recorded, [{"argv": ring_argv(1, "c", "a"), "stdin": ""}])
+        self.assertEqual(recorded, [{"argv": ring_argv(root, 1, "c", "a"), "stdin": ""}])
         self.assertEqual(landed, ["000001-from-a.md", "000002-from-a.md"])
 
     def test_a_failed_ring_is_a_warning_and_the_send_exits_0(self):
@@ -395,7 +469,7 @@ class CodexRouteTest(unittest.TestCase):
         self.assertTrue(marked, "the failed ring left no marker")
         self.assertEqual(second[0], 0, f"second send exited {second[0]}: {second[2]}")
         self.assertEqual([call["argv"] for call in recorded],
-                         [ring_argv(1, "c", "a"), ring_argv(2, "c", "b")])
+                         [ring_argv(root, 1, "c", "a"), ring_argv(root, 2, "c", "b")])
         self.assertTrue(second[1].endswith(RANG_WORDS.format(to="c") + "\n"), second[1])
         self.assertTrue(cleared, "a ring that exited 0 left the marker")
 
@@ -463,7 +537,7 @@ class CodexRouteTest(unittest.TestCase):
         self.assertEqual(while_held, [], "the send landed while the test held the inbox lock")
         self.assertEqual(proc.returncode, 0, err)
         self.assertEqual(landed, ["000001-from-a.md"])
-        self.assertEqual([call["argv"] for call in recorded], [ring_argv(1, "c", "a")])
+        self.assertEqual([call["argv"] for call in recorded], [ring_argv(root, 1, "c", "a")])
 
     def test_read_holds_the_inbox_lock_from_glob_to_rename(self):
         """With the test holding mail/.box-b.lock, `tc read b` moves nothing until it is released.
@@ -602,7 +676,7 @@ class CodexRouteTest(unittest.TestCase):
             recorded = calls()
         self.assertEqual(code, 0, f"send to b exited {code}: {err}")
         self.assertFalse(rang_for_claude, "a send to a claude card ran codex")
-        self.assertEqual([call["argv"] for call in recorded], [ring_argv(1, "c", "a")])
+        self.assertEqual([call["argv"] for call in recorded], [ring_argv(root, 1, "c", "a")])
 
     def test_it_rings_again_once_the_inbox_was_read(self):
         """send, read, send: two rings, one per batch of unread mail.
@@ -622,7 +696,7 @@ class CodexRouteTest(unittest.TestCase):
             self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
             recorded = calls()
         self.assertEqual([call["argv"] for call in recorded],
-                         [ring_argv(1, "c", "a"), ring_argv(1, "c", "b")])
+                         [ring_argv(root, 1, "c", "a"), ring_argv(root, 1, "c", "b")])
 
     def test_a_codex_card_with_no_thread_is_delivered_with_a_warning(self):
         """A hand-made codex card with no thread_id: exit 0, the mail lands, `ring failed` names why, no codex run.
@@ -657,25 +731,54 @@ class CodexRouteTest(unittest.TestCase):
     def test_a_ring_that_times_out_is_a_warning(self):
         """In process: codex past CODEX_RING_SECONDS gives `ring failed ... no answer in 30 s`, exit 0.
 
-        subprocess.run is swapped for one call, so nothing runs; the test
-        also checks the ring's stdin is /dev/null and its timeout is 30 s.
+        subprocess.Popen is swapped for a stand-in whose communicate() times
+        out, and os.killpg for a recorder, so nothing runs and no signal is
+        sent. The test also checks the ring's stdin is /dev/null, it waits
+        30 s, it starts codex in a session of its own and kills that group
+        (CARDS fix round 1, LOW-7), and it decodes with errors="replace"
+        (LOW-8).
 
-        @interacts  loads tc in process; patches subprocess.run for one
-                    deliver_codex call, which writes one message under the root.
+        @interacts  loads tc in process; patches subprocess.Popen and
+                    os.killpg for one deliver_codex call, which writes one
+                    message under the root.
         @deps       load_tc, unittest.mock.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
-        seen = []
+        seen, waits, killed = [], [], []
 
-        def hangs(argv, **kwargs):
-            seen.append((argv, kwargs))
-            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+        class Hangs:
+            """Stands in for subprocess.Popen: records how codex was started; communicate() times out.
+
+            @interacts  appends to the test's lists.
+            @deps       subprocess.TimeoutExpired.
+            @complexity O(1) per call.
+            @alloc      none beyond the list entries.
+            """
+
+            def __init__(self, argv, **kwargs):
+                seen.append((argv, kwargs))
+                self.args, self.pid, self.returncode = argv, STAND_IN_PID, None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def communicate(self, timeout=None):
+                waits.append(timeout)
+                raise subprocess.TimeoutExpired(self.args, timeout)
+
+            def wait(self, timeout=None):
+                self.returncode = -signal.SIGKILL
+                return self.returncode
 
         card = {"name": "c", "kind": "codex", "route": "codex", "thread_id": THREAD}
         with _root.TcRoot() as root:
             tc = load_tc(root)
-            with mock.patch.object(subprocess, "run", hangs):
+            with mock.patch.object(subprocess, "Popen", Hangs), \
+                    mock.patch.object(os, "killpg", lambda pid, sig: killed.append((pid, sig))):
                 got = tc.deliver_codex(card, "a", "c", "hi")
             landed = sorted(p.name for p in (root.path / "mail" / "to-c").glob("*.md"))
         self.assertEqual(got.exit, 0)
@@ -685,8 +788,123 @@ class CodexRouteTest(unittest.TestCase):
         self.assertEqual(len(seen), 1, "codex was not called exactly once")
         argv, kwargs = seen[0]
         self.assertEqual(argv[:4], ["codex", "queue", "--thread", THREAD])
-        self.assertEqual((kwargs.get("stdin"), kwargs.get("timeout")),
-                         (subprocess.DEVNULL, CODEX_RING_SECONDS))
+        self.assertEqual((kwargs.get("stdin"), kwargs.get("start_new_session"), kwargs.get("errors")),
+                         (subprocess.DEVNULL, True, "replace"))
+        self.assertEqual(waits, [CODEX_RING_SECONDS])
+        self.assertEqual(killed, [(STAND_IN_PID, signal.SIGKILL)])
+
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-7.
+    def test_a_ring_that_times_out_kills_codex_and_its_child(self):
+        """In process, with the timeout patched to 2 s: a codex that started a child of its own leaves nothing running.
+
+        The fake starts a sleeping child (as a node CLI starts a native
+        codex), records both pids, and sleeps. Must reject a timeout that
+        kills only the direct child: the grandchild would keep sleeping.
+        Both pids are killed by their own pids at the end in case it did.
+
+        @interacts  loads tc in process; runs deliver_codex once with PATH
+                    set to put this file's own fake first and
+                    CODEX_RING_SECONDS patched down; reads /proc.
+        @deps       load_tc, own_fake, gone, kill_own_fake; unittest.mock.
+        @complexity O(1): about SHORT_RING_SECONDS.
+        @alloc      one TcRoot and one module.
+        """
+        card = {"name": "c", "kind": "codex", "route": "codex", "thread_id": THREAD}
+        with _root.TcRoot() as root:
+            env, record = own_fake(root, SPAWNING_FAKE_BODY, SLEEP=ORPHAN_SLEEP_SECONDS)
+            tc = load_tc(root)
+            with mock.patch.dict(os.environ, env), \
+                    mock.patch.object(tc, "CODEX_RING_SECONDS", SHORT_RING_SECONDS):
+                got = tc.deliver_codex(card, "a", "c", "hi")
+            self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
+            ring = json.loads(record.read_text().splitlines()[0])
+            try:
+                child_gone = gone(ring["child"])
+                fake_gone = gone(ring["pid"])
+            finally:
+                kill_own_fake(ring["child"], record)
+                kill_own_fake(ring["pid"], record)
+        self.assertEqual(got.exit, 0)
+        self.assertIn(RING_FAILED_WORDS.format(to="c", reason=f"no answer in {SHORT_RING_SECONDS} s"),
+                      got.warnings)
+        self.assertTrue(fake_gone, "the timed-out codex is still running")
+        self.assertTrue(child_gone, "codex's own child outlived the timed-out ring")
+
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): REC-9.
+    def test_the_ring_names_the_root_and_quotes_it(self):
+        """In process, with TC_ROOT holding a space: the ring's line is `TC_ROOT=<quoted root> <quoted tc>` in both commands.
+
+        subprocess.Popen is swapped for a stand-in that exits 0, so nothing
+        runs. Must reject a ring with no root (a Codex session with another
+        default root would read the wrong mailbox) and an unquoted root
+        (the command it is told to run would split at the space).
+
+        @interacts  loads tc in process with TC_ROOT under the harness root;
+                    patches subprocess.Popen for one ring_codex call, which
+                    writes nothing.
+        @deps       load_tc, RING_MESSAGE; unittest.mock, shlex.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        seen = []
+
+        class Rings:
+            """Stands in for subprocess.Popen: records the argv; codex exits 0 at once.
+
+            @interacts  appends to the test's list.
+            @deps       none.
+            @complexity O(1).
+            @alloc      none beyond the list entry.
+            """
+
+            def __init__(self, argv, **kwargs):
+                seen.append(argv)
+                self.pid, self.returncode = STAND_IN_PID, 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def communicate(self, timeout=None):
+                return "", ""
+
+        with _root.TcRoot() as root:
+            spaced = root.path / "a b"
+            tc = load_tc(root, spaced)
+            with mock.patch.object(subprocess, "Popen", Rings):
+                reason = tc.ring_codex({"thread_id": THREAD}, "a", "c", 1)
+        self.assertIsNone(reason)
+        self.assertEqual(len(seen), 1, "codex was not called exactly once")
+        self.assertEqual(seen[0][-1], RING_MESSAGE.format(n=1, to="c", sender="a", tc=shlex.quote(TC_PATH),
+                                                          root=shlex.quote(str(spaced.resolve()))))
+        self.assertIn(f"TC_ROOT='{spaced.resolve()}' ", seen[0][-1])
+
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-8.
+    def test_odd_bytes_from_codex_never_fail_a_send(self):
+        """A fake that writes bytes that are not UTF-8 to stderr and exits 1: the send exits 0 and warns.
+
+        Must reject a strict decode: it raises after the mail landed and
+        the send exits 1 with a traceback.
+
+        @interacts  one join, one send; this file's own fake.
+        @deps       own_fake; _root.TcRoot.tc.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            env, record = own_fake(root, ODD_BYTES_FAKE_BODY)
+            self.join_codex(root)
+            code, out, err = root.tc("send", "--from", "a", "--to", "c", "hi", env=env)
+            self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
+            landed = sorted(p.name for p in (root.path / "mail" / "to-c").glob("*.md"))
+            marked = (root.path / "mail" / ".ring-pending-c").exists()
+        self.assertEqual(code, 0, f"odd bytes from codex failed the send: exit {code}")
+        self.assertIn("not utf-8; the mail is in its inbox; the next send to c rings again\n", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(landed, ["000001-from-a.md"])
+        self.assertTrue(marked)
 
 
 if __name__ == "__main__":

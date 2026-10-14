@@ -21,18 +21,23 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             what re-invokes the session that started it. `health` and `watch`
             also read /proc (meminfo, locks, each process's comm and cmdline)
             and run `nvidia-smi` when it exists. They never signal or touch
-            another process. `send` to a codex card runs `codex queue` (C2).
+            another process. `send` to a codex card runs `codex queue` (C2)
+            in a session of its own, and kills that one process group if the
+            ring times out.
 @deps       python3 stdlib (argparse, collections, contextlib, fcntl, json,
-            pathlib, re, resource, shutil, subprocess, time, datetime, os,
-            sys); Linux only (flock, RLIMIT_AS, O_NOFOLLOW, /proc).
-            nvidia-smi optional; the codex CLI for the codex route.
+            pathlib, re, resource, shlex, shutil, signal, subprocess, time,
+            datetime, os, sys); Linux only (flock, RLIMIT_AS, O_NOFOLLOW,
+            /proc). nvidia-smi optional; the codex CLI for the codex route.
 @complexity send O(b), b body bytes up to SEND_BODY_MAX_BYTES; status O(1).
             read/peek/wait-poll O(u), u unread messages in one inbox,
             single digits in practice. log O(t), t total messages ever,
-            low hundreds per job. health and each watch poll
-            O(p + k + n + c): p processes on the machine (hundreds), k lines
-            in /proc/locks (tens), n mailbox names and c cards (single digits).
-            join O(1); card O(u) for its unread count; cards O(c), c cards.
+            low hundreds per job. health O(p + k + n + m + c): p processes
+            on the machine (hundreds), k lines in /proc/locks (tens), n
+            mailbox names and c cards (a few dozen each), m message files in
+            every inbox and read/ (one stat each: hundreds to thousands, and
+            it grows with the history). Each watch poll O(k + n) plus one
+            nvidia-smi run where it exists; it reads no cards. O(p) once per
+            heartbeat. join O(1); card O(u) for its unread count; cards O(c).
 @alloc      one file per message, kept forever (read/ is the history); one
             card per name, replaced on a rejoin. Nothing
             held in memory past one command. `wait` measured flat at 13 MB RSS
@@ -51,7 +56,9 @@ import os
 import pathlib
 import re
 import resource
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -800,8 +807,12 @@ def read_body(message):
                 limit, writes SEND_TOO_LARGE_WORDS to stderr and exits.
     @deps       refuse; os, sys.
     @complexity O(b) over b bytes, at most SEND_BODY_MAX_BYTES + 1.
-    @alloc      the raw bytes and the decoded string, at most about
-                2 x SEND_BODY_MAX_BYTES at once; the string is returned.
+    @alloc      the raw bytes (up to SEND_BODY_MAX_BYTES + 1) and the
+                decoded string, which is returned. A str stores every
+                character at the width of its widest one, so one code point
+                above U+FFFF makes it 4 bytes a character: at most about
+                5 x SEND_BODY_MAX_BYTES at once (about 2 x when every
+                character is below U+0100).
     """
     if message:
         if len(os.fsencode(message)) > SEND_BODY_MAX_BYTES:
@@ -920,37 +931,54 @@ def ring_codex(card, sender, to, count):
     """Ring the Codex thread named on `card` once. None when codex exits 0, else why not, in words.
 
     A thread_id that is missing, or is not a str of THREAD_ID_PATTERN's
-    shape, never reaches codex's argv (D14): the words say which.
+    shape, never reaches codex's argv (D14): the words say which. The
+    line names the mailbox root as well as tc, both quoted, so a Codex
+    session whose own default root differs reads and replies in this one
+    (REC-9). codex runs in a session of its own: past CODEX_RING_SECONDS
+    its whole process group is killed, so a child it started (a node
+    CLI's native codex) is not left behind (LOW-7). Its output is decoded
+    with errors="replace", so odd bytes never fail a send (LOW-8).
 
-    @interacts  when the thread_id passes, runs `codex queue --thread
-                <thread_id> --message <C2's line>` with stdin from /dev/null
-                and a CODEX_RING_SECONDS timeout, and reads its exit code
-                and stderr. Writes nothing.
-    @deps       THREAD_ID_PATTERN, CODEX_RING_SECONDS; subprocess, pathlib;
-                the `codex` CLI on PATH.
+    @interacts  when the thread_id passes, starts `codex queue --thread
+                <thread_id> --message <C2's line>` in a new session with
+                stdin from /dev/null, reads its stdout and stderr until it
+                exits or CODEX_RING_SECONDS pass, then SIGKILLs its process
+                group (that group only) and reaps it. Writes nothing.
+    @deps       THREAD_ID_PATTERN, CODEX_RING_SECONDS, ROOT; subprocess,
+                os, signal, shlex, pathlib; the `codex` CLI on PATH.
     @complexity O(t) over t characters of the thread_id, plus one codex run
                 of at most CODEX_RING_SECONDS.
-    @alloc      the message and codex's captured output, freed on return.
+    @alloc      the message and codex's captured output, freed on return;
+                one child and its two pipes, closed and reaped on return.
     """
     thread = card.get("thread_id") if card else None
     if thread is None or thread == "":
         return "its card has no thread_id"
     if not isinstance(thread, str) or not THREAD_ID_PATTERN.fullmatch(thread):
         return "its card's thread_id is not a thread id"
-    tc_path = pathlib.Path(__file__).resolve()
-    message = (f"MAIL: {count} unread for {to}. Run: {tc_path} read {to}, act on it, "
-               f"reply with {tc_path} send --from {to} --to {sender}.")
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): REC-9, LOW-7, LOW-8.
+    run = f"TC_ROOT={shlex.quote(str(ROOT.resolve()))} {shlex.quote(str(pathlib.Path(__file__).resolve()))}"
+    message = (f"MAIL: {count} unread for {to}. Run: {run} read {to}, act on it, "
+               f"reply with {run} send --from {to} --to {sender}.")
     try:
-        done = subprocess.run(["codex", "queue", "--thread", thread, "--message", message],
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                              timeout=CODEX_RING_SECONDS)
-    except subprocess.TimeoutExpired:
-        return f"no answer in {CODEX_RING_SECONDS} s"
+        with subprocess.Popen(["codex", "queue", "--thread", thread, "--message", message],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+                              start_new_session=True) as proc:
+            try:
+                _, said = proc.communicate(timeout=CODEX_RING_SECONDS)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)  # its own group: start_new_session
+                except ProcessLookupError:
+                    pass  # every process in the group is already gone
+                proc.wait()
+                return f"no answer in {CODEX_RING_SECONDS} s"
     except OSError as err:
         return f"could not run codex ({err.strerror})"
-    if done.returncode != 0:
-        said = done.stderr.strip().splitlines()
-        return said[0] if said else f"codex exited {done.returncode} with no stderr"
+    if proc.returncode != 0:
+        lines = said.strip().splitlines()
+        return lines[0] if lines else f"codex exited {proc.returncode} with no stderr"
     return None
 
 
@@ -1142,8 +1170,10 @@ def health_snapshot():
                 (machine_stats). Writes nothing.
     @deps       now_iso, machine_stats, session_counts, listeners,
                 mailbox_summary, cards_summary.
-    @complexity O(p + k + n + c): p processes, k lines in /proc/locks, n
-                mailbox names, c cards.
+    @complexity O(p + k + n + m + c): p processes, k lines in /proc/locks,
+                n mailbox names, m message files in every inbox and read/
+                (mailbox_summary stats each one: hundreds to thousands), c
+                cards.
     @alloc      one dict, returned.
     """
     return {"time": now_iso(), "machine": machine_stats(), "sessions": session_counts(),
@@ -1224,8 +1254,11 @@ def cmd_watch(args):
                 listeners); prints a HEARTBEAT or ALERT line.
     @deps       require_names, machine_stats, listeners, session_counts,
                 _breaches; fcntl, resource.
-    @complexity O(p + k + n) per poll, as health (module block); one poll
-                every args.poll seconds until the heartbeat.
+    @complexity O(k + n) per poll: k lines in /proc/locks and n wait lock
+                files (listeners), plus /proc/meminfo and one nvidia-smi
+                run where it exists (machine_stats); no cards. O(p) once per
+                heartbeat over p processes (session_counts). One poll every
+                args.poll seconds until the heartbeat.
     @alloc      one open lock file for its lifetime; the peaks, a few floats.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
