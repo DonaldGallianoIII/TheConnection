@@ -23,9 +23,12 @@ for now"). The two later messages dropped that, and the claim read as if
 the tests were here.
 
 **Why it's bad:** the core mailbox (send, read, peek, wait, log, status)
-looked tested and was not, in this repo. No test in the tree calls
-`tc read`, `tc peek`, `tc log` or `tc status`, so a change that breaks one
-of them passes every test, and the history says it was covered.
+looked tested and was not, in this repo. No test in the tree tests
+`tc read`, `tc log` or `tc status`. Since `caf3ec6`, `tests/test_root.py`
+runs `tc send` and `tc peek`, but only as harness plumbing, and nothing
+checks that peek leaves mail unread (CORE's K8). So most ways of breaking
+the core mailbox still pass every test, and the history says it was
+covered.
 
 **Prevention:** a claim names a file and a command, and the file is in the
 tree at that commit. Tests kept somewhere else are not cited as passing

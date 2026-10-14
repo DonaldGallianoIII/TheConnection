@@ -81,9 +81,12 @@ function, class and method with `@interacts`, `@deps`, `@complexity`
 
 ## What was not built
 
-- No test for `fake_bin`, `tc()` or the listener's failure branches in the
-  tree. The spec names 2 tests. Checked by hand instead (below). Pause
-  GROUND-2.
+- At G3, no test for `fake_bin`, `tc()` or the listener's failure
+  branches was in the tree; the spec named 2 tests, and the rest was
+  checked by hand (below). Round 1 (c) added tests for `fake_bin` and
+  `tc()` and for one listener failure branch (mail already waiting), and
+  pause GROUND-2 is settled. The other two branches (a `tc wait` that
+  exits first, the 5 s ceiling) still have no test.
 - The fake writes nothing to its own stdout or stderr. SSH task S1 expects
   "its stderr printed" for a fake exiting 7; that lane may need a way to
   give the fake stderr text. Not asked for in G3, so not built.
@@ -139,8 +142,9 @@ function, class and method with `@interacts`, `@deps`, `@complexity`
   paths it is given (conventions commit `918e260`). Open, and the
   owner's: `check_voice.py` skips phrases in any file named `CLAUDE.md`,
   so a `CLAUDE.md` is voice-checked through a copy under another name.
-- `pauses/GROUND-2.md`: `fake_bin` has no test in the tree.
-  Recommendation: a third test in `tests/test_root.py`.
+- `pauses/GROUND-2.md`, settled (architect, 2026-10-14): option 1.
+  `tests/test_root.py` tests `fake_bin` (per-call exit codes, stderr, the
+  record, a fake ahead of the refusing stub).
 - `pauses/GROUND-3.md`, settled: files in the lane's base named the
   owner's employer; `7e87e0e` on the dev branch scrubbed the tree;
   rewriting history is the owner's call (D11).
@@ -302,8 +306,8 @@ GROUND-3 is settled and cut to three sentences. GROUND-1 is settled for
 its American English half; its `CLAUDE.md` half stays open, the owner's.
 This handoff drops the retired checker and the long GROUND-3 passage.
 GROUND-2's question (no test for `fake_bin`) is answered by the harness
-commit below; the pause file is outside round 1's work set and was not
-edited.
+commit below. The pause file was outside round 1's work set; `89bdd2e`,
+after the merge, marked it settled.
 
 **`tests/_root.py` and `tests/test_root.py`** (the commit after this one):
 

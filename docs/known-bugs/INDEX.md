@@ -6,6 +6,11 @@ Status: unreviewed
 The failures this repo has already paid for. Every review checks new code
 against them, and every plan task's "must reject" draws on them.
 
+The relay's pattern checker reads files and has no shell, so it cannot run
+entry 2's commit-message check (`git cat-file -e <commit>:<path>` for every
+test a message names). The architect runs it, with git, at each lane
+review.
+
 ## The format
 
 Index plus detail, as in `~/Conventions/code/KNOWN-BUGS.md` in the owner's
