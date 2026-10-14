@@ -13,10 +13,16 @@
  * carrying a message moves (dash flow toward the reader) and gets an arrow
  * and a text label. With reduced motion the dashes stop but the arrow and
  * label stay.
+ *
+ * Two looks. Dark (the notebook's, the default) sits on :root. Daylight,
+ * the CRC TMS light look's colors (web/src/styles/themes.css, Daylight Ops),
+ * is [data-theme='daylight'] on <html> and overrides only tokens; no rule
+ * below names a color of its own, so a look is a token set and nothing else.
  */
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
+  color-scheme: dark;
   --tc-bg: #0c0f14;
   --tc-bg2: #0a0d12;
   --tc-panel: #161c25;
@@ -37,6 +43,30 @@
   --tc-yellow: #ffd93b;
   --tc-grey: #8b93a1;
 
+  /* Surfaces that were written as values: the page behind the window, the
+   * title and footer bars and the words on them, the shadows, and how faint
+   * a quiet wire is. */
+  --tc-page: #06080c;
+  --tc-backdrop: radial-gradient(circle at 28% 8%, #11161f, #06080c 72%);
+  --tc-title-bg: linear-gradient(180deg, #12171f, #0d1219);
+  --tc-foot-bg: linear-gradient(180deg, #0d1219, #0a0e13);
+  --tc-bar-text: var(--tc-text);
+  --tc-bar-muted: var(--tc-muted);
+  --tc-bar-dim: var(--tc-dim);
+  --tc-shadow-win: 0 44px 130px -30px rgba(0, 0, 0, .85), 0 0 0 1px rgba(255, 255, 255, .02) inset;
+  --tc-shadow-node: 0 4px 12px -4px rgba(0, 0, 0, .6);
+  --tc-shadow-sel: 0 5px 14px -4px rgba(0, 0, 0, .7);
+  --tc-shadow-port: 0 0 4px rgba(0, 0, 0, .5);
+  --tc-wire-rest: .55;
+  /* The connection dot sits on the title bar, so it reads its own set. */
+  --tc-conn-up: var(--tc-green);
+  --tc-conn-warn: var(--tc-amber);
+  --tc-conn-down: var(--tc-red);
+  /* The look switch on the title bar: its frame, and the words on its
+   * pressed (light) face. */
+  --tc-bar-line: var(--tc-line);
+  --tc-bar-pressed-words: var(--tc-bg);
+
   --tc-font: 'Space Grotesk', system-ui, sans-serif;
   --tc-mono: 'JetBrains Mono', ui-monospace, monospace;
 
@@ -51,6 +81,61 @@
   --tc-pulse-speed: 2s;
 }
 
+/* Daylight: the CRC TMS light look (Daylight Ops in CRC-TMS
+ * web/src/styles/themes.css). White cards on a steel ground, gunmetal bars
+ * with white words, the TMS accent blue, and its status set: ok green, warn
+ * blue, danger hot pink. The TMS moved off orange and red because they sat on
+ * top of the green for red and green colorblindness; this follows it, so the
+ * warn dot is blue here, not amber. Every value is a TMS Daylight value
+ * except --tc-yellow, --tc-grey and --tc-bar-dim, which the TMS has no match
+ * for. Model: Claude Opus 5.5, 2026-10-14. Status: unreviewed. */
+:root[data-theme='daylight'] {
+  color-scheme: light;
+  --tc-bg: #e0e3e7;
+  --tc-bg2: #d2d5da;
+  --tc-panel: #ffffff;
+  --tc-panel-hi: #edeff2;
+  --tc-inset: #d2d5da;
+  --tc-line: #a5aab2;
+  --tc-line2: #a5aab2;
+  --tc-text: #1c1c1e;
+  --tc-muted: #474951;
+  --tc-dim: #474951;
+  /* Dark enough to read as words on white (the writing state's line).
+   * #0066d6 is the TMS accent's hover shade, picked over #007aff because
+   * that one is under 4.5 to 1 on white. */
+  --tc-cyan: #0066d6;
+  --tc-blue: #1659c7;
+  --tc-green: #1f7a3a;
+  --tc-amber: #1659c7;
+  --tc-red: #e6007e;
+  --tc-violet: #7c3aed;
+  --tc-orange: #ea580c;
+  --tc-yellow: #a16207;
+  --tc-grey: #6b6f78;
+
+  --tc-page: #d2d5da;
+  --tc-backdrop: #d2d5da;
+  --tc-title-bg: #3b4048;
+  --tc-foot-bg: #3b4048;
+  --tc-bar-text: #f4f4f5;
+  --tc-bar-muted: #f4f4f5;
+  --tc-bar-dim: #d5d8dd;
+  --tc-shadow-win: 0 1px 2px rgba(0, 0, 0, .06), 0 24px 60px -24px rgba(0, 0, 0, .28);
+  --tc-shadow-node: 0 1px 2px rgba(0, 0, 0, .04), 0 8px 24px rgba(0, 0, 0, .06);
+  --tc-shadow-sel: 0 8px 24px rgba(0, 0, 0, .12);
+  --tc-shadow-port: 0 0 2px rgba(0, 0, 0, .25);
+  --tc-wire-rest: .7;
+  /* On the gunmetal bar the light status set reads; these are the TMS dark
+   * look's ok, warn and danger. */
+  --tc-conn-up: #3ee67f;
+  --tc-conn-warn: #7fb2ff;
+  --tc-conn-down: #ff1493;
+  /* The TMS Daylight bar button's outline, and its pressed words. */
+  --tc-bar-line: #aeb2b8;
+  --tc-bar-pressed-words: #1c1c1e;
+}
+
 /* Page backdrop, same radial glow as the notebook. */
 .tc-backdrop {
   min-height: 100vh;
@@ -59,7 +144,7 @@
   place-items: center;
   padding: 16px;
   box-sizing: border-box;
-  background: radial-gradient(circle at 28% 8%, #11161f, #06080c 72%);
+  background: var(--tc-backdrop);
   color: var(--tc-text);
   font-family: var(--tc-font);
   -webkit-font-smoothing: antialiased;
@@ -78,7 +163,7 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 44px 130px -30px rgba(0, 0, 0, .85), 0 0 0 1px rgba(255, 255, 255, .02) inset;
+  box-shadow: var(--tc-shadow-win);
 }
 .tc-title {
   height: 42px;
@@ -87,15 +172,16 @@
   align-items: center;
   gap: 9px;
   padding: 0 14px;
-  background: linear-gradient(180deg, #12171f, #0d1219);
+  background: var(--tc-title-bg);
   border-bottom: 1px solid var(--tc-line);
+  color: var(--tc-bar-text);
 }
-.tc-dot { width: 11px; height: 11px; border-radius: 50%; }
+.tc-dot { flex: none; width: 11px; height: 11px; border-radius: 50%; }
 .tc-dot.r { background: #ff5f57; }
 .tc-dot.y { background: #febc2e; }
 .tc-dot.g { background: #28c840; }
 .tc-fname { white-space: nowrap; font-family: var(--tc-mono); font-size: 12px; font-weight: 600; margin-left: 4px; }
-.tc-sub { font-size: 11px; color: var(--tc-dim); }
+.tc-sub { font-size: 11px; color: var(--tc-bar-dim); }
 .tc-conn {
   margin-left: auto;
   min-width: 0;
@@ -106,7 +192,7 @@
   gap: 7px;
   font-family: var(--tc-mono);
   font-size: 11px;
-  color: var(--tc-muted);
+  color: var(--tc-bar-muted);
 }
 .tc-cdot {
   width: 8px;
@@ -117,9 +203,37 @@
   animation: tc-pulse var(--tc-pulse-speed) ease-in-out infinite;
 }
 .tc-conn > span:last-child { overflow: hidden; text-overflow: ellipsis; }
-.tc-conn[data-state="up"] .tc-cdot { color: var(--tc-green); }
-.tc-conn[data-state="warn"] .tc-cdot { color: var(--tc-amber); }
-.tc-conn[data-state="down"] .tc-cdot { color: var(--tc-red); animation: none; }
+.tc-conn[data-state="up"] .tc-cdot { color: var(--tc-conn-up); }
+.tc-conn[data-state="warn"] .tc-cdot { color: var(--tc-conn-warn); }
+.tc-conn[data-state="down"] .tc-cdot { color: var(--tc-conn-down); animation: none; }
+
+/* Look switch: two outlined buttons on the title bar. Pressed is a light
+ * face with dark words and a filled dot; not pressed is no face and a ring.
+ * Shape and lightness carry it, so it reads in grayscale. */
+.tc-look {
+  flex: none;
+  display: inline-flex;
+  border: 1px solid var(--tc-bar-line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.tc-look-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 0;
+  background: transparent;
+  color: var(--tc-bar-text);
+  font-family: var(--tc-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.tc-look-btn + .tc-look-btn { border-left: 1px solid var(--tc-bar-line); }
+.tc-look-btn[aria-pressed="true"] { background: var(--tc-bar-text); color: var(--tc-bar-pressed-words); font-weight: 700; }
+.tc-look-btn:focus-visible { outline: 2px solid var(--tc-bar-text); outline-offset: -4px; }
+.tc-look-dot { width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid currentColor; }
+.tc-look-btn[aria-pressed="true"] .tc-look-dot { background: currentColor; }
 
 .tc-body { flex: 1; position: relative; overflow: hidden; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
 
@@ -130,11 +244,11 @@
   align-items: center;
   gap: 14px;
   padding: 0 14px;
-  background: linear-gradient(180deg, #0d1219, #0a0e13);
+  background: var(--tc-foot-bg);
   border-top: 1px solid var(--tc-line);
   font-family: var(--tc-mono);
   font-size: 11px;
-  color: var(--tc-muted);
+  color: var(--tc-bar-muted);
   overflow: hidden;
   white-space: nowrap;
 }
@@ -183,7 +297,7 @@
   background: var(--tc-panel);
   border: 1.5px solid var(--tc-line);
   border-radius: var(--tc-radius);
-  box-shadow: 0 4px 12px -4px rgba(0, 0, 0, .6);
+  box-shadow: var(--tc-shadow-node);
 }
 .tc-node-bar { width: var(--tc-bar-w); flex: none; border-radius: 6px 0 0 6px; background: var(--tc-node-hue, var(--tc-grey)); }
 .tc-node-body { flex: 1; min-width: 0; padding: 4px 9px; display: flex; flex-direction: column; justify-content: center; gap: 1px; }
@@ -199,7 +313,7 @@
 .tc-node[data-state="idle"] .tc-node-sub { color: var(--tc-muted); }
 .tc-node[data-state="down"] { border-style: dashed; border-color: var(--tc-red); }
 .tc-node[data-state="down"] .tc-node-sub { color: var(--tc-red); font-weight: 600; }
-.tc-node.sel { box-shadow: 0 0 0 2px var(--tc-cyan), 0 5px 14px -4px rgba(0, 0, 0, .7); }
+.tc-node.sel { box-shadow: 0 0 0 2px var(--tc-cyan), var(--tc-shadow-sel); }
 
 /* Ports: shape carries direction. In = hollow ring, out = filled dot. */
 .tc-port {
@@ -208,13 +322,13 @@
   height: var(--tc-port);
   border-radius: 50%;
   z-index: 3;
-  box-shadow: 0 0 4px rgba(0, 0, 0, .5);
+  box-shadow: var(--tc-shadow-port);
 }
 .tc-port.in { background: var(--tc-bg); border: 2.5px solid var(--tc-blue); }
 .tc-port.out { background: var(--tc-cyan); border: 2px solid var(--tc-bg); }
 
 /* ---------- wires ---------- */
-.tc-wire { fill: none; stroke: var(--tc-cyan); stroke-width: var(--tc-wire-w); opacity: .55; }
+.tc-wire { fill: none; stroke: var(--tc-cyan); stroke-width: var(--tc-wire-w); opacity: var(--tc-wire-rest); }
 .tc-wire.flow {
   opacity: 1;
   stroke-dasharray: var(--tc-dash) calc(var(--tc-dash) * .6);
@@ -240,6 +354,6 @@
 }
 
 @media (max-width: 640px) {
-  .tc-sub { display: none; }
+  .tc-sub, .tc-look-word { display: none; }
   .tc-body { padding: 8px; }
 }

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TheConnection board looks</title>
+<!--
+  compare.html: the two board looks side by side, each a live demo.html in a
+  frame. Stacks them on a narrow screen. Nothing here draws the board itself.
+
+  @interacts  loads demo.html twice, once with ?theme=daylight
+  @deps       demo.html (and through it look.js, theme.css, demo-script.json)
+  @complexity O(1)
+  @alloc      two frames, held for the page's life
+
+  Model: Claude Opus 5.5, 2026-10-14. Status: unreviewed.
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #8a8f98;
+    --label: #ffffff;
+    --label-face: #23272e;
+  }
+  body {
+    margin: 0;
+    padding: 16px;
+    background: var(--page);
+    font-family: system-ui, sans-serif;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 640px), 1fr));
+    gap: 16px;
+  }
+  figure { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+  figcaption {
+    align-self: start;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: var(--label-face);
+    color: var(--label);
+    font-weight: 600;
+    font-size: 14px;
+  }
+  iframe { width: 100%; height: 760px; border: 0; border-radius: 10px; }
+</style>
+</head>
+<body>
+  <figure>
+    <figcaption>Dark: the notebook look (default)</figcaption>
+    <iframe src="demo.html" title="Board, dark look"></iframe>
+  </figure>
+  <figure>
+    <figcaption>Daylight: the CRC TMS light look</figcaption>
+    <iframe src="demo.html?theme=daylight" title="Board, Daylight look"></iframe>
+  </figure>
+</body>
+</html>

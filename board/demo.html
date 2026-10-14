@@ -5,10 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TheConnection board look</title>
 <link rel="stylesheet" href="theme.css">
-<style>
-  :root { color-scheme: dark; }
-  body { background: #06080c; }
-</style>
 </head>
 <body class="tc-backdrop">
 <div id="app" class="tc-mount"></div>
@@ -16,22 +12,54 @@
 /**
  * demo.html: a scripted walk through the board look. Fake sessions and fake
  * traffic from demo-script.json, no mailbox reads. It shows what each state
- * and wire looks like.
+ * and wire looks like. The switch on the title bar flips between the dark
+ * look and the TMS light look. ?theme=daylight or ?theme=dark picks one in
+ * the URL (compare.html uses that); otherwise the last pick in this browser,
+ * otherwise dark. ?gray=1 draws the page in grayscale, the colorblind check:
+ * every state must still read.
  *
- * @interacts  builds the board under #app with look.js; one interval timer and
- *             one ResizeObserver, both released on pagehide
+ * @interacts  reads ?theme and ?gray from the URL; reads and writes the
+ *             last look in localStorage (per browser only, and the page
+ *             works without it); sets data-theme and the grayscale filter
+ *             on <html>; rewrites ?theme in place on a pick; builds the
+ *             board under #app with look.js; one interval timer, one
+ *             ResizeObserver and two click listeners, the first two released
+ *             on pagehide, the listeners with their buttons
  * @deps       look.js, theme.css, demo-script.json
  * @complexity O(1) per step; the script has s steps (7 in the shipped file)
  * @alloc      one board, built once; steps only flip classes and text
  */
-import { createWindow, createCanvas, createNode, drawWire, setFooter, HUES, CONFIG } from './look.js';
+import {
+  createWindow, createCanvas, createNode, drawWire, setFooter, createLookSwitch,
+  pickLook, applyLook, HUES, CONFIG,
+} from './look.js';
 
 const FIT_PADDING = 24;
+const LOOK_KEY = 'tc-board-look';
+
+const readStored = () => { try { return localStorage.getItem(LOOK_KEY); } catch { return null; } };
+const store = (look) => { try { localStorage.setItem(LOOK_KEY, look); } catch { /* private window: the pick lasts this page only */ } };
+
+const query = new URLSearchParams(location.search);
+let look = pickLook(query.get('theme'), readStored());
+applyLook(document, look);
+if (query.get('gray') === '1') document.documentElement.style.filter = 'grayscale(1)';
 
 const demo = await (await fetch('demo-script.json')).json();
 const app = document.getElementById('app');
 const win = createWindow(document, app, { file: demo.window.file, sub: demo.window.sub });
 win.setConn(demo.window.conn, demo.window.connState);
+const lookSwitch = createLookSwitch(document, win.title, {
+  look,
+  onPick(next) {
+    look = next;
+    applyLook(document, look);
+    lookSwitch.setLook(look);
+    store(look);
+    query.set('theme', look);
+    history.replaceState(null, '', `?${query}`);
+  },
+});
 
 const chips = document.createElement('div');
 chips.className = 'tc-chips';

@@ -4,7 +4,8 @@
  * data and talks to no mailbox: callers decide what to draw and when.
  *
  * @interacts  creates elements under the container the caller passes in; uses
- *             theme.css class names; never touches innerHTML or globals
+ *             theme.css class names; applyLook writes data-theme on <html>;
+ *             never touches innerHTML, storage or globals
  * @deps       browser DOM and SVG only, no libraries
  * @complexity every function is O(1) except drawWire's update, which is O(1)
  *             per call; a board with n nodes and w wires costs O(n + w) to build
@@ -36,6 +37,72 @@ export const STATES = Object.freeze({
   idle: { glyph: '○', word: 'idle' },
   down: { glyph: '✕', word: 'no listener' },
 });
+
+/**
+ * The two looks. dark is the default and sets no attribute; the others set
+ * data-theme on <html>, which theme.css keys its token sets on. Each has a
+ * glyph and a word, so the switch never says which is on by color alone.
+ */
+export const LOOKS = Object.freeze({
+  dark: { glyph: '◐', word: 'Dark', attr: null },
+  daylight: { glyph: '☀', word: 'Light', attr: 'daylight' },
+});
+export const DEFAULT_LOOK = 'dark';
+
+/**
+ * Which look to draw: the URL's choice, else the stored one, else the
+ * default. Unknown names are ignored, so a stale or mistyped value falls
+ * through instead of drawing a look that has no tokens.
+ * @complexity O(1)  @alloc none
+ */
+export function pickLook(fromUrl, fromStore) {
+  if (Object.hasOwn(LOOKS, fromUrl)) return fromUrl;
+  if (Object.hasOwn(LOOKS, fromStore)) return fromStore;
+  return DEFAULT_LOOK;
+}
+
+/**
+ * Draw the page in a look. Only the attribute changes; theme.css does the rest.
+ * @interacts  writes data-theme on doc.documentElement
+ * @complexity O(1)  @alloc none
+ */
+export function applyLook(doc, look) {
+  const attr = LOOKS[look] ? LOOKS[look].attr : null;
+  if (attr) doc.documentElement.dataset.theme = attr;
+  else delete doc.documentElement.dataset.theme;
+}
+
+/**
+ * Two-button switch between the looks. The pressed one has a filled dot and a
+ * light face with dark words; the other a ring and no face, so pressed reads
+ * by shape and lightness, not hue. Calls onPick(look) on a click; the caller
+ * applies and stores it, and calls setLook so the switch follows.
+ * @interacts  appends to parent; one click listener per button, released with
+ *             the elements (removeBoard or the caller's own teardown)
+ * @complexity O(k) for k looks, 2 today  @alloc one group and k buttons
+ * @returns {{ root, setLook(look) }}
+ */
+export function createLookSwitch(doc, parent, { look, onPick }) {
+  const root = el(doc, 'div', 'tc-look');
+  root.setAttribute('role', 'group');
+  root.setAttribute('aria-label', 'Look');
+  const buttons = Object.entries(LOOKS).map(([name, l]) => {
+    const b = el(doc, 'button', 'tc-look-btn');
+    b.type = 'button';
+    b.dataset.look = name;
+    b.setAttribute('aria-label', l.word);
+    b.append(el(doc, 'span', 'tc-look-dot'), el(doc, 'span', 'tc-look-glyph', l.glyph), el(doc, 'span', 'tc-look-word', l.word));
+    b.addEventListener('click', () => onPick(name));
+    return b;
+  });
+  root.append(...buttons);
+  parent.append(root);
+  const setLook = (current) => {
+    for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.look === current));
+  };
+  setLook(look);
+  return { root, setLook };
+}
 
 /** Node bar hues. Identity only; the node title already names the session. */
 export const HUES = Object.freeze([
@@ -77,7 +144,7 @@ export function portPoint(pos, side) {
  * Window frame: title bar with traffic dots, a status pill, a body and a footer.
  * @interacts  appends to parent
  * @complexity O(1)  @alloc one window subtree
- * @returns {{ root, body, foot, setConn(text, state) }}  state: 'up' | 'warn' | 'down'
+ * @returns {{ root, title, body, foot, setConn(text, state) }}  state: 'up' | 'warn' | 'down'
  */
 export function createWindow(doc, parent, { file, sub }) {
   const root = el(doc, 'div', 'tc-win');
@@ -94,7 +161,7 @@ export function createWindow(doc, parent, { file, sub }) {
   root.append(title, body, foot);
   parent.append(root);
   return {
-    root, body, foot,
+    root, title, body, foot,
     setConn(text, state) { ctext.textContent = text; conn.dataset.state = state; },
   };
 }

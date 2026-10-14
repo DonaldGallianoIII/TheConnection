@@ -16,7 +16,7 @@ the way the Greener Pastures node graph does, and every state reads without colo
    - An arrowhead sits at the reader's end and a label like `a → b · #781` floats
      over the wire.
    - The sender's box gets a thicker border and its second line reads `✎ writing`.
-4. Check each state reads without color (turn your screen to greyscale, or use the
+4. Check each state reads without color (turn your screen to grayscale, or use the
    browser's devtools "emulate achromatopsia"):
    - `● listening`, `✎ writing`, `○ idle · 41m`, `✕ no listener` all show as words.
    - `zed · worker` has a dashed border and a dotted wire.
@@ -27,4 +27,26 @@ the way the Greener Pastures node graph does, and every state reads without colo
 6. Turn on reduced motion (OS setting, or devtools "prefers-reduced-motion: reduce").
    - The dashes stop moving, but the dashed line, arrow and label still show which
      wire is active.
-7. Stop the server with Ctrl+C.
+7. Open http://localhost:8765/demo.html?theme=daylight (the CRC TMS light look).
+   - A steel gray page, white session cards, and dark gunmetal title and footer
+     bars with white words.
+   - The writing line, the wires and the out ports are blue. `zed · worker` is hot
+     pink with a dashed border, not red.
+   - Steps 3 to 6 hold here too.
+8. Open http://localhost:8765/demo.html?theme=daylight&gray=1, then the same
+   without `theme=daylight`.
+   - The page draws in grayscale. Every state still reads by its word and glyph,
+     the dead wire is still dotted, the active one still dashed with an arrow.
+9. Open http://localhost:8765/demo.html and use the switch at the right of the
+   title bar.
+   - It has two buttons, `◐ Dark` and `☀ Light`. The one that is on has a light
+     face, dark bold words and a filled dot; the other has no face and a ring.
+   - Click `Light`: the whole board turns to the light look at once, traffic
+     keeps running, and the address bar now ends in `?theme=daylight`.
+   - Reload: it stays on Light. Click `Dark`, reload: it stays on Dark.
+   - At phone width the words drop and the `◐` and `☀` symbols stay, with the
+     filled dot still on the pressed one.
+10. Open http://localhost:8765/compare.html.
+   - Both looks side by side, labeled, each running its own traffic. On a phone
+     width they stack.
+11. Stop the server with Ctrl+C.
