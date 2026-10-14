@@ -61,6 +61,35 @@ with its own inbox.
 | `tc status b "text"` | Post b's status |
 | `tc status` | Show every side's status |
 | `tc log [--last N]` | History in both directions |
+| `tc health [--json]` | Machine, sessions, listeners and mail at a glance |
+| `tc watch a` | Heartbeat or alert that wakes a. Run it in the background. Exit 0 = heartbeat, exit 5 = alert, exit 3 = already watching. |
+
+## Health and heartbeats
+
+```
+tc health            # machine, sessions, listeners, mail, one screen
+tc health --json     # same thing for a board or a script
+tc watch a           # run in the background: heartbeat or alert wakes session a
+```
+
+`tc health` shows load over core count, free memory, GPU temperature and use (if
+`nvidia-smi` exists), how many Claude Code and Codex sessions are running, which
+listeners are live with their PIDs, and each inbox's unread count and last activity.
+It only reads. Live listeners come from the kernel's lock table (`/proc/locks`), so
+checking never gets in a listener's way.
+
+`tc watch a` is a watchdog that wakes session `a`. Run it with Bash
+`run_in_background: true`. It polls every 15 s and:
+
+- exits 0 with a `HEARTBEAT` line (load and peak, free memory and low, GPU peak,
+  session counts, who is listening) once per heartbeat. The default heartbeat is just
+  under the cache TTL, so a watch also keeps the cache warm (see below).
+- exits 5 with an `ALERT` line early if load stays over 0.9 x cores for 3 polls, free
+  memory drops under 15%, a GPU passes 85C, or a listener named in `--names` stops.
+- exits 3 if another `tc watch a` is already running.
+
+Either way, re-arm it after you handle the output. Thresholds are flags:
+`--load-ratio`, `--mem-min-pct`, `--gpu-max-c`, `--heartbeat`, `--poll`.
 
 ## Board look kit
 

@@ -11,15 +11,22 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   mail/to-<name>/read/...                  read (moved there by `tc read`)
   status/<name>.md                         latest self-reported status
   mail/.seq                                message counter (flock guarded)
+  mail/.watch-<name>.lock                  held by `tc watch <name>` while it runs
 
-@interacts  filesystem only: writes mail/ and status/ under ROOT; no network,
-            no other process. The waking side is Claude Code's background Bash:
-            `tc wait` exiting is what re-invokes the listening session.
-@deps       python3 stdlib (argparse, fcntl, pathlib, resource, time, datetime,
-            os, sys); Linux only (flock, RLIMIT_AS)
+@interacts  writes mail/ and status/ under ROOT; no network. The waking side is
+            Claude Code's background Bash: `tc wait` or `tc watch` exiting is
+            what re-invokes the session that started it. `health` and `watch`
+            also read /proc (meminfo, locks, each process's comm and cmdline)
+            and run `nvidia-smi` when it exists. They never signal or touch
+            another process.
+@deps       python3 stdlib (argparse, fcntl, json, pathlib, resource, shutil,
+            subprocess, time, datetime, os, sys); Linux only (flock, RLIMIT_AS,
+            /proc). nvidia-smi optional.
 @complexity send/status O(1). read/peek/wait-poll O(u), u unread messages in
             one inbox, single digits in practice. log O(t), t total messages
-            ever, low hundreds per job.
+            ever, low hundreds per job. health and each watch poll
+            O(p + k + n): p processes on the machine (hundreds), k lines in
+            /proc/locks (tens), n mailbox names (single digits).
 @alloc      one file per message, kept forever (read/ is the history). Nothing
             held in memory past one command. `wait` measured flat at 13 MB RSS
             over 200k polls; it also hard-caps itself at WAIT_MEMORY_CAP_BYTES
@@ -30,9 +37,12 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
 import argparse
 import datetime
 import fcntl
+import json
 import os
 import pathlib
 import resource
+import shutil
+import subprocess
 import sys
 import time
 
@@ -50,10 +60,36 @@ EXIT_ALREADY_LISTENING = 3
 # Address-space ceiling for a listener. Measured need is about 13 MB; the cap
 # only exists so a bug can never take the machine down with it.
 WAIT_MEMORY_CAP_BYTES = 256 * 1024 * 1024
+EXIT_ALERT = 5
+
+# Prompt cache. A Claude session's cache expires after this long with no
+# request. Waking a session sooner than that keeps its cache warm. Override
+# with TC_CACHE_TTL_SECONDS if your plan uses a different TTL.
+CACHE_TTL_SECONDS = int(os.environ.get("TC_CACHE_TTL_SECONDS", 3600))
+# Wake this long before the TTL runs out, to cover the poll interval and the
+# time the session takes to respond.
+KEEPALIVE_MARGIN_SECONDS = int(os.environ.get("TC_KEEPALIVE_MARGIN_SECONDS", 300))
+MIN_KEEPALIVE_SECONDS = 1
+
+# `tc watch` defaults. A breach wakes the session early; otherwise it wakes
+# once per heartbeat with a one-line summary.
+WATCH_POLL_SECONDS = 15
+LOAD_ALERT_RATIO = 0.9          # 1-minute load over CPU count
+LOAD_STRIKES = 3                # consecutive polls over the line before alerting
+MEM_AVAIL_MIN_PCT = 15
+GPU_TEMP_MAX_C = 85
+GPU_QUERY_TIMEOUT_SECONDS = 5
+SECONDS_PER_MINUTE = 60
+SECONDS_PER_HOUR = 3600
+SECONDS_PER_DAY = 86400
 
 
 def now_iso():
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def keepalive_seconds():
+    return max(MIN_KEEPALIVE_SECONDS, CACHE_TTL_SECONDS - KEEPALIVE_MARGIN_SECONDS)
 
 
 def inbox(name):
@@ -152,6 +188,248 @@ def cmd_log(args):
     show(every[-args.last:] if args.last else every)
 
 
+# ---------- health: machine, sessions, listeners, mail ----------
+
+def machine_stats():
+    """Load, memory and GPU right now. GPU is None when nvidia-smi is absent."""
+    load1 = os.getloadavg()[0]
+    cores = os.cpu_count() or 1
+    info = {}
+    with open("/proc/meminfo") as f:
+        for line in f:
+            key, _, rest = line.partition(":")
+            info[key] = int(rest.split()[0])
+    mem_pct = 100.0 * info["MemAvailable"] / info["MemTotal"]
+    return {"load1": round(load1, 2), "cores": cores,
+            "mem_avail_pct": round(mem_pct, 1), "gpus": gpu_stats()}
+
+
+def gpu_stats():
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return None
+    try:
+        out = subprocess.run([exe, "--query-gpu=temperature.gpu,utilization.gpu",
+                              "--format=csv,noheader,nounits"], capture_output=True,
+                             text=True, timeout=GPU_QUERY_TIMEOUT_SECONDS).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    gpus = []
+    for line in out.strip().splitlines():
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) == 2 and all(x.isdigit() for x in parts):
+            gpus.append({"temp_c": int(parts[0]), "util_pct": int(parts[1])})
+    return gpus or None
+
+
+def _cmdline(pid):
+    try:
+        raw = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [a.decode(errors="replace") for a in raw.split(b"\0") if a]
+
+
+def _is_codex(argv):
+    if not argv or any("app-server-daemon" in a for a in argv):
+        return False
+    first = os.path.basename(argv[0])
+    return first == "codex" or (first == "node" and len(argv) > 1 and os.path.basename(argv[1]) == "codex")
+
+
+def session_counts():
+    """Claude Code sessions (process name `claude`) and Codex CLI sessions.
+
+    Codex is approximate: a CLI started through node spawns a native `codex`
+    child, so a codex process whose parent is also codex is not counted again,
+    and the app-server daemon is skipped.
+    """
+    claude, codex_pids, parent = 0, set(), {}
+    for d in pathlib.Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            stat = (d / "stat").read_text()
+        except OSError:
+            continue
+        # comm is in parens and may hold spaces; fields after it are fixed.
+        comm = stat[stat.index("(") + 1:stat.rindex(")")]
+        fields = stat[stat.rindex(")") + 2:].split()
+        state, ppid = fields[0], fields[1]
+        if state == "Z":
+            continue
+        if comm == "claude":
+            claude += 1
+        elif _is_codex(_cmdline(d.name)):
+            codex_pids.add(d.name)
+            parent[d.name] = ppid
+    codex = sum(1 for pid in codex_pids if parent[pid] not in codex_pids)
+    return {"claude": claude, "codex": codex}
+
+
+def _flock_holders():
+    """Map 'major:minor:inode' to the pid holding an flock on that file."""
+    holders = {}
+    try:
+        lines = pathlib.Path("/proc/locks").read_text().splitlines()
+    except OSError:
+        return holders
+    for line in lines:
+        f = line.split()
+        if len(f) >= 6 and f[1] == "FLOCK":
+            holders[f[5]] = int(f[4])
+    return holders
+
+
+def _lock_key(path):
+    st = path.stat()
+    return f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}"
+
+
+def listeners(kind="wait"):
+    """Each name that ever ran `tc <kind>`, with the pid holding its lock or None.
+
+    Reads /proc/locks instead of trying the lock, so probing never races a
+    listener that is starting up.
+    """
+    holders = _flock_holders()
+    out = {}
+    if not MAIL.exists():
+        return out
+    prefix = f".{kind}-"
+    for lock in sorted(MAIL.glob(f"{prefix}*.lock")):
+        name = lock.name[len(prefix):-len(".lock")]
+        try:
+            out[name] = holders.get(_lock_key(lock))
+        except OSError:
+            out[name] = None
+    return out
+
+
+def _age(seconds):
+    if seconds is None:
+        return None
+    if seconds < SECONDS_PER_MINUTE:
+        return f"{int(seconds)}s"
+    if seconds < SECONDS_PER_HOUR:
+        return f"{int(seconds // SECONDS_PER_MINUTE)}m"
+    if seconds < SECONDS_PER_DAY:
+        return f"{int(seconds // SECONDS_PER_HOUR)}h"
+    return f"{int(seconds // SECONDS_PER_DAY)}d"
+
+
+def mailbox_summary():
+    now = time.time()
+    names = sorted({p.name[len("to-"):] for p in MAIL.glob("to-*") if p.is_dir()}) if MAIL.exists() else []
+    out = {}
+    for name in names:
+        box = MAIL / f"to-{name}"
+        every = list(box.glob("*.md")) + list((box / "read").glob("*.md"))
+        newest = max((p.stat().st_mtime for p in every), default=None)
+        st = STATUS / f"{name}.md"
+        out[name] = {
+            "unread": len(list(box.glob("*.md"))),
+            "newest_mail_age_s": None if newest is None else round(now - newest),
+            "status_age_s": round(now - st.stat().st_mtime) if st.exists() else None,
+        }
+    return out
+
+
+def health_snapshot():
+    return {"time": now_iso(), "machine": machine_stats(), "sessions": session_counts(),
+            "listeners": listeners("wait"), "watchers": listeners("watch"),
+            "mail": mailbox_summary()}
+
+
+def _gpu_text(gpus):
+    if not gpus:
+        return "GPU none"
+    return " · ".join(f"GPU {g['temp_c']}C {g['util_pct']}%" for g in gpus)
+
+
+def _who(table):
+    up = [f"{n} (pid {pid})" for n, pid in table.items() if pid]
+    down = [n for n, pid in table.items() if not pid]
+    text = " · ".join(up) if up else "none running"
+    return text + (f" · stopped: {', '.join(down)}" if down else "")
+
+
+def cmd_health(args):
+    snap = health_snapshot()
+    if args.json:
+        print(json.dumps(snap, indent=2))
+        return
+    m, s = snap["machine"], snap["sessions"]
+    print(f"machine    load {m['load1']} / {m['cores']} cores · mem free {m['mem_avail_pct']}% · {_gpu_text(m['gpus'])}")
+    print(f"sessions   {s['claude']} Claude Code · {s['codex']} Codex")
+    print(f"listeners  {_who(snap['listeners'])}")
+    print(f"watchers   {_who(snap['watchers'])}")
+    rows = []
+    for name, b in snap["mail"].items():
+        bits = [f"{b['unread']} unread"]
+        if b["newest_mail_age_s"] is not None:
+            bits.append(f"last mail {_age(b['newest_mail_age_s'])} ago")
+        if b["status_age_s"] is not None:
+            bits.append(f"status {_age(b['status_age_s'])} ago")
+        rows.append(f"{name}: " + ", ".join(bits))
+    print("mail       " + ("\n           ".join(rows) if rows else "empty"))
+
+
+# ---------- watch: heartbeat and alerts that wake the session ----------
+
+def _breaches(m, args, strikes):
+    found = []
+    if strikes >= LOAD_STRIKES:
+        found.append(f"load {m['load1']} over {args.load_ratio} x {m['cores']} cores for {strikes} polls")
+    if m["mem_avail_pct"] < args.mem_min_pct:
+        found.append(f"mem free {m['mem_avail_pct']}% under {args.mem_min_pct}%")
+    for i, g in enumerate(m["gpus"] or []):
+        if g["temp_c"] > args.gpu_max_c:
+            found.append(f"GPU{i} {g['temp_c']}C over {args.gpu_max_c}C")
+    return found
+
+
+def cmd_watch(args):
+    resource.setrlimit(resource.RLIMIT_AS, (WAIT_MEMORY_CAP_BYTES, WAIT_MEMORY_CAP_BYTES))
+    MAIL.mkdir(parents=True, exist_ok=True)
+    lock = open(MAIL / f".watch-{args.name}.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"ALREADY WATCHING: another `tc watch {args.name}` is running. Not starting a second.")
+        sys.exit(EXIT_ALREADY_LISTENING)
+    tracked = [n for n in (args.names.split(",") if args.names else []) if n]
+    alive_at_start = {n for n, pid in listeners("wait").items() if n in tracked and pid}
+    peak_load, low_mem, peak_gpu, strikes = 0.0, 100.0, None, 0
+    deadline = time.monotonic() + args.heartbeat
+    while True:
+        m = machine_stats()
+        over = m["load1"] > args.load_ratio * m["cores"]
+        strikes = strikes + 1 if over else 0
+        peak_load = max(peak_load, m["load1"])
+        low_mem = min(low_mem, m["mem_avail_pct"])
+        for g in m["gpus"] or []:
+            peak_gpu = g["temp_c"] if peak_gpu is None else max(peak_gpu, g["temp_c"])
+        problems = _breaches(m, args, strikes)
+        now_alive = {n for n, pid in listeners("wait").items() if pid}
+        problems += [f"LISTENER DOWN: {n}" for n in sorted(alive_at_start - now_alive)]
+        if problems:
+            print(f"ALERT {now_iso()}: " + "; ".join(problems))
+            print(f"  now: load {m['load1']} / {m['cores']}, mem free {m['mem_avail_pct']}%, {_gpu_text(m['gpus'])}")
+            print(f"Re-arm after handling: tc watch {args.name}")
+            sys.exit(EXIT_ALERT)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(min(args.poll, max(0.0, deadline - time.monotonic())))
+    s = session_counts()
+    gpu = "GPU none" if peak_gpu is None else f"GPU peak {peak_gpu}C"
+    up = sorted(n for n, pid in listeners("wait").items() if pid)
+    print(f"HEARTBEAT {now_iso()}: load {m['load1']} (peak {peak_load}) / {m['cores']}, "
+          f"mem free {m['mem_avail_pct']}% (low {low_mem}%), {gpu}, "
+          f"{s['claude']} Claude Code, {s['codex']} Codex, listening: {', '.join(up) or 'none'}")
+    print(f"Re-arm: tc watch {args.name}")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="tc", description="Mailbox between Claude sessions.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -181,6 +459,21 @@ def main():
     lg = sub.add_parser("log", help="full history, both directions")
     lg.add_argument("--last", type=int, default=0)
     lg.set_defaults(fn=cmd_log)
+
+    h = sub.add_parser("health", help="machine load, memory, GPU, sessions, listeners, mail")
+    h.add_argument("--json", action="store_true", help="machine-readable, for a board")
+    h.set_defaults(fn=cmd_health)
+
+    wt = sub.add_parser("watch", help="heartbeat for a session; exits early on an alert (run in background)")
+    wt.add_argument("name", help="the session this watcher wakes")
+    wt.add_argument("--heartbeat", type=float, default=keepalive_seconds(),
+                    help="seconds between heartbeats (default: just under the cache TTL)")
+    wt.add_argument("--poll", type=float, default=WATCH_POLL_SECONDS)
+    wt.add_argument("--names", default="", help="comma list of listeners to watch; alert if one goes down")
+    wt.add_argument("--load-ratio", type=float, default=LOAD_ALERT_RATIO)
+    wt.add_argument("--mem-min-pct", type=float, default=MEM_AVAIL_MIN_PCT)
+    wt.add_argument("--gpu-max-c", type=float, default=GPU_TEMP_MAX_C)
+    wt.set_defaults(fn=cmd_watch)
 
     args = ap.parse_args()
     args.fn(args)
