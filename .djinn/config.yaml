@@ -1,0 +1,59 @@
+# Djinn Relay config for TheConnection.
+# Model: Claude Opus 5.5 (the TheConnection architect session, home machine)
+# Status: unreviewed. Values come from docs/planning/connection-routes/00-index.md.
+
+# Lanes merge into the dev branch; nothing in this plan merges toward main.
+base_branch: Claude-Development-TheConnection
+
+# tc is one stdlib script and the board is plain ES modules: a compile and
+# syntax check is the whole build.
+build_cmd: python3 -m py_compile tc && node --check board/look.js
+
+test_cmd: python3 -m unittest discover -s tests -p 'test_*.py' && node --test tests/*.test.mjs
+
+known_bugs_index: docs/known-bugs/INDEX.md
+
+conventions_files:
+  - CLAUDE.md
+  - ~/Conventions/code/STANDARDS.md
+  - ~/Conventions/code/DOCBLOCKS.md
+  - ~/Conventions/code/ACCESSIBILITY.md
+  - ~/Conventions/code/WEB.md
+  - ~/Conventions/voice/VOICE.md
+
+# tc wait and tc watch poll for hours (every 5 s and 15 s), and health
+# runs on every watch poll and every board feed. The board polls every 3 s.
+hot_paths:
+  - tc
+  - board/
+
+goal_doc: docs/planning/connection-routes/00-index.md
+
+# Python 3 stdlib only, plain ES modules, no package manager.
+deps:
+  manifests: []
+  lockfiles: []
+  list_cmd: none
+  check_cmd: none
+  platform: "Python 3 stdlib, Node 22 for tests only, Linux and WSL2"
+  coupled_sets: []
+  landmines: []
+
+project_notes: |
+  TheConnection is a file mailbox between agent sessions run by one Linux
+  user. tc is a single Python 3 stdlib script. State is files under ROOT
+  (TC_ROOT, default next to the script): mail/to-<name>/NNNNNN-from-X.md
+  unread, mail/to-<name>/read/ read, mail/.seq the counter under flock,
+  mail/.wait-<name>.lock held by a live `tc wait`, status/<name>.md.
+  A message is written to a .tmp and renamed, so a reader never sees half
+  of one. Listeners are proven live only by their pid in /proc/locks.
+  The waking mechanism is outside tc: Claude Code's background Bash wakes
+  a session when `tc wait` exits.
+  The board (board/) is a look kit of plain ES modules with no innerHTML,
+  and meaning never rides on color alone (the owner is colorblind).
+  The plan in docs/planning/connection-routes/ adds address cards, a
+  router, ssh and codex routes, a shared mailbox and a live board server
+  on 127.0.0.1. Tests run under their own TC_ROOT and never touch a live
+  mailbox; agents never run real ssh or codex.
+  The repo is public: no secrets, hostnames, real mailbox content, or
+  anything about the owner's employer.
