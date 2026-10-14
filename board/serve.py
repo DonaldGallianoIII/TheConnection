@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 """
-serve.py: the live board's feed (C5). Loads tc as a module and never edits
-it. feed() builds one JSON object from tc's health snapshot, the address
-cards and the message file names. It never opens a message body.
+serve.py: the live board's feed (C5) and its server (C6). Loads tc as a
+module and never edits it. feed() builds one JSON object from tc's health
+snapshot, the address cards and the message file names. It never opens a
+message body. The server reads only: it answers GET and HEAD on
+127.0.0.1, gives the feed to a request that carries the token, and serves
+an allow list of the board's own files.
+
+    python3 board/serve.py [--port 8780]
+
+prints `board: http://127.0.0.1:<port>/live.html#token=<t>` once and serves
+until Ctrl+C or SIGTERM. The token sits in the URL fragment, which the
+browser never sends, so it reaches no server log and no referrer. The
+mailbox is tc's: TC_ROOT if set, else the folder tc lives in.
 
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
@@ -67,31 +77,46 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             it exists, and globs and stats mail/ and status/ under tc's
             ROOT. Reads cards/*.json and the head of status/<name>.md; lists
             mail/to-*/ and mail/to-*/read/ and stats a few message files.
-            Opens no message body. Writes nothing, anywhere.
-@deps       python3 stdlib (collections, heapq, importlib, json, os,
-            pathlib, re, time); ../tc; Linux (/proc via tc).
+            Opens no message body. Writes nothing to disk. main() binds one
+            TCP socket on 127.0.0.1, prints the URL with the token once to
+            stdout, reads the allow-listed files in board/ per request, and
+            writes no request log. A failed feed writes one line to stderr.
+@deps       python3 stdlib (argparse, collections, heapq, hmac, http.server,
+            importlib, json, os, pathlib, re, secrets, signal, sys,
+            threading, time, urllib.parse); ../tc; Linux (/proc via tc).
 @complexity feed(): O(n + m + e) plus tc's own health_snapshot (O(p + k + n),
             see tc's header): n names (single digits to tens), m message
             file names (about 800 after two weeks of heavy use; each is
             matched once, no body read), e parent edges (at most n). The
             last WIRE_HISTORY messages are picked in O(m log W), W = 50.
             Stats: at most W + n + l files, l linked pairs (at most n^2/2,
-            tens in practice).
+            tens in practice). One request: O(1) to route, plus one feed()
+            or one read of a board file (tens of KB).
 @alloc      per feed(): one list of m small tuples and the returned dict,
             freed when the caller drops them. Held across calls: the
             loaded tc module and last_listening_at, one float per name
-            seen listening, pruned past DOWN_WINDOW_S on every feed().
+            seen listening, pruned past DOWN_WINDOW_S on every feed(). The
+            server holds one Board, the token and a lock; one short-lived
+            thread per request.
 """
 
+import argparse
 import collections
 import heapq
+import hmac
+import http.server
 import importlib.machinery
 import importlib.util
 import json
 import os
 import pathlib
 import re
+import secrets
+import signal
+import sys
+import threading
 import time
+import urllib.parse
 
 BOARD_DIR = pathlib.Path(__file__).resolve().parent
 TC_PATH = BOARD_DIR.parent / "tc"
@@ -120,6 +145,35 @@ HUB_MIN_PARTNERS = 2
 # A card is a few hundred bytes (C1). A file in cards/ bigger than this is
 # not a card, and the board skips it instead of reading it on every poll.
 CARD_READ_MAX_BYTES = 65536
+
+# The server (C6). 8780 because 8765 was taken on the owner's machine on
+# 2026-10-14 (O7); --port moves it, and port 0 lets the OS pick.
+DEFAULT_PORT = 8780
+# Loopback only. Nothing off this machine can reach the board; the token
+# guards it from other local users' pages.
+BIND_HOST = "127.0.0.1"
+# Bytes of randomness in the token (C6: secrets.token_urlsafe(24), 32
+# characters). Made once per start, never written to disk.
+TOKEN_BYTES = 24
+TOKEN_HEADER = "X-TC-Token"
+# The names the page may reach the server by. Any other Host header is a
+# page on another name pointed here (DNS rebinding), and gets 421.
+HOST_NAMES = ("127.0.0.1", "localhost")
+FEED_PATH = "/feed"
+# The only files the server sends (C6). Anything else is 404, with no
+# folder listing, so serve.py, tc and the mailbox never leave.
+STATIC_FILES = {
+    "live.html": "text/html; charset=utf-8",
+    "look.js": "text/javascript; charset=utf-8",
+    "theme.css": "text/css; charset=utf-8",
+    "demo.html": "text/html; charset=utf-8",
+    "demo-script.json": "application/json; charset=utf-8",
+    "compare.html": "text/html; charset=utf-8",
+}
+FEED_TYPE = "application/json; charset=utf-8"
+# A connection that sends nothing for this long is dropped, so a stalled
+# client cannot hold a request thread forever. The page asks every 3 s.
+REQUEST_TIMEOUT_S = 10
 
 # tc's message file name: NNNNNN-from-<sender>.md, tc's SEQ_WIDTH digits
 # (more past 999999). The .tmp sibling a send writes first never matches.
@@ -418,7 +472,8 @@ class Board:
     """The feed's state across polls: the loaded tc and who was seen listening.
 
     `clock` returns seconds since the epoch, as time.time does; tests pass a
-    fake one so windows can be crossed without waiting.
+    fake one so windows can be crossed without waiting. feed() is not safe
+    from two threads at once; BoardServer calls it under its own lock.
 
     @interacts  see the module block.
     @deps       load_tc and the module's helpers.
@@ -539,3 +594,233 @@ class Board:
             "machine": {key: machine[key] for key in ("load1", "cores", "mem_avail_pct")},
             "nodes": nodes, "wires": wires, "links": links,
         }
+
+
+class FeedHandler(http.server.BaseHTTPRequestHandler):
+    """One request to the board: the Host check, then the feed or a board file.
+
+    Every request is checked in this order. A Host that is not
+    127.0.0.1:<port> or localhost:<port>: 421. A method other than GET or
+    HEAD: 405. /feed without the right X-TC-Token header: 401. A path not
+    on STATIC_FILES (or not on disk): 404. Every refusal has no body.
+
+    @interacts  reads the request; writes one response; calls the server's
+                Board.feed() under its lock; reads one file in board/.
+    @deps       hmac, http.server, json, urllib.parse.
+    @complexity O(1) to route, plus the feed or the file.
+    @alloc      the response bytes, freed after the write.
+    """
+
+    server_version = "tc-board"
+    sys_version = ""
+    timeout = REQUEST_TIMEOUT_S
+
+    def __getattr__(self, name):
+        """Any do_<METHOD> not defined below answers 405, so no method reaches 501.
+
+        @interacts  none.
+        @deps       none.
+        @complexity O(1).
+        @alloc      none.
+        """
+        if name.startswith("do_"):
+            return self.refuse_method
+        raise AttributeError(name)
+
+    def do_GET(self):
+        """Answer a GET with its body.
+
+        @interacts  see answer().
+        @deps       answer.
+        @complexity see answer().
+        @alloc      see answer().
+        """
+        self.answer(with_body=True)
+
+    def do_HEAD(self):
+        """Answer a HEAD: the same status and headers as GET, no body.
+
+        @interacts  see answer().
+        @deps       answer.
+        @complexity see answer().
+        @alloc      see answer().
+        """
+        self.answer(with_body=False)
+
+    def log_message(self, format, *args):
+        """Write no request log: the board polls every 3 s and nothing in a request is news.
+
+        @interacts  none.
+        @deps       none.
+        @complexity O(1).
+        @alloc      none.
+        """
+
+    def host_ok(self):
+        """True when the Host header is 127.0.0.1:<port> or localhost:<port>.
+
+        @interacts  reads the request's Host header and the bound port.
+        @deps       none.
+        @complexity O(h) over h = len(HOST_NAMES) = 2.
+        @alloc      a few short strings.
+        """
+        port = self.server.server_address[1]
+        host = (self.headers.get("Host") or "").lower()
+        return host in {f"{name}:{port}" for name in HOST_NAMES}
+
+    def send_empty(self, code, *headers):
+        """Send `code` with no body, plus any (name, value) headers.
+
+        @interacts  writes one response.
+        @deps       http.server.
+        @complexity O(1).
+        @alloc      none retained.
+        """
+        self.send_response(code)
+        for name, value in headers:
+            self.send_header(name, value)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def send_bytes(self, ctype, data, with_body):
+        """Send 200 with `data` as `ctype`; the body only when `with_body`.
+
+        @interacts  writes one response.
+        @deps       http.server.
+        @complexity O(b) over b bytes of data.
+        @alloc      none retained.
+        """
+        self.send_response(http.server.HTTPStatus.OK)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        if with_body:
+            self.wfile.write(data)
+
+    def refuse_method(self):
+        """421 for a foreign Host, else 405: nothing on the board writes.
+
+        @interacts  writes one response.
+        @deps       host_ok, send_empty.
+        @complexity O(1).
+        @alloc      none retained.
+        """
+        if not self.host_ok():
+            self.send_empty(http.server.HTTPStatus.MISDIRECTED_REQUEST)
+            return
+        self.send_empty(http.server.HTTPStatus.METHOD_NOT_ALLOWED, ("Allow", "GET, HEAD"))
+
+    def answer(self, with_body):
+        """Route a GET or HEAD: the Host check, then /feed or an allowed file.
+
+        @interacts  calls Board.feed() under the server's lock for /feed;
+                    reads one file in board/ otherwise. A feed that raises
+                    gets 500 and one line on stderr.
+        @deps       hmac, json, urllib.parse; host_ok, send_empty, send_bytes.
+        @complexity O(1) to route, plus one feed() or one file read.
+        @alloc      the JSON or the file's bytes, freed after the write.
+        """
+        if not self.host_ok():
+            self.send_empty(http.server.HTTPStatus.MISDIRECTED_REQUEST)
+            return
+        path = urllib.parse.urlsplit(self.path).path
+        if path == FEED_PATH:
+            given = (self.headers.get(TOKEN_HEADER) or "").encode("utf-8", "replace")
+            if not hmac.compare_digest(given, self.server.token.encode("utf-8")):
+                self.send_empty(http.server.HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                with self.server.feed_lock:
+                    data = json.dumps(self.server.board.feed()).encode("utf-8")
+            except Exception as exc:  # the server stays up; the page shows "no answer"
+                print(f"serve.py: feed failed: {exc!r}", file=sys.stderr, flush=True)
+                self.send_empty(http.server.HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self.send_bytes(FEED_TYPE, data, with_body)
+            return
+        name = path[1:] if path.startswith("/") else ""
+        if name not in STATIC_FILES:
+            self.send_empty(http.server.HTTPStatus.NOT_FOUND)
+            return
+        try:
+            data = (BOARD_DIR / name).read_bytes()
+        except OSError:
+            self.send_empty(http.server.HTTPStatus.NOT_FOUND)
+            return
+        self.send_bytes(STATIC_FILES[name], data, with_body)
+
+
+class BoardServer(http.server.ThreadingHTTPServer):
+    """The board's HTTP server: bound to BIND_HOST, holding one Board and the token.
+
+    Board.feed() keeps state across calls (last_listening_at), so requests
+    take `feed_lock` around it. Request threads are daemon threads, so a
+    stalled one never keeps the process alive.
+
+    @interacts  binds one TCP socket on BIND_HOST:`port` (0: the OS picks).
+    @deps       http.server, threading; FeedHandler.
+    @complexity O(1) to build.
+    @alloc      the socket, released by server_close(); the Board, the
+                token and one lock, held for the server's life.
+    """
+
+    daemon_threads = True
+
+    def __init__(self, board, port, token):
+        """Bind BIND_HOST:`port` and keep `board` and `token` for the handler.
+
+        @interacts  binds and listens on one socket.
+        @deps       http.server, threading.
+        @complexity O(1).
+        @alloc      the socket and one lock.
+        """
+        super().__init__((BIND_HOST, port), FeedHandler)
+        self.board = board
+        self.token = token
+        self.feed_lock = threading.Lock()
+
+
+def stop_on_term(signum, frame):
+    """SIGTERM handler: stop serve_forever the way Ctrl+C does, so the socket closes.
+
+    @interacts  raises KeyboardInterrupt in the main thread.
+    @deps       none.
+    @complexity O(1).
+    @alloc      none.
+    """
+    raise KeyboardInterrupt
+
+
+def main(argv=None):
+    """Start the board: print its URL with a fresh token once, serve until stopped.
+
+    @interacts  see the module block: loads tc for the mailbox TC_ROOT
+                names (or tc's own folder), binds BIND_HOST:--port, prints
+                one line to stdout, sets a SIGTERM handler.
+    @deps       argparse, secrets, signal; Board, BoardServer.
+    @complexity O(1) to start; then one request at a time per thread.
+    @alloc      one Board and one BoardServer, closed on the way out.
+    """
+    ap = argparse.ArgumentParser(prog="serve.py",
+                                 description="The live board: a read-only feed of the mailbox on 127.0.0.1.")
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT,
+                    help=f"port on {BIND_HOST} (default {DEFAULT_PORT}; 0 lets the OS pick)")
+    args = ap.parse_args(argv)
+    token = secrets.token_urlsafe(TOKEN_BYTES)
+    server = BoardServer(Board(), args.port, token)
+    signal.signal(signal.SIGTERM, stop_on_term)
+    host, port = server.server_address[:2]
+    print(f"board: http://{host}:{port}/live.html#token={token}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
