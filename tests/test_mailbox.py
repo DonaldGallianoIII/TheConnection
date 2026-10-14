@@ -19,15 +19,17 @@ joined will warn there (open item O1). No test depends on `tc read` or
             one command, start() for the K3 senders, listener() for K4's
             first wait (proven in /proc/locks, killed by its own pid in the
             harness's teardown). K2 loads tc as a module with TC_ROOT set
-            to the test's root before the load, and wraps
-            pathlib.Path.rename and Path.write_text for one in-process
-            send, restored in teardown. K3 takes an flock on the root's
-            mail/.seq itself and reads /proc/locks to prove each send is
-            blocked on it. K5 sets message file times with os.utime. Reads
-            and writes only inside each test's temp folder.
-@deps       python3 stdlib (contextlib, fcntl, importlib, io, os, pathlib,
-            re, shlex, subprocess, sys, time, unittest, unittest.mock);
-            tests/_root.py; ../tc; Linux only (flock, /proc/locks).
+            to the test's root before the load, and wraps os.open,
+            builtins.open, pathlib.Path.write_text and Path.rename for one
+            in-process send, all restored as the send returns or raises.
+            K3 takes an flock on the root's mail/.seq itself and reads
+            /proc/locks to prove each send is blocked on it. K5 sets
+            message file times with os.utime. Reads and writes only inside
+            each test's temp folder.
+@deps       python3 stdlib (builtins, contextlib, fcntl, importlib, io, os,
+            pathlib, re, shlex, subprocess, sys, time, unittest,
+            unittest.mock); tests/_root.py; ../tc; Linux only (flock,
+            /proc/locks).
 @complexity O(1) tc commands per test, except K3: S = SENDERS = 50
             children, and each poll of /proc/locks is O(k + S) over k
             other lines (tens). K3 waits HOLD_SECONDS = 1 s on purpose and
@@ -39,6 +41,7 @@ joined will warn there (open item O1). No test depends on `tc read` or
             is kept between tests.
 """
 
+import builtins
 import contextlib
 import fcntl
 import importlib.machinery
@@ -133,6 +136,10 @@ TC_MODULE_NAME = "tc_under_test_mailbox"
 # K2. tc reads its settings from environment variables with this prefix.
 # None reaches the in-process load, as the harness keeps them from children.
 TC_ENV_PREFIX = "TC_"
+# K2 fix (Claude Opus 5.5, unreviewed). The open() mode letters that can
+# create a file: write, append, exclusive create. "r+" opens only a file
+# that already exists, so it is not here.
+CREATING_MODE_LETTERS = frozenset("wax")
 
 
 def said(args, code, out, err):
@@ -245,6 +252,24 @@ def load_tc(root):
     return module
 
 
+# K2 fix (Claude Opus 5.5, unreviewed).
+def named(path):
+    """`path` made absolute, its folders resolved and its last part kept as given.
+
+    A link at the last part is named, not followed, so a K2 record says
+    which name a call touched. K2 puts every path it records or compares
+    through this, so the records and the inbox listing compare alike.
+
+    @interacts  resolves the folders above `path` (lstat and readlink on
+                each). Writes nothing.
+    @deps       os, pathlib.
+    @complexity O(d) over d parts of the path (about ten under a temp root).
+    @alloc      one Path, returned.
+    """
+    path = pathlib.Path(os.fsdecode(path))
+    return path.parent.resolve() / path.name
+
+
 class MailboxTest(unittest.TestCase):
     """K1 to K8: the core mailbox, one test per row of the plan's table.
 
@@ -317,23 +342,39 @@ class MailboxTest(unittest.TestCase):
             self.assertEqual(lines(out), [f"no unread mail for {B}"],
                              f"the second read did not say there is no unread mail{ran}")
 
+    # K2 fix (Claude Opus 5.5, unreviewed): records every way tc can create a file.
     def test_k2_a_message_appears_only_whole(self):
         """K2. One in-process send: the .md is made only by a rename from a .tmp sibling.
 
-        White box. tc is loaded as a module under this root, and
-        pathlib.Path.rename and Path.write_text are wrapped to record each
-        call. At the rename that makes the message, the test records whether
+        White box. tc is loaded as a module under this root. For the one
+        send, each way tc can create a file is wrapped to record it, so the
+        test does not lean on one write API: os.open with O_CREAT (tc's
+        write_new_file goes this way), builtins.open given a path in a mode
+        that creates, and Path.write_text. Each record holds the name and
+        whether anything was at it before the call. Path.rename is wrapped
+        too. At the rename that makes the message, the test records whether
         the final name already existed, the .tmp's bytes, and what unread()
-        lists right then, while the .tmp sits in the inbox. Must reject a
-        send that writes the final name directly: it fails every run, not by
+        lists right then, while the .tmp sits in the inbox.
+
+        Then: the recorder saw at least one creation; none was the final
+        name; one rename made the final name, from a sibling ending .tmp
+        that a recorded creation made fresh; the final name did not exist
+        before it; unread() at that moment listed no .tmp. A recorder that
+        misses how tc writes fails loudly, never passes. Must reject a send
+        that writes the final name directly: it fails every run, not by
         timing luck.
 
-        @interacts  loads tc as a module; wraps Path.rename and
-                    Path.write_text until teardown; runs tc's main() in
-                    process with sys.argv patched and stdout and stderr
+        @interacts  loads tc as a module; wraps os.open, builtins.open,
+                    Path.write_text and Path.rename for the send only, all
+                    restored when main() returns or raises; runs tc's main()
+                    in process with sys.argv patched and stdout and stderr
                     captured.
-        @deps       load_tc, unittest.mock, contextlib, io.
-        @complexity O(1): one send, one rename, one or two writes recorded.
+        @deps       load_tc, named, CREATING_MODE_LETTERS; builtins,
+                    contextlib, io, os, unittest.mock.
+        @complexity O(c + u + n): c creations recorded (the .seq file, any
+                    lock file, the .tmp: under ten), and one rename that
+                    lists u unread files (none here) and reads the .tmp's
+                    n bytes.
         @alloc      the module, two small lists of records; one TcRoot,
                     removed on exit.
         """
@@ -343,64 +384,117 @@ class MailboxTest(unittest.TestCase):
                              f"tc loaded with MAIL {tc.MAIL}, not this test's root; stopping "
                              f"before it could touch a live mailbox")
             box = root.path / "mail" / f"to-{B}"
-            writes, renames = [], []
-            real_rename = pathlib.Path.rename
+            creations, renames = [], []
+            real_os_open = os.open
+            real_open = builtins.open
             real_write_text = pathlib.Path.write_text
+            real_rename = pathlib.Path.rename
+
+            def created(how, path):
+                """Record that `how` is about to create `path`, and whether anything is there now.
+
+                @interacts  lstats `path` (a link counts as there). Writes
+                            nothing.
+                @deps       named; os.
+                @complexity O(d) over d parts of the path.
+                @alloc      one dict, appended to creations.
+                """
+                creations.append({"how": how, "path": named(path), "existed": os.path.lexists(path)})
+
+            def os_open(path, flags, *args, **kwargs):
+                """Record a path opened with O_CREAT, then open as the real os.open does.
+
+                A relative path given with dir_fd is recorded against the
+                working folder, so it never matches the .tmp: K2 then fails
+                loudly. tc passes no dir_fd.
+
+                @interacts  creates or opens `path` through the real call.
+                @deps       created; os.
+                @complexity O(d) over d parts of the path.
+                @alloc      one dict when O_CREAT is set.
+                """
+                if flags & os.O_CREAT:
+                    created("os.open", path)
+                return real_os_open(path, flags, *args, **kwargs)
+
+            def builtin_open(file, mode="r", *args, **kwargs):
+                """Record a path opened in a mode that creates, then open as the real open() does.
+
+                A descriptor (an int) is not recorded here: os.open made
+                that file and recorded it.
+
+                @interacts  opens `file` through the real call.
+                @deps       created, CREATING_MODE_LETTERS; builtins.
+                @complexity O(d) over d parts of the path.
+                @alloc      one dict when the mode creates.
+                """
+                if not isinstance(file, int) and CREATING_MODE_LETTERS & set(mode):
+                    created("open", file)
+                return real_open(file, mode, *args, **kwargs)
 
             def write_text(path, data, *args, **kwargs):
                 """Record the path, then write as the real Path.write_text does.
 
                 @interacts  writes `path` through the real method.
-                @deps       pathlib.
+                @deps       created; pathlib.
                 @complexity O(n) over n characters of `data`.
-                @alloc      one list entry.
+                @alloc      one dict.
                 """
-                writes.append(pathlib.Path(path).resolve())
+                created("Path.write_text", path)
                 return real_write_text(path, data, *args, **kwargs)
 
             def rename(path, target):
                 """Record the state at this moment, then rename as the real Path.rename does.
 
-                @interacts  reads the source file and lists the inbox
-                            through tc's unread(); renames through the real
-                            method.
-                @deps       pathlib; tc.unread.
+                @interacts  reads the source file, lstats the target, and
+                            lists the inbox through tc's unread(); renames
+                            through the real method.
+                @deps       named; os, pathlib; tc.unread.
                 @complexity O(u + n) over u unread files and n bytes of the
                             source.
                 @alloc      one dict per call.
                 """
-                src, dst = pathlib.Path(path), pathlib.Path(target)
+                src = pathlib.Path(path)
                 renames.append({
-                    "src": src.resolve(),
-                    "dst": dst.resolve(),
-                    "dst_existed": dst.exists(),
+                    "src": named(path),
+                    "dst": named(target),
+                    "dst_existed": os.path.lexists(target),
                     "src_bytes": src.read_bytes() if src.is_file() else None,
                     "unread": [p.name for p in tc.unread(B)],
                 })
                 return real_rename(path, target)
 
-            for name, wrapper in (("rename", rename), ("write_text", write_text)):
-                patcher = mock.patch.object(pathlib.Path, name, wrapper)
-                patcher.start()
-                self.addCleanup(patcher.stop)
-
+            wrapped = ((os, "open", os_open), (builtins, "open", builtin_open),
+                       (pathlib.Path, "write_text", write_text), (pathlib.Path, "rename", rename))
             argv = ["tc", "send", "--from", A, "--to", B, BODY]
             out, err = io.StringIO(), io.StringIO()
             code = 0
-            with mock.patch.object(sys, "argv", argv), \
-                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            # Every wrap is undone when this block exits, before any
+            # assertion runs and before the TcRoot is removed.
+            with contextlib.ExitStack() as patched:
+                for owner, name, wrapper in wrapped:
+                    patched.enter_context(mock.patch.object(owner, name, wrapper))
+                patched.enter_context(mock.patch.object(sys, "argv", argv))
+                patched.enter_context(contextlib.redirect_stdout(out))
+                patched.enter_context(contextlib.redirect_stderr(err))
                 try:
                     tc.main()
                 except SystemExit as stop:
                     code = 0 if stop.code is None else stop.code
             ran = (f"\nin process: tc main() with argv {argv[1:]}{said(argv[1:], code, out.getvalue(), err.getvalue())}"
-                   f"\nwrite_text calls: {writes}\nrename calls: {renames}")
+                   f"\nfile creations: {creations}\nrename calls: {renames}")
 
             self.assertEqual(code, 0, ran)
             finals = sorted(box.glob("*.md"))
             self.assertEqual(len(finals), 1, f"the inbox holds {finals}, not one message{ran}")
-            final = finals[0].resolve()
-            self.assertNotIn(final, writes, f"send wrote the final name {final.name} directly{ran}")
+            final = named(finals[0])
+            # A recorder that saw nothing proves nothing, so it fails here
+            # rather than let the next check pass by not checking.
+            self.assertNotEqual(creations, [],
+                                f"recorded no file creation during the send, so this test's "
+                                f"recorder misses how tc writes; wrap what tc now uses{ran}")
+            created_paths = [c["path"] for c in creations]
+            self.assertNotIn(final, created_paths, f"send created the final name {final.name} directly{ran}")
             made = [r for r in renames if r["dst"] == final]
             self.assertEqual(len(made), 1, f"{final.name} was not made by exactly one rename{ran}")
             made = made[0]
@@ -408,11 +502,17 @@ class MailboxTest(unittest.TestCase):
                              f"the rename's source is not a sibling of {final.name}{ran}")
             self.assertTrue(made["src"].name.endswith(".tmp"),
                             f"the rename's source {made['src'].name} does not end .tmp{ran}")
-            # Proves the write record sees tc's writes, so the "never wrote
-            # the final name" check above cannot pass by not checking.
-            self.assertIn(made["src"], writes,
-                          f"the .tmp was not written through Path.write_text, so this test's "
-                          f"write record misses tc's writes; wrap what tc now uses{ran}")
+            # Proves the creation record sees tc's writes, whichever API
+            # made them, so "never created the final name" cannot pass by
+            # not checking.
+            self.assertIn(made["src"], created_paths,
+                          f"no recorded creation (os.open with O_CREAT, open() in a creating "
+                          f"mode, Path.write_text) made the .tmp, so this test's recorder "
+                          f"misses how tc writes; wrap what tc now uses{ran}")
+            fresh = [c for c in creations if c["path"] == made["src"] and not c["existed"]]
+            self.assertNotEqual(fresh, [],
+                                f"something was already at {made['src'].name} when tc created it, "
+                                f"so no recorded creation made it{ran}")
             self.assertFalse(made["dst_existed"],
                              f"{final.name} existed before the rename, so it was not made by it{ran}")
             self.assertEqual(made["src_bytes"], finals[0].read_bytes(),
