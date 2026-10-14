@@ -2,8 +2,11 @@
 Tests for `tc health` and `tc watch` against a throwaway TC_ROOT.
 
 @interacts  runs ../tc as a subprocess; starts and kills its own `tc wait`
-            listeners; touches only a tempdir
-@deps       python3 stdlib (unittest, subprocess, tempfile, json)
+            listeners; touches only a tempdir. HealthCardsTest (CARDS R5,
+            Claude Opus 5.5, unreviewed) runs tc through tests/_root.py
+            instead, so no identity variable of the session reaches it.
+@deps       python3 stdlib (unittest, subprocess, tempfile, json);
+            tests/_root.py for HealthCardsTest
 @complexity O(1) per test; the slowest waits a few poll intervals (about 5 s)
 @alloc      one tempdir per test, removed in tearDown; every child process
             is killed in tearDown
@@ -19,6 +22,13 @@ import time
 import unittest
 
 TC = pathlib.Path(__file__).resolve().parent.parent / "tc"
+# CARDS R5 (Claude Opus 5.5, unreviewed): the harness, for HealthCardsTest.
+# Run as `python3 -m unittest tests.test_health` from the repo root, tests/
+# is not on sys.path; under discover it is. Add it once so both work.
+HERE = pathlib.Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+import _root  # noqa: E402  (needs the path line above)
 SETTLE_TIMEOUT = 10
 SETTLE_STEP = 0.2
 # Thresholds no real machine reaches, so only the condition under test fires.
@@ -107,6 +117,49 @@ class HealthTest(unittest.TestCase):
         r = self.tc("watch", "a", "--heartbeat", "30", *QUIET)
         self.assertEqual(r.returncode, 3)
         self.assertIn("ALREADY WATCHING", r.stdout)
+
+
+# CARDS R5 (Claude Opus 5.5, unreviewed): tc health shows cards.
+class HealthCardsTest(unittest.TestCase):
+    """`tc health` and `tc health --json` show every card.
+
+    @interacts  runs tc through tests/_root.py under a throwaway TC_ROOT;
+                identity variables go only where a call passes them.
+    @deps       _root.TcRoot.
+    @complexity O(1): two joins, one card, three health runs.
+    @alloc      one TcRoot, removed when its context exits.
+    """
+
+    def test_health_shows_each_card_in_text_and_json(self):
+        """The `cards` key lists name, kind, account, route, reports_to; the `cards` line says the same in words.
+
+        With no cards: an empty list and `cards      none`.
+
+        @interacts  three tc health runs, two joins, one tc card.
+        @deps       _root.TcRoot.tc.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            empty_json = json.loads(root.tc("health", "--json")[1])
+            empty_text = root.tc("health")[1]
+            root.tc("join", "b", "--reports-to", "a", env={"CLAUDECODE": "1"})
+            root.tc("join", "c", "--account", "work", env={"CODEX_THREAD_ID": "t1"})
+            root.tc("card", "x", "--ssh", "u@h", "--account", "far")
+            code, out, err = root.tc("health", "--json")
+            tcode, text, terr = root.tc("health")
+        self.assertEqual(empty_json["cards"], [])
+        self.assertIn("\ncards      none\n", empty_text)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["cards"], [
+            {"name": "b", "kind": "claude", "account": "unknown", "route": "local", "reports_to": "a"},
+            {"name": "c", "kind": "codex", "account": "work", "route": "codex", "reports_to": None},
+            {"name": "x", "kind": "other", "account": "far", "route": "ssh", "reports_to": None},
+        ])
+        self.assertEqual(tcode, 0, terr)
+        self.assertIn("\ncards      b (claude, account unknown, route local), reports to a\n"
+                      "           c (codex, account work, route codex)\n"
+                      "           x (other, account far, route ssh)\n", text)
 
 
 if __name__ == "__main__":

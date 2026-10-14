@@ -28,8 +28,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             read/peek/wait-poll O(u), u unread messages in one inbox,
             single digits in practice. log O(t), t total messages ever,
             low hundreds per job. health and each watch poll
-            O(p + k + n): p processes on the machine (hundreds), k lines in
-            /proc/locks (tens), n mailbox names (single digits).
+            O(p + k + n + c): p processes on the machine (hundreds), k lines
+            in /proc/locks (tens), n mailbox names and c cards (single digits).
             join O(1); card O(u) for its unread count; cards O(c), c cards.
 @alloc      one file per message, kept forever (read/ is the history); one
             card per name, replaced on a rejoin. Nothing
@@ -885,10 +885,42 @@ def mailbox_summary():
     return out
 
 
+# CARDS R5 (Claude Opus 5.5, unreviewed): the cards tc health shows.
+def cards_summary():
+    """Every card's name, kind, account, route and reports_to, in name order.
+
+    The name is the file's (cards/<name>.json), the one the router reads.
+    A card that is not a JSON object keeps its name with the other four
+    fields null, so it still shows.
+
+    @interacts  reads cards/*.json through all_cards. Writes nothing.
+    @deps       all_cards; pathlib.
+    @complexity O(c) over c cards (single digits).
+    @alloc      one list of c small dicts, returned.
+    """
+    out = []
+    for file_name, card in all_cards():
+        card = card or {}
+        out.append({"name": pathlib.Path(file_name).stem, "kind": card.get("kind"),
+                    "account": card.get("account"), "route": card.get("route"),
+                    "reports_to": card.get("reports_to")})
+    return out
+
+
 def health_snapshot():
+    """One snapshot of the machine, sessions, listeners, watchers, mail and cards.
+
+    @interacts  reads /proc, mail/, status/ and cards/; may run nvidia-smi
+                (machine_stats). Writes nothing.
+    @deps       now_iso, machine_stats, session_counts, listeners,
+                mailbox_summary, cards_summary.
+    @complexity O(p + k + n + c): p processes, k lines in /proc/locks, n
+                mailbox names, c cards.
+    @alloc      one dict, returned.
+    """
     return {"time": now_iso(), "machine": machine_stats(), "sessions": session_counts(),
             "listeners": listeners("wait"), "watchers": listeners("watch"),
-            "mail": mailbox_summary()}
+            "mail": mailbox_summary(), "cards": cards_summary()}
 
 
 def _gpu_text(gpus):
@@ -905,6 +937,13 @@ def _who(table):
 
 
 def cmd_health(args):
+    """`tc health [--json]`: the snapshot, as JSON or one screen of words.
+
+    @interacts  see health_snapshot; prints to stdout.
+    @deps       health_snapshot, describe_card, _who, _age, _gpu_text; json.
+    @complexity as health_snapshot.
+    @alloc      the snapshot and the printed text, freed on exit.
+    """
     snap = health_snapshot()
     if args.json:
         print(json.dumps(snap, indent=2))
@@ -914,6 +953,10 @@ def cmd_health(args):
     print(f"sessions   {s['claude']} Claude Code · {s['codex']} Codex")
     print(f"listeners  {_who(snap['listeners'])}")
     print(f"watchers   {_who(snap['watchers'])}")
+    # CARDS R5 (Claude Opus 5.5, unreviewed): one line per card, `?` for a field it lacks.
+    cards = [describe_card({k: ("?" if v is None and k != "reports_to" else v) for k, v in c.items()})
+             for c in snap["cards"]]
+    print("cards      " + ("\n           ".join(cards) if cards else "none"))
     rows = []
     for name, b in snap["mail"].items():
         bits = [f"{b['unread']} unread"]
