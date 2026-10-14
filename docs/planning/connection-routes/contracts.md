@@ -26,11 +26,15 @@ pause; no lane reuses a number for a new meaning.
 | 6 | bad name, under C0, for any name argument including `--reports-to`; also a self-report and a bad ssh target or remote path | every command that takes a name, `card` | this plan (C0, C1) |
 | 7 | refused by the gate | `gate` | this plan (C3) |
 | 8 | message over `SEND_BODY_MAX_BYTES` | `send`, `gate` | this plan (C0) |
+| 9 | usage error: an unknown command, flag or missing argument; the usage text goes to stderr | every command (the parser) | this plan (D12) |
 
-Collision, known and not changed by this plan: argparse exits **2** on a
-usage error, the same code as a `wait` timeout. A listener that exits 2
-with a `usage:` line on stderr was mistyped and never listened. JOIN.md
-(task D2) says to read stderr on an exit 2 before re-arming.
+Why 9 (D12): argparse exits 2 on a usage error, the same code as a `wait`
+timeout. A mistyped listener exits at once, its session reads 2 as a
+timeout and re-arms the same typo, and that loops paid wakes. `tc`'s
+parser overrides `ArgumentParser.error` to exit `EXIT_USAGE` (9) instead;
+subparsers inherit it. A session re-arms its listener only on 0 (after
+reading the mail) or 2, and never starts a second one on 3; on any other
+code it stops and tells its relay (task D2).
 
 ---
 

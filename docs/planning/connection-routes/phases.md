@@ -102,7 +102,7 @@ commit can point at a test by name.
 ## CARDS (P2, wave 1)
 
 Exit: a Claude session sends to a Codex session and the Codex wakes,
-through `tc send` alone. Proven by hand once (QA script, task D4), and by
+through `tc send` alone; a usage error exits 9, never 2. Proven by hand once (QA script, task D4), and by
 the fake-codex tests always.
 
 ### R1. Names (C0)
@@ -110,9 +110,14 @@ the fake-codex tests always.
 - **Do:** `valid_name()`; every command checks names first; exit 6.
 - **Test:** property: no command writes anything for a bad name. Input:
   `tc send --from a --to ../x hi`, `tc read "a b"`, `tc wait ..`,
-  `tc send --from a --to -x hi`. Expected: exit 6, the C0 words, the
-  root's file list unchanged. Must reject: a check on `--to` only (also
-  test `--from` and `read`); a rule that lets a leading dash through.
+  `tc send --from a --to=-x hi`. Expected: exit 6, the C0 words, the
+  root's file list unchanged. The leading dash case must use the `=` form:
+  `--to -x` with a space never reaches `valid_name()`, because the parser
+  reads `-x` as a flag and refuses first (exit 9 after R6, 2 before it).
+  Today the `=` form gets through and makes `mail/to--x/` (seen by hand at
+  b6a95d4). Test both forms; both write nothing. Must reject: a check on
+  `--to` only (also test `--from` and `read`); a rule that lets a leading
+  dash through.
 - **Verify:** `python3 -m unittest tests.test_names -v`.
 
 ### R2. Cards and `tc join`, `tc card`, `tc cards` (C1)
@@ -173,9 +178,19 @@ the fake-codex tests always.
   account, route, reports_to.
 - **Verify:** `python3 -m unittest tests.test_health -v`.
 
----
-
-## SSH (P3, wave 2b, after SHARED merges)
+### R6. Usage errors exit 9 (D12)
+- **Files:** `tc`, `tests/test_usage.py`.
+- **Do:** a parser class whose `error()` prints the usage and the message
+  to stderr and exits `EXIT_USAGE` (9), used by `main()` and inherited by
+  every subparser. Add `EXIT_USAGE` beside the other exit constants.
+- **Test:** `tc wait --timeot 1 b` exits 9 with `usage:` on stderr and no
+  `TIMEOUT` on stdout; `tc wait b --timeout 1` still exits 2 with
+  `TIMEOUT`; `tc` with no command exits 9; `tc frobnicate` exits 9;
+  `tc send --to b hi` (no `--from`) exits 9 and writes nothing. Must
+  reject: an override on the top parser only (the `wait` typo goes through
+  the subparser, so it would still exit 2).
+- **Verify:** `python3 -m unittest tests.test_usage -v`.
+- **PR:** Make a usage error exit 9, so a mistyped listener cannot pass for a timeout.
 
 SSH starts from SHARED's merge, not beside it: both edit `main()`'s
 argparse block and `tc`'s doc block, and SHARED is small. SSH adds its
@@ -370,9 +385,10 @@ talking by following the README alone.
 ### D2. JOIN.md and JOIN-CODEX.md
 - **Files:** `JOIN.md`, `JOIN-CODEX.md` (new).
 - **Do:** JOIN.md gains `tc join <name> --account <label> --reports-to
-  <relay>` (the relay that pointed it here), the exit 2 note from the
-  contracts' exit code list (read stderr for `usage:` before re-arming),
-  and the proven-listener rule (a listener is live when `tc health` names its pid).
+  <relay>` (the relay that pointed it here), the re-arm rule from D12
+  (re-arm only on exit 0 after reading the mail, or exit 2 for `TIMEOUT` or
+  `KEEPALIVE`; on 3 one is already running, so start none; on any other
+  code do not re-arm, and tell the relay), and the proven-listener rule (a listener is live when `tc health` names its pid).
   JOIN-CODEX.md: `tc join`, no listener, go idle, reply with `tc send`; the
   mail arrives as a queued message.
 
