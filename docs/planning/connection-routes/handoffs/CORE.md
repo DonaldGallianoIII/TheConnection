@@ -23,7 +23,7 @@ No amend, reset or rebase. Nothing pushed or merged. `tc` is not edited:
 all on `tests/_root.py`. Every test runs under its own `TcRoot`. Every
 assertion message carries the command (`$ tc ...`), its exit code, its
 stdout and its stderr. K2's message carries the in-process argv, the
-captured output and every recorded `write_text` and `rename` call.
+captured output and every recorded file creation and `rename` call.
 
 | # | Test | What it checks |
 |---|---|---|
@@ -73,12 +73,14 @@ tests.test_mailbox -v` printed no warning.
    calls `main()`, so it holds when CARDS changes what `cmd_send()` does
    inside (C2 keeps its arguments and its output for route `local`). It
    calls `unread(name)`, a name `contracts.md` lists as today's.
-6. **K2 asserts the `.tmp` went through `Path.write_text`.** That proves
-   the write record sees tc's writes, so "never wrote the final name"
-   cannot pass by not checking. If CARDS writes the `.tmp` another way,
-   K2 fails with a message saying to wrap what tc uses now. The rename
-   checks would still catch a direct write made any other way; that
-   variant was not run (see "Not verified").
+6. **K2 asserts a recorded creation made the `.tmp`.** It records
+   `os.open` with `O_CREAT`, `open()` in a creating mode and
+   `Path.write_text` (widened in `62d8a6d`, when CARDS moved to `os.open`
+   with `O_EXCL` and `O_NOFOLLOW`). That proves the record sees tc's
+   writes, so "never wrote the final name" cannot pass by not checking. A
+   write path the record misses fails with a message saying to wrap what
+   tc uses now. A direct write through `open(path, "w")` was run as a
+   mutation in `62d8a6d` and went red.
 7. **K7's "no file"** is read as no file in any inbox, unread or
    `read/`. K7 does not check whether the counter moved.
 8. **K4 uses three names in one root**: b (mail waiting), c (no mail),
@@ -179,9 +181,9 @@ run: the worktree held no `mail/` or `status/`, and `/tmp` held no
   create an inbox), but they were not run on CARDS' branch.
 - These tests on the P0 fixer's `tests/_root.py`. They use only the
   documented calls, but were run only on the harness at `89bdd2e`.
-- K2 against a direct write that skips `Path.write_text` (for example
-  `open(path, "w")`). The rename checks should turn it red; that mutation
-  was not run.
+- K2 against a rename made with `os.replace` or `Path.replace`: it
+  would fail loudly at "not made by exactly one rename", a false red,
+  not a false pass. Not run.
 - The 50-sender count against a lock misused rather than missing (taken
   after the read, or dropped before the write). Not a mutation test; not
   run.
