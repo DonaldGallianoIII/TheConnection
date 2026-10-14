@@ -2,7 +2,11 @@
 
 Model:  Claude Opus 5.5 (the CARDS lane agent), 2026-10-14
 Status: unreviewed
-Pause:  open. Built to the contract as written; the fix is one line.
+Pause:  settled by D13 (a2, for Donald, 2026-10-14). Option 3, built in
+        the CARDS fix round 1 (commit 8bb1f8b): warn only with no inbox
+        and no card. It looks for the card file on disk, not at
+        `deliver_local`'s `card` argument, because the gate (C3) calls
+        `deliver_local` directly (synthesis REC-2).
 
 ## The question
 
@@ -30,5 +34,8 @@ Option 3. The warning's words are about joining, and the card is the
 record of a join. It keeps `tc join` to the one file C1 names. A name
 nobody joined still gets the warning, which is what O1 wants.
 
-Until this is settled, `tests/test_router.py` does not assert stderr on a
-send to a joined name (`test_a_local_card_delivers_where_to_says_and_reports_to_routes_nothing`).
+Settled: `tests/test_router.py` now asserts an empty stderr on the first
+send to a joined name
+(`test_a_local_card_delivers_where_to_says_and_reports_to_routes_nothing`),
+and `test_the_new_inbox_warning_keys_on_the_card_file` calls
+`deliver_local` with no card in hand, as the gate will.

@@ -2,7 +2,10 @@
 
 Model:  Claude Opus 5.5 (the CARDS lane agent), 2026-10-14
 Status: unreviewed
-Pause:  open. Built to a default for each; each is one line to change.
+Pause:  settled by D13 (a2, for Donald, 2026-10-14). Items 1 and 2
+        stand as built (exit 1, kind `other`). Item 3 takes the other
+        option, built in the CARDS fix round 1 (commit 8bb1f8b):
+        `--account`, else `unknown`, never `CLAUDE_CONFIG_DIR`.
 
 C1 says how `tc join` fills a card. For `tc card` (a name on another
 machine) it names the flags but leaves three things open.

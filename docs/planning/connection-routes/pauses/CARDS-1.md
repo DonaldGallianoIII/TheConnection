@@ -2,7 +2,8 @@
 
 Model:  Claude Opus 5.5 (the CARDS lane agent), 2026-10-14
 Status: unreviewed
-Pause:  open. Built to the recommendation below; nothing waits on it.
+Pause:  settled by D13 (a2, for Donald, 2026-10-14). Option 1 stands as
+        built, and phases.md R2 on the dev branch now names both forms.
 
 ## The question
 

@@ -2,8 +2,9 @@
 
 Model:  Claude Opus 5.5 (the CARDS lane agent), 2026-10-14
 Status: unreviewed
-Pause:  open. The test rejects the mutation anyway; only the plan's
-        sentence is wrong.
+Pause:  settled by D13 (a2, for Donald, 2026-10-14). Option 1 stands as
+        built, and phases.md R6 on the dev branch now names the missing
+        `--from` case as the one that rejects the mutation.
 
 ## The question
 

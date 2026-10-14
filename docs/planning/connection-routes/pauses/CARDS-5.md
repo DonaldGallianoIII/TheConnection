@@ -2,7 +2,12 @@
 
 Model:  Claude Opus 5.5 (the CARDS lane agent), 2026-10-14
 Status: unreviewed
-Pause:  open, for the SSH lane before S1. Nothing in CARDS depends on it.
+Pause:  settled by D13 (a2, for Donald, 2026-10-14). Option 1, for the
+        SSH lane to build in S1: a leading `~/` goes bare and the rest is
+        quoted; `~` alone and `~user/...` are refused with exit 6; the far
+        side is assumed to run a POSIX login shell, which the README says.
+        `tc card` already refuses both `~` forms; the CARDS fix round 1
+        added their tests (commit 8bb1f8b).
 
 ## The question
 

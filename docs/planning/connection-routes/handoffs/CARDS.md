@@ -17,11 +17,22 @@ Where:  ~/TheConnection-lanes/cards
 | R4 | `8698576` | Add the codex route: deliver the mail, then ring the Codex thread with codex queue when its inbox was empty. |
 | R5 | `0dd58c2` | Show each card in tc health: a cards line in words and a cards key in --json. |
 | R6 | `4196411` | Make a usage error exit 9, so a mistyped listener cannot pass for a timeout. (phases.md's line) |
-| Handoff | the commit that adds this file | Write the CARDS handoff and its six pauses. |
+| Handoff | `0739794` | Write the CARDS handoff and its six pauses. |
+| Fix 1 (a) | `fe3f7fa` | Stop the codex route losing a wake, and lock each inbox (D14, LOW-9) |
+| Fix 1 (b) | `8bb1f8b` | Settle the card and router pauses (D13) and tighten the refusals and .tmp writes |
+| Fix 1 (c) | `fd01c39` | Kill a timed-out ring's whole process group, name the root in the ring, fix stale tags |
+| Fix 1 (d) | the commit that changes this file | Bring the CARDS handoff and its six pauses up to fix round 1 |
 
 `phases.md` gives a PR line for R6 only; the other five are written in
 its style. No amend, reset or rebase. Nothing pushed or merged.
-`tests/_root.py` was not edited.
+`tests/_root.py` was not edited, in the lane or in the fix round.
+
+Fix round 1 ran the brief
+`audits/2026-10-14-1752-standard/fixes/round-1.md`: 20 items from that
+audit's synthesis, built to the dev branch's contracts.md C0 to C2 (with
+D13 and D14) and phases.md R1 to R6. See "Fix round 1" below. The
+sections from here to "Fix round 1" record the lane as first built, with
+the lines the fix round made false brought up to date.
 
 R6's parser class was not done early. R1's test of `--to -x` (with a
 space) asserts a usage refusal (`usage:` on stderr, exit neither 0 nor 6,
@@ -53,13 +64,16 @@ written by `write_card` to `cards/<name>.json.<pid>.tmp` and renamed.
   exit 1 (`EXIT_REFUSED`), words why, nothing written. Prints
   `joined as <name> (<kind>, account <a>, route <r>)`, plus
   `, reports to <N>`. A rejoin replaces the card and resets `joined_at`.
-- `account_label`: `--account`, else `CLAUDE_CONFIG_DIR`'s base name,
-  else `unknown`; a blank at any step falls through.
+- `account_label` (join): `--account`, else `CLAUDE_CONFIG_DIR`'s base
+  name, else `unknown`; a blank at any step falls through. Since fix round
+  1, `tc card` uses `far_account`: `--account`, else `unknown` (D13).
 - `tc card <name> --ssh T [--remote-tc P] [--account L] [--reports-to N]
   [--force]`: route ssh, kind other, `ssh: {target, tc}` with
   `~/TheConnection/tc` as the default path. A target or path that fails
   C1's checks exits 6. Unread mail for the name refuses it (exit 1,
-  naming the count) unless `--force`.
+  naming the count) unless `--force`. Since fix round 1 the count and the
+  write share the inbox lock, and a note on stderr says sends are refused
+  until the ssh route is built.
 - A name that reports to itself exits 6 with `tc: <name> cannot report
   to itself`. `--reports-to` takes a C0 name.
 - `tc cards`: one line per card in the same words, `route ssh to <T>` for
@@ -70,7 +84,8 @@ written by `write_card` to `cards/<name>.json.<pid>.tmp` and renamed.
 route. `cmd_send` checks names, then the body's size, then the empty
 message, then reads the card and calls the route. No card is route
 local. A route not in `ROUTES` answers `route <r> is not built yet`, exit
-1, nothing written. `read_body` reads at most `SEND_BODY_MAX_BYTES + 1`
+1, nothing written (since fix round 1: `tc send: route <r> is not built
+yet; nothing sent`). `read_body` reads at most `SEND_BODY_MAX_BYTES + 1`
 (1 MiB plus one) bytes from stdin and decodes them with stdin's own
 encoding and error mode; a text argument is measured in its argv bytes
 (`os.fsencode`). Over the limit: `tc send: message over 1 MiB; this is a
@@ -81,21 +96,25 @@ inbox print `no unread mail for <name>` and create nothing. A card that is
 not a JSON object refuses the send, exit 1. Nothing reads `reports_to`
 to route.
 
-**R4, the codex route (C2, D3).** `deliver_codex` counts unread first
-(`unread_count`, which never makes the inbox), delivers through
-`deliver_local`, and when the count was 0 runs `codex queue --thread <t>
---message "MAIL: <n> unread for <to>. Run: <tc> read <to>, act on it,
-reply with <tc> send --from <to> --to <sender>."` with stdin from
-`/dev/null` and `CODEX_RING_SECONDS = 30`. Exit 0 adds `rang codex <to>
-(queued; delivered when its turn ends or the session is resumed)`. Any
-other exit, a timeout, codex missing, or no `thread_id` adds `ring failed
-for <to>: <reason>; the mail is in its inbox`; the send exits 0. `<tc>`
-is tc's resolved path. `ROUTES` gains `"codex": deliver_codex`.
+**R4, the codex route (C2, D3).** As first built: `deliver_codex`
+counts unread first (`unread_count`, which never makes the inbox),
+delivers through `deliver_local`, and when the count was 0 runs `codex
+queue --thread <t> --message "MAIL: <n> unread for <to>. Run: <tc> read
+<to>, act on it, reply with <tc> send --from <to> --to <sender>."` with
+stdin from `/dev/null` and `CODEX_RING_SECONDS = 30`. Exit 0 adds `rang
+codex <to> (queued; delivered when its turn ends or the session is
+resumed)`. Any other exit, a timeout, codex missing, or no `thread_id`
+adds `ring failed for <to>: <reason>; the mail is in its inbox`; the send
+exits 0. `ROUTES` gains `"codex": deliver_codex`. Fix round 1 rebuilt it
+to D14 (the marker, the inbox lock, the thread_id check), named the root
+in the ring and killed a timed-out ring's process group; see below.
 
 **R5, health shows cards.** `cards_summary()`: a list of `{name, kind,
-account, route, reports_to}`, in name order, name from the file. `tc
-health --json` has a `cards` key; `tc health` has a `cards` line (or
-`none`), one card per line in `tc cards`' words.
+account, route, reports_to}`, in name order, name from the file (fix
+round 1 added `ssh_target`). `tc health --json` has a `cards` key; `tc
+health` has a `cards` line (or `none`), one card per line in `tc cards`'
+words. As first built that was false for an ssh card, which lost its
+target; fix round 1 (LOW-4) made it true.
 
 **R6, usage errors (D12).** `EXIT_USAGE = 9` beside the other exit
 constants. `TcParser(argparse.ArgumentParser)` overrides `error()` to
@@ -108,7 +127,8 @@ top parser from it and passes `parser_class=TcParser` to
 `tests/test_router.py` (9), `tests/test_codex_route.py` (7),
 `tests/test_usage.py` (5), and `HealthCardsTest` in
 `tests/test_health.py` (1; the seven existing cases unchanged). 39 new
-tests; the suite went from 25 to 64.
+tests; the suite went from 25 to 64. Fix round 1 added 19 more (cards
+16, router 15, codex route 17), so the suite runs 83.
 
 ## What was not built
 
@@ -151,25 +171,37 @@ tests; the suite went from 25 to 64.
 
 ## Pauses
 
-All six are open and built to their recommendation; nothing waits on
-them.
+All six are settled by D13 (a2, for Donald, 2026-10-14), and each file's
+`Pause:` line says how. When the lane first handed off, the line here
+said all six were "built to their recommendation". Two were not: CARDS-2
+was built to the contract as written, and CARDS-4 item 3 to C1's chain.
+Fix round 1 built both to D13.
 
-- `pauses/CARDS-1.md`: `phases.md` R2 says `tc card x --ssh
+| Pause | Status | Built |
+|---|---|---|
+| CARDS-1 | settled by D13 | as built (option 1); phases.md R2 now names both forms |
+| CARDS-2 | settled by D13 | option 3, in fix round 1 (`8bb1f8b`), keyed on the card file |
+| CARDS-3 | settled by D13 | as built (option 1); phases.md R6 now names the `--from` case |
+| CARDS-4 | settled by D13 | items 1 and 2 as built; item 3 the other option, in fix round 1 (`8bb1f8b`) |
+| CARDS-5 | settled by D13 | option 1, for the SSH lane (S1); the `~` refusals' tests added in fix round 1 |
+| CARDS-6 | settled by D13 | the nine defaults as built; items 3, 4, 6 and 9 amended by fix round 1 |
+
+- `pauses/CARDS-1.md`: `phases.md` R2 said `tc card x --ssh
   -oProxyCommand=y` exits 6; with a space the parser refuses first, as
   R1's `--to -x` does. Both forms are tested; both write nothing.
-- `pauses/CARDS-2.md`: C2's new-inbox warning keys on the inbox, and
-  `tc join` makes none, so the first mail to a freshly joined name says
+- `pauses/CARDS-2.md`: C2's new-inbox warning keyed on the inbox, and
+  `tc join` makes none, so the first mail to a freshly joined name said
   "nobody has joined" (every Codex name, since it never runs `tc wait`).
-  Recommendation: warn only when there is no inbox and no card.
-- `pauses/CARDS-3.md`: R6's stated reason is wrong in Python 3.12.3.
+  Now it warns only when there is no inbox and no card.
+- `pauses/CARDS-3.md`: R6's stated reason was wrong in Python 3.12.3.
   `wait --timeot 1 b` is refused by the top parser, so a top-only
   override still exits 9 there; the subparser cases catch that mutation.
-- `pauses/CARDS-4.md`: `tc card`'s exit code over unread mail (built 1),
-  its kind (built `other`), and its account default (built C1's chain,
-  which labels a far name with the local session's account).
+- `pauses/CARDS-4.md`: `tc card`'s exit code over unread mail (1), its
+  kind (`other`), and its account default (now `--account`, else
+  `unknown`).
 - `pauses/CARDS-5.md`, for the SSH lane: C3's `shlex.join` quotes the
   default `~/TheConnection/tc`, and a quoted `~` never expands on the far
-  side. Recommendation: send a leading `~/` bare.
+  side. D13: send a leading `~/` bare.
 - `pauses/CARDS-6.md`: nine small defaults (watch's names, a blank
   account, an unreadable card, a codex card with no thread, the ring's
   `<n>`, the shape of health's `cards` key, `header_note`'s place,
@@ -311,17 +343,193 @@ warnings were there before this lane (GROUND's handoff says so).
 `check_voice.py` and `check_american.py` were clean on this file and on
 the six pause files.
 
+## Fix round 1
+
+Model: Claude Opus 5.5 (the CARDS fixer), 2026-10-14. Brief:
+`audits/2026-10-14-1752-standard/fixes/round-1.md`. Ids are the
+synthesis's. Every new block in `tc` carries a one-line `CARDS fix round
+1 (Claude Opus 5.5, unreviewed)` comment, and every function touched has
+its four tags brought up to date.
+
+**(a) `fe3f7fa`, the codex route and the inbox lock.**
+
+- Item 1, MEDIUM-1 (D14). `deliver_codex` holds `mail/.box-<to>.lock` alone
+  while it counts, checks `mail/.ring-pending-<to>`, delivers and
+  decides; it rings when the count was 0 or the marker is there, after
+  the lock is released. Exit 0 removes the marker; any other outcome
+  writes it (`.tmp`, then rename) and warns `ring failed for <to>:
+  <reason>; the mail is in its inbox; the next send to <to> rings again`.
+  `tc read` holds the same lock from its glob to its last rename. The
+  ring itself moved into `ring_codex`. If the marker cannot be written,
+  the warning says a later send may not ring, not that it will.
+- Item 2, MEDIUM-2 (D14). `THREAD_ID_PATTERN` (`[A-Za-z0-9][A-Za-z0-9._-]*`,
+  with its why). `ring_codex` hands codex only a str of that shape;
+  anything else is not rung, warns `its card's thread_id is not a thread
+  id`, and leaves the marker; exit 0. A missing or empty `thread_id`
+  keeps CARDS-6 item 4's words, `its card has no thread_id`, which D13
+  settled. `tc join` refuses a `CODEX_THREAD_ID` of another shape: exit
+  1, words why, no card.
+- Item 11, LOW-9. `tc card` counts unread mail and writes the card under the
+  inbox lock (alone). For the claim "a send cannot land in the gap" to
+  hold, the send side takes it too: a local send reads the card again
+  under the lock and lands under it. It takes the lock shared, so many
+  local senders to one inbox never queue behind each other, only on
+  `mail/.seq` as before (CORE's K3 checks that 50 senders all block on
+  `.seq`). The first card read stays outside the lock, so a refused send
+  still writes nothing.
+
+**(b) `8bb1f8b`, cards, the router, refusals.**
+
+- Item 3, MEDIUM-3 (D13). `deliver_local` warns only when the inbox did not
+  exist and `cards/<to>.json` does not exist: the card file on disk, not
+  the `card` argument (REC-2, the gate calls `deliver_local` directly).
+- Item 4, MEDIUM-4 (D13). `far_account`: `tc card`'s account is `--account`,
+  else `unknown`; it reads no environment. `cmd_card`'s doc block says
+  so. Kind `other` and the exit-1 refusal were already so.
+- Item 7, LOW-4. `cards_summary` adds `ssh_target` (null unless route ssh), the
+  list shape kept; `tc health` prints `route ssh to <target>` as `tc
+  cards` does.
+- Item 12, LOW-10. A card with no string `route`: `tc send: the card <path> has
+  no route; nothing sent.` plus who fixes it. Never `None`.
+- Item 13, LOW-11. The empty message goes through `refuse(..., EXIT_REFUSED)`;
+  same words, exit 1.
+- Item 14, LOW-12. The `EXIT_BAD_NAME` and `EXIT_REFUSED` comments list every
+  case the code uses them for, by row of the exit table.
+- Item 16, LOW-15. An unreadable card's refusal ends `Ask <to>'s owner to rejoin
+  (tc join <to>, run in <to>'s own session), or, if <to> lives on
+  another machine, write its card with tc card <to> --ssh <target>.`
+- Item 17, DEBT-3. `write_new_file` makes every `.tmp` (card, message, ring
+  marker) with `os.open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+  0o666)` (`NEW_FILE_FLAGS`, `NEW_FILE_MODE`; the umask applies). A
+  planted link or file refuses with words: `tc send: could not create
+  <tmp> (File exists); nothing sent` (the number is used), or `tc:
+  could not create <tmp> (File exists); no card written`.
+- Item 19, REC-13. While `ssh` is not in `ROUTES`, `tc card --ssh` prints `note:
+  sends to <name> are refused until the ssh route is built` on stderr
+  after the card line. The not-built refusal reads `tc send: route <r>
+  is not built yet; nothing sent`.
+
+**(c) `fd01c39`, tags, the ring's process group and words.**
+
+- Item 5, LOW-1 and LOW-2. The module `@complexity`: health O(p + k + n + m + c),
+  m every message file in every inbox and `read/`; a watch poll O(k +
+  n) plus one nvidia-smi run, no cards, O(p) once per heartbeat. The
+  same in `health_snapshot`'s and `cmd_watch`'s tags.
+- Item 6, LOW-3. `read_body`'s `@alloc`: up to 4 bytes a character, about 5 x
+  the limit at once.
+- Item 9, LOW-7. `ring_codex` starts codex with `start_new_session=True`; on a
+  timeout it sends SIGKILL to that process group (`os.killpg`) and reaps
+  the child.
+- Item 10, LOW-8. The ring decodes codex's output with `encoding="utf-8",
+  errors="replace"`.
+- Item 15, LOW-13. The fixture's label: `written from the plan's words (0
+  queued, 1 unknown thread), not recorded from a run of codex`, and
+  `test_the_fixture_is_labeled` checks that wording and that it names
+  the fakes' codes.
+- Item 18, REC-9. The ring's line: `Run: TC_ROOT=<root> <tc> read <to>, act on
+  it, reply with TC_ROOT=<root> <tc> send --from <to> --to <sender>.`,
+  the root resolved, both words through `shlex.quote`.
+
+**Tests added (19):** `tests/test_codex_route.py` 10, `tests/test_router.py`
+6, `tests/test_cards.py` 3. Thirteen older cases changed what they expect
+(new words, the root in the ring, the `.tmp` made by `os.open`, two `~`
+cases, the health case). The lock tests hold the lock in the
+test process and read `/proc/locks` to see the child blocked on it, never
+a fixed sleep. Three fakes of the test file's own (one that sleeps,
+one that starts a child, one that writes odd bytes) sit inside the harness's temp
+folder, ahead of the refusing stub; what they start is killed by its own
+pid. `test_router.py` and `test_cards.py` import `wait_until_blocked`
+and `RELEASE_CEILING_SECONDS` from `test_codex_route.py`, so there is one
+copy.
+
+### Mutations and their red runs (fix round 1)
+
+Same method as above: a scratch script outside the repo made each
+mutation as an exact text edit to `tc`, ran the named test, wrote the
+original bytes back and compared sha256. Every row printed `restored:
+OK`. Paths cut to `<root>`; only the assertion line is quoted.
+
+| Item | Mutation | Test | Red line |
+|---|---|---|---|
+| MEDIUM-1 | ring decided on the count alone | `test_a_failed_ring_leaves_a_marker_and_the_next_send_rings` | `AssertionError: Lists differ: [['qu[213 chars] a.']] != [['qu[213 chars] a.'], ['queue', '--thread', 't1', '--message'[179 chars]b.']]` |
+| MEDIUM-1 | the ring run under the inbox lock | `test_a_slow_ring_never_holds_up_a_read` | `AssertionError: 4.964908753987402 not less than 1 : tc read took 5.0 s while the ring ran: the ring held the inbox lock` |
+| MEDIUM-1 | count and write outside the lock | `test_a_codex_send_waits_for_the_inbox_lock` | `AssertionError: tc exited 0 while the test held .box-c.lock, so it never waited for the lock` |
+| MEDIUM-1 | `tc read` outside the lock | `test_read_holds_the_inbox_lock_from_glob_to_rename` | `AssertionError: tc exited 0 while the test held .box-b.lock, so it never waited for the lock` |
+| MEDIUM-1 | marker write with no handler | `test_a_marker_that_cannot_be_written_is_said` | an error, not a failure: `IsADirectoryError: [Errno 21] Is a directory: '<root>/mail/.ring-pending-c.<pid>.tmp'` |
+| MEDIUM-2 | the truthiness check alone | `test_a_thread_id_of_another_shape_never_reaches_codex` | `"-x"`: `AssertionError: "ring failed for d: its card's thread_id is not a thread id; the mail is in its inbox; the next send to d rings again" not found in 'new inbox: nobody has joined as d\n'`; `5` and `["t1"]`: `AssertionError: 1 != 0 : exited 1: Traceback (most recent call last):` (a TypeError after the mail landed) |
+| MEDIUM-2 | `tc join` takes any thread id | `test_join_refuses_a_codex_thread_id_of_another_shape` | `AssertionError: 0 != 1 : exited 0: ` |
+| LOW-9 | local send outside the lock | `test_a_local_send_waits_for_a_held_inbox_lock` | `AssertionError: tc exited 0 while the test held .box-b.lock, so it never waited for the lock` |
+| LOW-9 | local send takes the lock alone | `test_local_sends_share_the_inbox_lock` | `AssertionError: the send still waited 5 s on a lock the test held shared: it took the lock alone` |
+| LOW-9 | `tc card` outside the lock | `test_tc_card_counts_and_writes_under_the_inbox_lock` | `AssertionError: tc exited 0 while the test held .box-x.lock, so it never waited for the lock` |
+| MEDIUM-3 | warning keyed on the `card` argument | `test_the_new_inbox_warning_keys_on_the_card_file` | `AssertionError: Lists differ: ['new inbox: nobody has joined as b'] != []` |
+| MEDIUM-3 | warning keyed on the inbox alone | `test_a_local_card_delivers_where_to_says_and_reports_to_routes_nothing` | `AssertionError: 'new inbox: nobody has joined as b\n' != ''` |
+| MEDIUM-4 | C1's join chain for `tc card` | `test_tc_card_never_takes_this_sessions_account` | `AssertionError: Tuples differ: ('acct', 'other') != ('unknown', 'other')` (no flag, and a blank flag) |
+| LOW-4 | health drops the target | `HealthCardsTest` | `AssertionError: '\ncards      b (claude, account unknown, route local), reports to a\n           c (codex, account work, route codex)\n           x (other, account far, route ssh to u@h)\n' not found in '...'` (machine lines cut) |
+| LOW-10 | no route check | `test_a_card_with_no_route_is_refused_in_words` | `AssertionError: 'tc send: route None is not built yet; nothing sent\n' != "tc send: the card <root>/[185 chars]>.\n"`, and the same with `route 5` |
+| LOW-11 | `sys.exit("tc send: empty message")` | `test_an_empty_message_is_refused_through_refuse_with_exit_1` | `AssertionError: 'tc send: empty message' != 1` |
+| LOW-15 | the old words | `test_an_unreadable_card_is_refused_not_guessed` | `AssertionError: False is not true : tc send: the card <root>/cards/b.json is unreadable (Expecting property name enclosed in double quotes: line 1 column 3 (char 2)); nothing sent. Rewrite it with tc join or tc card.` |
+| DEBT-3 | `.tmp` through `Path.write_text` | the two planted-link tests and the `.tmp` test | `AssertionError: 0 != 1 : exited 0: ` (message); `AssertionError: SystemExit not raised` (card); `AssertionError: 0 != 1 : the .tmp was not made by one os.open: []` |
+| REC-13 | no note | `test_card_ssh_gives_route_ssh_and_the_default_remote_path` | `AssertionError: '' != 'note: sends to x are refused until the ssh route is built\n'` |
+| REC-13 | the old refusal words | `test_a_route_not_built_yet_is_refused_and_writes_nothing` | `AssertionError: Tuples differ: (1, '', 'route ssh is not built yet\n') != (1, '', 'tc send: route ssh is not built yet; nothing sent\n')` |
+| LOW-7 | kill the direct child only | `test_a_ring_that_times_out_kills_codex_and_its_child` | `AssertionError: False is not true : codex's own child outlived the timed-out ring` |
+| LOW-8 | a strict decode | `test_odd_bytes_from_codex_never_fail_a_send` | `AssertionError: 1 != 0 : odd bytes from codex failed the send: exit 1` |
+| REC-9 | no root in the ring | `test_two_sends_to_an_empty_codex_inbox_ring_once` | `AssertionError: Lists differ: [{'ar[69 chars]Run: <tc>[122 chars] ''}] != [{'ar[69 chars]Run: TC_ROOT=<root> <tc>[192 chars] ''}]` (tc's path cut to `<tc>`) |
+| REC-9 | the root unquoted | `test_the_ring_names_the_root_and_quotes_it` | `AssertionError: 'MAIL: 1 unread for c. Run: TC_ROOT=<root>[212 chars]o a.' != "MAIL: 1 unread for c. Run: TC_ROOT='<root>[216 chars]o a."` |
+
+One test change came out of these runs, in `fd01c39`: the first run of
+LOW-7's mutation stayed green. The fake's child slept 5 s and the test
+polled for up to 5 s, so it watched the child exit on its own. The fake
+now sleeps `ORPHAN_SLEEP_SECONDS = 30`, past the poll, and the row above
+is the rerun. The MEDIUM-2 red lines were taken at `fe3f7fa`, before
+MEDIUM-3 removed the new-inbox warning from that stderr.
+
+### Verify, fix round 1
+
+At `fd01c39`, in `~/TheConnection-lanes/cards`:
+
+```
+$ python3 -m unittest tests.test_cards -v         # Ran 16 tests, OK
+$ python3 -m unittest tests.test_codex_route -v   # Ran 17 tests, OK
+$ python3 -m unittest tests.test_router -v        # Ran 15 tests, OK
+$ python3 -m unittest tests.test_health -v        # Ran 8 tests, OK (the two ResourceWarning lines, as before)
+$ python3 -m unittest discover -s tests -p 'test_*.py'
+Ran 83 tests in 21.258s
+OK
+$ node --test tests/*.test.mjs
+# tests 8
+# pass 8
+# fail 0
+```
+
+CORE's `tests/test_mailbox.py` (on the dev branch, not in this tree) was
+run against this `tc` in a scratch copy with the dev branch's
+`tests/_root.py`: K1 and K3 to K8 pass, K3's 50 senders included. **K2
+fails**, and will on merge: `AssertionError:
+PosixPath('<root>/root/mail/to-b/000001-from-a.tmp') not found in [] :
+the .tmp was not written through Path.write_text, so this test's write
+record misses tc's writes; wrap what tc now uses`. K2 records writes by
+wrapping `Path.write_text`; DEBT-3 (item 17 of the brief) makes the
+message `.tmp` with `os.open`, as the brief requires. K2's own message
+names the fix: record `os.open` too, as
+`test_a_card_is_written_through_a_tmp_and_renamed` now does. K2 is not
+in this lane's work set, so it is left for the architect or CORE.
+
 ## Not verified
 
-- CORE's `tests/test_mailbox.py` against this branch. Not in this tree.
+- CORE's K2 after merge: it fails (see "Verify, fix round 1"). The other
+  seven pass against this `tc` in a scratch copy.
 - Real `codex`. The argv, the flags `--thread` and `--message`, and the
-  exit codes come from the plan (C2, D3), not from a run; the fixture is
-  labeled `matches Codex 0.162.1, 2026-10-14` and was written from the
-  plan's words. Every codex test ran against the harness's fake or with
-  `subprocess.run` swapped; the refusing stub stood behind the fake.
-  Donald runs the real one (D4).
-- The 30 s ring timeout end to end. Only the in-process test, with
-  `subprocess.run` raising `TimeoutExpired`.
+  exit codes come from the plan (C2, D3), not from a run; the fixture's
+  label says so. Every codex test ran against a fake or with `Popen`
+  swapped; the refusing stub stood behind the fake. Donald runs the real
+  one (D4).
+- The 30 s ring timeout end to end. The in-process stand-in checks the
+  30 s and the group kill; the real kill ran with the timeout patched to
+  2 s.
+- Whether a real `codex queue` started through node leaves a native child
+  (LOW-7's premise comes from tc's own docstring, not from a run).
+- The marker's removal failing (the `rang codex <to>, but <marker> could
+  not be removed` warning). No test reaches it.
 - Python other than 3.12.3. CARDS-3 rests on how this argparse hands
   leftovers back.
 - Two joins of one name at the same moment.
@@ -340,3 +548,15 @@ the six pause files.
   spot.
 - `tests/test_health.py`'s `HealthTest` leaves two pipes unclosed (the
   ResourceWarnings above). Outside this lane's case.
+- Fix round 1: a codex send reads the card before it takes the inbox
+  lock. A `tc card` that turns a codex name into an ssh name in that gap
+  (with an empty inbox) leaves the message in the local inbox. It needs
+  that rare change and a millisecond overlap; not closed.
+- Fix round 1: C3's gate calls `deliver_local` directly, so a gated send
+  takes no inbox lock and a `tc card` race stays open there. For the SSH
+  lane before S3, with the ring gap the audit's blast radius already
+  names.
+- Fix round 1: the inbox lock file is opened in append mode, so it never
+  truncates, but it follows a link planted at its name, as the wait and
+  watch locks do. Under C4's group-writable `mail/` that is the same class
+  as DEBT-3. Left as it is.
