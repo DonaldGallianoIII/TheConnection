@@ -20,12 +20,13 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             also read /proc (meminfo, locks, each process's comm and cmdline)
             and run `nvidia-smi` when it exists. They never signal or touch
             another process.
-@deps       python3 stdlib (argparse, fcntl, json, pathlib, re, resource, shutil,
+@deps       python3 stdlib (argparse, collections, fcntl, json, pathlib, re, resource, shutil,
             subprocess, time, datetime, os, sys); Linux only (flock, RLIMIT_AS,
             /proc). nvidia-smi optional.
-@complexity send/status O(1). read/peek/wait-poll O(u), u unread messages in
-            one inbox, single digits in practice. log O(t), t total messages
-            ever, low hundreds per job. health and each watch poll
+@complexity send O(b), b body bytes up to SEND_BODY_MAX_BYTES; status O(1).
+            read/peek/wait-poll O(u), u unread messages in one inbox,
+            single digits in practice. log O(t), t total messages ever,
+            low hundreds per job. health and each watch poll
             O(p + k + n): p processes on the machine (hundreds), k lines in
             /proc/locks (tens), n mailbox names (single digits).
             join O(1); card O(u) for its unread count; cards O(c), c cards.
@@ -38,6 +39,7 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
 """
 
 import argparse
+import collections
 import datetime
 import fcntl
 import json
@@ -93,6 +95,13 @@ DEFAULT_REMOTE_TC = "~/TheConnection/tc"
 SSH_TARGET_PATTERN = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]*(@[A-Za-z0-9._][A-Za-z0-9._-]*)?")
 # C1: a remote tc path starts with one of these.
 REMOTE_TC_PREFIXES = ("/", "~/")
+# CARDS R3 (Claude Opus 5.5, unreviewed): the router (C2) and the size limit (C0).
+# This is a mailbox for words: 1 MiB is far past any message a session
+# writes, and small enough that a runaway pipe never fills the disk.
+SEND_BODY_MAX_BYTES = 1048576
+SEND_TOO_LARGE_WORDS = "tc send: message over 1 MiB; this is a mailbox for words"
+# A message over SEND_BODY_MAX_BYTES, refused before it takes a number.
+EXIT_TOO_LARGE = 8
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -185,26 +194,42 @@ def next_seq():
 
 
 def cmd_send(args):
-    """`tc send`: write one message to mail/to-<to>/ and print where it went.
+    """`tc send`: check, then hand the message to the route on the recipient's card (C2).
+
+    No card means route local: today's send, with today's stdout line. The
+    route's Delivery decides the rest: words to stdout on exit 0, else to
+    stderr; every warning to stderr; then its exit code.
 
     @interacts  checks both names first (C0, exit 6, nothing written); reads
-                stdin when no text is given; takes the mail/.seq flock in
-                next_seq(); writes a .tmp sibling and renames it into
-                mail/to-<to>/; prints one line to stdout.
-    @deps       require_names, next_seq, inbox, now_iso.
-    @complexity O(b) over b bytes of body.
-    @alloc      the body string, freed on exit; one message file, kept.
+                the body (stdin when no text is given) and refuses one over
+                SEND_BODY_MAX_BYTES (exit 8) or empty (exit 1) before any
+                number is taken; reads cards/<to>.json; calls one ROUTES
+                function, which writes the message; prints.
+    @deps       require_names, read_body, read_card, refuse, ROUTES, Delivery.
+    @complexity O(b) over b bytes of body, at most SEND_BODY_MAX_BYTES,
+                plus the route's own work.
+    @alloc      the body string, freed on exit; whatever the route keeps.
     """
     require_names(args.sender, args.to)  # CARDS R1 (Claude Opus 5.5, unreviewed)
-    body = args.message if args.message else sys.stdin.read()
+    # CARDS R3 (Claude Opus 5.5, unreviewed): size, then the card, then the route.
+    body = read_body(args.message)
     if not body.strip():
         sys.exit("tc send: empty message")
-    n = next_seq()
-    path = inbox(args.to) / f"{n:0{SEQ_WIDTH}d}-from-{args.sender}.md"
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(f"# #{n} from {args.sender} to {args.to}, {now_iso()}\n\n{body.rstrip()}\n")
-    tmp.rename(path)  # atomic, so a waiter never reads a half-written file
-    print(f"sent #{n} to {args.to}: {path}")
+    try:
+        card = read_card(args.to)
+    except ValueError as problem:
+        refuse(f"tc send: {problem}; nothing sent. Rewrite it with tc join or tc card.", EXIT_REFUSED)
+    route = card.get("route") if card is not None else "local"
+    deliver = ROUTES.get(route) if isinstance(route, str) else None
+    if deliver is None:
+        result = Delivery(EXIT_REFUSED, f"route {route} is not built yet", [])
+    else:
+        result = deliver(card, args.sender, args.to, body)
+    print(result.words, file=sys.stdout if result.exit == 0 else sys.stderr)
+    for warning in result.warnings:
+        print(warning, file=sys.stderr)
+    if result.exit != 0:
+        sys.exit(result.exit)
 
 
 def show(paths):
@@ -216,14 +241,18 @@ def show(paths):
 def cmd_read(args):
     """`tc read <name>`: print unread mail and move it to read/.
 
-    @interacts  checks the name first (C0, exit 6, nothing written); makes
-                mail/to-<name>/read/ if missing; reads and renames each
-                unread file; prints to stdout.
+    @interacts  checks the name first (C0, exit 6, nothing written); a name
+                with no inbox gets `no unread mail` and nothing is created
+                (O2); else makes mail/to-<name>/read/ if missing, reads and
+                renames each unread file; prints to stdout.
     @deps       require_names, unread, show.
     @complexity O(u) over u unread messages (single digits).
     @alloc      the list of paths and each file's text while printed.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
+    if not (MAIL / f"to-{args.name}").is_dir():  # CARDS R3 (Claude Opus 5.5, unreviewed): O2
+        print(f"no unread mail for {args.name}")
+        return
     msgs = unread(args.name)
     if not msgs:
         print(f"no unread mail for {args.name}")
@@ -236,14 +265,18 @@ def cmd_read(args):
 def cmd_peek(args):
     """`tc peek <name>`: print unread mail and leave it unread.
 
-    @interacts  checks the name first (C0, exit 6, nothing written); makes
-                mail/to-<name>/read/ if missing; reads each unread file;
-                prints to stdout.
+    @interacts  checks the name first (C0, exit 6, nothing written); a name
+                with no inbox gets `no unread mail` and nothing is created
+                (O2); else makes mail/to-<name>/read/ if missing and reads
+                each unread file; prints to stdout.
     @deps       require_names, unread, show.
     @complexity O(u) over u unread messages (single digits).
     @alloc      the list of paths and each file's text while printed.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
+    if not (MAIL / f"to-{args.name}").is_dir():  # CARDS R3 (Claude Opus 5.5, unreviewed): O2
+        print(f"no unread mail for {args.name}")
+        return
     msgs = unread(args.name)
     print(f"{len(msgs)} unread for {args.name}")
     show(msgs)
@@ -549,6 +582,96 @@ def cmd_cards(args):
         print("no cards")
     for file_name, card in cards:
         print(describe_card(card) if card is not None else f"{file_name}: unreadable card")
+
+
+# ---------- router: tc send delivers by the recipient's card (C2) ----------
+# CARDS R3 (Claude Opus 5.5, unreviewed). No hub (D7): the route comes from
+# the recipient's card alone. Nothing here reads reports_to.
+
+# What a route hands back to cmd_send: its exit code, the words to print
+# (stdout on 0, else stderr), and warnings for stderr whatever the exit.
+Delivery = collections.namedtuple("Delivery", "exit words warnings")
+
+
+def read_card(name):
+    """The card for `name` as a dict, or None when it has none.
+
+    Raises ValueError, with words naming the file, for a card that is not
+    a JSON object: the router refuses rather than guess a route.
+
+    @interacts  reads cards/<name>.json. Writes nothing.
+    @deps       json, pathlib.
+    @complexity O(1): one small file.
+    @alloc      one dict, returned.
+    """
+    path = CARDS / f"{name}.json"
+    if not path.exists():
+        return None
+    try:
+        card = json.loads(path.read_text())
+    except (OSError, ValueError) as err:
+        raise ValueError(f"the card {path} is unreadable ({err})") from err
+    if not isinstance(card, dict):
+        raise ValueError(f"the card {path} is not a JSON object")
+    return card
+
+
+def read_body(message):
+    """The message body: `message` when given, else stdin. Over the limit exits 8.
+
+    Reads at most SEND_BODY_MAX_BYTES + 1 bytes from stdin and decodes them
+    as sys.stdin would, so the body is the same text today's send saw. A
+    text argument is measured in the bytes it came in as. Runs before
+    next_seq(), so a refusal uses no number (C0).
+
+    @interacts  reads stdin when `message` is empty; on a body over the
+                limit, writes SEND_TOO_LARGE_WORDS to stderr and exits.
+    @deps       refuse; os, sys.
+    @complexity O(b) over b bytes, at most SEND_BODY_MAX_BYTES + 1.
+    @alloc      the raw bytes and the decoded string, at most about
+                2 x SEND_BODY_MAX_BYTES at once; the string is returned.
+    """
+    if message:
+        if len(os.fsencode(message)) > SEND_BODY_MAX_BYTES:
+            refuse(SEND_TOO_LARGE_WORDS, EXIT_TOO_LARGE)
+        return message
+    raw = sys.stdin.buffer.read(SEND_BODY_MAX_BYTES + 1)
+    if len(raw) > SEND_BODY_MAX_BYTES:
+        refuse(SEND_TOO_LARGE_WORDS, EXIT_TOO_LARGE)
+    return raw.decode(sys.stdin.encoding, sys.stdin.errors)
+
+
+def deliver_local(card, sender, to, body, header_note=None):
+    """Route local: today's send. Seq under flock, write a .tmp, rename into the inbox.
+
+    Warns `new inbox: nobody has joined as <to>` when the inbox did not
+    exist before this send (O1). `header_note`, when given, ends the
+    header line after a comma (the gate's, C3). `card` is unused here; the
+    argument keeps every route's shape the same.
+
+    @interacts  takes the mail/.seq flock (next_seq); makes
+                mail/to-<to>/read/; writes NNNNNN-from-<sender>.tmp and
+                renames it to .md in mail/to-<to>/.
+    @deps       next_seq, inbox, now_iso, Delivery.
+    @complexity O(b) over b bytes of body.
+    @alloc      the message text while written; one message file, kept.
+    """
+    box_existed = (MAIL / f"to-{to}").is_dir()
+    n = next_seq()
+    path = inbox(to) / f"{n:0{SEQ_WIDTH}d}-from-{sender}.md"
+    tmp = path.with_suffix(".tmp")
+    header = f"# #{n} from {sender} to {to}, {now_iso()}" + (f", {header_note}" if header_note else "")
+    tmp.write_text(f"{header}\n\n{body.rstrip()}\n")
+    tmp.rename(path)  # atomic, so a waiter never reads a half-written file
+    warnings = [] if box_existed else [f"new inbox: nobody has joined as {to}"]
+    return Delivery(0, f"sent #{n} to {to}: {path}", warnings)
+
+
+# One function per route; a card's route picks one. A route not here
+# answers "route <route> is not built yet" (C2). Each lane adds its own line.
+ROUTES = {
+    "local": deliver_local,
+}
 
 
 # ---------- health: machine, sessions, listeners, mail ----------
