@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>TheConnection live board</title>
+<link rel="stylesheet" href="theme.css">
+</head>
+<body class="tc-backdrop">
+<div id="app" class="tc-mount"></div>
+<script type="module">
+/**
+ * live.html: the live board (C6). Reads the token from the URL fragment
+ * (#token=...), asks serve.py's /feed for the mailbox every POLL_MS with the
+ * token in the X-TC-Token header, and draws each answer with patchBoard, so
+ * nodes and wires move in place. The newest answer wins: every request is
+ * numbered, and an answer older than the one on screen is dropped, so a
+ * slow old answer never overwrites a newer one. It only reads; nothing on
+ * the page writes to the mailbox. ?theme=dark or ?theme=daylight picks a
+ * look, the switch flips it, and ?gray=1 draws the page in grayscale, the
+ * colorblind check.
+ *
+ * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
+ *
+ * @interacts  reads #token from the fragment and ?theme and ?gray from the
+ *             URL; GETs ./feed every POLL_MS; reads and writes the last look
+ *             in localStorage (per browser only, and the page works without
+ *             it); sets data-theme and the grayscale filter on <html>;
+ *             rewrites ?theme in place on a pick; builds the board under
+ *             #app with look.js. One interval timer, one ResizeObserver and
+ *             each request's AbortController, all released on pagehide; two
+ *             click listeners, released with their buttons
+ * @deps       look.js, theme.css; serve.py's /feed (C5, C6)
+ * @complexity one poll: O(n log n + l + r) in patchBoard over n nodes, l
+ *             links and r recent wires (tens each)
+ * @alloc      one board, patched in place; one AbortController per request
+ *             in flight, dropped when it settles
+ */
+import {
+  createWindow, createCanvas, setFooter, createLookSwitch, pickLook, applyLook,
+  createBoard, createKit, patchBoard, fitTransform,
+} from './look.js';
+
+// C6 and O7: a wire moves within 3 s of a send, and one feed costs the
+// server tens of ms, so a poll this often is cheap.
+const POLL_MS = 3000;
+// Room left around the board when it is scaled to fit the canvas.
+const FIT_PADDING = 24;
+const LOOK_KEY = 'tc-board-look';
+const TOKEN_HEADER = 'X-TC-Token';
+
+const readStored = () => { try { return localStorage.getItem(LOOK_KEY); } catch { return null; } };
+const store = (look) => { try { localStorage.setItem(LOOK_KEY, look); } catch { /* private window: the pick lasts this page only */ } };
+
+const query = new URLSearchParams(location.search);
+const token = new URLSearchParams(location.hash.slice(1)).get('token') || '';
+let look = pickLook(query.get('theme'), readStored());
+applyLook(document, look);
+if (query.get('gray') === '1') document.documentElement.style.filter = 'grayscale(1)';
+
+const app = document.getElementById('app');
+const win = createWindow(document, app, { file: 'connection.board', sub: '· TheConnection :: live' });
+const lookSwitch = createLookSwitch(document, win.title, {
+  look,
+  onPick(next) {
+    look = next;
+    applyLook(document, look);
+    lookSwitch.setLook(look);
+    store(look);
+    query.set('theme', look);
+    history.replaceState(null, '', `?${query}${location.hash}`);
+  },
+});
+const canvas = createCanvas(document, win.body, 'live · dashes run toward the reader · arrow marks the reader');
+const board = createBoard(createKit(document, canvas));
+
+const fit = () => {
+  const r = canvas.root.getBoundingClientRect();
+  const t = fitTransform(r.width, r.height, board.view.extent, FIT_PADDING);
+  canvas.view.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.k})`;
+};
+const ro = new ResizeObserver(fit);
+ro.observe(canvas.root);
+
+const draw = (feed) => {
+  patchBoard(board, feed);
+  fit();
+  const states = feed.nodes.map((n) => n.state);
+  const listening = states.filter((s) => s === 'listening').length;
+  const down = states.filter((s) => s === 'down').length;
+  win.setConn(down ? `${listening} listening · ${down} down` : `live · ${listening} listening`, down ? 'warn' : 'up');
+  canvas.hud.textContent = feed.nodes.length
+    ? 'live · dashes run toward the reader · arrow marks the reader'
+    : 'no sessions yet · send a message or start a listener';
+  const m = feed.machine;
+  setFooter(document, win.foot, [
+    { text: `load ${m.load1} / ${m.cores}` }, { text: `mem free ${m.mem_avail_pct}%` }, { spacer: true },
+    { text: `${feed.nodes.length} sessions · ${listening} listening` }, { text: `at ${feed.at}` },
+  ]);
+};
+
+let asked = 0;
+let shown = 0;
+const inFlight = new Set();
+const poll = async () => {
+  const n = ++asked;
+  const ctl = new AbortController();
+  inFlight.add(ctl);
+  try {
+    const answer = await fetch('feed', { headers: { [TOKEN_HEADER]: token }, cache: 'no-store', signal: ctl.signal });
+    if (answer.status === 401) {
+      if (n > shown) { shown = n; win.setConn('token refused · open the URL serve.py printed', 'down'); }
+      return;
+    }
+    if (!answer.ok) {
+      if (n > shown) { shown = n; win.setConn(`no answer · HTTP ${answer.status}`, 'down'); }
+      return;
+    }
+    const feed = await answer.json();
+    if (n <= shown) return;
+    shown = n;
+    draw(feed);
+  } catch (err) {
+    if (err.name !== 'AbortError' && n > shown) { shown = n; win.setConn('no answer · is serve.py running?', 'down'); }
+  } finally {
+    inFlight.delete(ctl);
+  }
+};
+
+let timer = null;
+if (token) {
+  win.setConn('asking the server', 'warn');
+  poll();
+  timer = setInterval(poll, POLL_MS);
+} else {
+  win.setConn('no token · open the URL serve.py printed', 'down');
+}
+addEventListener('pagehide', () => {
+  clearInterval(timer);
+  for (const ctl of inFlight) ctl.abort();
+  inFlight.clear();
+  ro.disconnect();
+});
+</script>
+</body>
+</html>
