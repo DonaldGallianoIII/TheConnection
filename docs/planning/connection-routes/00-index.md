@@ -39,6 +39,22 @@ session in a different permission mode holds a native message for its
 user's approval and can let it expire, and the mailbox is a record anyone
 can read on disk.
 
+**Any shape** (Donald, 2026-10-14, decision D7). No hub is assumed.
+Real setups look like any of these, and both routing and the board handle
+all of them:
+
+- one relay, many workers: `a` to `b`, `c`, `d`
+- a relay whose worker is itself a relay for others: `a` to `b`, and `b`
+  to `c`, `d`
+- two or more orchestrators side by side, each with its own workers, and
+  sometimes mailing each other
+
+The router never reads a hub from anywhere (C2). The board draws its
+edges from mail that actually moved, and ranks levels from an optional
+`reports_to` hint on the card, falling back to what the mail shows (C5).
+With no hints at all it still draws every shape, and says which roles it
+inferred.
+
 Donald's three ways of working, each of which must work by the end:
 
 1. Claude sessions on his computer, SSHed into another box that is the dev
@@ -157,9 +173,15 @@ writes a pause, never edits the contract.
    (Donald's preference), and the split is stated. LOW never blocks.
 4. Re-check with `/djinn:review quick` on the fix diff. Three rounds at
    most, then Donald.
-5. Donald says merge. The architect merges the lane into
+5. a2 says merge, for Donald (D8). The architect merges the lane into
    `Claude-Development-TheConnection` and runs every test. Nobody merges
-   toward `main`.
+   toward `main`: that stays Donald's alone.
+
+**After each phase lands** (D9), the architect runs a djinn review over
+the merged dev branch: `/djinn:review standard --base <the commit before
+the phase's first merge>` for P0, P1, P2 and P5, and `full` for P3 and P4
+(a remote command line, an open port). The verdict and the HIGH and
+MEDIUM counts go to a2 by mail.
 
 The reviewer is never the session that built the lane. Every reviewer and
 fixer runs on Opus. Fable is the escalation, after Opus has built and
@@ -197,7 +219,9 @@ Pasted into every brief, word for word.
 1. **Stay in your lane.** Edit only the files your task names, plus the
    shared spots in section 4. Anything else is a pause.
 2. **Branch and commits.** Work in your worktree on your lane branch. Never
-   `main`. Never push, never merge. Commit by path (`git add <paths>`), never
+   `main`. Never push, never merge (the architect pushes lane branches and
+   the dev branch, D10; never `main`, never a force push, never
+   `--no-verify`). Commit by path (`git add <paths>`), never
    `git add -A`. The message says what changed and why and ends with
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. The repo is
    personal and public; commits go out under its configured personal identity.
@@ -239,9 +263,14 @@ Pasted into every brief, word for word.
     banned words and phrases are in
     `~/Conventions/tools/voice-rules.yaml` (the owner's conventions folder);
     read it once. Short sentences, concrete nouns. American English. Run
-    `python3 ~/Conventions/tools/check_voice.py <file>` and a spelling check
-    that reads the file you name (`check_american.py` scans only its own
-    folder; the lane briefs name the wrapper) on every Markdown file you write.
+    `python3 ~/Conventions/tools/check_voice.py <file>` and
+    `python3 ~/Conventions/tools/check_american.py <file>` on every
+    Markdown file you write. Each exits 1 on a hit.
+13. **Public repo** (D11). Nothing sensitive goes into a file or a commit
+    message: no keys, tokens or passwords, no real mailbox content, no
+    hostnames, IPs or tailnet names, no email beyond the commit author, and
+    nothing about the owner's employer or its systems. Test names and demo
+    names are made up.
 
 ## 10. What every task carries, and what done means
 
@@ -290,6 +319,8 @@ verified with the command and its output, and nothing you did not.
 | O7 | Board port and poll | `127.0.0.1:8780` (8765 was taken on Donald's machine), token printed once at start, poll every 3 s |
 | O8 | Remote names on the board | Drawn with route `ssh` and the words `remote · not checked`; no SSH from the board in this plan |
 | O9 | Same-account Claude pairs | The board draws them as `native` with the words `native · not observed`, since tc cannot see that traffic |
+| O10 | Role words | `orchestrator`, `worker`, `peer`, with `· inferred` when the role came from mail instead of a card (C5) |
+| O11 | When mail alone makes a hub | `HUB_MIN_PARTNERS` = 2: a node with one partner is that partner's worker when the partner has two or more |
 
 ## 12. Files in this folder
 

@@ -2,8 +2,8 @@
 
 Model:  Claude Opus 5.5 (the TheConnection architect session)
 Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
-        2026-10-14, 24 findings, all folded in). Fixed once Donald
-        approves; a lane that needs a change writes a pause and does not
+        2026-10-14, 24 findings, all folded in). Amended for D7 (any
+        topology) on 2026-10-14. Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
 Date:   2026-10-14
 
@@ -62,6 +62,7 @@ a `.tmp` and renamed, like a message.
   "pid": 119855,
   "thread_id": null,
   "ssh": null,
+  "reports_to": null,
   "joined_at": "2026-10-14T12:00:00-05:00"
 }
 ```
@@ -74,6 +75,7 @@ a `.tmp` and renamed, like a message.
 | `session_id`, `pid` | from `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` | `tc join` in a Claude session; null otherwise |
 | `thread_id` | from `CODEX_THREAD_ID` | `tc join` in a Codex session; required for route `codex` |
 | `ssh` | `{"target": "user@host", "tc": "/path/to/tc"}` | `tc card <name> --ssh user@host [--remote-tc PATH]`; `tc` defaults to `~/TheConnection/tc` |
+| `reports_to` | a name (C0), or null | `--reports-to <name>` on `tc join` or `tc card`; null when not given. A hint for the board's levels (C5), never a route (D7). |
 
 **What `tc join` reads.** Exactly these environment variables and no
 others: `CODEX_THREAD_ID`, `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
@@ -93,21 +95,34 @@ refuses with words, exit 6, and writes nothing.
 
 Commands:
 
-- `tc join <name> [--account L] [--kind K]` writes the card for the session
-  it runs in, prints `joined as <name> (<kind>, account <account>, route
-  <route>)`. A name that already has a card is overwritten and `joined_at`
+- `tc join <name> [--account L] [--kind K] [--reports-to N]` writes the
+  card for the session it runs in, prints `joined as <name> (<kind>,
+  account <account>, route <route>)`, plus `, reports to <N>` when given. A name that already has a card is overwritten and `joined_at`
   reset (a restarted session rejoins). `--kind codex` with no
   `CODEX_THREAD_ID`: refused, exit 1, with the words why.
 - `tc card <name> --ssh user@host [--remote-tc PATH] [--account L]
-  [--force]` writes a card for a name that lives on another machine. If
+  [--reports-to N] [--force]` writes a card for a name that lives on another machine. If
   `mail/to-<name>/` holds unread mail here, refused with words naming the
   count (that mail would never be read once sends go remote), unless
   `--force`.
-- `tc cards` prints every card, one line each, in words.
+- `tc cards` prints every card, one line each, in words, with `reports to
+  <N>` when set.
+- `--reports-to` takes a C0 name (else exit 6, the C0 words). A name that
+  reports to itself is refused: `tc: <name> cannot report to itself`, exit
+  6, nothing written. The named mailbox need not exist yet. Two cards that
+  report to each other are allowed; the board breaks the cycle (C5).
+- **No card names a hub** (D7). `reports_to` is read only by `tc cards`,
+  `tc health` and the board. Mail goes wherever `--to` says.
 - **No card means route `local`.** Every mailbox that works today keeps
   working with no card.
 
 ## C2. The router
+
+**No hub** (D7). The router delivers by the recipient's card alone. Any
+name may send to any name, and no name is special: the README's `a` is a
+default, not a role. A worker that is itself a relay for others is a name
+that sends and receives, nothing more. Nothing in tc reads `reports_to` to
+route.
 
 `cmd_send()` keeps its arguments and its output for route `local`. After
 checking names and size (C0) it reads the recipient's card and calls one
@@ -241,10 +256,14 @@ file names. It never opens a message body.
   "nodes": [
     { "id": "a", "kind": "claude", "account": "work", "route": "local",
       "state": "listening", "listener_pid": 4242, "unread": 0,
-      "last_mail_age_s": 30, "status": "reviewing parser" }
+      "last_mail_age_s": 30, "status": "reviewing parser",
+      "role": "orchestrator", "role_source": "declared",
+      "reports_to": null, "level": 0 }
   ],
-  "wires": [ { "from": "a", "to": "b", "seq": 781, "age_s": 4 } ],
-  "links": [ { "from": "a", "to": "b", "kind": "mailbox" } ]
+  "wires": [ { "from": "a", "to": "b", "seq": 41, "age_s": 4 } ],
+  "links": [ { "from": "a", "to": "b", "kind": "mailbox",
+               "sent": { "a": 12, "b": 9 }, "last_age_s": 4 },
+             { "from": "b", "to": "a", "kind": "reports_to" } ]
 }
 ```
 
@@ -263,15 +282,62 @@ file names. It never opens a message body.
   `## <name> status, <time>` header, cut at `STATUS_PREVIEW_CHARS` = 80.
 - `wires`: the last `WIRE_HISTORY` = 50 messages, read from file names
   (`NNNNNN-from-X.md` in `to-Y/` and `to-Y/read/`).
-- `links`: one per pair that has ever exchanged mail, `kind: mailbox`; and
-  `kind: native` for two `claude` cards with the same `account`, drawn with
-  the words `native · not observed`.
+- `links`, all from what is on disk, never from a config that names a hub
+  (D7):
+  - `kind: mailbox`: one per pair that has ever exchanged mail, read from
+    every message file name in every `to-*/` and `to-*/read/` (names
+    only, never bodies). Undirected: `from` sorts before `to`. `sent`
+    counts each side's messages; `last_age_s` is the newest one's age.
+  - `kind: reports_to`: one per card with a `reports_to`, `from` the card,
+    `to` the name it reports to. A hint, drawn as a thin line under the
+    mailbox wires.
+  - `kind: native`: two `claude` cards with the same `account`, drawn with
+    the words `native · not observed`.
 - `look.js` gains two states, `doorbell` (glyph `◎`) and `remote`
   (glyph `⇄`), each with a word, and `patchBoard(board, feed)`, which adds,
   moves and removes nodes and wires by id and never rebuilds the board.
 
-Cost: O(n + m) for n names and m message files scanned, m capped by
-`WIRE_HISTORY` per inbox listing.
+**Roles and levels** (D7). Any shape: one relay with many workers, a
+relay whose worker is a relay for others, several orchestrators side by
+side that mail each other, and cycles. `feed()` computes these, so they
+are tested in Python; `look.js` only lays them out.
+
+1. **Partners** of a node: the names it has exchanged at least one message
+   with, either way, itself excluded.
+2. **Parent.** Declared: the card's `reports_to`, when that name is a
+   node. Inferred, when nothing is declared: the one partner of a node
+   that has exactly one partner, if that partner has `HUB_MIN_PARTNERS`
+   (2) or more. Else none. A `reports_to` naming no node stays on the node,
+   is drawn as `reports to <N> · not found`, and gives no parent.
+3. **Role.** `orchestrator` when one or more nodes have it as parent;
+   `worker` when it has a parent and no children; `peer` otherwise. A
+   relay for others under a relay is an `orchestrator` one level down.
+4. **`role_source`**: `declared` when every parent edge that decided the
+   role came from a card; `inferred` when any came from mail. A `peer` is
+   `inferred`.
+5. **Level.** Nodes with no parent are roots, level 0. Walk breadth first
+   down parent to child. Nodes still unreached sit on a cycle of
+   `reports_to`: the one whose name sorts first becomes a root, and the
+   walk runs again from it. Repeat until every node has a level. Each node
+   gets exactly one level, and the walk ends on any cycle: O(n + e) for n
+   nodes and e parent edges.
+6. **Known limit**, said in `serve.py`'s doc block and the README: with no
+   hints at all, a top relay whose only partner is a lower relay is drawn
+   as that relay's `worker`, marked `inferred`. `--reports-to` fixes it,
+   and JOIN.md writes it (task D2).
+
+`look.js` gains `layoutLevels(feed)`, a pure function: each root's tree
+side by side, roots in name order, levels top to bottom. Mailbox wires
+between any two nodes (two orchestrators, cousins) draw whatever their
+levels. Each node's title carries its role word (`a · orchestrator`,
+`b · worker`, `x · peer`), with `· inferred` when `role_source` says so.
+Role never rides on color.
+
+Cost: O(n + m + e) for n names, m message file names scanned (every
+inbox and `read/` folder, names only, for `links`; `wires` keeps the last
+`WIRE_HISTORY`), and e parent edges. m grows with the mailbox's history:
+about 800 names after two weeks of heavy use on Donald's machine, read
+once per poll.
 
 ## C6. The board server
 

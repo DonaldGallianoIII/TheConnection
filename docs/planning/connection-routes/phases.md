@@ -128,9 +128,13 @@ the fake-codex tests always.
   mail: refused naming the count; with `--force`: written. `tc card x --ssh
   -oProxyCommand=y`: exit 6, nothing written. With
   `CLAUDE_CODE_MESSAGING_TOKEN=secret123` in env, no value in the card
-  contains `secret123`. Must reject: an empty account; a card written in
-  place (assert the write goes through a `.tmp`); a join that copies the
-  whole environment.
+  contains `secret123`. `tc join b --reports-to a` stores `"reports_to":
+  "a"`; a rejoin of `b` without the flag stores null; `tc join b
+  --reports-to b` exits 6 with `cannot report to itself` and writes no
+  card; `--reports-to ../x` exits 6. `tc cards` shows `reports to a`.
+  Must reject: an empty account; a card written in place (assert the write
+  goes through a `.tmp`); a join that copies the whole environment; a
+  self-report written as a card.
 - **Verify:** `python3 -m unittest tests.test_cards -v`.
 
 ### R3. The router, `deliver_local`, the two behavior fixes (C2, O1, O2)
@@ -166,7 +170,7 @@ the fake-codex tests always.
 ### R5. `tc health` shows cards
 - **Files:** `tc`, `tests/test_health.py` (add a case).
 - **Do:** a `cards` line in text and a `cards` key in `--json`: name, kind,
-  account, route.
+  account, route, reports_to.
 - **Verify:** `python3 -m unittest tests.test_health -v`.
 
 ---
@@ -257,6 +261,26 @@ refuses without the token; it binds nowhere but 127.0.0.1.
   status file's first line after the header shows, cut at 80. Must reject:
   a feed that opens message bodies (make bodies unreadable, mode `000`;
   the feed must still work).
+- **Test, shapes (D7, C5 roles and levels)**, each a temp root with
+  made-up names and hand-written cards:
+  - star with hints (`b`, `c`, `d` report to `a`): `a` orchestrator level 0,
+    the rest workers level 1, all `declared`.
+  - chain with hints (`b` reports to `a`; `c`, `d` to `b`): levels 0, 1, 2,
+    2; `a` and `b` orchestrators.
+  - the same chain with no cards, mail only: `b` is the root and an
+    `inferred` orchestrator, `a`, `c`, `d` its `inferred` workers. This
+    pins the known limit, so a change to it is a decision, not a drift.
+  - two orchestrators side by side (`x` over `x1`, `x2`; `y` over `y1`,
+    `y2`; `x` and `y` mail each other): two level 0 orchestrators and a
+    `mailbox` link between them.
+  - a `reports_to` cycle (`p` reports to `q`, `q` to `p`): `p` level 0, `q`
+    level 1, and `feed()` returns.
+  - a `reports_to` naming nobody: the node is a root and keeps the name.
+  Must reject: a feed that picks one root for the whole board (the
+  side-by-side case must give two level 0 nodes); a level walk with no
+  cycle break (run the cycle case under a 2 s timeout); links taken from
+  the last `WIRE_HISTORY` only (a pair whose only message is older than
+  that must still have its link).
 - **Verify:** `python3 -m unittest tests.test_board_feed -v`.
 
 ### B2. The server (C6)
@@ -268,7 +292,8 @@ refuses without the token; it binds nowhere but 127.0.0.1.
 - **Verify:** `python3 -m unittest tests.test_board_server -v`.
 
 ### B3. `patchBoard` and the two new states (C5)
-- **Files:** `board/look.js`, `board/theme.css`, `tests/board-patch.test.mjs`.
+- **Files:** `board/look.js`, `board/theme.css`, `tests/board-patch.test.mjs`,
+  `tests/board-layout.test.mjs`.
 - **Test:** `patchBoard` over feed A then feed B (one node moved, one
   removed, one added, one wire new): the kept node is the same object, the
   removed one is gone, the new one exists; no rebuild (count create calls).
@@ -276,6 +301,11 @@ refuses without the token; it binds nowhere but 127.0.0.1.
   Must reject: a patch that rebuilds everything (the kept node would be a
   new object). Pure functions only, so no DOM library is needed; split the
   diff from the drawing.
+- **Test, layout (D7):** `layoutLevels` over the B1 shapes as feed JSON:
+  two roots sit side by side in name order with no overlap; depth 3 stacks
+  three rows; the cycle feed lays out; each title carries the role word,
+  and `· inferred` exactly when `role_source` is `inferred`. Must reject: a
+  layout that stacks every root in one column.
 - **Verify:** `node --test tests/*.test.mjs`.
 
 ### B4. `live.html`
@@ -297,6 +327,17 @@ refuses without the token; it binds nowhere but 127.0.0.1.
   `last_listening_at` that grows without bound (feed 1,000 distinct names
   that come and go; the map is pruned past `DOWN_WINDOW_S`).
 - **Verify:** both commands pass.
+
+### B6. The demo shows the shapes (D7)
+- **Files:** `board/demo-script.json`, `board/demo.html` if its loader
+  needs it, `qa/human/board-look.md`.
+- **Do:** the demo draws a two-level tree (`a` over `b` and `docs`; `b`
+  over `c` and `d`) and a second orchestrator (`z` over `y1`, `y2`) that
+  mails `a`. Made-up names only. Role words in every title.
+- **Test:** `node --test tests/*.test.mjs` still passes; add a check that
+  the script holds two level 0 orchestrators and one level 1 orchestrator.
+- **Verify:** the human script gains a step: in `?gray=1`, each
+  orchestrator reads as one by its word.
 
 ---
 
@@ -324,8 +365,8 @@ talking by following the README alone.
 
 ### D2. JOIN.md and JOIN-CODEX.md
 - **Files:** `JOIN.md`, `JOIN-CODEX.md` (new).
-- **Do:** JOIN.md gains `tc join <name> --account <label>` and the
-  proven-listener rule (a listener is live when `tc health` names its pid).
+- **Do:** JOIN.md gains `tc join <name> --account <label> --reports-to
+  <relay>` (the relay that pointed it here) and the proven-listener rule (a listener is live when `tc health` names its pid).
   JOIN-CODEX.md: `tc join`, no listener, go idle, reply with `tc send`; the
   mail arrives as a queued message.
 
@@ -335,7 +376,9 @@ talking by following the README alone.
 
 ### D4. Human QA per route
 - **Files:** `qa/human/route-local.md`, `route-codex.md`, `route-ssh.md`,
-  `route-shared.md`, `two-accounts.md` (new); results in `qa/results/`.
+  `route-shared.md`, `two-accounts.md`, `shapes.md` (new); results in
+  `qa/results/`. `shapes.md` walks the three D7 shapes by hand under a
+  temp `TC_ROOT` and checks the live board draws each.
 - **Do:** step by step, what to type and what to see. `two-accounts.md` is
   the planner's measurement: two Claude accounts on this machine, neither
   lists the other with ListAgents, and `tc send` across them wakes the
