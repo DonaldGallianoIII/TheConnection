@@ -19,10 +19,11 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             what re-invokes the session that started it. `health` and `watch`
             also read /proc (meminfo, locks, each process's comm and cmdline)
             and run `nvidia-smi` when it exists. They never signal or touch
-            another process.
-@deps       python3 stdlib (argparse, collections, fcntl, json, pathlib, re, resource, shutil,
-            subprocess, time, datetime, os, sys); Linux only (flock, RLIMIT_AS,
-            /proc). nvidia-smi optional.
+            another process. `send` to a codex card runs `codex queue` (C2).
+@deps       python3 stdlib (argparse, collections, fcntl, json, pathlib, re,
+            resource, shutil, subprocess, time, datetime, os, sys); Linux
+            only (flock, RLIMIT_AS, /proc). nvidia-smi optional; the codex
+            CLI for the codex route.
 @complexity send O(b), b body bytes up to SEND_BODY_MAX_BYTES; status O(1).
             read/peek/wait-poll O(u), u unread messages in one inbox,
             single digits in practice. log O(t), t total messages ever,
@@ -102,6 +103,11 @@ SEND_BODY_MAX_BYTES = 1048576
 SEND_TOO_LARGE_WORDS = "tc send: message over 1 MiB; this is a mailbox for words"
 # A message over SEND_BODY_MAX_BYTES, refused before it takes a number.
 EXIT_TOO_LARGE = 8
+# CARDS R4 (Claude Opus 5.5, unreviewed): the codex route (C2, D3).
+# How long `codex queue` gets to answer. It only queues a line for the
+# thread, so a healthy answer is quick; past this the sender stops waiting.
+# The mail has landed before the ring either way.
+CODEX_RING_SECONDS = 30
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -667,10 +673,68 @@ def deliver_local(card, sender, to, body, header_note=None):
     return Delivery(0, f"sent #{n} to {to}: {path}", warnings)
 
 
+# CARDS R4 (Claude Opus 5.5, unreviewed): the codex route, a doorbell (D3).
+def deliver_codex(card, sender, to, body, header_note=None):
+    """Route codex: deliver_local, then ring the Codex thread if the inbox was empty.
+
+    A listener started inside Codex dies when its command returns (D3), so
+    a Codex session is woken by `codex queue`, which hands its thread a
+    line to act on when its turn ends or the session is resumed. It rings
+    only when the inbox held no unread mail before this send: one ring per
+    batch. Two senders racing an empty inbox may both ring; accepted. A
+    ring that fails or times out is a warning: the mail is in the inbox,
+    so the send still exits 0.
+
+    @interacts  counts mail/to-<to>/*.md without creating it; writes the
+                message through deliver_local; when the count was 0, runs
+                `codex queue --thread <thread_id> --message ...` with stdin
+                from /dev/null and a CODEX_RING_SECONDS timeout. Reads
+                nothing from codex but its exit code and stderr.
+    @deps       unread_count, deliver_local, Delivery; subprocess, pathlib;
+                the `codex` CLI on PATH.
+    @complexity O(u + b) over u unread messages (counted twice) and b
+                bytes of body, plus one codex run of at most
+                CODEX_RING_SECONDS.
+    @alloc      the ring's message and codex's captured output, freed on
+                return; one message file, kept.
+    """
+    waiting = unread_count(to)
+    landed = deliver_local(card, sender, to, body, header_note)
+    if waiting:
+        return landed
+    words, warnings = [landed.words], list(landed.warnings)
+    thread = card.get("thread_id") if card else None
+    tc_path = pathlib.Path(__file__).resolve()
+    message = (f"MAIL: {unread_count(to)} unread for {to}. Run: {tc_path} read {to}, act on it, "
+               f"reply with {tc_path} send --from {to} --to {sender}.")
+    reason = None
+    if not thread:
+        reason = "its card has no thread_id"
+    else:
+        try:
+            done = subprocess.run(["codex", "queue", "--thread", thread, "--message", message],
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                  timeout=CODEX_RING_SECONDS)
+        except subprocess.TimeoutExpired:
+            reason = f"no answer in {CODEX_RING_SECONDS} s"
+        except OSError as err:
+            reason = f"could not run codex ({err.strerror})"
+        else:
+            said = done.stderr.strip().splitlines()
+            if done.returncode != 0:
+                reason = said[0] if said else f"codex exited {done.returncode} with no stderr"
+    if reason is None:
+        words.append(f"rang codex {to} (queued; delivered when its turn ends or the session is resumed)")
+    else:
+        warnings.append(f"ring failed for {to}: {reason}; the mail is in its inbox")
+    return Delivery(landed.exit, "\n".join(words), warnings)
+
+
 # One function per route; a card's route picks one. A route not here
 # answers "route <route> is not built yet" (C2). Each lane adds its own line.
 ROUTES = {
     "local": deliver_local,
+    "codex": deliver_codex,
 }
 
 
