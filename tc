@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""
+tc: file mailbox between Claude Code sessions on one machine.
+
+One session (the one you talk to) relays for others you can't reach directly.
+All run as the same Linux user, so a shared directory is the whole transport.
+One message is one markdown file, so a human can read the mailbox with cat.
+
+Layout under ROOT (default: this script's directory, override with TC_ROOT):
+  mail/to-<name>/NNNNNN-from-<sender>.md   unread
+  mail/to-<name>/read/...                  read (moved there by `tc read`)
+  status/<name>.md                         latest self-reported status
+  mail/.seq                                message counter (flock guarded)
+
+@interacts  filesystem only: writes mail/ and status/ under ROOT; no network,
+            no other process. The waking side is Claude Code's background Bash:
+            `tc wait` exiting is what re-invokes the listening session.
+@deps       python3 stdlib (argparse, fcntl, pathlib, resource, time, datetime,
+            os, sys); Linux only (flock, RLIMIT_AS)
+@complexity send/status O(1). read/peek/wait-poll O(u), u unread messages in
+            one inbox, single digits in practice. log O(t), t total messages
+            ever, low hundreds per job.
+@alloc      one file per message, kept forever (read/ is the history). Nothing
+            held in memory past one command. `wait` measured flat at 13 MB RSS
+            over 200k polls; it also hard-caps itself at WAIT_MEMORY_CAP_BYTES
+            so a runaway dies alone. `wait` holds mail/.wait-<name>.lock for its
+            lifetime; the kernel releases it when the process exits or is killed.
+"""
+
+import argparse
+import datetime
+import fcntl
+import os
+import pathlib
+import resource
+import sys
+import time
+
+ROOT = pathlib.Path(os.environ.get("TC_ROOT", pathlib.Path(__file__).resolve().parent))
+MAIL = ROOT / "mail"
+STATUS = ROOT / "status"
+SEQ_FILE = MAIL / ".seq"
+SEQ_WIDTH = 6
+POLL_SECONDS = 5
+# Claude Code caps a background Bash at 7200 s. Exit before that so the
+# session gets a clean "timeout, re-arm" instead of a killed command.
+DEFAULT_WAIT_SECONDS = 6600
+EXIT_TIMEOUT = 2
+EXIT_ALREADY_LISTENING = 3
+# Address-space ceiling for a listener. Measured need is about 13 MB; the cap
+# only exists so a bug can never take the machine down with it.
+WAIT_MEMORY_CAP_BYTES = 256 * 1024 * 1024
+
+
+def now_iso():
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def inbox(name):
+    box = MAIL / f"to-{name}"
+    (box / "read").mkdir(parents=True, exist_ok=True)
+    return box
+
+
+def unread(name):
+    return sorted(p for p in inbox(name).glob("*.md"))
+
+
+def next_seq():
+    MAIL.mkdir(parents=True, exist_ok=True)
+    with open(SEQ_FILE, "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        n = int(f.read().strip() or 0) + 1
+        f.seek(0)
+        f.truncate()
+        f.write(str(n))
+    return n
+
+
+def cmd_send(args):
+    body = args.message if args.message else sys.stdin.read()
+    if not body.strip():
+        sys.exit("tc send: empty message")
+    n = next_seq()
+    path = inbox(args.to) / f"{n:0{SEQ_WIDTH}d}-from-{args.sender}.md"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(f"# #{n} from {args.sender} to {args.to}, {now_iso()}\n\n{body.rstrip()}\n")
+    tmp.rename(path)  # atomic, so a waiter never reads a half-written file
+    print(f"sent #{n} to {args.to}: {path}")
+
+
+def show(paths):
+    for p in paths:
+        print(p.read_text())
+        print("---")
+
+
+def cmd_read(args):
+    msgs = unread(args.name)
+    if not msgs:
+        print(f"no unread mail for {args.name}")
+        return
+    show(msgs)
+    for p in msgs:
+        p.rename(p.parent / "read" / p.name)
+
+
+def cmd_peek(args):
+    msgs = unread(args.name)
+    print(f"{len(msgs)} unread for {args.name}")
+    show(msgs)
+
+
+def cmd_wait(args):
+    resource.setrlimit(resource.RLIMIT_AS, (WAIT_MEMORY_CAP_BYTES, WAIT_MEMORY_CAP_BYTES))
+    MAIL.mkdir(parents=True, exist_ok=True)
+    lock = open(MAIL / f".wait-{args.name}.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"ALREADY LISTENING: another `tc wait {args.name}` is running. Not starting a second.")
+        sys.exit(EXIT_ALREADY_LISTENING)
+    deadline = time.monotonic() + args.timeout
+    while time.monotonic() < deadline:
+        msgs = unread(args.name)
+        if msgs:
+            print(f"MAIL: {len(msgs)} unread for {args.name}. Run: tc read {args.name}")
+            return
+        time.sleep(POLL_SECONDS)
+    print(f"TIMEOUT: no mail for {args.name} in {args.timeout}s. Re-arm: tc wait {args.name}")
+    sys.exit(EXIT_TIMEOUT)
+
+
+def cmd_status(args):
+    STATUS.mkdir(parents=True, exist_ok=True)
+    if args.text is None:
+        files = sorted(STATUS.glob("*.md"))
+        if not files:
+            print("no status posted")
+        for p in files:
+            print(p.read_text())
+        return
+    (STATUS / f"{args.name}.md").write_text(f"## {args.name} status, {now_iso()}\n\n{args.text}\n")
+    print(f"status posted for {args.name}")
+
+
+def cmd_log(args):
+    every = sorted(MAIL.glob("to-*/**/*.md"), key=lambda p: p.name)
+    if not every:
+        print("mailbox empty")
+    show(every[-args.last:] if args.last else every)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="tc", description="Mailbox between Claude sessions.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("send", help="send a message (text arg or stdin)")
+    s.add_argument("--from", dest="sender", required=True)
+    s.add_argument("--to", required=True)
+    s.add_argument("message", nargs="?")
+    s.set_defaults(fn=cmd_send)
+
+    for name, fn, text in (("read", cmd_read, "print unread and mark read"),
+                           ("peek", cmd_peek, "print unread, leave unread")):
+        p = sub.add_parser(name, help=text)
+        p.add_argument("name")
+        p.set_defaults(fn=fn)
+
+    w = sub.add_parser("wait", help="block until mail arrives (run in background)")
+    w.add_argument("name")
+    w.add_argument("--timeout", type=int, default=DEFAULT_WAIT_SECONDS)
+    w.set_defaults(fn=cmd_wait)
+
+    st = sub.add_parser("status", help="post status (with text) or show all (without)")
+    st.add_argument("name", nargs="?")
+    st.add_argument("text", nargs="?")
+    st.set_defaults(fn=cmd_status)
+
+    lg = sub.add_parser("log", help="full history, both directions")
+    lg.add_argument("--last", type=int, default=0)
+    lg.set_defaults(fn=cmd_log)
+
+    args = ap.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()
