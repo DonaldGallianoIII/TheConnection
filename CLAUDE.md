@@ -61,15 +61,26 @@ Two ideas carry the whole tool.
 
 - Every tunable is a module constant at the top of `tc` with a comment
   saying why (`POLL_SECONDS`, `DEFAULT_WAIT_SECONDS`,
-  `WAIT_MEMORY_CAP_BYTES`). `ROOT` is the only other global.
+  `WAIT_MEMORY_CAP_BYTES`). The only other globals are `ROOT` and the
+  paths built from it (`MAIL`, `STATUS`, `SEQ_FILE`). tc fixes all four
+  at import, from `TC_ROOT`.
 - `TC_ROOT` moves the whole mailbox. Every test and every hand run uses its
   own `TC_ROOT` in a temp folder.
-- Exit codes are the interface for the waking side. `tc wait`: 0 mail,
-  2 timeout, 3 a listener for that name already runs. `tc watch`:
-  0 heartbeat, 5 alert, 3 already watching.
+- Exit codes are the interface for the waking side. The one table is
+  under "Exit codes" at the top of
+  `docs/planning/connection-routes/contracts.md`. Read it there; this file
+  keeps no copy. One trap today: a usage error (a mistyped flag, a missing
+  argument) exits 2, the same code as a `tc wait` timeout. CARDS task R6
+  (D12) moves it to 9. Until then, on an exit 2, read stderr: a usage
+  error starts with `usage:`.
 - Tests run `tc` as a subprocess, or load it as a module without running
-  `main()` (`tests/test_keepalive.py` shows how). New tests build on the
-  shared harness, `tests/_root.py`.
+  `main()` (`tests/test_keepalive.py` shows how). A load reads `TC_ROOT`
+  once, at import, so a module loaded inside `with TcRoot() as root`
+  still points at the checkout's own `mail/` unless the variable is set
+  first. Set `os.environ["TC_ROOT"]` to `str(root.path)` before the load,
+  inside the `with`, and restore the old value after. Patching `ROOT`
+  after the load moves nothing: `MAIL`, `STATUS` and `SEQ_FILE` keep the
+  old paths. New tests build on the shared harness, `tests/_root.py`.
 - `tc` is one file that several lanes edit. Each lane adds its own functions
   and touches only the shared spots named in `00-index.md` section 4: the
   `ROUTES` table (planned, contract C2), the argparse block in `main()`, and
@@ -91,8 +102,9 @@ wait on GROUND's merge; SHARED, SSH and DOCS come after them.
   contract changed writes a pause instead.
 - The owner's conventions folder (`~/Conventions/`). Read it; never edit it
   from here.
-- The Azure CLI, anything that touches Azure, and Docker. Real `ssh` and
-  real `codex`: only the owner runs those, in the human QA scripts.
+- A cloud provider's CLI, anything that touches a cloud account, and
+  Docker. Real `ssh` and real `codex`: only the owner runs those, in the
+  human QA scripts.
 
 ---
 
@@ -124,20 +136,21 @@ python3 -m unittest discover -s tests -p 'test_*.py'   # every Python test
 python3 -m unittest tests.test_root -v                  # one suite, by module
 node --test tests/*.test.mjs                            # the board look tests
 python3 ~/Conventions/tools/check_voice.py FILE.md      # dashes, machine register
+python3 ~/Conventions/tools/check_american.py FILE.md   # American spelling
 ```
 
 There is no single check script. Run these by hand before every commit.
+Each checker reads the files it is given and exits 1 on a hit.
 
-**The American English check needs care.** `~/Conventions/tools/check_american.py`
-takes no file argument: it scans only the conventions folder it lives in, so
-its "clean" says nothing about a file in this repo. Run its word list on
-your file instead. The lane coordinator's wrapper does that:
-`python3 ~/TheConnection-lanes/tools/american-on.py FILE.md`. It prints
-`american english: N hit(s) in M file(s)` and exits 1 on any hit.
+The `~/Conventions/` tools, and the lane worktrees under
+`~/TheConnection-lanes/`, live on the owner's machine. A fork without them
+skips those checks or brings its own.
 
 **The voice check skips phrases in any file named `CLAUDE.md`.** The
 exemption list in `voice-rules.yaml` names `CLAUDE.md`, so on this file
-`check_voice.py` checks characters and slang only.
+`check_voice.py` checks characters and slang only. To voice-check a
+`CLAUDE.md`, copy it to another name outside the repo first and check the
+copy.
 
 ---
 
@@ -161,25 +174,42 @@ session in a different permission mode holds a native message for its
 user's approval and can let it expire, and the mailbox is a record anyone
 can read on disk.
 
+**Any shape** (Donald, 2026-10-14, decision D7). No hub is assumed.
+Real setups look like any of these, and both routing and the board handle
+all of them:
+
+- one relay, many workers: `a` to `b`, `c`, `d`
+- a relay whose worker is itself a relay for others: `a` to `b`, and `b`
+  to `c`, `d`
+- two or more orchestrators side by side, each with its own workers, and
+  sometimes mailing each other
+
+The router never reads a hub from anywhere (C2). The board draws its
+edges from mail that actually moved, and ranks levels from an optional
+`reports_to` hint on the card, falling back to what the mail shows (C5).
+With no hints at all it still draws every shape, and says which roles it
+inferred.
+
 ### Rules every executing agent carries
 
-From `00-index.md` section 9. Rule 2 names the commit identity in general
-words and rule 12 names the owner's conventions folder; the rest is word
-for word.
+From `00-index.md` section 9, all 13, word for word. No rule here
+differs from the plan's.
 
 1. **Stay in your lane.** Edit only the files your task names, plus the
    shared spots in section 4. Anything else is a pause.
 2. **Branch and commits.** Work in your worktree on your lane branch. Never
-   `main`. Never push, never merge. Commit by path (`git add <paths>`), never
+   `main`. Never push, never merge (the architect pushes lane branches and
+   the dev branch, D10; never `main`, never a force push, never
+   `--no-verify`). Commit by path (`git add <paths>`), never
    `git add -A`. The message says what changed and why and ends with
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. The repo is
-   personal; commits go out under the repo's configured personal identity.
+   personal and public; commits go out under its configured personal identity.
 3. **No deletion.** No `rm` at all, no `git clean`, no `git reset --hard`,
    no deleting a branch. The one exception: a test's own
    `TemporaryDirectory` cleaning itself up in teardown. No test touches the
    live `mail/` or `status/`: every test runs under its own `TC_ROOT`.
-4. **Never run the Azure CLI (`az`) or anything that touches Azure. Never
-   run Docker.**
+4. **Never run a cloud provider's CLI or anything that touches a cloud
+   account. Never run Docker.**
 5. **Agents never run real `ssh` or real `codex`**, in tests or by hand.
    Tests put a fake on `PATH` that records its argv. The fake must be
    asserted called, or the test passes by not checking. Donald runs the
@@ -210,13 +240,16 @@ for word.
     comment saying the same.
 12. **Voice.** No em dashes, no en dashes. No machine register: the
     banned words and phrases are in
-    `~/Conventions/tools/voice-rules.yaml`; read it once.
-    Short sentences, concrete nouns. American English. Run
-    `python3 ~/Conventions/tools/check_voice.py` and
-    `check_american.py` on every Markdown file you write.
-
-Rule 12's American check: see the note under Commands. `check_american.py`
-alone proves nothing about a file here.
+    `~/Conventions/tools/voice-rules.yaml` (the owner's conventions folder);
+    read it once. Short sentences, concrete nouns. American English. Run
+    `python3 ~/Conventions/tools/check_voice.py <file>` and
+    `python3 ~/Conventions/tools/check_american.py <file>` on every
+    Markdown file you write. Each exits 1 on a hit.
+13. **Public repo** (D11). Nothing sensitive goes into a file or a commit
+    message: no keys, tokens or passwords, no real mailbox content, no
+    hostnames, IPs or tailnet names, no email beyond the commit author, and
+    nothing about the owner's employer or its systems. Test names and demo
+    names are made up.
 
 ### QA
 
@@ -228,7 +261,20 @@ The human scripts in `qa/human/` cover the rest (`00-index.md` section 10).
 
 ## Deviations from the conventions
 
-None.
+*Deviation:* no check script. The conventions copy the checkers from
+`~/Conventions/tools/` into a repo and wire them into one check script.
+This repo runs the owner's tools in place, by hand, from the list under
+Commands.
+
+*Deviation:* no `qa/bot/` step. The unittest suite is the scripted
+playthrough for every deterministic loop (`00-index.md` section 10); the
+human scripts in `qa/human/` cover the rest.
+
+*Deviation:* uppercase lane ids in file names. Handoff and pause files
+take the plan's lane ids as they are (`handoffs/GROUND.md`,
+`pauses/GROUND-1.md`), against the lowercase-with-hyphens rule. Accepted,
+not renamed: the plan's `<lane>` path templates give every lane these
+names.
 
 ---
 
@@ -240,6 +286,9 @@ The core mailbox commands (send, read, peek, wait, log, status) have no
 tests in the tree yet; CORE writes them.
 
 GROUND (P0) adds this file (G1), `docs/known-bugs/` (G2) and
-`tests/_root.py` (G3), one commit each on the GROUND lane branch. All three
-are unreviewed until the review relay closes and the owner says merge.
+`tests/_root.py` (G3), one commit each on the GROUND lane branch, and the
+first review round's fixes land on the same branch. All of it is
+unreviewed until the review relay closes. Then a2 says merge for the
+owner (D8), and the architect merges GROUND into the dev branch,
+`Claude-Development-TheConnection`. `main` stays the owner's alone.
 Nothing else in the plan is built.

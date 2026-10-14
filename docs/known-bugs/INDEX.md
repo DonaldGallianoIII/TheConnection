@@ -10,7 +10,7 @@ against them, and every plan task's "must reject" draws on them.
 
 Index plus detail, as in `~/Conventions/code/KNOWN-BUGS.md` in the owner's
 conventions folder. This file is the index. Each entry has its own detail
-file in this folder, named by its slug, in these parts:
+file in this folder, named by its slug, in these ten parts:
 
 - **What:** the pattern, in one or two sentences.
 - **How it showed:** what was seen, when, and where.
@@ -24,6 +24,8 @@ file in this folder, named by its slug, in these parts:
 - **Tier when hit:** HIGH, MEDIUM or LOW, with a few words of why. It is a
   floor: a review that matches an entry files the finding at that tier or
   higher.
+- **Shared catalog:** the entry in the shared known-bugs catalog this one
+  is a form of, and how.
 
 An entry is never deleted for being old. One hit again is marked recurring
 and its count goes up.
