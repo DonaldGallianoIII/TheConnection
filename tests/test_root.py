@@ -7,7 +7,12 @@ refuses a name with mail waiting, teardown reaps every child when one
 times out, a listener's cleanup failure never replaces the test's own
 exception, a fake gives each call its exit code and stderr, start()
 children die with the root and read their stdin, and a bare `ssh` or
-`codex` hits the refusing stub unless a fake stands in front of it.
+`codex` hits the refusing stub unless a fake stands in front of it. And:
+calls() read after the root exits raises, teardown gives all its children
+one shared reap ceiling, a dotted or symlinked PATH entry that leads out
+of the temp folder stays behind the stubs, fake_bin refuses a name that is
+not a plain word, a listener already up at the first read yields without
+sleeping, and start(argv=...) runs that command and dies with the root.
 
 Model:  Claude Opus 5.5 (the GROUND lane agent), 2026-10-14
 Status: unreviewed
@@ -18,15 +23,19 @@ Status: unreviewed
             test's own cleanup also kills each child by its own pid. Runs a
             probe script in tc's place (by patching _root.TC) to read the
             environment a child gets and to resolve `ssh` and `codex` on
-            its PATH; the probe runs a resolved tool only when it sits
-            inside the root's temp folder, so the real tool never runs even
-            when the harness is broken. Calls fakes by absolute path. Reads
-            /proc/locks and /proc/<pid> with its own code, kept apart from
-            the harness's reader so a bug in one cannot hide in the other.
+            its PATH. The probe prints only TC_ROOT and the variables that
+            carry the PLANTED marker, so no failing assertion can print the
+            inherited environment. It runs a resolved tool only when it
+            sits inside the root's temp folder, so the real tool never runs
+            even when the harness is broken. Calls fakes by absolute path.
+            One test writes a decoy `ssh` in its own temporary folder
+            beside the root's, and never runs it. Reads /proc/locks and
+            /proc/<pid> with its own code, kept apart from the harness's
+            reader so a bug in one cannot hide in the other.
 @deps       python3 stdlib (contextlib, io, json, os, pathlib, subprocess,
-            sys, unittest, unittest.mock); tests/_root.py; /bin/sh; Linux
-            only (/proc).
-@complexity O(1) per test: one to three children, and one or two `tc
+            sys, tempfile, time, types, unittest, unittest.mock);
+            tests/_root.py; /bin/sh; Linux only (/proc).
+@complexity O(1) per test: one to four children, and one or two `tc
             health` or probe runs (tc health is O(p + k + n) inside tc, see
             tc's header). Under a second each.
 @alloc      one TcRoot per test, removed when its context exits. Nothing is
@@ -40,6 +49,9 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
+import time
+import types
 import unittest
 from unittest import mock
 
@@ -81,10 +93,28 @@ REFUSED_EXIT = 97
 REFUSED_WORDS = "real {name} is not allowed in tests\n"
 # The argument the probe passes to a tool it runs.
 PROBE_ARG = "probe-arg"
+# The longest name fake_bin takes. Written here, not read from the harness's
+# pattern, for the same reason as NEVER_IN_A_CHILD.
+FAKE_NAME_MAX = 32
+# A start(argv=...) child sleeps this long, far past any test, so only
+# teardown can end it.
+SLEEPER_SECONDS = 30
+# A decoy `ssh` outside the root's temp folder. The probe never runs it,
+# because it resolves outside that folder; it only has to be found first
+# on PATH when the harness is broken.
+DECOY_SCRIPT = """#!/bin/sh
+# A decoy ssh written by tests/test_root.py. Nothing runs it.
+exit 0
+"""
+# Owner may read, write and run the decoy. Nobody else needs to.
+DECOY_MODE = 0o700
 
 # Run in tc's place (the test patches _root.TC), so a test sees what a child
 # of the harness gets. argv: the root's temp folder, then tool names. Prints
-# {"env": its environment, "tools": {name: what it found}}. A tool runs only
+# {"env": {...}, "tools": {name: what it found}}, where "env" holds only
+# TC_ROOT and the variables whose value carries the PLANTED marker. It
+# never prints the whole environment: a failing assertion over it would
+# write every inherited secret into the test's output. A tool runs only
 # when it resolves inside the temp folder (a stub or a fake): a broken
 # harness shows up as a path outside it, and the real tool never runs.
 PROBE_SCRIPT = """\
@@ -105,7 +135,8 @@ for name in sys.argv[2:]:
                               capture_output=True, text=True, timeout={timeout})
         seen.update(ran=True, code=done.returncode, stderr=done.stderr)
     tools[name] = seen
-print(json.dumps({{"env": dict(os.environ), "tools": tools}}))
+env = {{k: v for k, v in os.environ.items() if k == "TC_ROOT" or {marker!r} in v}}
+print(json.dumps({{"env": env, "tools": tools}}))
 """
 
 
@@ -183,11 +214,13 @@ def probe(root, *tools, env=None):
                 for one call; the probe may run a stub or a fake in the
                 temp folder, never anything outside it.
     @deps       json, unittest.mock; _root.TcRoot.tc.
-    @complexity O(e) over e variables the probe prints (tens).
+    @complexity O(e) over e variables the child has (tens), to filter; it
+                prints TC_ROOT and the planted ones only (a handful).
     @alloc      the probe file (removed with the temp folder) and the report.
     """
     script = root.base / "probe.py"
-    script.write_text(PROBE_SCRIPT.format(arg=PROBE_ARG, timeout=CHILD_TIMEOUT_SECONDS),
+    script.write_text(PROBE_SCRIPT.format(arg=PROBE_ARG, timeout=CHILD_TIMEOUT_SECONDS,
+                                          marker=PLANTED),
                       encoding="utf-8")
     with mock.patch.object(_root, "TC", script):
         code, out, err = root.tc(str(root.base), *tools, env=env)
@@ -334,8 +367,20 @@ class RootTest(unittest.TestCase):
         real_stop = _root._stop
         times_out = set()
 
-        def stop_then_time_out(proc):
-            real_stop(proc)
+        def stop_then_time_out(proc, deadline=None):
+            """The real _stop, then a reap timeout for each pid in `times_out`.
+
+            Stands in for _root._stop. The child is killed and reaped for
+            real first, so a simulated timeout leaves nothing running.
+
+            @interacts  SIGKILL to proc.pid through the real _stop, then
+                        raises TimeoutExpired when proc.pid is in
+                        `times_out`.
+            @deps       _root._stop, subprocess.
+            @complexity O(1).
+            @alloc      none; the real _stop releases the child's pipes.
+            """
+            real_stop(proc, deadline)
             if proc.pid in times_out:
                 raise subprocess.TimeoutExpired(proc.args, _root.REAP_CEILING_SECONDS)
 
@@ -371,8 +416,20 @@ class RootTest(unittest.TestCase):
         """
         real_stop = _root._stop
 
-        def stop_then_time_out(proc):
-            real_stop(proc)
+        def stop_then_time_out(proc, deadline=None):
+            """The real _stop, then a reap timeout, for every child.
+
+            Stands in for _root._stop while the listener tears down. The
+            child is killed and reaped for real first, so the simulated
+            timeout leaves nothing running.
+
+            @interacts  SIGKILL to proc.pid through the real _stop, then
+                        always raises TimeoutExpired.
+            @deps       _root._stop, subprocess.
+            @complexity O(1).
+            @alloc      none; the real _stop releases the child's pipes.
+            """
+            real_stop(proc, deadline)
             raise subprocess.TimeoutExpired(proc.args, _root.REAP_CEILING_SECONDS)
 
         log = io.StringIO()
@@ -503,6 +560,249 @@ class RootTest(unittest.TestCase):
         self.assertEqual(report["tools"]["codex"]["code"], 0)
         self.assertEqual(recorded, [{"argv": [PROBE_ARG], "stdin": ""}])
         self.assertEqual(report["tools"]["ssh"]["code"], REFUSED_EXIT)
+
+    def test_calls_read_after_the_root_exits_raises(self):
+        """calls() is [] while the root is live and the fake never ran; after the root exits it raises.
+
+        Must reject a calls() that answers [] once the record is gone: an
+        "assert not called" placed after the `with` block would pass even
+        though the fake ran.
+
+        @interacts  calls the fake once by absolute path.
+        @deps       _root.TcRoot.fake_bin, subprocess.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("ssh", 0)
+            before = calls()
+            run = subprocess.run([str(folder / "ssh"), "-T"], env=root.env,
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                 timeout=CHILD_TIMEOUT_SECONDS)
+            during = calls()
+        self.assertEqual(before, [], f"calls() before any run: {before}")
+        self.assertEqual(run.returncode, 0, f"the fake exited {run.returncode}: {run.stderr}")
+        self.assertEqual(during, [{"argv": ["-T"], "stdin": ""}])
+        with self.assertRaises(RuntimeError) as caught:
+            calls()
+        self.assertIn("inside the `with TcRoot()` block", str(caught.exception))
+
+    def test_teardown_shares_one_reap_ceiling_across_children(self):
+        """Four children stuck on reap cost one REAP_CEILING_SECONDS in all, and each is named.
+
+        _root's view of time is a number the test moves by hand, so no real
+        wait happens. _stop is wrapped: it stops the child for real, then
+        acts stuck, using up all the time left before the deadline it was
+        given, and raises TimeoutExpired. _kill is wrapped to log the
+        order. Must reject a teardown that gives each child a ceiling of
+        its own (the clock would reach four ceilings), and one that reaps
+        before every child has had its SIGKILL.
+
+        @interacts  four start() children; each is also killed by its own
+                    pid in this test's cleanup.
+        @deps       _root.TcRoot.start, _root._stop, _root._kill, types,
+                    in_proc, kill_own.
+        @complexity O(h) over h = 4 children.
+        @alloc      one TcRoot, removed on exit.
+        """
+        children = 4
+        real_stop = _root._stop
+        real_kill = _root._kill
+        now = [0.0]
+        events = []
+
+        def kill_and_log(proc):
+            """The real _kill, logged as ("kill", pid).
+
+            @interacts  SIGKILL to proc.pid through the real _kill.
+            @deps       _root._kill.
+            @complexity O(1).
+            @alloc      one event tuple.
+            """
+            events.append(("kill", proc.pid))
+            real_kill(proc)
+
+        def stop_then_stick(proc, deadline=None):
+            """The real _stop, then a reap that uses up the time left before `deadline`.
+
+            @interacts  SIGKILL to proc.pid through the real _stop, which
+                        reaps it for real; then moves the test's clock to
+                        `deadline` and raises TimeoutExpired.
+            @deps       _root._stop, subprocess.
+            @complexity O(1).
+            @alloc      one event tuple; the real _stop releases the pipes.
+            """
+            events.append(("reap", proc.pid))
+            real_stop(proc)
+            left = max(0.0, deadline - now[0])
+            now[0] += left
+            raise subprocess.TimeoutExpired(proc.args, left)
+
+        clock = types.SimpleNamespace(monotonic=lambda: now[0], sleep=time.sleep)
+        procs = []
+        raised = None
+        try:
+            with mock.patch.object(_root, "time", clock), \
+                    mock.patch.object(_root, "_kill", kill_and_log), \
+                    mock.patch.object(_root, "_stop", stop_then_stick):
+                with _root.TcRoot() as root:
+                    for i in range(children):
+                        proc = root.start("wait", f"h{i}", "--timeout", str(LISTENER_TIMEOUT_SECONDS))
+                        self.addCleanup(kill_own, proc)
+                        procs.append(proc)
+        except Exception as exc:  # the test checks what came out, below
+            raised = exc
+        pids = {proc.pid for proc in procs}
+        self.assertIsInstance(raised, _root.ChildNotReaped, f"teardown raised {raised!r}")
+        for pid in pids:
+            self.assertIn(f"pid {pid}", str(raised), f"pid {pid} not named: {raised}")
+        self.assertLessEqual(now[0], _root.REAP_CEILING_SECONDS,
+                             f"{children} stuck reaps took {now[0]} s of the clock, more than one ceiling")
+        first = events[:children]
+        self.assertEqual(first, [("kill", pid) for pid in (proc.pid for proc in procs)],
+                         f"a reap came before every child had its SIGKILL: {events}")
+        for proc in procs:
+            self.assertFalse(in_proc(proc.pid), f"pid {proc.pid} still in /proc after teardown")
+
+    def test_a_dotted_or_symlinked_path_out_of_base_stays_behind_the_stubs(self):
+        """A PATH entry that reads as inside the temp folder but resolves outside it goes behind the stubs.
+
+        A decoy folder beside the root's temp folder holds an `ssh`. Two
+        entries name it from inside the temp folder: a symlink in base,
+        and `<base>/../<decoy>`. With either first on PATH, a child's
+        `ssh` must still be the stub. The probe never runs the decoy: it
+        resolves outside the temp folder. Must reject a _guard_path that
+        compares paths as text.
+
+        @interacts  two probe runs through root.tc(); writes the decoy in
+                    a TemporaryDirectory of its own, removed on exit.
+        @deps       probe, tempfile, os, pathlib.
+        @complexity O(1).
+        @alloc      one TcRoot and one decoy folder, both removed on exit.
+        """
+        seen = {}
+        with _root.TcRoot() as root, \
+                tempfile.TemporaryDirectory(prefix="tc-decoy-", dir=root.base.parent) as decoy:
+            tool = pathlib.Path(decoy) / "ssh"
+            tool.write_text(DECOY_SCRIPT)
+            tool.chmod(DECOY_MODE)
+            link = root.base / "decoy-link"
+            link.symlink_to(decoy, target_is_directory=True)
+            entries = {"symlink": str(link),
+                       "dotted": os.path.join(str(root.base), os.pardir, os.path.basename(decoy))}
+            for form, entry in entries.items():
+                code, report, err = probe(root, "ssh",
+                                          env={"PATH": f"{entry}{os.pathsep}{root.env['PATH']}"})
+                seen[form] = (code, report["tools"]["ssh"] if report else None, err)
+        for form, (code, found, err) in seen.items():
+            with self.subTest(form=form):
+                self.assertEqual(code, 0, f"probe exited {code}: {err}")
+                self.assertTrue(found["ran"], f"`ssh` resolved to {found['path']}, outside the "
+                                              f"test's temp folder: the stubs were not first")
+                self.assertEqual(found["code"], REFUSED_EXIT, f"`ssh` exited {found['code']}")
+
+    def test_fake_bin_refuses_a_name_that_is_not_a_plain_word(self):
+        """fake_bin raises ValueError for a slash, a newline, a capital, a space, an empty or too-long name.
+
+        Nothing is written for a refused name, and a plain word of the
+        longest length still passes. Must reject a fake_bin that takes any
+        string (a newline adds a line to the generated scripts; a slash
+        writes outside bin/).
+
+        @interacts  writes one fake, for the name that passes.
+        @deps       _root.TcRoot.fake_bin.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        longest = "s" * FAKE_NAME_MAX
+        bad = ("ssh\nexit 0", "ssh\n", "../ssh", "bin/ssh", "", "Ssh", "-ssh", "ssh x", longest + "s")
+        with _root.TcRoot() as root:
+            for name in bad:
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    root.fake_bin(name, 0)
+            written = sorted(p.name for p in root.base.glob("fake-*"))
+            folder, calls = root.fake_bin(longest, 0)
+            made = (folder / longest).exists()
+        self.assertEqual(written, [], f"a refused name still wrote a fake: {written}")
+        self.assertTrue(made, f"fake_bin({longest!r}) wrote no fake")
+
+    def test_a_listener_already_up_yields_without_sleeping(self):
+        """When the first read of /proc/locks shows the pid, listener() yields with no sleep.
+
+        _root's view of time is swapped so its sleeps are counted, not
+        slept, and _root.flock_holders answers only once the pid really
+        holds the lock, so the listener is up by the first read. Must
+        reject a listener() that sleeps before its first read (every
+        listener would pay one LOCK_POLL_SECONDS at least).
+
+        @interacts  one listener; reads /proc/locks through held_by.
+        @deps       _root.TcRoot.listener, _root.flock_holders, held_by,
+                    types, time.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        real_holders = _root.flock_holders
+        sleeps = []
+
+        def holders_once_up(path):
+            """_root.flock_holders, answered only once some pid holds `path`.
+
+            Waits with the real time.sleep, which the listener's counted
+            sleep does not see, up to LOCK_CEILING_SECONDS.
+
+            @interacts  reads /proc/locks through held_by, then through
+                        the real flock_holders.
+            @deps       held_by, _root.flock_holders, time.
+            @complexity at most LOCK_CEILING_SECONDS / LOCK_POLL_SECONDS
+                        = 100 reads, each O(k) over k lines (tens).
+            @alloc      the set of pids, returned.
+            """
+            give_up = time.monotonic() + _root.LOCK_CEILING_SECONDS
+            while not held_by(path) and time.monotonic() < give_up:
+                time.sleep(_root.LOCK_POLL_SECONDS)
+            return real_holders(path)
+
+        counted = types.SimpleNamespace(monotonic=time.monotonic, sleep=sleeps.append)
+        with _root.TcRoot() as root:
+            lock = root.path / "mail" / f".wait-{NAME}.lock"
+            with mock.patch.object(_root, "time", counted), \
+                    mock.patch.object(_root, "flock_holders", holders_once_up):
+                with root.listener(NAME, LISTENER_TIMEOUT_SECONDS) as pid:
+                    holders = held_by(lock)
+        self.assertIn(pid, holders, f"at yield, pid {pid} does not hold {lock}; holders: {holders}")
+        self.assertEqual(sleeps, [], f"listener() slept {len(sleeps)} time(s) though the lock "
+                                     f"was held at its first read")
+
+    def test_start_runs_a_given_argv_and_teardown_kills_it(self):
+        """start(argv=[...]) runs that command with the root's env, and it dies with the root.
+
+        The child prints the TC_ROOT it sees, then sleeps far past the
+        test. Also: tc arguments with argv, an empty argv and a bare string
+        raise ValueError. Must reject a start() that ignores argv and runs
+        tc (the first line would not be the root's path).
+
+        @interacts  one start() child running python3 -c; it is also
+                    killed by its own pid in this test's cleanup.
+        @deps       _root.TcRoot.start, in_proc, kill_own.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        script = (f"import os, time; print(os.environ['TC_ROOT'], flush=True); "
+                  f"time.sleep({SLEEPER_SECONDS})")
+        argv = [sys.executable, "-c", script]
+        with _root.TcRoot() as root:
+            for args, given in ((("peek", NAME), argv), ((), []), ((), script)):
+                with self.subTest(args=args, argv=given), self.assertRaises(ValueError):
+                    root.start(*args, argv=given)
+            proc = root.start(argv=argv)
+            self.addCleanup(kill_own, proc)
+            said = proc.stdout.readline().strip()
+            running = proc.poll()
+            where = str(root.path)
+        self.assertEqual(proc.args, argv)
+        self.assertEqual(said, where, "the child did not run the given argv under this root")
+        self.assertIsNone(running, f"pid {proc.pid} exited {running} before teardown")
+        self.assertFalse(in_proc(proc.pid), f"pid {proc.pid} still in /proc after TcRoot exited")
 
 
 if __name__ == "__main__":
