@@ -1,0 +1,171 @@
+{
+  "_about": "Fake sessions and traffic for demo.html. Positions are board pixels; hue is an index into look.js HUES. back = true means the message runs right to left (a reply).",
+  "stepMs": 1800,
+  "window": {
+    "file": "connection.board",
+    "sub": "· TheConnection :: look demo",
+    "conn": "5 listening · 1 down",
+    "connState": "warn"
+  },
+  "hud": "demo · scripted traffic · dashes run toward the reader · arrow marks the reader",
+  "footer": [
+    "load 6 / 16",
+    "mem free 73%",
+    "GPU 27C",
+    null,
+    "6 sessions · 5 listeners"
+  ],
+  "sessions": [
+    {
+      "id": "you",
+      "title": "you · phone",
+      "pos": {
+        "x": 30,
+        "y": 160
+      },
+      "hue": 7,
+      "state": "listening"
+    },
+    {
+      "id": "a",
+      "title": "a · relay",
+      "pos": {
+        "x": 250,
+        "y": 160
+      },
+      "hue": 0,
+      "state": "listening"
+    },
+    {
+      "id": "b",
+      "title": "b · worker",
+      "pos": {
+        "x": 500,
+        "y": 30
+      },
+      "hue": 1,
+      "state": "listening"
+    },
+    {
+      "id": "crc",
+      "title": "crc · worker",
+      "pos": {
+        "x": 500,
+        "y": 130
+      },
+      "hue": 2,
+      "state": "idle",
+      "detail": "41m"
+    },
+    {
+      "id": "pac",
+      "title": "pac · worker",
+      "pos": {
+        "x": 500,
+        "y": 230
+      },
+      "hue": 4,
+      "state": "listening"
+    },
+    {
+      "id": "zed",
+      "title": "zed · worker",
+      "pos": {
+        "x": 500,
+        "y": 330
+      },
+      "hue": 5,
+      "state": "down"
+    }
+  ],
+  "links": [
+    [
+      "you",
+      "a"
+    ],
+    [
+      "a",
+      "b"
+    ],
+    [
+      "a",
+      "crc"
+    ],
+    [
+      "a",
+      "pac"
+    ],
+    [
+      "a",
+      "zed"
+    ]
+  ],
+  "downLinks": [
+    [
+      "a",
+      "zed"
+    ]
+  ],
+  "script": [
+    {
+      "wire": [
+        "you",
+        "a"
+      ],
+      "writer": "you",
+      "text": "you → a"
+    },
+    {
+      "wire": [
+        "a",
+        "b"
+      ],
+      "writer": "a",
+      "text": "a → b · #781"
+    },
+    {
+      "wire": [
+        "a",
+        "b"
+      ],
+      "writer": "b",
+      "text": "b → a · done",
+      "back": true
+    },
+    {
+      "wire": [
+        "you",
+        "a"
+      ],
+      "writer": "a",
+      "text": "a → you",
+      "back": true
+    },
+    {
+      "wire": [
+        "a",
+        "crc"
+      ],
+      "writer": "a",
+      "text": "a → crc · #782"
+    },
+    {
+      "wire": [
+        "a",
+        "pac"
+      ],
+      "writer": "pac",
+      "text": "pac → a · hourly",
+      "back": true
+    },
+    {
+      "wire": [
+        "you",
+        "a"
+      ],
+      "writer": "a",
+      "text": "a → you",
+      "back": true
+    }
+  ]
+}

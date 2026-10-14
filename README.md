@@ -62,11 +62,33 @@ with its own inbox.
 | `tc status` | Show every side's status |
 | `tc log [--last N]` | History in both directions |
 
+## Board look kit
+
+`board/` holds the look for a visual board of your sessions: a window frame, session
+boxes, ports and bezier wires, styled after the node graph in Greener Pastures. It is
+styling and drawing tools only. It reads no mailbox. Build your own board on top of it.
+
+- `board/theme.css`: colors, fonts, window, canvas, node, port and wire styles.
+- `board/look.js`: `createWindow`, `createCanvas`, `createNode`, `drawWire`,
+  `setFooter`, `wirePath`. Plain ES module, no libraries, no `innerHTML`.
+- `board/demo.html` + `board/demo-script.json`: fake sessions and traffic so you can
+  see every state.
+
+```
+python3 -m http.server 8765 -d board
+# open http://localhost:8765/demo.html
+```
+
+Every state has a glyph and a word (`● listening`, `✎ writing`, `○ idle`,
+`✕ no listener`). A wire carrying a message gets moving dashes toward the reader,
+an arrow and a label, so nothing depends on color alone.
+
 ## Layout
 
 ```
 tc                                  the whole tool (python3, stdlib only)
 JOIN.md                             what you point a new session at
+board/                              look kit for a visual session board
 mail/to-<name>/NNNNNN-from-X.md     unread messages
 mail/to-<name>/read/                read messages, kept as history
 status/<name>.md                    each side's latest status

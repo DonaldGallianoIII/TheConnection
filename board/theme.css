@@ -1,0 +1,245 @@
+/*
+ * theme.css: the board look. Window frame, canvas, session nodes, ports and
+ * wires, taken from the Greener Pastures notebook's node graph.
+ *
+ * @interacts  styles elements built by look.js; reads no data
+ * @deps       optional Google Fonts (Space Grotesk, JetBrains Mono); falls
+ *             back to system fonts offline
+ * @complexity n/a (static stylesheet)
+ * @alloc      none
+ *
+ * Colorblind rule: color is never the only signal. Every session state has a
+ * glyph and a word, ports differ by shape (ring in, dot out), and a wire
+ * carrying a message moves (dash flow toward the reader) and gets an arrow
+ * and a text label. With reduced motion the dashes stop but the arrow and
+ * label stay.
+ */
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  --tc-bg: #0c0f14;
+  --tc-bg2: #0a0d12;
+  --tc-panel: #161c25;
+  --tc-panel-hi: #1d2530;
+  --tc-inset: #0e131a;
+  --tc-line: #2a3543;
+  --tc-line2: #212a36;
+  --tc-text: #e7eef6;
+  --tc-muted: #8593a4;
+  --tc-dim: #566273;
+  --tc-green: #4fd6a0;
+  --tc-amber: #ffb454;
+  --tc-cyan: #5cc8ff;
+  --tc-red: #ff6b6b;
+  --tc-violet: #7c5cff;
+  --tc-blue: #4ea1ff;
+  --tc-orange: #ff9f43;
+  --tc-yellow: #ffd93b;
+  --tc-grey: #8b93a1;
+
+  --tc-font: 'Space Grotesk', system-ui, sans-serif;
+  --tc-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  --tc-radius-win: 14px;
+  --tc-radius: 8px;
+  --tc-bar-w: 5px;
+  --tc-port: 12px;
+  --tc-wire-w: 2.5px;
+  --tc-dash: 7px;
+  --tc-gap: 5px;
+  --tc-flow-speed: 0.9s;
+  --tc-pulse-speed: 2s;
+}
+
+/* Page backdrop, same radial glow as the notebook. */
+.tc-backdrop {
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  box-sizing: border-box;
+  background: radial-gradient(circle at 28% 8%, #11161f, #06080c 72%);
+  color: var(--tc-text);
+  font-family: var(--tc-font);
+  -webkit-font-smoothing: antialiased;
+}
+.tc-backdrop *, .tc-backdrop *::before, .tc-backdrop *::after { box-sizing: border-box; }
+/* The board's mount point fills the row so the window can size to it. */
+.tc-mount { width: 100%; min-width: 0; display: flex; justify-content: center; }
+
+/* ---------- window frame ---------- */
+.tc-win {
+  width: min(1180px, 100%);
+  height: min(724px, calc(100vh - 32px));
+  background: var(--tc-bg);
+  border: 1px solid var(--tc-line);
+  border-radius: var(--tc-radius-win);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 44px 130px -30px rgba(0, 0, 0, .85), 0 0 0 1px rgba(255, 255, 255, .02) inset;
+}
+.tc-title {
+  height: 42px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 14px;
+  background: linear-gradient(180deg, #12171f, #0d1219);
+  border-bottom: 1px solid var(--tc-line);
+}
+.tc-dot { width: 11px; height: 11px; border-radius: 50%; }
+.tc-dot.r { background: #ff5f57; }
+.tc-dot.y { background: #febc2e; }
+.tc-dot.g { background: #28c840; }
+.tc-fname { white-space: nowrap; font-family: var(--tc-mono); font-size: 12px; font-weight: 600; margin-left: 4px; }
+.tc-sub { font-size: 11px; color: var(--tc-dim); }
+.tc-conn {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--tc-mono);
+  font-size: 11px;
+  color: var(--tc-muted);
+}
+.tc-cdot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 9px currentColor;
+  animation: tc-pulse var(--tc-pulse-speed) ease-in-out infinite;
+}
+.tc-conn > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.tc-conn[data-state="up"] .tc-cdot { color: var(--tc-green); }
+.tc-conn[data-state="warn"] .tc-cdot { color: var(--tc-amber); }
+.tc-conn[data-state="down"] .tc-cdot { color: var(--tc-red); animation: none; }
+
+.tc-body { flex: 1; position: relative; overflow: hidden; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+
+.tc-foot {
+  height: 30px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px;
+  background: linear-gradient(180deg, #0d1219, #0a0e13);
+  border-top: 1px solid var(--tc-line);
+  font-family: var(--tc-mono);
+  font-size: 11px;
+  color: var(--tc-muted);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.tc-foot .tc-sp { flex: 1; }
+
+/* ---------- chips and small text ---------- */
+.tc-h { font-family: var(--tc-mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--tc-dim); }
+.tc-chips { display: flex; gap: var(--tc-gap); flex-wrap: wrap; align-items: center; }
+.tc-chip {
+  background: var(--tc-panel);
+  border: 1px solid var(--tc-line);
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--tc-text);
+}
+.tc-chip[data-hue] { border-color: var(--tc-chip-hue); box-shadow: inset 3px 0 0 var(--tc-chip-hue); }
+
+/* ---------- canvas ---------- */
+.tc-canvas {
+  position: relative;
+  flex: 1;
+  min-height: 260px;
+  background: var(--tc-inset);
+  border: 1px solid var(--tc-line2);
+  border-radius: var(--tc-radius);
+  overflow: hidden;
+}
+.tc-view { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+.tc-wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+.tc-hud {
+  position: absolute;
+  bottom: 6px;
+  left: 8px;
+  font-size: 9px;
+  color: var(--tc-dim);
+  font-family: var(--tc-mono);
+  pointer-events: none;
+}
+
+/* ---------- session node ---------- */
+.tc-node {
+  position: absolute;
+  display: flex;
+  background: var(--tc-panel);
+  border: 1.5px solid var(--tc-line);
+  border-radius: var(--tc-radius);
+  box-shadow: 0 4px 12px -4px rgba(0, 0, 0, .6);
+}
+.tc-node-bar { width: var(--tc-bar-w); flex: none; border-radius: 6px 0 0 6px; background: var(--tc-node-hue, var(--tc-grey)); }
+.tc-node-body { flex: 1; min-width: 0; padding: 4px 9px; display: flex; flex-direction: column; justify-content: center; gap: 1px; }
+.tc-node-title { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-node-sub { font-size: 9px; color: var(--tc-dim); font-family: var(--tc-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-node-glyph { display: inline-block; width: 1.2em; }
+
+/* States: glyph and word always; border weight and style as the second cue. */
+.tc-node[data-state="listening"] .tc-node-sub { color: var(--tc-muted); }
+.tc-node[data-state="writing"] { border-color: var(--tc-cyan); border-width: 2.5px; }
+.tc-node[data-state="writing"] .tc-node-sub { color: var(--tc-cyan); font-weight: 600; }
+.tc-node[data-state="idle"] { opacity: .85; }
+.tc-node[data-state="idle"] .tc-node-sub { color: var(--tc-muted); }
+.tc-node[data-state="down"] { border-style: dashed; border-color: var(--tc-red); }
+.tc-node[data-state="down"] .tc-node-sub { color: var(--tc-red); font-weight: 600; }
+.tc-node.sel { box-shadow: 0 0 0 2px var(--tc-cyan), 0 5px 14px -4px rgba(0, 0, 0, .7); }
+
+/* Ports: shape carries direction. In = hollow ring, out = filled dot. */
+.tc-port {
+  position: absolute;
+  width: var(--tc-port);
+  height: var(--tc-port);
+  border-radius: 50%;
+  z-index: 3;
+  box-shadow: 0 0 4px rgba(0, 0, 0, .5);
+}
+.tc-port.in { background: var(--tc-bg); border: 2.5px solid var(--tc-blue); }
+.tc-port.out { background: var(--tc-cyan); border: 2px solid var(--tc-bg); }
+
+/* ---------- wires ---------- */
+.tc-wire { fill: none; stroke: var(--tc-cyan); stroke-width: var(--tc-wire-w); opacity: .55; }
+.tc-wire.flow {
+  opacity: 1;
+  stroke-dasharray: var(--tc-dash) calc(var(--tc-dash) * .6);
+  animation: tc-flow var(--tc-flow-speed) linear infinite;
+}
+.tc-wire.flow.back { animation-direction: reverse; }
+.tc-wire.down { stroke: var(--tc-red); stroke-dasharray: 2 5; opacity: .8; }
+.tc-arrow { fill: var(--tc-cyan); }
+.tc-wire-label {
+  font-family: var(--tc-mono);
+  font-size: 9px;
+  fill: var(--tc-text);
+  paint-order: stroke;
+  stroke: var(--tc-inset);
+  stroke-width: 4px;
+}
+
+@keyframes tc-flow { to { stroke-dashoffset: calc(var(--tc-dash) * -1.6); } }
+@keyframes tc-pulse { 50% { opacity: .4; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .tc-wire.flow, .tc-cdot { animation: none; }
+}
+
+@media (max-width: 640px) {
+  .tc-sub { display: none; }
+  .tc-body { padding: 8px; }
+}

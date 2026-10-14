@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TheConnection board look</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  :root { color-scheme: dark; }
+  body { background: #06080c; }
+</style>
+</head>
+<body class="tc-backdrop">
+<div id="app" class="tc-mount"></div>
+<script type="module">
+/**
+ * demo.html: a scripted walk through the board look. Fake sessions and fake
+ * traffic from demo-script.json, no mailbox reads. It shows what each state
+ * and wire looks like.
+ *
+ * @interacts  builds the board under #app with look.js; one interval timer and
+ *             one ResizeObserver, both released on pagehide
+ * @deps       look.js, theme.css, demo-script.json
+ * @complexity O(1) per step; the script has s steps (7 in the shipped file)
+ * @alloc      one board, built once; steps only flip classes and text
+ */
+import { createWindow, createCanvas, createNode, drawWire, setFooter, HUES, CONFIG } from './look.js';
+
+const FIT_PADDING = 24;
+
+const demo = await (await fetch('demo-script.json')).json();
+const app = document.getElementById('app');
+const win = createWindow(document, app, { file: demo.window.file, sub: demo.window.sub });
+win.setConn(demo.window.conn, demo.window.connState);
+
+const chips = document.createElement('div');
+chips.className = 'tc-chips';
+const h = document.createElement('span');
+h.className = 'tc-h';
+h.textContent = 'sessions';
+chips.append(h);
+for (const s of demo.sessions) {
+  const c = document.createElement('span');
+  c.className = 'tc-chip';
+  c.dataset.hue = '';
+  c.style.setProperty('--tc-chip-hue', HUES[s.hue]);
+  c.textContent = s.id;
+  chips.append(c);
+}
+win.body.append(chips);
+
+const canvas = createCanvas(document, win.body, demo.hud);
+const nodes = {};
+for (const s of demo.sessions) nodes[s.id] = createNode(document, canvas, { ...s, hue: HUES[s.hue] });
+const wires = {};
+for (const [f, t] of demo.links) wires[`${f}>${t}`] = drawWire(document, canvas, nodes[f], nodes[t]);
+for (const [f, t] of demo.downLinks) wires[`${f}>${t}`].setDown(true);
+setFooter(document, win.foot, demo.footer.map((t) => (t === null ? { spacer: true } : { text: t })));
+
+// Fit the board inside the canvas at any width (renderer only).
+const extent = demo.sessions.reduce((m, s) => ({
+  w: Math.max(m.w, s.pos.x + CONFIG.NODE_W), h: Math.max(m.h, s.pos.y + CONFIG.NODE_H),
+}), { w: 0, h: 0 });
+const fit = () => {
+  const r = canvas.root.getBoundingClientRect();
+  const k = Math.min(1, (r.width - FIT_PADDING) / extent.w, (r.height - FIT_PADDING) / extent.h);
+  const x = Math.max(0, (r.width - extent.w * k) / 2);
+  const y = Math.max(0, (r.height - extent.h * k) / 2);
+  canvas.view.style.transform = `translate(${x}px, ${y}px) scale(${k})`;
+};
+const ro = new ResizeObserver(fit);
+ro.observe(canvas.root);
+
+let step = 0;
+let last = null;
+const tick = () => {
+  if (last) {
+    last.wire.setFlow(false);
+    const prev = demo.sessions.find((s) => s.id === last.writer);
+    nodes[last.writer].setState(prev.state, prev.detail);
+  }
+  const s = demo.script[step % demo.script.length];
+  const wire = wires[`${s.wire[0]}>${s.wire[1]}`];
+  wire.setFlow(true, s.text, s.back);
+  nodes[s.writer].setState('writing');
+  last = { wire, writer: s.writer };
+  step += 1;
+};
+tick();
+const timer = setInterval(tick, demo.stepMs);
+addEventListener('pagehide', () => { clearInterval(timer); ro.disconnect(); });
+</script>
+</body>
+</html>
