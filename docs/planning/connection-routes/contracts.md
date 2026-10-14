@@ -3,8 +3,8 @@
 Model:  Claude Opus 5.5 (the TheConnection architect session)
 Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
-        topology) on 2026-10-14, and for the CARDS pauses (D13) and the codex lost wake (D14) the
-        same day.
+        topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
+        pauses (D15) the same day.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
 Date:   2026-10-14
@@ -309,7 +309,7 @@ file names. It never opens a message body.
       "state": "listening", "listener_pid": 4242, "unread": 0,
       "last_mail_age_s": 30, "status": "reviewing parser",
       "role": "orchestrator", "role_source": "declared",
-      "reports_to": null, "level": 0 }
+      "reports_to": null, "parent": null, "level": 0 }
   ],
   "wires": [ { "from": "a", "to": "b", "seq": 41, "age_s": 4 } ],
   "links": [ { "from": "a", "to": "b", "kind": "mailbox",
@@ -329,6 +329,12 @@ file names. It never opens a message body.
   opens it at the listener's start. After a server restart nothing is
   `down` until it has been seen listening again; the doc block says so.
 - `idle`: a card or inbox, no listener, not codex or ssh, not down.
+- **When more than one holds** (D15), the first in this order wins:
+  `writing`, `down`, `listening`, `doorbell`, `remote`, `idle`. Writing
+  comes first because nearly every session has a listener, and the
+  moving activity is the point of the board. Writing lasts
+  `WRITING_WINDOW_S`, so a node flashes `writing` and then shows its
+  standing state again.
 - `status`: from `status/<name>.md`, the first non-empty line after its
   `## <name> status, <time>` header, cut at `STATUS_PREVIEW_CHARS` = 80.
 - `wires`: the last `WIRE_HISTORY` = 50 messages, read from file names
@@ -343,7 +349,9 @@ file names. It never opens a message body.
     `to` the name it reports to. A hint, drawn as a thin line under the
     mailbox wires.
   - `kind: native`: two `claude` cards with the same `account`, drawn with
-    the words `native · not observed`.
+    the words `native · not observed`. Never when that account is the
+    word `unknown` (D15): a link would claim a shared account no card
+    knows.
 - `look.js` gains two states, `doorbell` (glyph `◎`) and `remote`
   (glyph `⇄`), each with a word, and `patchBoard(board, feed)`, which adds,
   moves and removes nodes and wires by id and never rebuilds the board.
@@ -358,8 +366,12 @@ are tested in Python; `look.js` only lays them out.
 2. **Parent.** Declared: the card's `reports_to`, when that name is a
    node. Inferred, when nothing is declared: the one partner of a node
    that has exactly one partner, if that partner has `HUB_MIN_PARTNERS`
-   (2) or more. Else none. A `reports_to` naming no node stays on the node,
-   is drawn as `reports to <N> · not found`, and gives no parent.
+   (2) or more, **unless that partner's card declares this node as its
+   own parent** (D15: inference never inverts a declared edge). Else none.
+   A `reports_to` naming no node stays on the node, is drawn as `reports
+   to <N> · not found`, and gives no parent. Each node carries the parent
+   the walk used as `parent` (declared or inferred, or null), so
+   `look.js` lays out trees without repeating this rule.
 3. **Role.** `orchestrator` when one or more nodes have it as parent;
    `worker` when it has a parent and no children; `peer` otherwise. A
    relay for others under a relay is an `orchestrator` one level down.

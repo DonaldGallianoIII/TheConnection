@@ -315,6 +315,14 @@ refuses without the token; it binds nowhere but 127.0.0.1.
   - a `reports_to` cycle (`p` reports to `q`, `q` to `p`): `p` level 0, `q`
     level 1, and `feed()` returns.
   - a `reports_to` naming nobody: the node is a root and keeps the name.
+  - inference never inverts a declared edge (D15): `b` reports to `z` by
+    card, `z` mails only `b`, `b` also mails `x`: `z` is level 0 and `b`
+    level 1 under it, whatever the names' sort order (test it with the
+    names swapped too).
+  - state order (D15): a listening node that sent within
+    `WRITING_WINDOW_S` is `writing`; after the window it is `listening`
+    again. Two `claude` cards on account `unknown`: no `native` link.
+  - every node carries `parent`, and it matches the walk in every shape.
   - two orchestrators share a worker (`b` reports to `a` by card, and `x`
     also mails `b`): `b` appears once, at level 1 under `a`, and the
     `mailbox` link `b` and `x` is still in `links`.
