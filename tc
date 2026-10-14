@@ -12,8 +12,9 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   status/<name>.md                         latest self-reported status
   mail/.seq                                message counter (flock guarded)
   mail/.watch-<name>.lock                  held by `tc watch <name>` while it runs
+  cards/<name>.json                        one address card per name (C1)
 
-@interacts  writes mail/ and status/ under ROOT; no network. The waking side is
+@interacts  writes mail/, status/ and cards/ under ROOT; no network. The waking side is
             Claude Code's background Bash: `tc wait` or `tc watch` exiting is
             what re-invokes the session that started it. `health` and `watch`
             also read /proc (meminfo, locks, each process's comm and cmdline)
@@ -27,7 +28,9 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             ever, low hundreds per job. health and each watch poll
             O(p + k + n): p processes on the machine (hundreds), k lines in
             /proc/locks (tens), n mailbox names (single digits).
-@alloc      one file per message, kept forever (read/ is the history). Nothing
+            join O(1); card O(u) for its unread count; cards O(c), c cards.
+@alloc      one file per message, kept forever (read/ is the history); one
+            card per name, replaced on a rejoin. Nothing
             held in memory past one command. `wait` measured flat at 13 MB RSS
             over 200k polls; it also hard-caps itself at WAIT_MEMORY_CAP_BYTES
             so a runaway dies alone. `wait` holds mail/.wait-<name>.lock for its
@@ -71,6 +74,25 @@ NAME_MAX_CHARS = 64
 NAME_PATTERN = re.compile(rf"[A-Za-z0-9._][A-Za-z0-9._-]{{0,{NAME_MAX_CHARS - 1}}}")
 # A bad name, refused before anything is written (contracts.md, exit codes).
 EXIT_BAD_NAME = 6
+# CARDS R2 (Claude Opus 5.5, unreviewed): address cards, contract C1.
+# Refused with words: an empty message, --kind codex with no thread, a
+# route not built yet (contracts.md, exit codes). Today's empty-message
+# exit already meant this.
+EXIT_REFUSED = 1
+# One JSON file per name. A path built from ROOT, like MAIL and STATUS.
+CARDS = ROOT / "cards"
+# The card's own format number, so a later shape can be told apart.
+CARD_VERSION = 1
+CARD_KINDS = ("claude", "codex", "other")
+# The account word when nothing names one. C1: never a blank.
+UNKNOWN_ACCOUNT = "unknown"
+# Where tc lives on the other machine when `tc card` is not told (C1).
+DEFAULT_REMOTE_TC = "~/TheConnection/tc"
+# C1: user@host or host alone, no leading dash on either part, no spaces.
+# The target is a word on ssh's command line, where a dash means an option.
+SSH_TARGET_PATTERN = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]*(@[A-Za-z0-9._][A-Za-z0-9._-]*)?")
+# C1: a remote tc path starts with one of these.
+REMOTE_TC_PREFIXES = ("/", "~/")
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -296,6 +318,237 @@ def cmd_log(args):
     if not every:
         print("mailbox empty")
     show(every[-args.last:] if args.last else every)
+
+
+# ---------- cards: who each name is and how mail reaches it (C1) ----------
+# CARDS R2 (Claude Opus 5.5, unreviewed). No card names a hub (D7):
+# reports_to is a hint for tc cards, tc health and the board, never a route.
+
+def unread_count(name):
+    """How many unread messages mail/to-<name>/ holds; 0 with no inbox.
+
+    Unlike unread(), it never creates the inbox.
+
+    @interacts  globs mail/to-<name>/*.md. Writes nothing.
+    @deps       pathlib.
+    @complexity O(u) over u unread messages (single digits).
+    @alloc      one list of paths, freed on return.
+    """
+    return len(list((MAIL / f"to-{name}").glob("*.md")))
+
+
+def refuse(words, code):
+    """Print `words` to stderr and exit with `code`.
+
+    @interacts  writes one line to stderr; exits.
+    @deps       sys.
+    @complexity O(1).
+    @alloc      none.
+    """
+    print(words, file=sys.stderr)
+    sys.exit(code)
+
+
+def refuse_self_report(name, reports_to):
+    """Exit EXIT_BAD_NAME when a name says it reports to itself (C1).
+
+    @interacts  writes one line to stderr and exits on a self-report.
+    @deps       refuse.
+    @complexity O(c) over the name's characters.
+    @alloc      none.
+    """
+    if reports_to is not None and reports_to == name:
+        refuse(f"tc: {name} cannot report to itself", EXIT_BAD_NAME)
+
+
+def account_label(given):
+    """The card's account: `given`, else CLAUDE_CONFIG_DIR's base name, else UNKNOWN_ACCOUNT.
+
+    A blank value counts as not given at each step, so the word is never
+    empty (C1).
+
+    @interacts  reads CLAUDE_CONFIG_DIR from the environment when `given`
+                is blank, and nothing else.
+    @deps       os, pathlib.
+    @complexity O(c) over the characters of the value used.
+    @alloc      the label string, returned.
+    """
+    if given is not None and given.strip():
+        return given
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config and pathlib.Path(config).name.strip():
+        return pathlib.Path(config).name
+    return UNKNOWN_ACCOUNT
+
+
+def write_card(card):
+    """Write cards/<name>.json whole: a .tmp sibling, then a rename over the old card.
+
+    The .tmp name carries this process's pid, so two joins of one name at
+    once never write into the same file.
+
+    @interacts  makes cards/; writes cards/<name>.json.<pid>.tmp and renames
+                it to cards/<name>.json, replacing any card there.
+    @deps       json, os, pathlib.
+    @complexity O(1): eleven fields.
+    @alloc      one JSON string, freed on return; one card file, kept.
+    """
+    CARDS.mkdir(parents=True, exist_ok=True)
+    path = CARDS / f"{card['name']}.json"
+    tmp = CARDS / f"{card['name']}.json.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps(card, indent=2) + "\n")
+    tmp.rename(path)  # atomic, so a reader never sees half a card
+    return path
+
+
+def describe_card(card):
+    """One card in words: `<name> (<kind>, account <a>, route <r>)`, plus `, reports to <N>`.
+
+    An ssh card's route reads `route ssh to <target>`. A field missing from
+    a hand-made card shows as `?`.
+
+    @interacts  none; string work only.
+    @deps       none.
+    @complexity O(1).
+    @alloc      one string, returned.
+    """
+    route = card.get("route", "?")
+    if route == "ssh" and isinstance(card.get("ssh"), dict):
+        route = f"ssh to {card['ssh'].get('target', '?')}"
+    text = (f"{card.get('name', '?')} ({card.get('kind', '?')}, "
+            f"account {card.get('account', '?')}, route {route})")
+    if card.get("reports_to"):
+        text += f", reports to {card['reports_to']}"
+    return text
+
+
+def all_cards():
+    """Every card under cards/, by name: a list of (file name, card or None).
+
+    None stands for a file that is not a JSON object (hand-edited or cut
+    short); the caller says so instead of guessing.
+
+    @interacts  globs and reads cards/*.json. Writes nothing.
+    @deps       json, pathlib.
+    @complexity O(n) over n cards (single digits).
+    @alloc      one list of n dicts, returned.
+    """
+    out = []
+    for path in sorted(CARDS.glob("*.json")) if CARDS.exists() else []:
+        try:
+            card = json.loads(path.read_text())
+        except (OSError, ValueError):
+            card = None
+        out.append((path.name, card if isinstance(card, dict) else None))
+    return out
+
+
+def cmd_join(args):
+    """`tc join <name>`: write the card for the session this runs in (C1).
+
+    Reads exactly five environment variables: CODEX_THREAD_ID, CLAUDECODE,
+    CLAUDE_CODE_SESSION_ID, CLAUDE_PID and CLAUDE_CONFIG_DIR. Nothing else,
+    so the native path's socket and token never reach a card.
+
+    @interacts  checks both names (C0, exit 6) and a self-report (exit 6);
+                refuses --kind codex with no CODEX_THREAD_ID (exit 1); then
+                writes cards/<name>.json through write_card, replacing any
+                card there and resetting joined_at; prints one line.
+    @deps       require_names, refuse_self_report, refuse, account_label,
+                write_card, describe_card, now_iso; os.
+    @complexity O(1).
+    @alloc      one card dict, freed on exit; one card file, kept.
+    """
+    require_names(args.name, args.reports_to)
+    refuse_self_report(args.name, args.reports_to)
+    thread = os.environ.get("CODEX_THREAD_ID") or None
+    if args.kind:
+        kind = args.kind
+    elif thread:
+        kind = "codex"
+    elif os.environ.get("CLAUDECODE") == "1":
+        kind = "claude"
+    else:
+        kind = "other"
+    if kind == "codex" and not thread:
+        refuse("tc join: kind codex needs CODEX_THREAD_ID, the thread the codex route "
+               "rings, and it is not set. Run tc join inside the Codex session.", EXIT_REFUSED)
+    pid = os.environ.get("CLAUDE_PID")
+    card = {
+        "version": CARD_VERSION,
+        "name": args.name,
+        "kind": kind,
+        "account": account_label(args.account),
+        "route": "codex" if kind == "codex" else "local",
+        "session_id": os.environ.get("CLAUDE_CODE_SESSION_ID") or None,
+        "pid": int(pid) if pid and pid.isascii() and pid.isdigit() else None,
+        "thread_id": thread,
+        "ssh": None,
+        "reports_to": args.reports_to,
+        "joined_at": now_iso(),
+    }
+    write_card(card)
+    print(f"joined as {describe_card(card)}")
+
+
+def cmd_card(args):
+    """`tc card <name> --ssh user@host`: write a card for a name on another machine (C1).
+
+    @interacts  checks both names and a self-report (exit 6), the ssh
+                target and the remote tc path (exit 6); counts unread mail
+                in mail/to-<name>/ without creating it and refuses (exit 1)
+                when there is any, unless --force; then writes
+                cards/<name>.json through write_card; prints one line.
+                Reads CLAUDE_CONFIG_DIR only when --account is blank.
+    @deps       require_names, refuse_self_report, refuse, unread_count,
+                account_label, write_card, describe_card, now_iso.
+    @complexity O(u) over u unread messages for the name (single digits).
+    @alloc      one card dict, freed on exit; one card file, kept.
+    """
+    require_names(args.name, args.reports_to)
+    refuse_self_report(args.name, args.reports_to)
+    if not SSH_TARGET_PATTERN.fullmatch(args.ssh):
+        refuse(f'tc card: bad ssh target "{args.ssh}": user@host or host, '
+               f'no leading dash on either part, no spaces', EXIT_BAD_NAME)
+    remote = args.remote_tc
+    if not remote.startswith(REMOTE_TC_PREFIXES) or any(c.isspace() for c in remote):
+        refuse(f'tc card: bad remote tc path "{remote}": it starts with / or ~/ '
+               f'and has no spaces', EXIT_BAD_NAME)
+    waiting = unread_count(args.name)
+    if waiting and not args.force:
+        refuse(f"tc card: {args.name} has {waiting} unread here. Once its card says ssh, "
+               f"sends go to the other machine and that mail is never read. Read it first "
+               f"(tc read {args.name}), or pass --force.", EXIT_REFUSED)
+    card = {
+        "version": CARD_VERSION,
+        "name": args.name,
+        "kind": "other",
+        "account": account_label(args.account),
+        "route": "ssh",
+        "session_id": None,
+        "pid": None,
+        "thread_id": None,
+        "ssh": {"target": args.ssh, "tc": remote},
+        "reports_to": args.reports_to,
+        "joined_at": now_iso(),
+    }
+    write_card(card)
+    print(f"card written: {describe_card(card)}")
+
+
+def cmd_cards(args):
+    """`tc cards`: every card, one line each, in words.
+
+    @interacts  reads cards/*.json through all_cards; prints to stdout.
+    @deps       all_cards, describe_card.
+    @complexity O(n) over n cards (single digits).
+    @alloc      the list of cards, freed on exit.
+    """
+    cards = all_cards()
+    if not cards:
+        print("no cards")
+    for file_name, card in cards:
+        print(describe_card(card) if card is not None else f"{file_name}: unreadable card")
 
 
 # ---------- health: machine, sessions, listeners, mail ----------
@@ -555,6 +808,13 @@ def cmd_watch(args):
 
 
 def main():
+    """Parse the command line and run one command.
+
+    @interacts  reads sys.argv; whatever the chosen cmd_* does.
+    @deps       argparse; every cmd_* function.
+    @complexity O(a) over a arguments to parse, plus the command.
+    @alloc      the parser and the parsed arguments, freed on exit.
+    """
     ap = argparse.ArgumentParser(prog="tc", description="Mailbox between Claude sessions.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -601,6 +861,27 @@ def main():
     wt.add_argument("--mem-min-pct", type=float, default=MEM_AVAIL_MIN_PCT)
     wt.add_argument("--gpu-max-c", type=float, default=GPU_TEMP_MAX_C)
     wt.set_defaults(fn=cmd_watch)
+
+    # CARDS R2 (Claude Opus 5.5, unreviewed): join, card, cards (C1).
+    j = sub.add_parser("join", help="write the address card for the session this runs in")
+    j.add_argument("name")
+    j.add_argument("--account", help="account label (default: CLAUDE_CONFIG_DIR's base name, else unknown)")
+    j.add_argument("--kind", choices=CARD_KINDS, help="override the kind tc works out")
+    j.add_argument("--reports-to", dest="reports_to", help="a hint for the board's levels, never a route")
+    j.set_defaults(fn=cmd_join)
+
+    cd = sub.add_parser("card", help="write a card for a name that lives on another machine")
+    cd.add_argument("name")
+    cd.add_argument("--ssh", required=True, metavar="USER@HOST")
+    cd.add_argument("--remote-tc", dest="remote_tc", default=DEFAULT_REMOTE_TC,
+                    help=f"tc's path on that machine (default {DEFAULT_REMOTE_TC})")
+    cd.add_argument("--account")
+    cd.add_argument("--reports-to", dest="reports_to")
+    cd.add_argument("--force", action="store_true", help="write it even with unread mail here")
+    cd.set_defaults(fn=cmd_card)
+
+    cs = sub.add_parser("cards", help="every card, one line each")
+    cs.set_defaults(fn=cmd_cards)
 
     args = ap.parse_args()
     args.fn(args)
