@@ -7,14 +7,15 @@
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
- * @interacts  imports board/look.js; no DOM
- * @deps       node:test, node:assert (Node 18+)
+ * @interacts  imports board/look.js; reads board/demo-script.json; no DOM
+ * @deps       node:test, node:assert, node:fs (Node 18+)
  * @complexity O(n^2) per shape over n <= 8 nodes, for the pairwise overlap check
  * @alloc      the layouts, dropped at the end of each test
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { layoutLevels, roleTitle, fitTransform, CONFIG } from '../board/look.js';
+import { readFileSync } from 'node:fs';
+import { layoutLevels, roleTitle, fitTransform, boardView, STATES, CONFIG } from '../board/look.js';
 
 function n(id, role, source, level, parent, extra) {
   return { id, role, role_source: source, level, parent, state: 'idle', ...extra };
@@ -112,4 +113,32 @@ test('an empty feed lays out nothing; fitTransform never enlarges or shrinks pas
   assert.equal(fitTransform(1, 1, lay.extent, 24).k, CONFIG.MIN_FIT_SCALE);
   const half = fitTransform(lay.extent.w / 2 + 24, 10000, lay.extent, 24);
   assert.ok(Math.abs(half.k - 0.5) < 1e-9, `k ${half.k}`);
+});
+
+// Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
+// B6: the demo script draws D7's shapes.
+const DEMO = JSON.parse(readFileSync(new URL('../board/demo-script.json', import.meta.url), 'utf8'));
+
+test('the demo holds two level 0 orchestrators and one level 1 orchestrator, side by side', () => {
+  const orchestrators = (level) => DEMO.nodes.filter((x) => x.role === 'orchestrator' && x.level === level).map((x) => x.id);
+  assert.deepEqual(orchestrators(0), ['a', 'z']);
+  assert.deepEqual(orchestrators(1), ['b']);
+  const lay = layoutLevels({ nodes: DEMO.nodes });
+  assert.deepEqual(lay.roots, ['a', 'z']);
+  assert.equal(lay.pos.a.y, lay.pos.z.y);
+  assert.ok(lay.pos.a.x < lay.pos.z.x);
+  for (const node of DEMO.nodes) {
+    assert.ok(lay.titles[node.id].startsWith(`${node.id} · ${node.role}`), lay.titles[node.id]);
+  }
+});
+
+test('the demo shows every state, every line kind, and a wire for every scripted message', () => {
+  const states = new Set(DEMO.nodes.map((x) => x.state));
+  for (const s of Object.keys(STATES).filter((name) => name !== 'writing')) assert.ok(states.has(s), `no ${s} node`);
+  const writers = DEMO.script.map((s) => DEMO.nodes.find((x) => x.id === s.from));
+  assert.ok(writers.some((x) => x.state !== 'listening'), 'no step shows a writing node');
+  assert.deepEqual([...new Set(DEMO.links.map((l) => l.kind))].sort(), ['mailbox', 'native', 'reports_to']);
+  const view = boardView({ nodes: DEMO.nodes, links: DEMO.links, wires: [] });
+  const pairs = new Set(Object.values(view.edges).filter((e) => e.kind === 'mailbox').map((e) => [e.from, e.to].sort().join('>')));
+  for (const s of DEMO.script) assert.ok(pairs.has([s.from, s.to].sort().join('>')), `no wire for ${s.from} to ${s.to}`);
 });
