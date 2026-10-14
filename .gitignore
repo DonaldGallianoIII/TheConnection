@@ -2,3 +2,11 @@ mail/
 status/
 __pycache__/
 audits/
+# Claude Opus 5.5 (the P0 fixer), unreviewed. Live state the contracts add
+# under ROOT, which is the checkout's root by default: address cards (C1,
+# each names an ssh user@host), the outbox (C3, whole message bodies) and
+# the shared-mailbox marker (C4). Anchored, so a tracked folder of the same
+# name deeper in the tree is not hidden.
+/cards/
+/outbox/
+/.shared

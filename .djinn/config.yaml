@@ -23,9 +23,13 @@ conventions_files:
 
 # tc wait and tc watch poll for hours (every 5 s and 15 s), and health
 # runs on every watch poll and every board feed. The board polls every 3 s.
+# tests/_root.py (added by the P0 fixer, Claude Opus 5.5, unreviewed)
+# carries every wave 1 test: the listener's /proc/locks poll, teardown of
+# up to about 50 children, the fake's per-call counter and PATH building.
 hot_paths:
   - tc
   - board/
+  - tests/_root.py
 
 goal_doc: docs/planning/connection-routes/00-index.md
 
@@ -57,3 +61,6 @@ project_notes: |
   mailbox; agents never run real ssh or codex.
   The repo is public: no secrets, hostnames, real mailbox content, or
   anything about the owner's employer.
+  Known bugs: a verified hit on an entry in docs/known-bugs/INDEX.md is
+  filed at that entry's "Tier when hit" or higher, never lower; the
+  index sets the floor, whatever tier the pattern check reported it at.

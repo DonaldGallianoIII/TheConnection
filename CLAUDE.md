@@ -39,8 +39,10 @@ and a README a stranger can follow. The plan's index is
   Windows are out of scope.
 - The board look kit (`board/`) is plain ES modules and CSS, no libraries,
   tested with `node --test`.
-- No installs, no server, no network of its own. SSH is the only way off the
-  machine, and only through the planned `ssh` route.
+- No installs and no network of its own. The plan's one server is the
+  board's (`board/serve.py`, task B2, contract C6): bound to 127.0.0.1
+  only, its feed behind a token made at start. It is not built yet. SSH is
+  the only way off the machine, and only through the planned `ssh` route.
 
 ### Architecture
 
@@ -60,8 +62,8 @@ Two ideas carry the whole tool.
 ### Key patterns
 
 - Every tunable is a module constant at the top of `tc` with a comment
-  saying why (`POLL_SECONDS`, `DEFAULT_WAIT_SECONDS`,
-  `WAIT_MEMORY_CAP_BYTES`). The only other globals are `ROOT` and the
+  saying why (`DEFAULT_WAIT_SECONDS`, `WAIT_MEMORY_CAP_BYTES`,
+  `CACHE_TTL_SECONDS`). The only other globals are `ROOT` and the
   paths built from it (`MAIL`, `STATUS`, `SEQ_FILE`). tc fixes all four
   at import, from `TC_ROOT`.
 - `TC_ROOT` moves the whole mailbox. Every test and every hand run uses its
@@ -75,10 +77,13 @@ Two ideas carry the whole tool.
   error starts with `usage:`.
 - Tests run `tc` as a subprocess, or load it as a module without running
   `main()` (`tests/test_keepalive.py` shows how). A load reads `TC_ROOT`
-  once, at import, so a module loaded inside `with TcRoot() as root`
-  still points at the checkout's own `mail/` unless the variable is set
-  first. Set `os.environ["TC_ROOT"]` to `str(root.path)` before the load,
-  inside the `with`, and restore the old value after. Patching `ROOT`
+  once, at import, from the test process's own environment. The harness
+  cleans its children's environment, not that one. So a module loaded
+  inside `with TcRoot() as root` points at the checkout's own `mail/`,
+  or, if the shell exports `TC_ROOT`, at whatever that names, which can
+  be a live mailbox. The harness root is the only safe target: set
+  `os.environ["TC_ROOT"]` to `str(root.path)` before the load, inside
+  the `with`, and restore the old value after. Patching `ROOT`
   after the load moves nothing: `MAIL`, `STATUS` and `SEQ_FILE` keep the
   old paths. New tests build on the shared harness, `tests/_root.py`.
 - `tc` is one file that several lanes edit. Each lane adds its own functions
@@ -89,9 +94,10 @@ Two ideas carry the whole tool.
 ### Current focus
 
 The connection routes plan, run in lanes and waves
-(`docs/planning/connection-routes/00-index.md` section 4). Wave 0 is GROUND:
-this file, `docs/known-bugs/` and `tests/_root.py`. CORE, CARDS and BOARD
-wait on GROUND's merge; SHARED, SSH and DOCS come after them.
+(`docs/planning/connection-routes/00-index.md` section 4). Wave 0, GROUND
+(this file, `docs/known-bugs/` and `tests/_root.py`), merged into the dev
+branch at `a029bda`. As of 2026-10-14, wave 1 runs: CORE, CARDS and
+BOARD, each in its own worktree. SHARED, SSH and DOCS come after them.
 
 ### Off limits
 
@@ -282,13 +288,16 @@ names.
 
 The tool runs today on one machine: send, read, peek, wait (with
 `--keepalive`), status, log, health and watch, plus the board look kit.
-The core mailbox commands (send, read, peek, wait, log, status) have no
-tests in the tree yet; CORE writes them.
+No test in the tree tests `tc read`, `tc log` or `tc status`.
+`tests/test_root.py` runs `tc send` and `tc peek` only as harness
+plumbing, and nothing checks that peek leaves mail unread (CORE's K8).
+CORE writes the core mailbox tests.
 
-GROUND (P0) adds this file (G1), `docs/known-bugs/` (G2) and
-`tests/_root.py` (G3), one commit each on the GROUND lane branch, and the
-first review round's fixes land on the same branch. All of it is
-unreviewed until the review relay closes. Then a2 says merge for the
-owner (D8), and the architect merges GROUND into the dev branch,
-`Claude-Development-TheConnection`. `main` stays the owner's alone.
-Nothing else in the plan is built.
+GROUND (P0) built this file (G1), `docs/known-bugs/` (G2) and
+`tests/_root.py` (G3) on its lane branch. After the lane's two review
+rounds, the architect merged it into the dev branch,
+`Claude-Development-TheConnection`, at `a029bda`, with the merge
+approved for the owner as decision D8 allows. `89bdd2e` followed with two
+post-merge fixes. As of 2026-10-14 the P0 phase review (D9) is in its
+fix round, and wave 1 (CORE, CARDS, BOARD) runs. Nothing else in the
+plan is built. `main` stays the owner's alone.
