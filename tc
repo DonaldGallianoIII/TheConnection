@@ -12,6 +12,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   status/<name>.md                         latest self-reported status
   mail/.seq                                message counter (flock guarded)
   mail/.watch-<name>.lock                  held by `tc watch <name>` while it runs
+  mail/.box-<name>.lock                    the inbox lock: send, tc read, tc card (D14)
+  mail/.ring-pending-<name>                a codex ring owed after one failed (D14)
   cards/<name>.json                        one address card per name (C1)
 
 @interacts  writes mail/, status/ and cards/ under ROOT; no network. The waking side is
@@ -20,10 +22,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             also read /proc (meminfo, locks, each process's comm and cmdline)
             and run `nvidia-smi` when it exists. They never signal or touch
             another process. `send` to a codex card runs `codex queue` (C2).
-@deps       python3 stdlib (argparse, collections, fcntl, json, pathlib, re,
-            resource, shutil, subprocess, time, datetime, os, sys); Linux
-            only (flock, RLIMIT_AS, /proc). nvidia-smi optional; the codex
-            CLI for the codex route.
+@deps       python3 stdlib (argparse, collections, contextlib, fcntl, json,
+            pathlib, re, resource, shutil, subprocess, time, datetime, os,
+            sys); Linux only (flock, RLIMIT_AS, /proc). nvidia-smi optional;
+            the codex CLI for the codex route.
 @complexity send O(b), b body bytes up to SEND_BODY_MAX_BYTES; status O(1).
             read/peek/wait-poll O(u), u unread messages in one inbox,
             single digits in practice. log O(t), t total messages ever,
@@ -41,6 +43,7 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
 
 import argparse
 import collections
+import contextlib
 import datetime
 import fcntl
 import json
@@ -112,6 +115,12 @@ EXIT_TOO_LARGE = 8
 # thread, so a healthy answer is quick; past this the sender stops waiting.
 # The mail has landed before the ring either way.
 CODEX_RING_SECONDS = 30
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14 and the audit's fixes.
+# The shape of a Codex thread id: letters, digits, dot, dash, underscore, a
+# letter or digit first. The value goes into codex's argv right after
+# --thread, where a leading dash could read as a flag, so nothing of another
+# shape (or type) ever gets there (D14).
+THREAD_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -203,19 +212,55 @@ def next_seq():
     return n
 
 
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): the inbox lock (D14, LOW-9).
+@contextlib.contextmanager
+def inbox_lock(name, how=fcntl.LOCK_EX):
+    """Hold mail/.box-<name>.lock (flock) for the `with` block.
+
+    One lock per inbox. Held alone (LOCK_EX) by the codex route from its
+    unread count to its message's rename, by `tc read` from its glob to its
+    last rename, and by `tc card` from its unread count to its card's
+    rename. A local send holds it shared (LOCK_SH) from its card read to its
+    rename: local senders never queue behind each other, only behind those
+    three. So a send never lands between a reader's glob and its renames
+    (the lost wake, D14), and never lands in an inbox after a `tc card` for
+    that name counted it (LOW-9). Nothing slow runs under it: the codex ring
+    waits until it is released.
+
+    @interacts  makes mail/; opens mail/.box-<name>.lock, creating it empty
+                (append mode, so it never truncates what is there), and holds
+                the flock until the block ends; the kernel drops it if the
+                process dies.
+    @deps       contextlib, fcntl.
+    @complexity O(1), plus however long another holder keeps it.
+    @alloc      one open file for the block.
+    """
+    MAIL.mkdir(parents=True, exist_ok=True)
+    with open(MAIL / f".box-{name}.lock", "a") as lock:
+        fcntl.flock(lock, how)
+        yield
+
+
 def cmd_send(args):
     """`tc send`: check, then hand the message to the route on the recipient's card (C2).
 
-    No card means route local: today's send, with today's stdout line. The
-    route's Delivery decides the rest: words to stdout on exit 0, else to
-    stderr; every warning to stderr; then its exit code.
+    No card means route local: today's send, with today's stdout line. A
+    local delivery reads the card again under the inbox lock (shared) and
+    lands under it, so a `tc card` for this name either counts this message
+    or is read here first (LOW-9). The codex route takes the lock itself.
+    The route's Delivery decides the rest: words to stdout on exit 0, else
+    to stderr; every warning to stderr; then its exit code.
 
     @interacts  checks both names first (C0, exit 6, nothing written); reads
                 the body (stdin when no text is given) and refuses one over
                 SEND_BODY_MAX_BYTES (exit 8) or empty (exit 1) before any
-                number is taken; reads cards/<to>.json; calls one ROUTES
-                function, which writes the message; prints.
-    @deps       require_names, read_body, read_card, refuse, ROUTES, Delivery.
+                number is taken; reads cards/<to>.json and refuses (exit 1,
+                nothing written) a card it cannot route; for a local
+                delivery holds mail/.box-<to>.lock shared and reads the card
+                again; calls one ROUTES function, which writes the message;
+                prints.
+    @deps       require_names, read_body, card_route, inbox_lock,
+                deliver_local, Delivery; fcntl.
     @complexity O(b) over b bytes of body, at most SEND_BODY_MAX_BYTES,
                 plus the route's own work.
     @alloc      the body string, freed on exit; whatever the route keeps.
@@ -225,15 +270,14 @@ def cmd_send(args):
     body = read_body(args.message)
     if not body.strip():
         sys.exit("tc send: empty message")
-    try:
-        card = read_card(args.to)
-    except ValueError as problem:
-        refuse(f"tc send: {problem}; nothing sent. Rewrite it with tc join or tc card.", EXIT_REFUSED)
-    route = card.get("route") if card is not None else "local"
-    deliver = ROUTES.get(route) if isinstance(route, str) else None
-    if deliver is None:
-        result = Delivery(EXIT_REFUSED, f"route {route} is not built yet", [])
-    else:
+    card, deliver = card_route(args.to)
+    if deliver is deliver_local:
+        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-9.
+        with inbox_lock(args.to, fcntl.LOCK_SH):
+            card, deliver = card_route(args.to)
+            if deliver is deliver_local:
+                result = deliver_local(card, args.sender, args.to, body)
+    if deliver is not deliver_local:
         result = deliver(card, args.sender, args.to, body)
     print(result.words, file=sys.stdout if result.exit == 0 else sys.stderr)
     for warning in result.warnings:
@@ -253,23 +297,29 @@ def cmd_read(args):
 
     @interacts  checks the name first (C0, exit 6, nothing written); a name
                 with no inbox gets `no unread mail` and nothing is created
-                (O2); else makes mail/to-<name>/read/ if missing, reads and
-                renames each unread file; prints to stdout.
-    @deps       require_names, unread, show.
+                (O2); else holds mail/.box-<name>.lock alone from its glob to
+                its last rename (D14), makes mail/to-<name>/read/ if missing,
+                reads and renames each unread file; prints to stdout.
+    @deps       require_names, inbox_lock, unread, show.
     @complexity O(u) over u unread messages (single digits).
-    @alloc      the list of paths and each file's text while printed.
+    @alloc      the list of paths and each file's text while printed; one
+                open lock file.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     if not (MAIL / f"to-{args.name}").is_dir():  # CARDS R3 (Claude Opus 5.5, unreviewed): O2
         print(f"no unread mail for {args.name}")
         return
-    msgs = unread(args.name)
-    if not msgs:
-        print(f"no unread mail for {args.name}")
-        return
-    show(msgs)
-    for p in msgs:
-        p.rename(p.parent / "read" / p.name)
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14. A codex send
+    # cannot land between this glob and these renames, so it never skips its
+    # ring for mail this read did not print.
+    with inbox_lock(args.name):
+        msgs = unread(args.name)
+        if not msgs:
+            print(f"no unread mail for {args.name}")
+            return
+        show(msgs)
+        for p in msgs:
+            p.rename(p.parent / "read" / p.name)
 
 
 def cmd_peek(args):
@@ -494,17 +544,24 @@ def cmd_join(args):
     so the native path's socket and token never reach a card.
 
     @interacts  checks both names (C0, exit 6) and a self-report (exit 6);
-                refuses --kind codex with no CODEX_THREAD_ID (exit 1); then
+                refuses a CODEX_THREAD_ID that is not a thread id (exit 1,
+                D14) and --kind codex with no CODEX_THREAD_ID (exit 1); then
                 writes cards/<name>.json through write_card, replacing any
                 card there and resetting joined_at; prints one line.
     @deps       require_names, refuse_self_report, refuse, account_label,
-                write_card, describe_card, now_iso; os.
-    @complexity O(1).
+                write_card, describe_card, now_iso, THREAD_ID_PATTERN; os.
+    @complexity O(1), plus O(t) over t characters of CODEX_THREAD_ID.
     @alloc      one card dict, freed on exit; one card file, kept.
     """
     require_names(args.name, args.reports_to)
     refuse_self_report(args.name, args.reports_to)
     thread = os.environ.get("CODEX_THREAD_ID") or None
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14, so a join never
+    # writes a thread_id the codex route would refuse to ring.
+    if thread is not None and not THREAD_ID_PATTERN.fullmatch(thread):
+        refuse(f'tc join: CODEX_THREAD_ID "{thread}" is not a thread id (letters, digits, '
+               f'dot, dash, underscore, a letter or digit first), so the codex route could '
+               f'never ring it. No card written.', EXIT_REFUSED)
     if args.kind:
         kind = args.kind
     elif thread:
@@ -538,15 +595,18 @@ def cmd_card(args):
     """`tc card <name> --ssh user@host`: write a card for a name on another machine (C1).
 
     @interacts  checks both names and a self-report (exit 6), the ssh
-                target and the remote tc path (exit 6); counts unread mail
-                in mail/to-<name>/ without creating it and refuses (exit 1)
-                when there is any, unless --force; then writes
-                cards/<name>.json through write_card; prints one line.
+                target and the remote tc path (exit 6); then, holding
+                mail/.box-<name>.lock alone (LOW-9), counts unread mail in
+                mail/to-<name>/ without creating it, refuses (exit 1) when
+                there is any unless --force, and writes cards/<name>.json
+                through write_card; prints one line.
                 Reads CLAUDE_CONFIG_DIR only when --account is blank.
-    @deps       require_names, refuse_self_report, refuse, unread_count,
-                account_label, write_card, describe_card, now_iso.
+    @deps       require_names, refuse_self_report, refuse, inbox_lock,
+                unread_count, account_label, write_card, describe_card,
+                now_iso.
     @complexity O(u) over u unread messages for the name (single digits).
-    @alloc      one card dict, freed on exit; one card file, kept.
+    @alloc      one card dict, freed on exit; one card file, kept; one open
+                lock file.
     """
     require_names(args.name, args.reports_to)
     refuse_self_report(args.name, args.reports_to)
@@ -557,11 +617,6 @@ def cmd_card(args):
     if not remote.startswith(REMOTE_TC_PREFIXES) or any(c.isspace() for c in remote):
         refuse(f'tc card: bad remote tc path "{remote}": it starts with / or ~/ '
                f'and has no spaces', EXIT_BAD_NAME)
-    waiting = unread_count(args.name)
-    if waiting and not args.force:
-        refuse(f"tc card: {args.name} has {waiting} unread here. Once its card says ssh, "
-               f"sends go to the other machine and that mail is never read. Read it first "
-               f"(tc read {args.name}), or pass --force.", EXIT_REFUSED)
     card = {
         "version": CARD_VERSION,
         "name": args.name,
@@ -575,7 +630,15 @@ def cmd_card(args):
         "reports_to": args.reports_to,
         "joined_at": now_iso(),
     }
-    write_card(card)
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-9. Count and write
+    # under the inbox lock, so no send lands here between the two.
+    with inbox_lock(args.name):
+        waiting = unread_count(args.name)
+        if waiting and not args.force:
+            refuse(f"tc card: {args.name} has {waiting} unread here. Once its card says ssh, "
+                   f"sends go to the other machine and that mail is never read. Read it first "
+                   f"(tc read {args.name}), or pass --force.", EXIT_REFUSED)
+        write_card(card)
     print(f"card written: {describe_card(card)}")
 
 
@@ -624,6 +687,34 @@ def read_card(name):
     if not isinstance(card, dict):
         raise ValueError(f"the card {path} is not a JSON object")
     return card
+
+
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): one place picks the route,
+# so cmd_send can ask again under the inbox lock (LOW-9).
+def card_route(to):
+    """The card for `to` and the ROUTES function its route names. Refuses what it cannot route.
+
+    No card is route local. A card that is not a JSON object, or whose
+    route is not in ROUTES, is refused with words, exit 1, nothing written
+    (C2).
+
+    @interacts  reads cards/<to>.json (read_card); on a refusal writes one
+                line to stderr and exits.
+    @deps       read_card, refuse, ROUTES, deliver_local.
+    @complexity O(1): one small file.
+    @alloc      the card dict, returned.
+    """
+    try:
+        card = read_card(to)
+    except ValueError as problem:
+        refuse(f"tc send: {problem}; nothing sent. Rewrite it with tc join or tc card.", EXIT_REFUSED)
+    if card is None:
+        return None, deliver_local
+    route = card.get("route")
+    deliver = ROUTES.get(route) if isinstance(route, str) else None
+    if deliver is None:
+        refuse(f"route {route} is not built yet", EXIT_REFUSED)
+    return card, deliver
 
 
 def read_body(message):
@@ -678,60 +769,109 @@ def deliver_local(card, sender, to, body, header_note=None):
 
 
 # CARDS R4 (Claude Opus 5.5, unreviewed): the codex route, a doorbell (D3).
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14, a failed ring is never lost.
 def deliver_codex(card, sender, to, body, header_note=None):
-    """Route codex: deliver_local, then ring the Codex thread if the inbox was empty.
+    """Route codex: deliver_local under the inbox lock, then ring the Codex thread when a wake is owed.
 
     A listener started inside Codex dies when its command returns (D3), so
     a Codex session is woken by `codex queue`, which hands its thread a
-    line to act on when its turn ends or the session is resumed. It rings
-    only when the inbox held no unread mail before this send: one ring per
-    batch. Two senders racing an empty inbox may both ring; accepted. A
-    ring that fails or times out is a warning: the mail is in the inbox,
-    so the send still exits 0.
+    line to act on when its turn ends or the session is resumed.
 
-    @interacts  counts mail/to-<to>/*.md without creating it; writes the
-                message through deliver_local; when the count was 0, runs
-                `codex queue --thread <thread_id> --message ...` with stdin
-                from /dev/null and a CODEX_RING_SECONDS timeout. Reads
-                nothing from codex but its exit code and stderr.
-    @deps       unread_count, deliver_local, Delivery; subprocess, pathlib;
-                the `codex` CLI on PATH.
+    Under mail/.box-<to>.lock, held alone (D14): count unread, look for the
+    marker mail/.ring-pending-<to>, deliver, and decide. A ring is owed when
+    the inbox held no unread mail before this send (one ring per batch) or
+    the marker says an earlier ring failed. The ring runs after the lock is
+    released, so a slow ring never holds up `tc read`. A ring that exits 0
+    removes the marker. Every other outcome writes it (.tmp, then rename),
+    so the next send to <to> rings again: codex exiting non-zero, a
+    timeout, codex missing, or a card whose thread_id is missing or not a
+    thread id, which is never handed to codex. The mail is in the inbox
+    either way, so the send still exits 0. Two senders racing an empty
+    inbox may both ring; accepted.
+
+    @interacts  holds mail/.box-<to>.lock while it counts mail/to-<to>/*.md
+                (before and after), stats mail/.ring-pending-<to> and writes
+                the message through deliver_local. Then, when a ring is
+                owed, rings through ring_codex (one `codex queue` run, at
+                most CODEX_RING_SECONDS) and removes the marker on exit 0,
+                or writes mail/.ring-pending-<to>.<pid>.tmp and renames it
+                over the marker.
+    @deps       inbox_lock, unread_count, deliver_local, ring_codex,
+                now_iso, Delivery; os.
     @complexity O(u + b) over u unread messages (counted twice) and b
                 bytes of body, plus one codex run of at most
                 CODEX_RING_SECONDS.
-    @alloc      the ring's message and codex's captured output, freed on
-                return; one message file, kept.
+    @alloc      the ring's words, freed on return; one message file, kept;
+                the marker file, kept until a ring exits 0.
     """
-    waiting = unread_count(to)
-    landed = deliver_local(card, sender, to, body, header_note)
-    if waiting:
+    marker = MAIL / f".ring-pending-{to}"
+    with inbox_lock(to):
+        waiting = unread_count(to)
+        owed = marker.exists()
+        landed = deliver_local(card, sender, to, body, header_note)
+        count = unread_count(to)
+    if landed.exit != 0 or (waiting and not owed):
         return landed
     words, warnings = [landed.words], list(landed.warnings)
-    thread = card.get("thread_id") if card else None
-    tc_path = pathlib.Path(__file__).resolve()
-    message = (f"MAIL: {unread_count(to)} unread for {to}. Run: {tc_path} read {to}, act on it, "
-               f"reply with {tc_path} send --from {to} --to {sender}.")
-    reason = None
-    if not thread:
-        reason = "its card has no thread_id"
-    else:
-        try:
-            done = subprocess.run(["codex", "queue", "--thread", thread, "--message", message],
-                                  stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                                  timeout=CODEX_RING_SECONDS)
-        except subprocess.TimeoutExpired:
-            reason = f"no answer in {CODEX_RING_SECONDS} s"
-        except OSError as err:
-            reason = f"could not run codex ({err.strerror})"
-        else:
-            said = done.stderr.strip().splitlines()
-            if done.returncode != 0:
-                reason = said[0] if said else f"codex exited {done.returncode} with no stderr"
+    reason = ring_codex(card, sender, to, count)
     if reason is None:
         words.append(f"rang codex {to} (queued; delivered when its turn ends or the session is resumed)")
+        try:
+            marker.unlink(missing_ok=True)
+        except OSError as err:
+            warnings.append(f"rang codex {to}, but {marker} could not be removed ({err.strerror}); "
+                            f"the next send to {to} rings again")
+        return Delivery(landed.exit, "\n".join(words), warnings)
+    tmp = MAIL / f".ring-pending-{to}.{os.getpid()}.tmp"
+    try:
+        tmp.write_text(f"{now_iso()} ring failed: {reason}\n")
+        tmp.rename(marker)  # atomic, like a message
+    except OSError as err:
+        warnings.append(f"ring failed for {to}: {reason}; the mail is in its inbox; {marker} could not "
+                        f"be written ({err.strerror}), so a later send may not ring")
     else:
-        warnings.append(f"ring failed for {to}: {reason}; the mail is in its inbox")
+        warnings.append(f"ring failed for {to}: {reason}; the mail is in its inbox; "
+                        f"the next send to {to} rings again")
     return Delivery(landed.exit, "\n".join(words), warnings)
+
+
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): the ring, apart from its bookkeeping.
+def ring_codex(card, sender, to, count):
+    """Ring the Codex thread named on `card` once. None when codex exits 0, else why not, in words.
+
+    A thread_id that is missing, or is not a str of THREAD_ID_PATTERN's
+    shape, never reaches codex's argv (D14): the words say which.
+
+    @interacts  when the thread_id passes, runs `codex queue --thread
+                <thread_id> --message <C2's line>` with stdin from /dev/null
+                and a CODEX_RING_SECONDS timeout, and reads its exit code
+                and stderr. Writes nothing.
+    @deps       THREAD_ID_PATTERN, CODEX_RING_SECONDS; subprocess, pathlib;
+                the `codex` CLI on PATH.
+    @complexity O(t) over t characters of the thread_id, plus one codex run
+                of at most CODEX_RING_SECONDS.
+    @alloc      the message and codex's captured output, freed on return.
+    """
+    thread = card.get("thread_id") if card else None
+    if thread is None or thread == "":
+        return "its card has no thread_id"
+    if not isinstance(thread, str) or not THREAD_ID_PATTERN.fullmatch(thread):
+        return "its card's thread_id is not a thread id"
+    tc_path = pathlib.Path(__file__).resolve()
+    message = (f"MAIL: {count} unread for {to}. Run: {tc_path} read {to}, act on it, "
+               f"reply with {tc_path} send --from {to} --to {sender}.")
+    try:
+        done = subprocess.run(["codex", "queue", "--thread", thread, "--message", message],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=CODEX_RING_SECONDS)
+    except subprocess.TimeoutExpired:
+        return f"no answer in {CODEX_RING_SECONDS} s"
+    except OSError as err:
+        return f"could not run codex ({err.strerror})"
+    if done.returncode != 0:
+        said = done.stderr.strip().splitlines()
+        return said[0] if said else f"codex exited {done.returncode} with no stderr"
+    return None
 
 
 # One function per route; a card's route picks one. A route not here

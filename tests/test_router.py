@@ -12,9 +12,12 @@ Status: unreviewed
             compares the root's file list and mail/.seq before and after.
             Two tests load tc as a module (TC_ROOT set to the harness root
             first, put back after) and call cmd_send or deliver_local in
-            process, so they write under that root only.
-@deps       python3 stdlib (argparse, contextlib, importlib, io, json, os,
-            pathlib, sys, unittest); tests/_root.py; ../tc.
+            process, so they write under that root only. Two tests hold
+            the inbox lock themselves and read /proc/locks (LOW-9).
+@deps       python3 stdlib (argparse, contextlib, fcntl, importlib, io,
+            json, os, pathlib, subprocess, sys, unittest); tests/_root.py;
+            RELEASE_CEILING_SECONDS and wait_until_blocked from
+            test_codex_route.py; ../tc.
 @complexity O(1) per test: one to six tc runs, each under a second. The
             size test pipes 1 MiB twice.
 @alloc      one TcRoot per test, removed when its context exits; the size
@@ -23,12 +26,14 @@ Status: unreviewed
 
 import argparse
 import contextlib
+import fcntl
 import importlib.machinery
 import importlib.util
 import io
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import unittest
 
@@ -39,6 +44,8 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import _root  # noqa: E402  (needs the path line above)
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): one copy of the lock helpers.
+from test_codex_route import RELEASE_CEILING_SECONDS, wait_until_blocked  # noqa: E402
 
 # C0's limit and words, written here rather than read from tc.
 MAX_BYTES = 1048576
@@ -46,6 +53,9 @@ TOO_LARGE_WORDS = "tc send: message over 1 MiB; this is a mailbox for words\n"
 EXIT_REFUSED = 1
 EXIT_TOO_LARGE = 8
 NEW_INBOX_WORDS = "new inbox: nobody has joined as {name}\n"
+# A send that shares the inbox lock with the test lands at once; this much
+# is room for a loaded machine, not a wait anyone expects.
+SHARED_SEND_CEILING_SECONDS = 5
 
 
 def files_under(root):
@@ -296,6 +306,62 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(got._fields, ("exit", "words", "warnings"))
         self.assertTrue(header.startswith("# #1 from x to b, "), header)
         self.assertTrue(header.endswith(", via ssh gate, key x"), header)
+
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-9.
+    def test_a_local_send_waits_for_a_held_inbox_lock(self):
+        """With the test holding mail/.box-b.lock alone, a send to b (no card) does not land until it is released.
+
+        A local send reads the card again and lands under the lock, so a
+        `tc card` for b, which holds it alone, never counts b's mail before
+        a send that lands after. Must reject a local send outside the lock.
+
+        @interacts  holds mail/.box-b.lock; one background send; reads
+                    /proc/locks.
+        @deps       wait_until_blocked; fcntl; _root.TcRoot.start.
+        @complexity O(1).
+        @alloc      one TcRoot, one open lock file, one background child.
+        """
+        with _root.TcRoot() as root:
+            box = root.path / "mail" / "to-b"
+            lock = root.path / "mail" / ".box-b.lock"
+            lock.parent.mkdir()
+            with open(lock, "a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                proc = root.start("send", "--from", "a", "--to", "b", "hi")
+                wait_until_blocked(self, proc, lock)
+                while_held = sorted(p.name for p in box.glob("*.md"))
+            out, err = proc.communicate(timeout=RELEASE_CEILING_SECONDS)
+            landed = sorted(p.name for p in box.glob("*.md"))
+        self.assertEqual(while_held, [], "the send landed while the test held the inbox lock")
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual(landed, ["000001-from-a.md"])
+
+    def test_local_sends_share_the_inbox_lock(self):
+        """With the test holding mail/.box-b.lock shared, a send to b still lands at once.
+
+        Local senders share the lock, so many senders to one inbox queue on
+        mail/.seq as before (CORE's K3), never on each other here. Must
+        reject a local send that takes the lock alone.
+
+        @interacts  holds mail/.box-b.lock shared; one background send.
+        @deps       fcntl, subprocess; _root.TcRoot.start.
+        @complexity O(1).
+        @alloc      one TcRoot, one open lock file, one background child.
+        """
+        with _root.TcRoot() as root:
+            lock = root.path / "mail" / ".box-b.lock"
+            lock.parent.mkdir()
+            with open(lock, "a") as held:
+                fcntl.flock(held, fcntl.LOCK_SH)
+                proc = root.start("send", "--from", "a", "--to", "b", "hi")
+                try:
+                    out, err = proc.communicate(timeout=SHARED_SEND_CEILING_SECONDS)
+                except subprocess.TimeoutExpired:
+                    self.fail(f"the send still waited {SHARED_SEND_CEILING_SECONDS} s on a lock "
+                              f"the test held shared: it took the lock alone")
+            landed = sorted(p.name for p in (root.path / "mail" / "to-b").glob("*.md"))
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual(landed, ["000001-from-a.md"])
 
 
 if __name__ == "__main__":

@@ -12,10 +12,12 @@ Status: unreviewed
             load tc as a module (TC_ROOT set to the harness root first, put
             back after) and call cmd_join in process: one wraps os.environ
             in a recorder, one wraps pathlib.Path.write_text and rename.
-            Both patches end with the test.
-@deps       python3 stdlib (argparse, collections.abc, contextlib,
+            Both patches end with the test. One test holds the inbox lock
+            itself and reads /proc/locks (LOW-9).
+@deps       python3 stdlib (argparse, collections.abc, contextlib, fcntl,
             importlib, io, json, os, pathlib, sys, unittest, unittest.mock);
-            tests/_root.py; ../tc.
+            tests/_root.py; RELEASE_CEILING_SECONDS and wait_until_blocked
+            from test_codex_route.py; ../tc.
 @complexity O(1) per test: one to six tc runs, each under a second.
 @alloc      one TcRoot per test (or per case), removed when its context
             exits. Nothing is kept between tests.
@@ -24,6 +26,7 @@ Status: unreviewed
 import argparse
 import collections.abc
 import contextlib
+import fcntl
 import importlib.machinery
 import importlib.util
 import io
@@ -41,6 +44,8 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import _root  # noqa: E402  (needs the path line above)
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): one copy of the lock helpers.
+from test_codex_route import RELEASE_CEILING_SECONDS, wait_until_blocked  # noqa: E402
 
 # C1's fields, in its order. Written here, not read from tc.
 CARD_FIELDS = ["version", "name", "kind", "account", "route", "session_id", "pid",
@@ -319,6 +324,33 @@ class CardsTest(unittest.TestCase):
         self.assertIsNone(refused, "a card was written over unread mail")
         self.assertEqual(code2, 0, f"--force exited {code2}: {err2}")
         self.assertEqual(forced["route"], "ssh")
+
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-9.
+    def test_tc_card_counts_and_writes_under_the_inbox_lock(self):
+        """With the test holding mail/.box-x.lock, `tc card x --ssh u@h` writes no card until it is released.
+
+        So no send lands in x's inbox between the card's unread count and
+        its write. Must reject a count and a write outside the lock.
+
+        @interacts  holds mail/.box-x.lock; one background tc card; reads
+                    /proc/locks.
+        @deps       wait_until_blocked; fcntl; _root.TcRoot.start, card_of.
+        @complexity O(1).
+        @alloc      one TcRoot, one open lock file, one background child.
+        """
+        with _root.TcRoot() as root:
+            lock = root.path / "mail" / ".box-x.lock"
+            lock.parent.mkdir()
+            with open(lock, "a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                proc = root.start("card", "x", "--ssh", "u@h")
+                wait_until_blocked(self, proc, lock)
+                while_held = card_of(root, "x")
+            out, err = proc.communicate(timeout=RELEASE_CEILING_SECONDS)
+            written = card_of(root, "x")
+        self.assertIsNone(while_held, "tc card wrote the card while the test held the inbox lock")
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual(written["route"], "ssh")
 
     def test_a_bad_ssh_target_or_remote_path_writes_nothing(self):
         """A target that reads as an ssh option, or a bad remote path: refused, nothing written.
