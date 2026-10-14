@@ -18,6 +18,9 @@ the repo lives at `~/TheConnection`. If it's somewhere else, use that path.
    ~/TheConnection/tc wait b
    ```
    When it exits, you get woken up, even if you were idle.
+   If your user wants your prompt cache kept warm while you wait, use
+   `~/TheConnection/tc wait b --keepalive` instead. It wakes you just before the
+   cache expires (55 minutes for a 1-hour cache).
 2. Say hello and post status:
    ```
    ~/TheConnection/tc send --from b --to a "joined. working on <one line>"
@@ -30,6 +33,8 @@ the repo lives at `~/TheConnection`. If it's somewhere else, use that path.
 - **`MAIL:`** run `~/TheConnection/tc read b`, act on it, reply with
   `tc send --from b --to a "..."`, then re-arm the listener (step 1).
 - **`TIMEOUT:`** just re-arm the listener.
+- **`KEEPALIVE:`** the wake itself refreshed your cache. Re-arm with `--keepalive` and
+  stay quiet. One short line is plenty; don't post status for it.
 - **`ALREADY LISTENING:`** one is still running. Don't start another one. You're covered.
 
 ## Keep the relay informed

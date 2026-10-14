@@ -67,8 +67,10 @@ EXIT_ALERT = 5
 # with TC_CACHE_TTL_SECONDS if your plan uses a different TTL.
 CACHE_TTL_SECONDS = int(os.environ.get("TC_CACHE_TTL_SECONDS", 3600))
 # Wake this long before the TTL runs out, to cover the poll interval and the
-# time the session takes to respond.
-KEEPALIVE_MARGIN_SECONDS = int(os.environ.get("TC_KEEPALIVE_MARGIN_SECONDS", 300))
+# time the session takes to respond. The margin shrinks with short TTLs (a
+# twelfth of the TTL at most) so a 5-minute TTL still waits 275 s, not 0.
+KEEPALIVE_MARGIN_SECONDS = float(os.environ.get("TC_KEEPALIVE_MARGIN_SECONDS", 300))
+KEEPALIVE_MARGIN_MAX_FRACTION = 1 / 12
 MIN_KEEPALIVE_SECONDS = 1
 
 # `tc watch` defaults. A breach wakes the session early; otherwise it wakes
@@ -89,7 +91,8 @@ def now_iso():
 
 
 def keepalive_seconds():
-    return max(MIN_KEEPALIVE_SECONDS, CACHE_TTL_SECONDS - KEEPALIVE_MARGIN_SECONDS)
+    margin = min(KEEPALIVE_MARGIN_SECONDS, CACHE_TTL_SECONDS * KEEPALIVE_MARGIN_MAX_FRACTION)
+    return max(MIN_KEEPALIVE_SECONDS, CACHE_TTL_SECONDS - margin)
 
 
 def inbox(name):
@@ -157,14 +160,20 @@ def cmd_wait(args):
     except BlockingIOError:
         print(f"ALREADY LISTENING: another `tc wait {args.name}` is running. Not starting a second.")
         sys.exit(EXIT_ALREADY_LISTENING)
-    deadline = time.monotonic() + args.timeout
+    timeout = args.timeout if args.timeout is not None else (
+        keepalive_seconds() if args.keepalive else DEFAULT_WAIT_SECONDS)
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         msgs = unread(args.name)
         if msgs:
             print(f"MAIL: {len(msgs)} unread for {args.name}. Run: tc read {args.name}")
             return
-        time.sleep(POLL_SECONDS)
-    print(f"TIMEOUT: no mail for {args.name} in {args.timeout}s. Re-arm: tc wait {args.name}")
+        time.sleep(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+    if args.keepalive:
+        print(f"KEEPALIVE: no mail for {args.name} in {timeout:g}s. This wake refreshed the cache. "
+              f"Re-arm: tc wait {args.name} --keepalive")
+    else:
+        print(f"TIMEOUT: no mail for {args.name} in {timeout:g}s. Re-arm: tc wait {args.name}")
     sys.exit(EXIT_TIMEOUT)
 
 
@@ -448,7 +457,10 @@ def main():
 
     w = sub.add_parser("wait", help="block until mail arrives (run in background)")
     w.add_argument("name")
-    w.add_argument("--timeout", type=int, default=DEFAULT_WAIT_SECONDS)
+    w.add_argument("--timeout", type=float, default=None,
+                   help=f"seconds (default {DEFAULT_WAIT_SECONDS}, or just under the cache TTL with --keepalive)")
+    w.add_argument("--keepalive", action="store_true",
+                   help="wake just before the prompt cache expires, so an idle session stays warm")
     w.set_defaults(fn=cmd_wait)
 
     st = sub.add_parser("status", help="post status (with text) or show all (without)")
