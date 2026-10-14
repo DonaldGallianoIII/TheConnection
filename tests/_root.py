@@ -1,6 +1,7 @@
 """
-Shared test harness for tc: a throwaway TC_ROOT, a runner, a proven
-listener, and fake `ssh` and `codex` executables that record every call.
+Shared test harness for tc: a throwaway TC_ROOT, a runner, a background
+runner, a proven listener, and fake `ssh` and `codex` executables that
+record every call. Real `ssh` and `codex` are refused.
 
 Model:  Claude Opus 5.5 (the GROUND lane agent), 2026-10-14
 Status: unreviewed
@@ -10,45 +11,64 @@ folder, removed when the context exits:
 
     with TcRoot() as root:
         code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi")
-        with root.listener("b", 30) as pid:
-            ...                     # pid holds mail/.wait-b.lock right now
-        folder, calls = root.fake_bin("codex", 0)
-        path = f"{folder}{os.pathsep}{os.environ['PATH']}"
-        root.tc("send", "--from", "a", "--to", "c", "hi", env={"PATH": path})
+        with root.listener("c", 30) as pid:
+            ...                     # pid holds mail/.wait-c.lock right now
+        folder, calls = root.fake_bin("codex", 0)  # first on every later child's PATH
+        root.tc("send", "--from", "a", "--to", "d", "hi")
         calls()                     # [] when the fake never ran
+        proc = root.start("send", "--from", "a", "--to", "b", stdin="hi")
+        out, err = proc.communicate(timeout=10)    # or leave it: teardown kills it
+        root.tc("peek", "b", env={"CLAUDECODE": "1", "HOME": None})  # None unsets HOME
 
 Layout inside the temporary folder:
   root/                       TC_ROOT for every command run through this root
+  refuse/ssh, refuse/codex    refusing stubs, first on every child's PATH
   listener-<name>-*.out       one listener's stdout and stderr
-  fake-<name>-*/bin/<name>    a fake executable; put bin/ first on PATH
+  start-stdin-*               the stdin text of one start() child
+  fake-<name>-*/bin/<name>    a fake: a /bin/sh wrapper, on PATH ahead of refuse/
+  fake-<name>-*/fake.py       the fake's recorder, run by the wrapper
   fake-<name>-*/calls.jsonl   one JSON line per call: {"argv": [...], "stdin": "..."}
 
 @interacts  runs ../tc as a subprocess under a TC_ROOT of its own, never the
-            live mail/ or status/; inherited TC_* variables are dropped so
-            the machine's own settings never reach a test. Reads
-            /proc/locks to prove a listener. Starts `tc wait` children and
-            kills each by its own pid. Writes fake executables that the
-            code under test finds through PATH.
-@deps       python3 stdlib (contextlib, json, os, pathlib, subprocess, sys,
-            tempfile, time); Linux only (/proc/locks, flock); ../tc. No
-            imports from tc itself, so a bug in tc's lock reading cannot
-            hide a bug here.
-@complexity tc(): O(1) plus the child. listener(): at most
-            LOCK_CEILING_SECONDS / LOCK_POLL_SECONDS polls (100), each O(k)
-            over k lines in /proc/locks (tens on a desktop). A fake's
-            reader: O(c) over c recorded calls (single digits per test).
-            Teardown: O(h) over h children this root started (one or two
+            live mail/ or status/. No child gets an inherited TC_* variable
+            or any of the eight in CHILD_ENV_DROP, so the machine's tc
+            settings, the session identity C1 reads, the native path's
+            secrets and the ssh agent never reach a test. Everything else
+            inherited passes through (HOME, PATH, LANG, a Claude session's
+            other CLAUDE_CODE_* flags). Every child's
+            PATH starts with refusing `ssh` and `codex` stubs, so a test
+            without a fake fails instead of running the real tool. Reads
+            /proc/locks to prove a listener. Starts `tc wait` and start()
+            children and kills each by its own pid. Writes fake executables
+            that the code under test finds through PATH.
+@deps       python3 stdlib (contextlib, json, os, pathlib, shlex, subprocess,
+            sys, tempfile, time); /bin/sh for the stubs and the fakes'
+            wrappers; Linux only (/proc/locks, flock); ../tc. No imports
+            from tc itself, so a bug in tc's lock reading cannot hide a bug
+            here.
+@complexity Entering, and building one child's env: O(e + p) over e
+            environment variables (tens) and p PATH entries (tens). tc()
+            and start(): that, plus the child. listener(): one glob of the
+            name's inbox, O(u) over u unread files (0 when it goes on), then
+            at most P = LOCK_CEILING_SECONDS / LOCK_POLL_SECONDS = 100 reads
+            of /proc/locks, each O(k) over k lines (tens on a desktop). One
+            call of a fake: O(c) over c calls already recorded (single
+            digits per test), to count them; its reader is O(c) too.
+            Teardown: O(h) over h children this root started (one to three
             per test).
 @alloc      one temporary folder per TcRoot, removed in __exit__ with
-            everything in it. One Popen per listener, killed and reaped in
-            the listener's own teardown, and again in __exit__ if a context
-            was left open. Nothing is retained after __exit__.
+            everything in it. One Popen per listener and per start(). A
+            listener's is dropped from the child list, killed and reaped in
+            its own teardown; __exit__ kills and reaps the rest, then clears
+            the child list and the env copy. Nothing is retained after
+            __exit__.
 """
 
 import contextlib
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -62,36 +82,85 @@ DEFAULT_TC_TIMEOUT_SECONDS = 10
 # imports is well under 1 s; 5 s is the plan's ceiling, so a slow machine
 # fails here with a message instead of a test hanging.
 LOCK_CEILING_SECONDS = 5
-# Gap between two reads of /proc/locks. 100 reads fit in the ceiling, and a
-# test waits about one Python start-up, never a fixed sleep.
+# Gap between two reads of /proc/locks. The deadline is checked before each
+# read, so at most 100 reads fit in the ceiling, and a test waits about one
+# Python start-up, never a fixed sleep.
 LOCK_POLL_SECONDS = 0.05
 # SIGKILL cannot be caught, so a child still unreaped after this is stuck in
 # the kernel. Fail loudly instead of hanging the suite.
 REAP_CEILING_SECONDS = 5
 # tc reads its settings from environment variables with this prefix.
 TC_ENV_PREFIX = "TC_"
+# Dropped from every child's environment, besides every TC_* variable.
+# C1's five identity variables: a child must not pass for the session that
+# runs the tests, and a test of "no identity at all" must be buildable. The
+# native path's socket and secret: no child of a test holds them. The ssh
+# agent: no child of a test can reach the owner's keys.
+CHILD_ENV_DROP = (
+    "CODEX_THREAD_ID",
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_PID",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "SSH_AUTH_SOCK",
+)
+# Tools no agent runs for real (rule 5). A refusing stub for each sits first
+# on every child's PATH, behind only the fakes a test writes.
+REFUSED_TOOLS = ("ssh", "codex")
+# What a refusing stub exits with. tc's own codes stop at 9 (contracts.md),
+# ssh fails with 255 and a shell with 126 or 127, so 97 means one thing: a
+# test reached a real tool's name with no fake in front of it.
+REFUSED_EXIT_CODE = 97
 # /proc/locks columns: "1: FLOCK ADVISORY WRITE <pid> <maj>:<min>:<inode> 0 EOF".
 # A blocked waiter's line has "->" in column 1, so it never matches FLOCK.
 LOCKS_KIND_COLUMN = 1
 LOCKS_PID_COLUMN = 4
 LOCKS_FILE_COLUMN = 5
-# Owner may read, write and run the fake. Nobody else needs to.
+# Owner may read, write and run a stub or a fake. Nobody else needs to.
 FAKE_EXE_MODE = 0o700
 
-# The fake executable. It records its arguments (not the program name,
-# which is its path in a temp folder and changes every run) and its stdin,
-# then exits with the code it was given. It reads stdin to the end: tc()
-# feeds /dev/null by default, so it only blocks if the code under test
-# hands it a pipe it never closes.
-FAKE_SCRIPT = """#!{python}
-# A fake `{name}` written by tests/_root.py. It records each call and does nothing else.
-import fcntl, json, sys
+# A refusing stub. Its shebang is a fixed path, so nothing about this
+# machine's Python reaches the kernel's shebang parser.
+REFUSE_STUB = """#!/bin/sh
+# Written by tests/_root.py: a test reached `{name}` with no fake in front of this stub.
+echo {message} >&2
+exit {code}
+"""
+
+# A fake's wrapper. The kernel splits a shebang line at its first space, so
+# the interpreter's path never goes there: the shebang is a fixed /bin/sh,
+# and the interpreter and the recorder are quoted words on the exec line.
+FAKE_WRAPPER = """#!/bin/sh
+# A fake `{name}` written by tests/_root.py. It runs its recorder, beside bin/.
+exec {python} {script} "$@"
+"""
+
+# A fake's recorder. It records its arguments (not the program name, which
+# is its path in a temp folder and changes every run) and its stdin, writes
+# its stderr text, and exits with this call's code: call n (from 0) takes
+# CODES[n], and the last code repeats. It counts earlier calls under the
+# record's flock, so overlapping calls still take their codes in order. It
+# reads stdin to the end: tc() feeds /dev/null by default, so it only blocks
+# if the code under test hands it a pipe it never closes.
+FAKE_SCRIPT = """# The recorder of a fake `{name}`, written by tests/_root.py. It records each call and does nothing else.
+import fcntl
+import json
+import sys
+
+CODES = {codes!r}
+STDERR = {stderr!r}
+
 data = sys.stdin.buffer.read().decode("utf-8", "replace") if sys.stdin is not None else ""
 line = json.dumps({{"argv": sys.argv[1:], "stdin": data}}) + "\\n"
-with open({record!r}, "a", encoding="utf-8") as f:
+with open({record!r}, "a+", encoding="utf-8") as f:
     fcntl.flock(f, fcntl.LOCK_EX)
+    f.seek(0)
+    call = sum(1 for _ in f)
     f.write(line)
-sys.exit({exit_code})
+sys.stderr.write(STDERR)
+sys.exit(CODES[min(call, len(CODES) - 1)])
 """
 
 
@@ -99,7 +168,20 @@ class ListenerNotProven(AssertionError):
     """A listener that never held its lock. Raised as a test failure.
 
     @interacts  none; carries a message naming the pid, the lock and the
-                listener's own output.
+                listener's own output, or why no listener was started.
+    @deps       none.
+    @complexity O(1).
+    @alloc      one message string.
+    """
+
+
+class ChildNotReaped(RuntimeError):
+    """Children still unreaped REAP_CEILING_SECONDS after SIGKILL.
+
+    Raised once, after teardown has tried every child, naming each one that
+    timed out.
+
+    @interacts  none; carries a message naming each pid and its command.
     @deps       none.
     @complexity O(1).
     @alloc      one message string.
@@ -133,32 +215,67 @@ def flock_holders(path):
 
 
 def _stop(proc):
-    """Kill one child by its own pid and reap it, so no zombie is left.
+    """Kill one child by its own pid, reap it, and close its pipes.
 
-    Safe to call twice: a child that already exited is only reaped.
+    Safe to call twice: a child that already exited is only reaped. Raises
+    subprocess.TimeoutExpired if the child is still unreaped
+    REAP_CEILING_SECONDS after SIGKILL; its pipes are closed either way.
 
     @interacts  sends SIGKILL to proc.pid and nothing else; never pkill.
     @deps       subprocess.
     @complexity O(1).
-    @alloc      none.
+    @alloc      releases the child's pipes, if it has any.
     """
-    if proc.poll() is None:
-        proc.kill()
-    proc.wait(timeout=REAP_CEILING_SECONDS)
+    try:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=REAP_CEILING_SECONDS)
+    finally:
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
+
+
+def _report_unreaped(procs, in_flight):
+    """Raise one ChildNotReaped naming every child in `procs`; nothing if empty.
+
+    A cleanup failure never replaces the test's own exception: when
+    `in_flight` is true (an exception is already on its way out), the same
+    message goes to stderr instead, and the caller's exception carries on.
+
+    @interacts  writes one line to stderr when `in_flight`; else raises.
+    @deps       shlex, sys.
+    @complexity O(h) over h children in `procs` (one to three).
+    @alloc      one message string.
+    """
+    if not procs:
+        return
+    named = "; ".join(f"pid {p.pid} ({shlex.join(str(a) for a in p.args)})" for p in procs)
+    message = (f"{len(procs)} child(ren) still unreaped {REAP_CEILING_SECONDS} s "
+               f"after SIGKILL: {named}")
+    if in_flight:
+        print(f"tests/_root.py: {message}", file=sys.stderr)
+        return
+    raise ChildNotReaped(message)
 
 
 class TcRoot:
     """A throwaway TC_ROOT and the tools that run tc against it.
 
     Attributes, set by __enter__: `base` (the temporary folder), `path`
-    (TC_ROOT, inside base), `env` (the environment every child gets).
+    (TC_ROOT, inside base), `env` (the environment every child gets: the
+    inherited one without TC_* or CHILD_ENV_DROP, TC_ROOT set to `path`,
+    PATH starting with the refusing stubs; fake_bin() puts its folder in
+    front of them).
 
     @interacts  see the module block. Every command runs with TC_ROOT set
                 to `path`, whatever the caller passes.
-    @deps       tempfile, subprocess; ../tc.
-    @complexity O(1) to enter; exit is O(h) over h children started.
-    @alloc      one temporary folder and a list of children, both released
-                in __exit__.
+    @deps       tempfile, subprocess, shlex; ../tc; /bin/sh.
+    @complexity O(e + p) to enter, over e environment variables and p PATH
+                entries (tens each). Exit is O(h) over h children started
+                (one to three per test).
+    @alloc      one temporary folder, the env dict and a list of children;
+                __exit__ removes the folder and clears the dict and the list.
     """
 
     def __init__(self):
@@ -170,130 +287,288 @@ class TcRoot:
         @alloc      an empty child list.
         """
         self._tmp = None
+        self._refuse = None
         self._children = []
         self.base = None
         self.path = None
         self.env = None
 
     def __enter__(self):
-        """Make the temporary folder, TC_ROOT inside it, and a clean env.
+        """Make the temporary folder, TC_ROOT, the refusing stubs, and a clean env.
 
-        @interacts  creates one folder under the system temp folder. Reads
-                    os.environ and copies it without TC_* variables.
-        @deps       tempfile, os.
-        @complexity O(e) over e environment variables (tens).
+        @interacts  creates one folder under the system temp folder, with
+                    root/ and refuse/ in it, and writes one refusing stub
+                    per REFUSED_TOOLS entry. Reads os.environ and copies it
+                    without TC_* or CHILD_ENV_DROP variables.
+        @deps       tempfile, os, shlex.
+        @complexity O(e + p) over e environment variables and p PATH
+                    entries (tens each), plus R = len(REFUSED_TOOLS) = 2
+                    stubs written.
         @alloc      the folder and one env dict, released in __exit__.
         """
         self._tmp = tempfile.TemporaryDirectory(prefix="tc-test-")
         self.base = pathlib.Path(self._tmp.name)
         self.path = self.base / "root"
         self.path.mkdir()
-        self.env = {k: v for k, v in os.environ.items() if not k.startswith(TC_ENV_PREFIX)}
+        self._refuse = self.base / "refuse"
+        self._refuse.mkdir()
+        for name in REFUSED_TOOLS:
+            stub = self._refuse / name
+            stub.write_text(REFUSE_STUB.format(
+                name=name, code=REFUSED_EXIT_CODE,
+                message=shlex.quote(f"real {name} is not allowed in tests")))
+            stub.chmod(FAKE_EXE_MODE)
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith(TC_ENV_PREFIX) and k not in CHILD_ENV_DROP}
         self.env["TC_ROOT"] = str(self.path)
+        self.env["PATH"] = self._guard_path(self.env.get("PATH", os.defpath))
         return self
 
-    def __exit__(self, *exc):
-        """Kill and reap any child still running, then remove the folder.
+    def __exit__(self, exc_type, exc, tb):
+        """Kill and reap every child still registered, then remove the folder.
+
+        Tries every child even when one times out, then raises one
+        ChildNotReaped naming each that did. If the test's own exception is
+        already on its way out, the names go to stderr instead (see
+        _report_unreaped).
 
         @interacts  SIGKILL to each child this root started that is still
                     running, by its own pid; removes the temporary folder.
-        @deps       tempfile.
-        @complexity O(h) over h children started (one or two per test),
+        @deps       tempfile, subprocess; _stop, _report_unreaped.
+        @complexity O(h) over h children started (one to three per test),
                     plus the size of the folder.
-        @alloc      frees everything __enter__ and the tools made.
+        @alloc      frees everything __enter__ and the tools made: clears
+                    the child list and the env copy, removes the folder.
         """
+        unreaped = []
         try:
             for proc in self._children:
-                _stop(proc)
+                try:
+                    _stop(proc)
+                except subprocess.TimeoutExpired:
+                    unreaped.append(proc)
         finally:
+            self._children.clear()
+            self.env = None
             self._tmp.cleanup()
+        _report_unreaped(unreaped, exc_type is not None)
         return False
+
+    def _guard_path(self, path):
+        """`path` with the refusing stubs put ahead of every folder outside base.
+
+        Folders inside this root's temporary folder (a fake's bin/) keep
+        their place in front; the stubs go right after them, so a fake can
+        go first and a real tool never can.
+
+        @interacts  none; string work only.
+        @deps       os, pathlib.
+        @complexity O(p) over p entries in `path` (tens).
+        @alloc      one list of entries and the joined string, returned.
+        """
+        refuse = str(self._refuse)
+        entries = [e for e in path.split(os.pathsep) if e != refuse]
+        at = 0
+        while at < len(entries) and pathlib.Path(entries[at]).is_relative_to(self.base):
+            at += 1
+        entries.insert(at, refuse)
+        return os.pathsep.join(entries)
+
+    def _child_env(self, env):
+        """The environment one child gets: this root's env, with `env` over it.
+
+        A key set to None in `env` is unset for this child only. TC_ROOT is
+        always this root's path, and PATH goes through _guard_path whatever
+        `env` says. Raises ValueError if `env` unsets PATH: with no PATH a
+        child falls back to the system's own folders, past the stubs.
+
+        @interacts  none; reads this root's env.
+        @deps       _guard_path.
+        @complexity O(e + p) over e variables and p PATH entries (tens each).
+        @alloc      one env dict, returned.
+        """
+        run_env = dict(self.env)
+        for key, value in (env or {}).items():
+            if value is None:
+                run_env.pop(key, None)
+            else:
+                run_env[key] = value
+        if "PATH" not in run_env:
+            raise ValueError("tests/_root.py: PATH cannot be unset; the refusing "
+                             "ssh and codex stubs live on it")
+        run_env["TC_ROOT"] = str(self.path)
+        run_env["PATH"] = self._guard_path(run_env["PATH"])
+        return run_env
 
     def tc(self, *args, stdin=None, env=None, timeout=DEFAULT_TC_TIMEOUT_SECONDS):
         """Run `tc *args` under this root. Return (exit, stdout, stderr).
 
         `stdin` is a string fed to tc, or /dev/null when None. `env` holds
-        variables layered over this root's env (PATH for a fake, a TC_*
-        setting); TC_ROOT always stays this root. A run past `timeout`
-        raises subprocess.TimeoutExpired after killing the child.
+        variables layered over this root's env for this call only (PATH, a
+        TC_* setting, an identity variable). A key set to None is unset for
+        this call. TC_ROOT always stays this root, and the refusing stubs
+        stay ahead of every folder outside it (see _child_env). A run past
+        `timeout` raises subprocess.TimeoutExpired after killing the child.
 
         @interacts  runs [sys.executable, TC, *args] as a child and waits.
-        @deps       subprocess; ../tc.
-        @complexity O(1) plus the child's own work.
+        @deps       subprocess; ../tc; _child_env.
+        @complexity O(e + p) for the env, plus the child's own work.
         @alloc      the env copy and the captured output, returned.
         """
-        run_env = dict(self.env)
-        run_env.update(env or {})
-        run_env["TC_ROOT"] = str(self.path)
         feed = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
-        done = subprocess.run([sys.executable, str(TC), *args], env=run_env,
+        done = subprocess.run([sys.executable, str(TC), *args], env=self._child_env(env),
                               capture_output=True, text=True, timeout=timeout, **feed)
         return done.returncode, done.stdout, done.stderr
+
+    def start(self, *args, stdin=None, env=None):
+        """Start `tc *args` in the background under this root; return its Popen.
+
+        For a child the test watches while it runs, such as a send blocked
+        on a lock (CORE K3). `stdin` is a string the child reads, served
+        from a file in the temp folder so writing it never blocks, or
+        /dev/null when None. `env` works as in tc(). stdout and stderr are
+        text pipes: read them with proc.communicate(timeout=...). The child
+        is registered with this root, so __exit__ kills it by its own pid
+        if it still runs, reaps it, and closes its pipes.
+
+        @interacts  starts one child running [sys.executable, TC, *args];
+                    writes start-stdin-* in the temp folder when `stdin` is
+                    given.
+        @deps       subprocess, tempfile; ../tc; _child_env.
+        @complexity O(e + p) for the env, plus the child's own work.
+        @alloc      one Popen with two pipes, held in the child list until
+                    __exit__; one stdin file, removed with the temp folder.
+        """
+        run_env = self._child_env(env)
+        feed = contextlib.nullcontext(subprocess.DEVNULL)
+        if stdin is not None:
+            fd, name = tempfile.mkstemp(dir=self.base, prefix="start-stdin-")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(stdin)
+            feed = open(name, "rb")
+        with feed as source:
+            proc = subprocess.Popen([sys.executable, str(TC), *args], env=run_env,
+                                    stdin=source, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True)
+        self._children.append(proc)
+        return proc
 
     @contextlib.contextmanager
     def listener(self, name, timeout):
         """Start `tc wait <name> --timeout <timeout>`; yield its pid once proven.
 
         Proven means /proc/locks shows that pid holding
-        mail/.wait-<name>.lock. Polls every LOCK_POLL_SECONDS up to
-        LOCK_CEILING_SECONDS, then raises ListenerNotProven. It also raises
-        if the child exits first: a second listener for the name (exit 3),
-        or mail already waiting (tc wait exits 0 at once). Teardown kills
-        the pid and reaps it, even when the test kills it first.
+        mail/.wait-<name>.lock. Before starting anything it raises
+        ListenerNotProven if the name already has unread mail in this root:
+        a `tc wait` started over waiting mail exits at once, so it cannot
+        be held. Then, every LOCK_POLL_SECONDS, it checks the deadline and
+        reads /proc/locks; it raises ListenerNotProven at
+        LOCK_CEILING_SECONDS, or if the child exits first (a second
+        listener for the name exits 3). Mail the test sends while the
+        listener starts is the test's own race.
 
-        @interacts  starts one `tc wait` child; reads /proc/locks; writes
-                    its output to listener-<name>-*.out in the temp folder.
-        @deps       subprocess, tempfile, time; flock_holders.
-        @complexity at most 100 polls, each O(k) over k lines in /proc/locks.
-        @alloc      one Popen and one output file, both released in
-                    teardown (the file with the folder).
+        Teardown drops the child from this root's list, kills the pid and
+        reaps it, even when the test killed it first. If reaping times out
+        it raises ChildNotReaped, unless the test's own exception is already
+        on its way out: then the failure goes to stderr and the test's
+        exception carries on.
+
+        @interacts  globs mail/to-<name>/*.md; starts one `tc wait` child;
+                    reads /proc/locks; writes its output to
+                    listener-<name>-*.out in the temp folder.
+        @deps       subprocess, tempfile, time; flock_holders, _stop,
+                    _report_unreaped.
+        @complexity O(u) over u unread files to check the inbox (0 when it
+                    goes on), then at most P = LOCK_CEILING_SECONDS /
+                    LOCK_POLL_SECONDS = 100 reads of /proc/locks, each O(k)
+                    over k lines (tens).
+        @alloc      one Popen, dropped from the child list and reaped in
+                    teardown; one output file, removed with the temp folder.
         """
+        waiting = sorted((self.path / "mail" / f"to-{name}").glob("*.md"))
+        if waiting:
+            raise ListenerNotProven(
+                f"tc wait {name} not started: mail/to-{name} already holds {len(waiting)} "
+                f"unread message(s). A tc wait started over waiting mail exits at once, "
+                f"so it cannot be held as a listener. Read the mail first, or listen on "
+                f"another name.")
         lock = self.path / "mail" / f".wait-{name}.lock"
         with tempfile.NamedTemporaryFile(dir=self.base, prefix=f"listener-{name}-",
                                          suffix=".out", delete=False) as out:
             proc = subprocess.Popen([sys.executable, str(TC), "wait", name, "--timeout", str(timeout)],
-                                    env=self.env, stdin=subprocess.DEVNULL,
+                                    env=self._child_env(None), stdin=subprocess.DEVNULL,
                                     stdout=out, stderr=subprocess.STDOUT)
         self._children.append(proc)
+        in_flight = False
         try:
             deadline = time.monotonic() + LOCK_CEILING_SECONDS
-            while proc.pid not in flock_holders(lock):
+            while True:
+                if time.monotonic() >= deadline:
+                    raise ListenerNotProven(f"tc wait {name} (pid {proc.pid}) did not hold {lock} "
+                                            f"within {LOCK_CEILING_SECONDS} s")
+                if proc.pid in flock_holders(lock):
+                    break
                 if proc.poll() is not None:
                     said = pathlib.Path(out.name).read_text()
                     raise ListenerNotProven(f"tc wait {name} (pid {proc.pid}) exited {proc.returncode} "
                                             f"without holding {lock}. It said: {said!r}")
-                if time.monotonic() >= deadline:
-                    raise ListenerNotProven(f"tc wait {name} (pid {proc.pid}) did not hold {lock} "
-                                            f"within {LOCK_CEILING_SECONDS} s")
                 time.sleep(LOCK_POLL_SECONDS)
             yield proc.pid
+        except BaseException:
+            in_flight = True
+            raise
         finally:
-            _stop(proc)
+            if proc in self._children:
+                self._children.remove(proc)
+            try:
+                _stop(proc)
+            except subprocess.TimeoutExpired:
+                _report_unreaped([proc], in_flight)
 
-    def fake_bin(self, name, exit_code):
-        """Write a fake `name` (codex or ssh) that records each call and exits `exit_code`.
+    def fake_bin(self, name, exit_code, stderr=""):
+        """Write a fake `name` (codex or ssh) that records each call, first on PATH.
 
-        Returns (folder, calls). Put `folder` first on PATH. `calls()`
-        returns one dict per call, in order: {"argv": the arguments after
-        the program name, "stdin": what it read}. It returns [] when the
-        fake never ran, so a test asserts the fake was called by asserting
-        calls() is not empty.
+        `exit_code` is one int for every call, or a list with one code per
+        call in order, the last repeating: [0, 255, 0] exits 0, then 255,
+        then 0 from the third call on. `stderr` is text the fake writes to
+        its stderr on every call. The fake's bin/ folder goes first on this
+        root's PATH, ahead of the refusing stubs and any earlier fake, so
+        every child started after this call finds it.
 
-        @interacts  writes fake-<name>-*/bin/<name> (mode 0700) in the temp
-                    folder. The fake appends to fake-<name>-*/calls.jsonl.
-        @deps       tempfile, json, sys.executable as the fake's interpreter.
-        @complexity O(1) to write; calls() is O(c) over c recorded calls.
-        @alloc      one folder holding the fake and its record, removed
-                    with the temp folder.
+        Returns (folder, calls). `calls()` returns one dict per call, in
+        order: {"argv": the arguments after the program name, "stdin": what
+        it read}. It returns [] when the fake never ran. The record is
+        calls.jsonl beside `folder` (folder.parent / "calls.jsonl"), so a
+        test asserts it exists before reading it.
+
+        @interacts  writes fake-<name>-*/bin/<name> (a /bin/sh wrapper, mode
+                    0700) and fake-<name>-*/fake.py in the temp folder; puts
+                    bin/ first on this root's PATH. Each call of the fake
+                    appends to fake-<name>-*/calls.jsonl under its flock.
+        @deps       tempfile, json, shlex; sys.executable as the recorder's
+                    interpreter; /bin/sh.
+        @complexity O(n + p) to write, over n codes given (a handful) and p
+                    PATH entries. Each call of the fake is O(c) over c calls
+                    already recorded; calls() is O(c).
+        @alloc      one folder holding the wrapper, the recorder and the
+                    record, removed with the temp folder.
         """
+        codes = [exit_code] if isinstance(exit_code, int) else list(exit_code)
+        if not codes:
+            raise ValueError(f"fake_bin({name!r}): exit_code is an empty list; give at least one code")
+        codes = [int(code) for code in codes]
         home = pathlib.Path(tempfile.mkdtemp(dir=self.base, prefix=f"fake-{name}-"))
         folder = home / "bin"
         folder.mkdir()
         record = home / "calls.jsonl"
+        script = home / "fake.py"
+        script.write_text(FAKE_SCRIPT.format(name=name, codes=codes, stderr=str(stderr),
+                                             record=str(record)), encoding="utf-8")
         exe = folder / name
-        exe.write_text(FAKE_SCRIPT.format(python=sys.executable, name=name,
-                                          record=str(record), exit_code=int(exit_code)))
+        exe.write_text(FAKE_WRAPPER.format(name=name, python=shlex.quote(sys.executable),
+                                           script=shlex.quote(str(script))))
         exe.chmod(FAKE_EXE_MODE)
+        self.env["PATH"] = self._guard_path(f"{folder}{os.pathsep}{self.env['PATH']}")
 
         def calls():
             """Every call the fake recorded, oldest first; [] if it never ran.
