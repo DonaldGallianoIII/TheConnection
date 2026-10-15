@@ -9,7 +9,11 @@ private mailbox keeps its wait exactly, and tc wait and tc watch close
 their lock file on every way out. And D35 (3): a busy refusal names the
 holder, its user and pid, and whom to ask, and tc health lists a lock
 held by someone other than its name's owner, while the gate's health
-never does.
+never does. And item 6, a2's class proof for the wake files
+(WakeFilesAreTheirOwnersTest): no member who is not a name's owner holds
+or redirects its wait lock, watch lock, inbox lock or ring marker, and a
+file planted at the owner's lock name is moved aside with words. Its
+mutations, and the lines each turned red, are in handoffs/P3FIX.md.
 
 Model:  Claude Opus 5.5 (the P3 fixer, round 1b), 2026-10-15
 Status: unreviewed
@@ -35,15 +39,25 @@ second-user walk is qa/human/route-shared.md.
             process), tc's gpu_stats, unread, machine_stats or
             flock_within replaced, SSH_ORIGINAL_COMMAND set, stdout and
             stderr captured, and warnings recorded; reads /proc/self/fd.
-            Writes nothing outside the root's temp folder.
+            The class proof starts one-shot member children
+            (MEMBER_SCRIPT) that make, hold or rewrite a file in place,
+            and runs the owner's command, or a send, in process with
+            os.lstat, os.fstat and os.stat patched (members_patched),
+            tc's unread, machine_stats or read_regular_file wrapped to
+            call a member while the command runs, and wall_clock replaced
+            (never a RING_BACKOFF_SECONDS sleep); it makes a link, a FIFO
+            and a hard link by hand, and a fake codex first on PATH, its
+            calls asserted. Writes nothing outside the root's temp folder.
 @deps       python3 stdlib (argparse, contextlib, fcntl, gc, io, json, os,
             pathlib, pwd, stat, subprocess, sys, time, unittest,
             unittest.mock, warnings); tests/_root.py; UmaskTestCase,
             load_tc, owner_patched_lstat, owner_patched_fstat,
             primary_group and tree from test_shared.py; ../tc.
-@complexity O(1) per test: a handful of tc runs and at most two children
+@complexity O(1) per test: a handful of tc runs and at most four children
             per root, each wait or watch run under a second or two; the
-            private pin test waits out one of tc's polls (POLL_SECONDS).
+            private pin test waits out one of tc's polls (POLL_SECONDS),
+            and each refused command one LOCK_WAIT_SECONDS. The class
+            proof: 5 subtests and 8 planted cases, each a fresh root.
 @alloc      one TcRoot per test or case, removed when its context exits,
             with every child it started.
 """
@@ -72,8 +86,8 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import _root  # noqa: E402  (needs the path line above)
-from test_shared import (UmaskTestCase, load_tc, owner_patched_fstat, owner_patched_lstat,  # noqa: E402
-                         primary_group, tree)
+from test_shared import (UmaskTestCase, contents, load_tc, owner_patched_fstat,  # noqa: E402
+                         owner_patched_lstat, primary_group, tree)
 
 # The names: the member who owns an inbox, a name nobody joined, and a
 # name for a private mailbox's new listener. Made up.
@@ -164,6 +178,68 @@ HOLDER_UID_STEP = 2
 HELD_LINE_WORDS = "held       {path}: {name}'s {lock} lock, held by {user} (pid {pid}), not by its owner {owner}"
 GATE_HEALTH = "/x/tc health --json"
 GATE_KEY = "farkey"
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): item 6, the class proof.
+# A one-shot child, a member who is not the name's owner: it acts on the
+# file named by its first argument, as its second says, and prints what
+# came of it on one line. One Linux user cannot see the kernel refuse
+# another user's open, so it applies the kernel's rule for a member who
+# is not the file's owner itself: it may open a file already there only
+# when the file's mode gives the group the access it asks for (read or
+# write to hold, write to rewrite), and prints DENIED otherwise. A file
+# not there yet it makes, as a member may in a folder the group can
+# write. `hold` takes the flock exclusive without waiting (HELD, or BUSY
+# when someone holds it) and keeps it, sleeping the seconds of its third
+# argument, until the harness kills it by its pid. `rewrite:<state>:<t>`
+# writes <state> as the first line in place (no moment where the file
+# reads empty) and, unless <t> is "-", sets its time to <t>.
+MEMBER_SCRIPT = """import fcntl, os, stat, sys, time
+path, act = sys.argv[1], sys.argv[2]
+try:
+    st = os.lstat(path)
+except FileNotFoundError:
+    st = None
+want = stat.S_IWGRP if act.startswith("rewrite") else stat.S_IRGRP | stat.S_IWGRP
+if st is not None and not stat.S_IMODE(st.st_mode) & want:
+    print("DENIED", flush=True)
+    sys.exit(0)
+if act == "hold":
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o664)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("BUSY", flush=True)
+        sys.exit(0)
+    print("HELD", flush=True)
+    time.sleep(float(sys.argv[3]))
+else:
+    _, state, stamp = act.split(":", 2)
+    data = (state + "\\n").encode()
+    fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    os.pwrite(fd, data, 0)
+    os.ftruncate(fd, len(data))
+    if stamp != "-":
+        os.utime(fd, (float(stamp), float(stamp)))
+    print("REWRITTEN", flush=True)
+"""
+MEMBER_HELD, MEMBER_BUSY, MEMBER_DENIED, MEMBER_REWROTE = "HELD", "BUSY", "DENIED", "REWRITTEN"
+# How long the owner's wait runs, and the owner's watch's heartbeat and
+# poll gap: one poll, where the member tries again, then the end.
+CLASS_LISTEN_SECONDS = 1.0
+CLASS_WATCH_POLL_SECONDS = 0.2
+# Python start-up and tc's imports on a busy machine, on top of the
+# inbox lock's bound: a refusal past both is a hang.
+LOCK_REFUSE_MARGIN_SECONDS = 3
+# The ring marker's states (tc's RING_CLEAR and RING_TIMED_OUT), its
+# name, the backoff, and how far past the sender's own backoff the
+# replaced clock stands.
+CLEAR_STATE, TIMED_OUT_STATE = "clear", "timed out"
+MARKER_NAME = ".ring-pending-{name}"
+RING_BACKOFF_SECONDS = 300
+PAST_BACKOFF_SECONDS = 10
+THREAD = "t1"
+RANG_LINE = "rang codex {to} (queued; delivered when its turn ends or the session is resumed)"
+# The kinds of entry a member plants at the owner's lock name.
+PLANTS = ("a file", "a symlink", "a FIFO", "a file with another name too (a hard link)")
 
 
 def login(uid):
@@ -297,6 +373,75 @@ def holder_patched_stat(pids, uid):
             return os.stat_result(fields)
         return st
     return patched
+
+
+def member(root, path, act):
+    """Run MEMBER_SCRIPT once on `path` with `act` ("hold", or "rewrite:<state>:<time>"): (its Popen, the one line it printed). A child that holds keeps running until the harness kills it by its pid.
+
+    @interacts  starts one child through the harness; reads one line of
+                its stdout.
+    @deps       _root.TcRoot.start; sys; MEMBER_SCRIPT, HOLD_SECONDS.
+    @complexity O(1).
+    @alloc      one Popen, registered with the root.
+    """
+    proc = root.start(argv=[sys.executable, "-c", MEMBER_SCRIPT, str(path), act, str(HOLD_SECONDS)])
+    return proc, proc.stdout.readline().strip()
+
+
+def identity(path):
+    """(st_dev, st_ino) of what has the name `path` now, never through a link.
+
+    @interacts  lstats `path`.
+    @deps       os.
+    @complexity O(1).
+    @alloc      one tuple, returned.
+    """
+    st = os.lstat(path)
+    return st.st_dev, st.st_ino
+
+
+@contextlib.contextmanager
+def members_patched(root_path, planted, pids):
+    """While entered, the running user is a member and others are too, as the SHARED suites report owners: os.lstat, os.fstat and os.stat report ROOT and its .shared as the init user's (one id up, as test_shared.as_member), each file whose (st_dev, st_ino) is in `planted` as another member's (HOLDER_UID_STEP up), and /proc/<pid> for each pid in `pids` as that member's. `planted` and `pids` are read at each call, so a caller may add to them while it runs.
+
+    @interacts  patches os.lstat, os.fstat and os.stat while entered;
+                lstats ROOT and its .shared once.
+    @deps       os, stat, unittest.mock; HOLDER_UID_STEP.
+    @complexity O(1) per call, plus O(p) over p pids for os.stat.
+    @alloc      the patches, undone on exit; one stat result per call.
+    """
+    me = os.geteuid()
+    init_files = {identity(root_path), identity(root_path / ".shared")}
+    real_lstat, real_fstat, real_stat = os.lstat, os.fstat, os.stat
+
+    def owned(st, uid):
+        if uid is None:
+            return st
+        fields = list(st[:stat.ST_CTIME + 1])
+        fields[stat.ST_UID] = uid
+        return os.stat_result(fields)
+
+    def owner(st):
+        key = (st.st_dev, st.st_ino)
+        return me + 1 if key in init_files else me + HOLDER_UID_STEP if key in planted else None
+
+    def lstat(path, *args, **kwargs):
+        st = real_lstat(path, *args, **kwargs)
+        return owned(st, owner(st))
+
+    def fstat(fd):
+        st = real_fstat(fd)
+        return owned(st, owner(st))
+
+    def stat_(path, *args, **kwargs):
+        st = real_stat(path, *args, **kwargs)
+        if not isinstance(path, int) and os.fspath(path) in {f"/proc/{pid}" for pid in pids}:
+            return owned(st, me + HOLDER_UID_STEP)
+        return owned(st, owner(st))
+
+    with mock.patch.object(os, "lstat", lstat), mock.patch.object(os, "fstat", fstat), \
+            mock.patch.object(os, "stat", stat_):
+        yield
 
 
 def wait_args(name, timeout):
@@ -757,6 +902,273 @@ class LockFileClosedTest(UmaskTestCase):
                 self.assertEqual(code, expected)
                 self.assertEqual(open_on_lock, 0, f"tc {kind} left its lock open after {label}")
                 self.assertEqual(leaks, [], f"tc {kind} left a file for the garbage collector after {label}")
+
+
+class WakeFilesAreTheirOwnersTest(UmaskTestCase):
+    """Item 6 of round 1b, a2's class proof for the wake files (test-strategist REC-2, the parallel to InboxPinnedTest): no member who is not a name's owner holds or redirects that name's wait lock, watch lock, inbox lock or ring marker.
+
+    Every subtest runs on a shared mailbox (tc init with the running
+    user's primary group, ann joined by the running user). The member is
+    a one-shot child (MEMBER_SCRIPT) that acts before the owner's command
+    and again while it runs; its process, and every file it plants, read
+    as another member's (members_patched: HOLDER_UID_STEP up), never as
+    the init user's, whom ROOT and .shared read as (one up, as_member).
+    The owner's command runs in process, so the patches reach it.
+
+    Per file, expected by value (the comments in the test say what the
+    contract allows): the wait and watch locks, the owner's command holds
+    its own lock and runs to its end, the member's open fails, and
+    listeners() names the owner's pid and never the member's; the inbox
+    lock, which every member may hold for a send (C4), the owner's
+    command exits 10 within the bound, writes nothing, and names the
+    holder's user and pid; the ring marker, which every member may write
+    (C4), rewritten to clear, or to timed out and touched each time tc
+    reads it, never stops a send after the sender's own backoff from
+    ringing (the fake codex asserted called). Each file's mutation is
+    recorded with the lines it turned red in handoffs/P3FIX.md.
+
+    Known gap: the list of wake files is hardcoded, as InboxPinnedTest's
+    families are; a wake file added later is not covered until someone
+    adds its subtest.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, UmaskTestCase, primary_group, load_tc,
+                member, identity, members_patched, run_in_process, login,
+                contents from test_shared.py.
+    @complexity O(f) subtests over f = 5 (four files, the marker twice),
+                plus eight for the planted entries.
+    @alloc      one TcRoot per subtest.
+    """
+
+    def shared_with_ann(self, root, codex=False):
+        """Share the root with the running user's primary group and join ann as the running user (as codex when `codex`).
+
+        @interacts  two tc runs.
+        @deps       primary_group; _root.TcRoot.tc; OWNER, THREAD.
+        @complexity O(1).
+        @alloc      the mailbox's folders and ann's card and inbox.
+        """
+        _, group, _ = primary_group()
+        self.assertEqual(root.tc("init", "--shared", "--group", group)[0], 0)
+        owner_env = {"CODEX_THREAD_ID": THREAD, "CLAUDECODE": None} if codex else {"CLAUDECODE": "1"}
+        self.assertEqual(root.tc("join", OWNER, env=owner_env)[0], 0)
+
+    def listener_case(self, root, kind):
+        """The wait or watch lock (`kind`): the member plants and holds a file at the owner's lock name, and holds the lock's old place in mail/, before the owner's command; at its first poll, tries again to hold the lock at the name. What was seen.
+
+        @interacts  three member children; one owner's command in
+                    process (cmd_wait or cmd_watch) with tc's unread or
+                    machine_stats wrapped to look at its first poll,
+                    resource.setrlimit made a no-op and tc's gpu_stats
+                    replaced.
+        @deps       member, identity, members_patched, run_in_process,
+                    load_tc, _root.flock_holders; unittest.mock.
+        @complexity O(1): one CLASS_LISTEN_SECONDS run.
+        @alloc      one module.
+        """
+        mail = root.path / "mail"
+        lock = mail / f"to-{OWNER}" / LOCK_NAME.format(kind=kind)
+        old = mail / OLD_LOCK_NAME.format(kind=kind, name=OWNER)
+        planter, planted_said = member(root, lock, "hold")
+        old_holder, old_said = member(root, old, "hold")
+        planted, pids = {identity(lock)}, {planter.pid, old_holder.pid}
+        tc = load_tc(root)
+        seen = {}
+        polled = tc.unread if kind == "wait" else tc.machine_stats
+
+        def first_poll(*args, **kwargs):
+            if not seen:
+                seen["holders"] = _root.flock_holders(lock)
+                trier, seen["while"] = member(root, lock, "hold")
+                pids.add(trier.pid)
+                seen["listeners"] = tc.listeners(kind)
+            return polled(*args, **kwargs)
+        call = ((lambda: tc.cmd_wait(wait_args(OWNER, CLASS_LISTEN_SECONDS))) if kind == "wait" else
+                (lambda: tc.cmd_watch(argparse.Namespace(**{**vars(watch_args(OWNER, CLASS_LISTEN_SECONDS)),
+                                                            "poll": CLASS_WATCH_POLL_SECONDS}))))
+        with members_patched(root.path, planted, pids), \
+                mock.patch.object(tc.resource, "setrlimit", lambda *args: None), \
+                mock.patch.object(tc, "gpu_stats", lambda: None), \
+                mock.patch.object(tc, "unread" if kind == "wait" else "machine_stats", first_poll):
+            ran = run_in_process(call)
+        return {"ran": ran, "seen": seen, "before": (planted_said, old_said), "member": (planter.pid, old_holder.pid),
+                "lock": lock}
+
+    def inbox_case(self, root):
+        """The inbox lock: the member holds ann's inbox lock before her tc read and through it. What was seen.
+
+        @interacts  one send; one member child; the root read before and
+                    after; tc read in process.
+        @deps       member, members_patched, run_in_process, load_tc,
+                    contents; time.
+        @complexity O(1): one LOCK_WAIT_SECONDS of waiting.
+        @alloc      one module.
+        """
+        self.assertEqual(root.tc("send", "--from", "ben", "--to", OWNER, "hi")[0], 0)
+        holder, said = member(root, root.path / "mail" / f".box-{OWNER}.lock", "hold")
+        before = contents(root.path)
+        tc = load_tc(root)
+        began = time.monotonic()
+        with members_patched(root.path, set(), {holder.pid}):
+            ran = run_in_process(lambda: tc.cmd_read(argparse.Namespace(name=OWNER)))
+        took = time.monotonic() - began
+        return {"ran": ran, "said": said, "pid": holder.pid, "took": took, "changed": contents(root.path) != before}
+
+    def marker_case(self, root, state):
+        """The ring marker: a ring fails (owed), then the member rewrites the marker to `state` before ben's next send and again each time that send reads it, a timed-out one touched to the send's own clock each time; the send runs with the clock RING_BACKOFF_SECONDS and more past ben's last ring. What was seen.
+
+        @interacts  a fake codex (a failure, then a success); one send as
+                    setup; member children; cmd_send in process with
+                    wall_clock replaced, PATH set to the root's, and tc's
+                    read_regular_file wrapped to call the member first.
+        @deps       member, members_patched, run_in_process, load_tc;
+                    _root.TcRoot.fake_bin; time, unittest.mock.
+        @complexity O(1): two codex fake runs.
+        @alloc      one module.
+        """
+        folder, calls = root.fake_bin("codex", [1, 0])
+        self.assertEqual(root.tc("send", "--from", "ben", "--to", OWNER, "one")[0], 0)
+        marker = root.path / "mail" / MARKER_NAME.format(name=OWNER)
+        state_after_setup = marker.read_text().partition("\n")[0]
+        tc = load_tc(root)
+        offset = RING_BACKOFF_SECONDS + PAST_BACKOFF_SECONDS
+        pids, rewrites = set(), []
+
+        def rewrite():
+            stamp = "-" if state == CLEAR_STATE else str(time.time() + offset)
+            proc, said = member(root, marker, f"rewrite:{state}:{stamp}")
+            pids.add(proc.pid)
+            rewrites.append(said)
+        rewrite()
+        real_read = tc.read_regular_file
+
+        def read_regular_file(path, *args, **kwargs):
+            if pathlib.Path(path) == marker:
+                rewrite()
+            return real_read(path, *args, **kwargs)
+        with members_patched(root.path, set(), pids), \
+                mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}), \
+                mock.patch.object(tc, "wall_clock", lambda: time.time() + offset), \
+                mock.patch.object(tc, "read_regular_file", read_regular_file):
+            ran = run_in_process(lambda: tc.cmd_send(argparse.Namespace(sender="ben", to=OWNER, message="two",
+                                                                        origin=None)))
+        record = folder.parent / "calls.jsonl"
+        return {"ran": ran, "setup": state_after_setup, "rewrites": rewrites,
+                "calls": calls() if record.exists() else None}
+
+    def test_no_member_holds_or_redirects_another_members_wake_file(self):
+        """For each wake file, a member who is not ann tries to hold or rewrite it before and while ann's command runs (or a send to ann, for the marker): ann's listener holds its own lock and health names ann's pid, never the member's; her read on a held inbox lock fails within the bound, writes nothing, and names the member; and a send after the sender's own backoff rings her Codex thread whatever the member wrote.
+
+        D35's wake-file class proof (the audit's HIGH-2, MEDIUM-1; REC-2,
+        REC-3, REC-4). Must reject a wait or watch lock the group can open
+        (the member's open succeeds, or its plant is taken as the lock),
+        busy words that do not name the holder, and a ring decision that
+        trusts the marker's words or its time.
+
+        @interacts  per subtest: a shared mailbox with ann joined, then
+                    listener_case, inbox_case or marker_case.
+        @deps       shared_with_ann, listener_case, inbox_case,
+                    marker_case, login; os.
+        @complexity O(f): f = 5 subtests.
+        @alloc      one TcRoot per subtest.
+        """
+        mine, other, init = login(os.geteuid()), login(os.geteuid() + HOLDER_UID_STEP), login(os.geteuid() + 1)
+        for kind in KINDS:
+            with self.subTest(wake_file=f"the {kind} lock"), _root.TcRoot() as root:
+                self.shared_with_ann(root)
+                got = self.listener_case(root, kind)
+                code, out, err = got["ran"]
+                # Allowed: nothing less. D35, "Each member's listener is theirs alone".
+                self.assertEqual(got["before"], (MEMBER_HELD, MEMBER_HELD), "the member could not plant and hold")
+                self.assertEqual(code, EXIT_TIMEOUT if kind == "wait" else 0,
+                                 f"ann's tc {kind} did not hold its own lock and run to its end: {out}{err}")
+                self.assertIn(os.getpid(), got["seen"]["holders"], f"ann's tc {kind} did not hold the lock at its name")
+                self.assertEqual(got["seen"]["while"], MEMBER_DENIED,
+                                 f"the member's open of ann's {kind} lock did not fail")
+                self.assertEqual(got["seen"]["listeners"].get(OWNER), os.getpid(),
+                                 f"listeners() did not name ann's own tc {kind}")
+                self.assertFalse(set(got["member"]) & set(got["seen"]["listeners"].values()),
+                                 "listeners() named the member's pid")
+                self.assertIn(f"was a file owned by {other}, not this user's own {kind} lock", err)
+        with self.subTest(wake_file="the inbox lock"), _root.TcRoot() as root:
+            self.shared_with_ann(root)
+            got = self.inbox_case(root)
+            # Allowed by C4 (D20, D23): any member may hold it, for a send; the cost is a failed command.
+            self.assertEqual(got["said"], MEMBER_HELD)
+            self.assertEqual(got["ran"], (EXIT_BUSY, "", HELD_BY_WORDS.format(
+                what=OWNER, user=other, pid=got["pid"], init=ASK_INIT_WORDS.format(init=init))))
+            self.assertLessEqual(got["took"], LOCK_WAIT_SECONDS + LOCK_REFUSE_MARGIN_SECONDS)
+            self.assertFalse(got["changed"], "a refused read changed the mailbox")
+        for state in (CLEAR_STATE, TIMED_OUT_STATE):
+            with self.subTest(wake_file=f"the ring marker, rewritten to {state}"), _root.TcRoot() as root:
+                self.shared_with_ann(root, codex=True)
+                got = self.marker_case(root, state)
+                code, out, err = got["ran"]
+                # Allowed by C4: a ring once more or once fewer, never the doorbell for good (C2 item 5).
+                self.assertEqual(got["setup"], "failed", "the setup's ring did not fail, so no ring was owed")
+                self.assertTrue(got["rewrites"] and set(got["rewrites"]) == {MEMBER_REWROTE}, got["rewrites"])
+                self.assertIsNotNone(got["calls"], "the fake codex never ran, not even in setup")
+                self.assertEqual(len(got["calls"]), 2,
+                                 f"a send past the sender's own backoff did not ring over a marker rewritten to "
+                                 f"{state}: {got['calls']}")
+                self.assertEqual(code, 0, err)
+                self.assertIn(RANG_LINE.format(to=OWNER), out)
+
+    def test_a_file_planted_at_the_owners_lock_name_is_moved_aside_with_words_and_the_owners_lock_made(self):
+        """Another member's file (held), a symlink to a file outside the mailbox, a FIFO, or a file with a second name, planted at ann's wait or watch lock's name: ann's command moves it aside to the first aside name with one line naming what it was and whose, makes her own lock at 0600, and runs to its end; the planted entry itself sits at the aside name, and the link's target is unchanged.
+
+        Must reject a planted entry taken as the lock, followed, waited on
+        or refused instead of moved (D35 (1): the owner's tc owns the
+        inbox and moves it, with words).
+
+        @interacts  per case: a shared mailbox with ann joined; the plant
+                    made by a member child or by hand (a link, a FIFO, a
+                    hard link to a file outside the root); one owner's
+                    command in process with members_patched, resource
+                    .setrlimit made a no-op and tc's gpu_stats replaced.
+        @deps       shared_with_ann, member, identity, members_patched,
+                    run_in_process, load_tc, login; os, stat.
+        @complexity O(1) per case, eight cases.
+        @alloc      one TcRoot and one module per case.
+        """
+        other = login(os.geteuid() + HOLDER_UID_STEP)
+        for kind in KINDS:
+            for plant in PLANTS:
+                with self.subTest(kind=kind, planted=plant), _root.TcRoot() as root:
+                    self.shared_with_ann(root)
+                    lock = root.path / "mail" / f"to-{OWNER}" / LOCK_NAME.format(kind=kind)
+                    target = root.base / "target"
+                    target.write_text(TARGET_TEXT)
+                    pids = set()
+                    if plant == "a file":
+                        planter, said = member(root, lock, "hold")
+                        self.assertEqual(said, MEMBER_HELD)
+                        pids.add(planter.pid)
+                    elif plant == "a symlink":
+                        lock.symlink_to(target)
+                    elif plant == "a FIFO":
+                        os.mkfifo(lock)
+                    else:
+                        os.link(target, lock)
+                    found = identity(lock)
+                    tc = load_tc(root)
+                    call = ((lambda: tc.cmd_wait(wait_args(OWNER, 0.0))) if kind == "wait" else
+                            (lambda: tc.cmd_watch(watch_args(OWNER, 0.0))))
+                    with members_patched(root.path, {found}, pids), \
+                            mock.patch.object(tc.resource, "setrlimit", lambda *args: None), \
+                            mock.patch.object(tc, "gpu_stats", lambda: None):
+                        code, out, err = run_in_process(call)
+                    aside = lock.with_name(FIRST_ASIDE.format(lock=lock.name))
+                    moved = identity(aside) if os.path.lexists(aside) else None
+                    st = os.lstat(lock)
+                    text = target.read_text()
+                self.assertEqual(code, EXIT_TIMEOUT if kind == "wait" else 0,
+                                 f"ann's tc {kind} did not run to its end over {plant}: {out}{err}")
+                self.assertIn(MOVED_WORDS.format(kind=kind, path=lock, what=plant, owner=other, aside=aside), err)
+                self.assertEqual(moved, found, f"{plant} is not what sits at {aside}")
+                self.assertEqual((stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid),
+                                 (True, WAKE_LOCK_MODE, os.geteuid()), "ann's own lock was not made at its name")
+                self.assertEqual(text, TARGET_TEXT, "the planted link's target changed")
 
 
 if __name__ == "__main__":
