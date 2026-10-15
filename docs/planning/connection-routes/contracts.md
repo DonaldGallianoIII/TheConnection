@@ -385,10 +385,13 @@ tc = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name
 loader.exec_module(tc)
 ```
 
-`feed()` returns one JSON object built from `health_snapshot()`, the card
-files (read directly from `cards/*.json` in C1's shape, **never** through
-a `cards` key in `health`, which the CARDS lane adds later) and message
-file names. It never opens a message body.
+`feed()` returns one JSON object built from the parts of tc's health
+that it reads (the machine's load and memory, the live listeners from
+`/proc/locks`, the mailbox summary), the card files (read directly from
+`cards/*.json` in C1's shape, **never** through a `cards` key in
+`health`) and message file names. It never opens a message body, and it
+never runs `nvidia-smi` or anything else slow on a request: the GPU part
+of `tc health` is not on the board's path.
 
 ```json
 {

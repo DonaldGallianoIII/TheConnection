@@ -330,7 +330,8 @@ refuses without the token; it binds nowhere but 127.0.0.1.
 - **Test:** a temp root with two proven listeners (harness), a codex card
   and an ssh card **written by hand in C1's shape** (CARDS' code is not
   there yet), and three messages: four nodes, states `listening`,
-  `listening`, `doorbell`, `remote`; three wires with the right from, to,
+  `listening`, `doorbell`, `remote` once the senders are past
+  `WRITING_WINDOW_S` (inside it, a sender reads `writing`, D15); three wires with the right from, to,
   seq; listener pids equal the harness pids. Kill one listener between two
   `feed()` calls on the same server object: it is `down` on the second. A
   status file's first line after the header shows, cut at 80. Must reject:
@@ -397,9 +398,14 @@ refuses without the token; it binds nowhere but 127.0.0.1.
 
 ### B4. `live.html`
 - **Files:** `board/live.html` (new), `qa/human/board-live.md` (new).
-- **Do:** token from the URL fragment, poll `/feed` every 3 s, newest answer
-  wins, `patchBoard`, the look switch, `?gray=1`. Clean up the timer on
-  `pagehide`.
+- **Do:** token from the URL fragment, poll `/feed` every 3 s with a
+  timeout and one poll in flight, newest answer wins, `patchBoard`, the
+  look switch, `?gray=1`; a stale or failed feed says so over the board;
+  on a narrow screen an outline view instead of the graph (roots headed,
+  rows indented by level, recent traffic newest first). Clean up timers
+  and listeners on `pagehide`, restart on `pageshow` from the cache.
+  `tests/board-browser-check.mjs` checks both views in a headless
+  browser when Playwright is installed.
 - **Verify:** the human script: start `serve.py`, open the printed URL, send
   a message between two test names, see the wire move within 3 s; in
   grayscale every state reads.
