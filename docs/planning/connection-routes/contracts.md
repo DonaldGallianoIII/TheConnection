@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D19) the same day.
+        wave 2 rulings (D17 to D20) the same day.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
 Date:   2026-10-14
@@ -343,12 +343,30 @@ For a separate Linux user per account on one machine.
   - Lock and marker files open with `O_NONBLOCK` and an `S_ISREG` check,
     so a FIFO planted at a lock's name is refused with words instead of
     hanging tc (D19).
-- **What the group is trusted with** (D19). The sticky bit sits on the
-  four top folders only. Inside an inbox, any group member can delete or
-  replace another member's unread mail, because `tc read` must move mail
-  other users wrote. The shared mode assumes the group trusts each other
-  with mail, never with files outside the mailbox. The README's shared
-  section says so.
+- **Nobody touches another member's mail** (D20, Donald: "prevent that
+  from occurring"; it replaces D19's trust trade). Under shared mode:
+  1. Each inbox folder (`mail/to-<name>/` and its `read/`) is owned by
+     its recipient, with mode `3770` (setgid and sticky). `tc join`
+     creates it as the joining user. Under sticky, only a file's owner or
+     the folder's owner can delete or rename, so the recipient's `tc
+     read` still moves anything into `read/`, and senders cannot touch
+     each other's files.
+  2. Message, card and status files are created `0640`, never
+     group-writable, so nobody rewrites one in place.
+  3. A send to a name with no card and no inbox is refused, exit 1,
+     `tc send: nobody has joined as <name> on this shared mailbox`, so a
+     sender never ends up owning someone else's inbox. O1's deliver plus
+     warning stays for a private mailbox.
+  4. An inbox not owned by the owner of its recipient's card (an old
+     one, or one made before this rule) is refused with words; tc never
+     guesses.
+  5. The files everyone must write stay group-writable and are never
+     deleted under shared mode: `mail/.seq`, the lock files, and the ring
+     marker (whose contents carry its state: pending, timed out, or
+     clear, instead of being removed). The worst a member can do through
+     them is make a send fail or ring once more; never read, lose or
+     alter mail.
+  The two-user cases are Donald's human QA (`qa/human/route-shared.md`).
 - `tc health` says `mailbox shared with group <g>` or `mailbox private`.
 
 ## C5. The board feed
