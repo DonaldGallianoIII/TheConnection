@@ -1,14 +1,47 @@
 # QA: the live board
 
-Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
+Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14; round 2 by
+        Claude Opus 5.5 (the BOARD fixer)
 Status: unreviewed. Written, not yet run by a person.
 
 What this checks: `board/serve.py` serves the live board on 127.0.0.1 only,
 refuses without its token, and `board/live.html` draws a real mailbox and
 follows it as mail moves. Every state, port and wire reads in grayscale.
+Round 2: the board fills the screen and the page scrolls, no wire passes
+through a box, no label sits on a box or another label, the legend is in
+the footer, each tree has a heading and the roots are listed at the top,
+and a phone draws an outline instead of the graph.
 
 Run everything from the repo root, in a throwaway mailbox, never the live one.
 Names below are made up.
+
+## First: the browser check
+
+A script opens the board in a headless browser at a desktop size and a
+phone size and measures what the steps below ask you to look at. It is
+not part of `node --test`. It needs Playwright; on this machine:
+
+```
+NODE_PATH=$HOME/CombatSim/node_modules node tests/board-browser-check.mjs
+```
+
+- It builds its own throwaway mailbox with 14 names (two orchestrator
+  trees and two peers), starts four listeners and proves them with
+  `tc health`, starts `serve.py` on a free port, and prints both. It never
+  prints the token.
+- At 1280 x 900 and at 390 x 844 it prints one line per check, each
+  `PASS` or `FAIL`: the view (graph on the desktop, outline on the phone),
+  no console errors, no sideways scroll, no text under 11 px, all 14 names
+  on screen, no box over another, the window at least the viewport's
+  height, no label on a label, a box or a heading, no wire through a box,
+  the legend below the last session, the roots listed with a working link
+  to `z`, nothing cut off in the pill or the footer.
+- It saves four screenshots (each size in color and in grayscale) to a
+  temp folder and prints their paths. Look at them. None goes in the repo.
+- It stops the server and the listeners by their own pids, prints those
+  pids, and ends with `result: PASS` (exit 0) or `result: FAIL (n)`
+  (exit 1).
+- Without Playwright it prints `skipped: playwright not found` and exits 0.
 
 ## Set up
 
@@ -31,10 +64,16 @@ Names below are made up.
      while it runs.
    - If 8780 is taken, add `--port 8781` and use that port below.
 5. Open the printed URL in a browser.
-   - A dark window titled `connection.board · TheConnection :: live`.
+   - A dark window titled `connection.board · TheConnection :: live`. It
+     reaches the bottom of the browser window however tall that is.
    - The pill on the right reads `live · 2 listening`.
+   - Under the title, the list of roots: `2 peers: b, c`.
    - Two boxes, `b · peer · inferred` and `c · peer · inferred`, each with
-     `● listening` on its second line.
+     `● listening` on its second line, each under a heading with its own
+     title. Each box has a hollow ring on the middle of its top edge (in)
+     and a filled dot on the middle of its bottom edge (out).
+   - The legend is the first line of the footer, under the board, never
+     over a box.
 
 ## Mail moves on the board
 
@@ -50,7 +89,9 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
    - Within 3 s a box `a · peer · inferred` appears, reading
      `○ idle · 1 unread` (`a` has an inbox now, and no listener).
    - The wire between `a` and `b` turns dashed and moves, with the words
-     `b → a · #1` and an arrow at `a`, the reader.
+     `b → a · #1` beside it (never on it) and an arrow at `a`, the reader.
+     `a` and `b` are side by side, so the wire runs straight across between
+     their sides.
    - `b` reads `✎ writing` with a thicker border for about 10 s, then
      `● listening` again: a send shows first, listener or not (D15). The
      pill still reads `live · 2 listening` the whole time.
@@ -70,12 +111,17 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
 9. Make `a` a relay. In terminal 4: `./tc send --from a --to c "second task"`,
    then in terminal 3 `./tc read c` and `./tc wait c` again, then in
    terminal 4 `./tc send --from c --to a "on it"`.
-   - `a` sits on the top row and reads `a · orchestrator · inferred`.
+   - `a` sits on the top row and reads `a · orchestrator · inferred`, under
+     the heading `a · orchestrator · inferred · 3 sessions`.
    - `b` and `c` sit one row below it and read `worker · inferred`.
-   - Each message flows on its wire within 3 s, with the arrow at the
-     reader. `c → a` runs up the wire with the arrow at `a`'s end.
+   - A thin line runs from `a`'s out dot down to each child's in ring, with
+     no words on it. Hover it: `b under a · inferred from mail`.
+   - Each message flows down that thin line within 3 s, dashed, with the
+     arrow at the reader. `c → a` flows on `c`'s line with the arrow at
+     `a`'s end.
 10. Wait 10 s with no mail.
-    - The dashes stop and the words leave the wires. The quiet lines stay.
+    - The dashes and the words leave the wires. The quiet lines stay, with
+      no words on them.
 
 ## Cards: doorbell, remote, reports to, native
 
@@ -90,15 +136,18 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     ```
     - Within 3 s `cx · worker` appears under `a`, reading `◎ doorbell`, with
       a double border.
-    - `b` now reads `b · worker`, with no `· inferred`. A thin line with the
-      words `reports to` runs from the top of `b` up to the bottom of `a`,
-      and another from `cx`.
-    - `far` appears as a root of its own to the right of `a`'s tree, reading
-      `⇄ remote · not checked`, with a dotted border.
+    - `b` now reads `b · worker`, with no `· inferred`. The thin line from
+      `a` down to `b` carries no words; hover it: `b reports to a`. `cx`
+      gets one too.
+    - `far` appears as a root of its own beside or under `a`'s tree, with
+      its own heading, reading `⇄ remote · not checked`, with a dotted
+      border.
     - `r` appears as a root too. Its third line reads
       `reports to ghost · not found`.
+    - The roots list at the top now names `a`, `far` and `r`.
     - `far` and `r` are both Claude cards on account `home`, so a long-dash
-      line with the words `native · not observed` joins them.
+      line joins them, side to side, with no words on the board. Hover it:
+      `far and r · native · not observed`. The legend names the long dash.
 12. Post a status: `./tc status c "reviewing the parser"`.
     - Within 3 s `c`'s third line reads `reviewing the parser`.
 
@@ -132,14 +181,18 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       `⇄ remote · not checked`.
     - The second cue on each box: thick border for writing, dashed for no
       listener, double for doorbell, dotted for remote.
-    - Ports: the left port on each box is a hollow ring (in), the right one a
-      filled dot (out).
-    - A moving wire: dashes, an arrow at the reader, and `from → to · #n`.
+    - Ports: the port on each box's top edge is a hollow ring (in), the one
+      on its bottom edge a filled dot (out). Only the thin tree lines touch
+      them; every other wire meets a box at its side.
+    - A moving wire: dashes, an arrow at the reader, and `from → to · #n`
+      beside it.
     - Stop `c`'s listener (Ctrl+C in terminal 3). Within 3 s `c` reads
       `✕ no listener` with a dashed border, and its wire is dotted.
-    - The `reports to` lines are thin and carry their words; the `native`
-      line is long-dashed and carries `native · not observed`.
-    - Each orchestrator reads as one by the word `orchestrator` in its title.
+    - The tree's lines are thin and solid, with no words; the `native` line
+      is long-dashed, with no words. The footer's legend names each kind of
+      line in words.
+    - Each orchestrator reads as one by the word `orchestrator` in its title
+      and in its tree's heading.
 17. Do the same with `?theme=daylight&gray=1` before the `#`.
     - Same checks; the look is light with dark title and footer bars.
 
@@ -149,9 +202,17 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     - The whole board turns at once and keeps updating. The address bar
       keeps the `#token=...` part.
 19. Narrow the window to phone width (about 390 px).
-    - No sideways scroll. The board keeps its size: the boxes wrap to one
-      per row, each child set a little right of its parent, and the canvas
-      scrolls down to the rest.
+    - No sideways scroll. The graph gives way to the outline: under each
+      root's heading, one row per session, each child indented under its
+      parent with a rule down its left, each with its name, role, state
+      glyph and word, and unread count. Under the trees, `recent traffic`:
+      one line per pair, such as `c → a · #4 · 1 m ago`, newest first. No
+      wires.
+    - The pill takes a line of its own under the title and wraps rather
+      than end in an ellipsis. The footer's counts wrap onto more lines;
+      none ends in an ellipsis.
+    - The roots list is still at the top; tap a name and its tree's
+      heading comes to the top of the screen.
 20. Fourteen names, the size of Donald's real board. Write eight more
     worker cards under `a`, on account `unknown` so no native lines join
     them:
@@ -164,14 +225,23 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     to `w8`.
     - At full desktop width, `a`'s children fill rows under it and wrap to
       a new row instead of running off the side. No box overlaps another.
+    - The window grows to hold the whole board and the page scrolls down to
+      it; there is no scroll box inside the window. The legend sits under
+      the board, in the footer.
+    - Each tree starts with its heading: `a`'s starts `a · orchestrator`
+      and ends `12 sessions` (all but `far` and `r`). Click `far` in the roots list at the top: its tree's
+      heading comes to the top of the screen.
+    - Send a few messages between workers in different rows (for example
+      `./tc send --from w1 --to w8 "x"`). Their wires go round the boxes in
+      the gaps, never through a box. Each moving wire's words sit beside it,
+      never on a box or on another label.
     - Every title, state line, status line and wire label reads without
       zooming. In devtools, a `.tc-node-note` or a `.tc-wire-label` has a
       computed font-size of 11px or more, and the `.tc-view` element's
       style ends in `scale(1)`: the board is never shrunk.
-    - Narrow the window to phone width (about 390 px). One box per row, each
-      worker a little right of `a`, so the levels still read. The canvas
-      scrolls down to the rest. Nothing scrolls sideways, on the page or in
-      the canvas.
+    - Narrow the window to phone width (about 390 px). The outline: all 14
+      names, each worker indented under `a`, and the recent traffic below.
+      Nothing scrolls sideways.
     - Do the phone check again with `?gray=1` before the `#`: every state
       still reads by its glyph and word.
 21. Turn on reduced motion (OS setting, or devtools
