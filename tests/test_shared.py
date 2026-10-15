@@ -68,7 +68,11 @@ not behind, even with the counter set back. And round 8 (SHARED fix
 round 8, Claude Opus 5.5, unreviewed): init's own stack walk, in both
 walks, names a folder past WALK_MAX_DEPTH and a top it may list but
 not search, never a traceback, and never opens a link (an os.open
-spy).
+spy); ROOT, its parent, each of the four, an inbox and its read/, and
+the entry in it, each swapped mid-walk for a link or another folder,
+never lead either walk outside the mailbox, and init names what it
+refused or skipped; and a hard-linked file is skipped and named,
+unchanged at both names.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -160,13 +164,22 @@ the owner's human QA (D4, qa/human/route-shared.md).
             without search and back, and plant links to a folder and a
             file outside TC_ROOT; they set this process's umask back to
             CHILD_UMASK between walks, and run cmd_init in process with
-            os.lstat wrapped (as_member) and os.open wrapped to record
-            each call (open_spy).
+            os.lstat and os.fstat wrapped (as_member) and os.open wrapped
+            to record each call (open_spy). The swap test builds a
+            mailbox and two mirrors of it by hand in the root's temp
+            folder, outside TC_ROOT, and runs cmd_init with os.open
+            wrapped (swap_on_open) to rename one point aside and put a
+            link or a mirror's folder in its place, reading
+            /proc/self/fd to see where each open is aimed; the hard-link
+            test chmods a status file and links it from outside TC_ROOT.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl, grp,
             importlib, io, json, os, pathlib, pwd, re, stat, subprocess,
             sys, time, unittest, unittest.mock); tests/_root.py.
 @complexity O(1) per test: a handful of tc runs over a root of a few dozen
-            entries, once per group tested (one or two).
+            entries, once per group tested (one or two); the round 8
+            swap test O(p) over p points, kinds and moments of a swap
+            (forty-two subtests, each one in-process init over a
+            hand-built mailbox of thirteen entries).
 @alloc      one TcRoot per test and group, removed when its context exits.
 """
 
@@ -504,6 +517,36 @@ TOO_DEEP_WHY = (f"{WALK_MAX_DEPTH + 1} folders deep, counting its top as one, pa
 NO_SEARCH_WHY = "this user may list it but not search (x) it; tc looked at nothing under it"
 # The name of every folder in a nest a member makes under status/.
 NEST_FOLDER = "d"
+# SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's HIGH-1 and
+# LOW-3 (audits/2026-10-15-0840-quick), ROOT pinned by identity. Written
+# out, not read from tc. What init says when ROOT, as it opens it after
+# its walk, is not the folder the walk judged.
+ROOT_CHANGED_WORDS = ("{root} changed after init's walk looked at it: another folder or a link has its name now. "
+                      "Nothing changed.")
+# Why init skips an entry that is not, at its open, the one the walk's
+# lstat found, and a regular file with another name.
+CHANGED_WHY = "another entry had its name by the time tc came to change it; tc changed nothing there"
+HARD_LINK_WHY = ("a file with another name too (a hard link), which tc never changes: the change would show at "
+                 "every name")
+# A file mode init never leaves: owner read and write only.
+OWNER_FILE_MODE = 0o600
+# The swap test's layout under the root's temp folder: ROOT's parent and
+# ROOT, and the two mirrors of them, one a link's target and one a real
+# folder put in place.
+SWAP_PARENT, SWAP_ROOT = "home", "mailbox"
+OUTSIDE_TREE, OTHER_TREE = "outside", "other"
+# The mailbox the swap test builds by hand, three times: each entry under
+# the four, a folder (None) or a file (its text), each at a mode init
+# never leaves (OWNER_FOLDER_MODE, OWNER_FILE_MODE), so a walk that
+# reached any of them would change it.
+SWAP_LAYOUT = (("mail", None), ("mail/.seq", "5\n"), ("mail/to-b", None),
+               ("mail/to-b/000006-from-a.md", "a message to b\n"), ("mail/to-b/read", None),
+               (f"mail/to-b/read/{OLD_OWN_MESSAGE}", "an old message from the member to b\n"),
+               ("status", None), ("status/b.md", "busy\n"), ("cards", None), ("cards/b.json", "{}\n"),
+               ("outbox", None), ("outbox/to-c", None), ("outbox/to-c/000007-from-a.md", "a queued message\n"))
+# When the swap test swaps a point: as init opens ROOT after its walk, or
+# while mail/'s walk runs.
+AT_ROOT_OPEN, MID_WALK = "as init opens ROOT", "while mail/'s walk runs"
 # SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's LOW-1. What
 # tc read says for an inbox file still there after its rename: a hard link
 # made at the target first turns rename(2) into nothing.
@@ -1394,6 +1437,35 @@ def owner_patched_lstat(*paths_to_patch):
     return lstat
 
 
+# SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's HIGH-1 (audits/2026-10-15-0840-quick).
+def owner_patched_fstat(*paths_to_patch):
+    """An os.fstat that reports a descriptor open on one of `paths_to_patch` (the same file, by st_dev and st_ino, as each was when this was made) as owned by another user (its uid plus one), and every other descriptor as it is.
+
+    owner_patched_lstat's pair for a check made on an open descriptor:
+    init opens ROOT once after its walk and, on a member's rerun, keeps
+    it only when fstat finds the init user's folder (tc's pin_root). The
+    files are fixed when this is made, so ROOT renamed or swapped later
+    is still matched by the folder it was.
+
+    @interacts  lstats each of `paths_to_patch` once, when made; then
+                fstats the descriptor it is given.
+    @deps       os, stat.
+    @complexity O(1) per call.
+    @alloc      the set of files to patch; one stat result per call.
+    """
+    real = os.fstat
+    patched = {(st.st_dev, st.st_ino) for st in (os.lstat(path) for path in paths_to_patch)}
+
+    def fstat(fd):
+        st = real(fd)
+        if (st.st_dev, st.st_ino) in patched:
+            fields = list(st[:stat.ST_CTIME + 1])
+            fields[stat.ST_UID] = st.st_uid + 1
+            return os.stat_result(fields)
+        return st
+    return fstat
+
+
 class NobodyTouchesAnotherMembersMailTest(UmaskTestCase):
     """D20: inboxes owned by their recipient at 3770, 0640 files, sends refused to names nobody joined, inbox and card owners matched, the marker rewritten in place.
 
@@ -2232,13 +2304,18 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
         its own in RootAndClaimTest) so this test keeps to .shared.
         SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28 takes back
         round 4's trust in the owner of .shared, which let the walk run
-        for real here, so the stand-in is back.
+        for real here, so the stand-in is back. SHARED fix round 8 (Claude
+        Opus 5.5, unreviewed): the walk always returns its verdict, and
+        init opens ROOT and checks it against the folder the walk judged,
+        so the stand-in is a verdict with nothing to refuse and ROOT's own
+        lstat.
 
         @interacts  one init; one chmod by hand; loads tc in process and
                     runs cmd_init with os.geteuid and root_walk_problem
-                    replaced; lstats .shared.
+                    replaced; lstats ROOT and .shared.
         @deps       _root.TcRoot.tc, primary_group, load_tc, run_init;
-                    unittest.mock; tc.user_name, tc.root_walk_problem.
+                    unittest.mock; tc.user_name, tc.root_walk_problem,
+                    tc.WalkProblem.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
@@ -2249,8 +2326,9 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
             marker.chmod(PRE_D21_MARKER_MODE)
             tc = load_tc(root)
             owner = tc.user_name(os.getuid())
+            passed = tc.WalkProblem(None, None, os.lstat(root.path))  # round 8: nothing to refuse, and ROOT as judged
             with mock.patch.object(os, "geteuid", return_value=os.getuid() + 1), \
-                    mock.patch.object(tc, "root_walk_problem", return_value=None):
+                    mock.patch.object(tc, "root_walk_problem", return_value=passed):
                 code, out, err = run_init(tc, name)
             left = (stat.S_IMODE(os.lstat(marker).st_mode), marker.read_text())
         self.assertEqual(first[0], 0, first[2])
@@ -3174,7 +3252,8 @@ class RootAndClaimTest(UmaskTestCase):
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, user_groups,
                 tree, load_tc, run_init, owner_patched_lstat,
-                member_setup, stat_seen, folder_swap; pwd, unittest.mock.
+                member_setup, stat_seen, folder_swap, owner_patched_fstat;
+                pwd, unittest.mock.
     @complexity O(1) per test.
     @alloc      one TcRoot per test.
     """
@@ -3428,12 +3507,13 @@ class RootAndClaimTest(UmaskTestCase):
         @interacts  per case: init, a join, a send, a status; one file
                     written, chowned and chmodded by hand, and two entries
                     chmodded; loads tc in process and runs cmd_init with
-                    os.lstat wrapped (and shared_group replaced in the
-                    second case), and os.chmod, os.chown, os.lchown,
-                    os.fchown and os.fchmod wrapped to count calls; stats
-                    every entry under ROOT before and after.
+                    os.lstat and os.fstat wrapped (and shared_group
+                    replaced in the second case), and os.chmod, os.chown,
+                    os.lchown, os.fchown and os.fchmod wrapped to count
+                    calls; stats every entry under ROOT before and after.
         @deps       member_setup, user_groups, load_tc, run_init, tree,
-                    owner_patched_lstat; contextlib, unittest.mock;
+                    owner_patched_lstat, owner_patched_fstat; contextlib,
+                    unittest.mock;
                     tc.user_name, tc.shared_group; RAN_INIT_WORDS,
                     FIXES_OWN_WORDS, FIXED_WORDS, FIXED_COUNT_WORDS,
                     NOTHING_CHANGED_WORDS, PRIVATE_FILE_MODE,
@@ -3457,6 +3537,7 @@ class RootAndClaimTest(UmaskTestCase):
                     with contextlib.ExitStack() as stack:
                         stack.enter_context(mock.patch.object(os, "lstat", owner_patched_lstat(
                             root.path, root.path / ".shared", box, status)))
+                        stack.enter_context(mock.patch.object(os, "fstat", owner_patched_fstat(root.path)))  # round 8: pin_root
                         counted = {fn: stack.enter_context(mock.patch.object(os, fn, wraps=getattr(os, fn)))
                                    for fn in changes}
                         if case != "as init read it":
@@ -3498,11 +3579,12 @@ class RootAndClaimTest(UmaskTestCase):
                     written, chowned and chmodded by hand; a folder made
                     outside the root; a rename and a symlink (by hand, or
                     by the patched os.fchown); loads tc in process and runs
-                    cmd_init with os.lstat and os.fchown wrapped; lstats
-                    the folder, the link and the message after.
+                    cmd_init with os.lstat, os.fstat and os.fchown
+                    wrapped; lstats the folder, the link and the message
+                    after.
         @deps       member_setup, stat_seen, user_groups, load_tc,
-                    run_init, owner_patched_lstat; unittest.mock;
-                    tc.user_name; RAN_INIT_WORDS, FIXES_OWN_WORDS,
+                    run_init, owner_patched_lstat, owner_patched_fstat;
+                    unittest.mock; tc.user_name; RAN_INIT_WORDS, FIXES_OWN_WORDS,
                     FIXED_WORDS, SKIPPED_WORDS, SKIPPED_LINK_WHY,
                     FIXED_COUNT_WORDS, OWNER_FOLDER_MODE, ASIDE_NAME,
                     SHARED_OWNED_FILE_MODE.
@@ -3538,6 +3620,7 @@ class RootAndClaimTest(UmaskTestCase):
                     tc = load_tc(root)
                     init_user = tc.user_name(os.getuid() + 1)
                     with mock.patch.object(os, "lstat", owner_patched_lstat(root.path, root.path / ".shared")), \
+                            mock.patch.object(os, "fstat", owner_patched_fstat(root.path)), \
                             mock.patch.object(os, "fchown", fchown):
                         code, out, err = run_init(tc, name)
                     after = stat_seen(home)
@@ -3619,10 +3702,11 @@ class RootAndClaimTest(UmaskTestCase):
 
         @interacts  init, a join, a send, a status; folder_swap's folders,
                     files and swap; loads tc in process and runs cmd_init
-                    with os.lstat and os.fchown wrapped; lstats the
-                    outside entries and the file fixed.
+                    with os.lstat, os.fstat and os.fchown wrapped; lstats
+                    the outside entries and the file fixed.
         @deps       folder_swap, stat_seen, user_groups, load_tc, run_init,
-                    owner_patched_lstat; unittest.mock; tc.user_name;
+                    owner_patched_lstat, owner_patched_fstat; unittest.mock;
+                    tc.user_name;
                     RAN_INIT_WORDS, FIXES_OWN_WORDS, FIXED_WORDS,
                     SKIPPED_WORDS, NOT_ENTERED_WHY, FIXED_COUNT_WORDS,
                     SWAP_TRIGGER, SHARED_OWNED_FILE_MODE.
@@ -3642,6 +3726,7 @@ class RootAndClaimTest(UmaskTestCase):
             tc = load_tc(root)
             init_user = tc.user_name(os.getuid() + 1)
             with mock.patch.object(os, "lstat", owner_patched_lstat(root.path, root.path / ".shared", box, *folders)), \
+                    mock.patch.object(os, "fstat", owner_patched_fstat(root.path)), \
                     mock.patch.object(os, "fchown", fchown):
                 code, out, err = run_init(tc, name)
             after = [stat_seen(path) for path in outside]
@@ -3780,14 +3865,16 @@ class RootAndClaimTest(UmaskTestCase):
 # SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, LOW-1 and LOW-2 (audits/2026-10-15-0840-quick).
 @contextlib.contextmanager
 def as_member(root_path, *others):
-    """While entered, the running user plays a member on the init user's ROOT: os.lstat reports ROOT, its .shared and each of `others` as another user's (owner_patched_lstat).
+    """While entered, the running user plays a member on the init user's ROOT: os.lstat reports ROOT, its .shared and each of `others` as another user's (owner_patched_lstat), and os.fstat reports ROOT so (owner_patched_fstat).
 
-    @interacts  patches os.lstat while entered.
-    @deps       owner_patched_lstat; unittest.mock, os.
+    @interacts  patches os.lstat and os.fstat while entered.
+    @deps       owner_patched_lstat, owner_patched_fstat; unittest.mock,
+                os.
     @complexity O(1).
-    @alloc      the patch, undone on exit.
+    @alloc      the patches, undone on exit.
     """
-    with mock.patch.object(os, "lstat", owner_patched_lstat(root_path, root_path / ".shared", *others)):
+    with mock.patch.object(os, "lstat", owner_patched_lstat(root_path, root_path / ".shared", *others)), \
+            mock.patch.object(os, "fstat", owner_patched_fstat(root_path)):
         yield
 
 
@@ -4009,6 +4096,312 @@ class InitWalkTest(UmaskTestCase):
                     self.assertIn(SKIPPED_WORDS.format(path=link, why=SKIPPED_LINK_WHY), err)
                 self.assertEqual(code, EXIT_REFUSED, err)
                 self.assertEqual(seen_after, seen_before, "a link's target changed")
+
+
+# SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's HIGH-1 and LOW-3 (audits/2026-10-15-0840-quick).
+def build_mailbox(at):
+    """Make the mailbox SWAP_LAYOUT names at `at`, by hand: ROOT at ROOT_MODE, every folder under it at OWNER_FOLDER_MODE, every file at OWNER_FILE_MODE.
+
+    @interacts  makes `at` and its missing parents, then each folder and
+                file of SWAP_LAYOUT, and chmods each.
+    @deps       pathlib; SWAP_LAYOUT, ROOT_MODE, OWNER_FOLDER_MODE,
+                OWNER_FILE_MODE.
+    @complexity O(e) over e entries of SWAP_LAYOUT (thirteen).
+    @alloc      the folders and files, removed with the root's temp
+                folder.
+    """
+    at.mkdir(parents=True)
+    at.chmod(ROOT_MODE)
+    for rel, text in SWAP_LAYOUT:
+        path = at / rel
+        if text is None:
+            path.mkdir()
+            path.chmod(OWNER_FOLDER_MODE)
+        else:
+            path.write_text(text)
+            path.chmod(OWNER_FILE_MODE)
+
+
+def tree_seen(top, lstat=os.lstat):
+    """What lstat says of `top` and of every entry under it that any change would move: {path relative to `top`: (mode, owner, group, change and modify times in ns)}.
+
+    `lstat` is the real os.lstat, bound when this module loads, so a
+    patch in place while it runs (as_member) never colors what it sees.
+    A link is never followed; a file is the one entry ".".
+
+    @interacts  lstats `top` and, when it is a folder, lists every folder
+                under it (os.walk) and lstats each entry. Writes nothing.
+    @deps       os, pathlib, stat.
+    @complexity O(e) over e entries under `top` (a dozen or so).
+    @alloc      one dict, returned.
+    """
+    def seen(path):
+        st = lstat(path)
+        return st.st_mode, st.st_uid, st.st_gid, st.st_ctime_ns, st.st_mtime_ns
+    out = {".": seen(top)}
+    if stat.S_ISDIR(lstat(top).st_mode):
+        for folder, folders, files in os.walk(top):
+            for name in folders + files:
+                path = pathlib.Path(folder) / name
+                out[str(path.relative_to(top))] = seen(path)
+    return out
+
+
+def swap_on_open(trigger, exact, swap):
+    """An os.open that, the first time it is aimed at `trigger` (or, unless `exact`, at anything under it), calls `swap` first and then opens as os.open does: (that os.open, the list of what it was aimed at when it swapped).
+
+    Where a call is aimed: by its path, the real path; by a name in a
+    folder's descriptor, that folder's path now (/proc/self/fd) and the
+    name. `trigger` is taken by its real path when this is made, before
+    anything is swapped.
+
+    @interacts  none until called; then reads /proc/self/fd or resolves
+                the path, may call `swap` once, and opens what it is
+                asked to.
+    @deps       os, pathlib.
+    @complexity O(1) per call.
+    @alloc      one list, holding at most one path.
+    """
+    real_open = os.open
+    target = pathlib.Path(os.path.realpath(trigger))
+    made = []
+
+    def aimed_open(path, flags, mode=0o777, *, dir_fd=None):
+        if not made:
+            aimed = (pathlib.Path(os.readlink(f"/proc/self/fd/{dir_fd}")) / path if dir_fd is not None
+                     else pathlib.Path(os.path.realpath(path)))
+            if aimed == target or (not exact and target in aimed.parents):
+                made.append(aimed)
+                swap()
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+    return aimed_open, made
+
+
+# What run_swap returns: init's exit code and words, what the swap hook was
+# aimed at, the far end of the swap as seen before and after, ROOT's own
+# entries before and after (wherever the original ROOT is by then), the
+# text of .shared there (None when there is none), and the login of the
+# user who ran init (a member's rerun).
+SwapRun = collections.namedtuple("SwapRun", "code out err made far_before far_after mine_before mine_after marker "
+                                            "init_user")
+
+
+def run_swap(root, walk, group, rel, kind, moment):
+    """Build a mailbox at SWAP_PARENT/SWAP_ROOT and its two mirrors under the root's temp folder, then run init in process for `walk` while the point `rel` is swapped for `kind` at `moment`: a SwapRun.
+
+    The point is renamed aside (its name plus FOLDER_ASIDE_SUFFIX), and in
+    its place goes a link to the same point in the OUTSIDE_TREE mirror
+    ("link"), or the same point of the OTHER_TREE mirror, moved in ("real
+    folder"). The far end, which a walk led by the swap would change, is
+    that mirror's point: seen before the run for a link, and just after
+    the move for a real folder. The swap is made by an os.open wrapped
+    with swap_on_open: AT_ROOT_OPEN, as init opens ROOT itself; MID_WALK,
+    for ROOT and its parent at the first open under mail/to-b, else at
+    the first open aimed at the point (the walk's open of a top, or
+    share_entry's of a folder or the entry, just after the walk's lstat
+    of it). A member's rerun writes .shared by hand and runs as_member.
+
+    @interacts  makes three mailboxes by hand and, for a member, .shared;
+                loads tc in process pointed at the mailbox and runs
+                cmd_init with os.open wrapped (and as_member); the wrap
+                renames the point and makes a link or moves a folder;
+                lstats the far end and the mailbox before and after.
+    @deps       build_mailbox, tree_seen, swap_on_open, as_member,
+                load_tc, run_init, SwapRun; contextlib, os, pathlib,
+                unittest.mock; SWAP_PARENT, SWAP_ROOT, OUTSIDE_TREE,
+                OTHER_TREE, FOLDER_ASIDE_SUFFIX, SHARED_MARKER_MODE,
+                AT_ROOT_OPEN.
+    @complexity O(e) over e entries of SWAP_LAYOUT, three times, plus
+                init's walk.
+    @alloc      the mailboxes and the link, removed with the root's temp
+                folder; one module; one SwapRun, returned.
+    """
+    base = root.base
+    mailbox = base / SWAP_PARENT / SWAP_ROOT
+    for tree in (base, base / OUTSIDE_TREE, base / OTHER_TREE):
+        build_mailbox(tree / SWAP_PARENT / SWAP_ROOT)
+    if walk == "a member's rerun":
+        marker = mailbox / ".shared"
+        marker.write_text(f"{group}\n")
+        marker.chmod(SHARED_MARKER_MODE)
+    point = base / rel
+    aside = point.with_name(point.name + FOLDER_ASIDE_SUFFIX)
+    far = base / OUTSIDE_TREE / rel if kind == "link" else point
+    seen = {"far": tree_seen(far) if kind == "link" else None}
+
+    def swap():
+        os.rename(point, aside)
+        if kind == "link":
+            point.symlink_to(far, target_is_directory=far.is_dir())
+        else:
+            os.rename(base / OTHER_TREE / rel, point)
+            seen["far"] = tree_seen(point)
+    above = len(rel.parts) <= len((SWAP_PARENT, SWAP_ROOT))
+    trigger = (mailbox if moment == AT_ROOT_OPEN else mailbox / "mail" / "to-b" if above else point)
+    aimed_open, made = swap_on_open(trigger, moment == AT_ROOT_OPEN, swap)
+    pinned = (base / f"{SWAP_PARENT}{FOLDER_ASIDE_SUFFIX}" / SWAP_ROOT if rel == pathlib.Path(SWAP_PARENT)
+              else aside if rel == pathlib.Path(SWAP_PARENT, SWAP_ROOT) else mailbox)
+    mine_before = tree_seen(mailbox)
+    tc = load_tc(root, mailbox)
+    with contextlib.ExitStack() as stack:
+        if walk == "a member's rerun":
+            stack.enter_context(as_member(mailbox))
+        stack.enter_context(mock.patch.object(os, "open", aimed_open))
+        code, out, err = run_init(tc, group)
+    marker = (pinned / ".shared").read_text() if os.path.lexists(pinned / ".shared") else None
+    return SwapRun(code, out, err, made, seen["far"], tree_seen(far), mine_before, tree_seen(pinned), marker,
+                   tc.user_name(os.getuid() + 1))
+
+
+class RootPinnedTest(UmaskTestCase):
+    """Round 8: after init's walk judged ROOT, no name on the write path is resolved again, in both walks (the init user's own init and a member's rerun on the init user's ROOT), and a hard-linked file is never changed.
+
+    The audit's HIGH-1 (audits/2026-10-15-0840-quick): rounds 5, 6 and 7
+    each pinned one level of the write path; round 7 still opened the four
+    by their paths under ROOT, so the init user could swap ROOT for a link
+    after a member's walk passed it, and the member's own init changed the
+    member's own folders elsewhere. Now init opens ROOT once, checks it
+    against the folder its walk judged, and opens every name from there
+    down in its own folder's descriptor. The swap test swaps every point
+    on the write path, one per subtest. LOW-3: a file hard-linked into the
+    mailbox is skipped and named. The member is the running user, with
+    ROOT and its .shared reported as the init user's (as_member).
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, UmaskTestCase, user_groups, primary_group,
+                run_swap, load_tc, run_init, as_member, stat_seen.
+    @complexity O(p) over p points and kinds of swap (forty-two subtests,
+                each a hand-built mailbox of a dozen entries); O(1) for
+                the hard-link test.
+    @alloc      one TcRoot per subtest.
+    """
+
+    def test_a_swap_at_any_point_on_the_write_path_never_leads_either_walk_outside(self):
+        """For each point on init's write path (ROOT's parent, ROOT, each of the four, mail/to-b and its read/, and the entry in it), swapped in the middle of either walk for a link to a folder outside the mailbox or for another real folder (the entry for a link only): what the swap leads to keeps its mode, owner, group and times, and init names what it refused or skipped.
+
+        The audit's HIGH-1 and its REC-4: with ROOT swapped while mail/'s
+        walk runs, round 7 opened status/ by its path through the swap and
+        changed the far end's folders and files. Per point: ROOT or its
+        parent swapped as init opens ROOT is refused with
+        ROOT_CHANGED_WORDS and nothing changes; swapped while mail/'s walk
+        runs, the walk carries on in the ROOT it opened, and its words
+        and .shared are as on an untouched mailbox; a top swapped before
+        its open is named as not entered; mail/to-b or its read/ swapped
+        after its lstat is named twice, at its own change (a link, or
+        changed) and as not entered; the entry swapped for a link is named
+        as a link. Must reject any name on the write path resolved by its
+        path after the walk judged ROOT: with the four opened by path
+        (round 7) the far end of a ROOT or parent swapped while mail/'s
+        walk runs changes.
+
+        @interacts  per subtest: run_swap's.
+        @deps       run_swap, user_groups, _root.TcRoot; pathlib;
+                    SWAP_PARENT, SWAP_ROOT, SHARED_FOLDER_NAMES,
+                    OLD_OWN_MESSAGE, AT_ROOT_OPEN, MID_WALK, CHILD_UMASK,
+                    RAN_INIT_WORDS, ROOT_CHANGED_WORDS, FIXED_COUNT_WORDS,
+                    SKIPPED_WORDS, NOT_ENTERED_WHY, SKIPPED_LINK_WHY,
+                    CHANGED_WHY, SWAP_LAYOUT.
+        @complexity O(p) over p points, kinds and moments (twenty-one per
+                    walk, two walks).
+        @alloc      one TcRoot per subtest.
+        """
+        found = user_groups()
+        _, name, gid = found[-1]
+        mailbox = pathlib.Path(SWAP_PARENT, SWAP_ROOT)
+        points = [pathlib.Path(SWAP_PARENT), mailbox, *[mailbox / top for top in SHARED_FOLDER_NAMES],
+                  mailbox / "mail" / "to-b", mailbox / "mail" / "to-b" / "read",
+                  mailbox / "mail" / "to-b" / "read" / OLD_OWN_MESSAGE]
+        for walk in ("the init user's own init", "a member's rerun"):
+            for rel in points:
+                entry, above = rel.name == OLD_OWN_MESSAGE, len(rel.parts) <= len(mailbox.parts)
+                for kind in ("link",) if entry else ("link", "real folder"):
+                    for moment in (AT_ROOT_OPEN, MID_WALK) if above else (MID_WALK,):
+                        os.umask(CHILD_UMASK)  # an in-process init before this one set its own
+                        with self.subTest(walk=walk, point=str(rel), kind=kind, moment=moment), \
+                                _root.TcRoot() as root:
+                            run = run_swap(root, walk, name, rel, kind, moment)
+                            point, root_path = root.base / rel, root.base / mailbox
+                        member = walk == "a member's rerun"
+                        lines = run.err.splitlines()
+                        with self.subTest(walk=walk, point=str(rel), kind=kind, moment=moment):
+                            self.assertTrue(run.made, "the swap never happened")
+                            self.assertEqual(run.far_after, run.far_before,
+                                             "a change reached the far end of the swap, outside the mailbox")
+                            if moment == AT_ROOT_OPEN:
+                                lead = f"{RAN_INIT_WORDS.format(root=root_path, owner=run.init_user)} " if member else "tc init: "
+                                self.assertEqual(run.err, f"{lead}{ROOT_CHANGED_WORDS.format(root=root_path)}\n")
+                                self.assertEqual(run.code, EXIT_REFUSED)
+                                self.assertEqual({k: v for k, v in run.mine_after.items() if k != "."},
+                                                 {k: v for k, v in run.mine_before.items() if k != "."},
+                                                 "a refused init changed the mailbox")
+                            elif above and member:
+                                self.assertEqual(run.code, EXIT_REFUSED, run.err)
+                                self.assertEqual([line for line in lines if line.startswith("tc init: skipped")], [])
+                                self.assertEqual(lines[-1], FIXED_COUNT_WORDS.format(fixed=len(SWAP_LAYOUT), skipped=0))
+                            elif above:
+                                self.assertEqual((run.code, run.err), (0, ""))
+                                self.assertEqual(run.marker, f"{name}\n", ".shared was not written in the ROOT init opened")
+                            elif entry:
+                                self.assertEqual(run.code, EXIT_REFUSED, run.err)
+                                self.assertIn(SKIPPED_WORDS.format(path=point, why=SKIPPED_LINK_WHY), lines)
+                            else:
+                                self.assertEqual(run.code, EXIT_REFUSED, run.err)
+                                self.assertIn(SKIPPED_WORDS.format(path=point, why=NOT_ENTERED_WHY), lines)
+                                if len(rel.parts) > len(mailbox.parts) + 1:  # mail/to-b and its read/: their own change too
+                                    why = SKIPPED_LINK_WHY if kind == "link" else CHANGED_WHY
+                                    self.assertIn(SKIPPED_WORDS.format(path=point, why=why), lines)
+
+    def test_a_hard_linked_file_is_skipped_and_named_and_unchanged_at_both_names(self):
+        """b's status file, set to 0644 by hand, with a second name outside the root (a hard link): in the init user's own init and in a member's rerun, init names it with HARD_LINK_WHY and its stat is the same at both names, before and after.
+
+        The audit's LOW-3: share_entry checked the kind and the owner but
+        not st_nlink, so a file hard-linked into the mailbox got group g
+        and 0640, and the change showed at its outside name. Must reject a
+        change to a regular file with more than one name.
+
+        @interacts  per walk: init, a join, a send, a status; one chmod
+                    and one hard link by hand; loads tc in process and
+                    runs cmd_init (as_member for the member); lstats both
+                    names.
+        @deps       _root.TcRoot.tc, primary_group, load_tc, run_init,
+                    as_member, stat_seen; os; PRIVATE_FILE_MODE,
+                    RAN_INIT_WORDS, FIXES_OWN_WORDS, SKIPPED_WORDS,
+                    HARD_LINK_WHY, FIXED_COUNT_WORDS, SKIPPED_BY_HAND_WORDS,
+                    CHILD_UMASK.
+        @complexity O(1) per walk, two walks.
+        @alloc      one TcRoot and one module per walk.
+        """
+        label, name, gid = primary_group()
+        for walk in ("the init user's own init", "a member's rerun"):
+            os.umask(CHILD_UMASK)  # an in-process init before this one set its own
+            with self.subTest(walk=walk), _root.TcRoot() as root:
+                setup = [root.tc("init", "--shared", "--group", name),
+                         root.tc("join", "b", env={"CLAUDECODE": "1"}),
+                         root.tc("send", "--from", "a", "--to", "b", "hi"),
+                         root.tc("status", "b", "busy")]
+                status = root.path / "status" / "b.md"
+                status.chmod(PRIVATE_FILE_MODE)  # not right yet, so init would change it
+                elsewhere = root.base / "outside-name"
+                os.link(status, elsewhere)
+                before = [stat_seen(status), stat_seen(elsewhere)]
+                tc = load_tc(root)
+                if walk == "a member's rerun":
+                    init_user = tc.user_name(os.getuid() + 1)
+                    with as_member(root.path):
+                        code, out, err = run_init(tc, name)
+                else:
+                    code, out, err = run_init(tc, name)
+                after = [stat_seen(status), stat_seen(elsewhere)]
+                for run in setup:
+                    self.assertEqual(run[0], 0, run[2])
+                skip = SKIPPED_WORDS.format(path=status, why=HARD_LINK_WHY)
+                self.assertEqual(code, EXIT_REFUSED, err)
+                if walk == "a member's rerun":
+                    self.assertEqual(err, f"{RAN_INIT_WORDS.format(root=root.path, owner=init_user)}{FIXES_OWN_WORDS}\n"
+                                          f"{skip}\n{FIXED_COUNT_WORDS.format(fixed=0, skipped=1)}\n")
+                else:
+                    self.assertEqual(err, f"{skip}\n{SKIPPED_BY_HAND_WORDS.format(n=1)}\n")
+                self.assertEqual(after, before, "a hard-linked file changed")
 
 
 class HealthSaysWhatItCannotSeeTest(UmaskTestCase):

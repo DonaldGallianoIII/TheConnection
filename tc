@@ -52,14 +52,20 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             and per skip, and exits 1 (round 6, D29). It makes the four
             when missing (D19), sets the group
             and mode of every folder and file under them that is not right
-            yet (both walks reach each entry by its name in its own
-            folder's descriptor and enter each folder through its
-            parent's, so no path below the four is resolved and
-            a folder swapped for a link on the way is named and never
-            entered: round 7, the audit's HIGH-1; tc's own stack walk,
-            which never opens a link, names a folder past WALK_MAX_DEPTH
-            or one it may list but not search and leaves it: round 8),
-            then writes .shared at
+            yet. Both walks start from ROOT, opened once after the walk
+            and kept only when it is the folder the walk judged (and, on
+            a member's rerun, the init user's), else init refuses and
+            changes nothing; they reach each entry by its name in its own
+            folder's descriptor, change it only when fstat finds the
+            entry lstat found there and, for a file, it has one name,
+            and enter each folder through its parent's. So no name from
+            ROOT down is resolved again once the walk judged ROOT, and a
+            ROOT, folder or entry swapped on the way is named, or passed
+            by, and nothing it leads to changes (rounds 7 and 8, the
+            audits' HIGH-1). The walk is tc's own stack walk: it never
+            opens a link, and names a folder past WALK_MAX_DEPTH or one
+            it may list but not search and leaves it (round 8). Then it
+            writes .shared, by its name in ROOT's descriptor, at
             0644, owner-write only (D21),
             unless it already names the group; then its owner's rerun
             sets it to 0644, and another member's says one line when it
@@ -71,8 +77,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             (D21). An entry init skips, and a folder in
             the wrong group, are named, and the words say its owner runs
             tc init --shared --group <g>, which fixes their own entries
-            that way; tc prints no chgrp or chmod line to paste (round
-            6, D29). Shared
+            that way; tc prints no chgrp or chmod line to paste for an
+            entry under the four (round 6, D29). The only command line
+            it prints is D23's chmod g-w,o-w, to the owner of ROOT or of
+            a folder above it, which the walk judges by path. Shared
             or not, the locks, mail/.seq, status files and the ring marker
             are opened without following a symlink, and an inbox or its
             read/ is lstat()ed before use: a link at any of them is
@@ -345,6 +353,30 @@ TOO_DEEP_WHY = (f"{WALK_MAX_DEPTH + 1} folders deep, counting its top as one, pa
 # Why it skips a folder this user may list but not search (read without
 # x): no name in it can be looked at (the audit's LOW-1).
 NO_SEARCH_WHY = "this user may list it but not search (x) it; tc looked at nothing under it"
+# SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
+# (audits/2026-10-15-0840-quick), ROOT pinned by identity. How init opens
+# ROOT, once, right after its walk judged it: read only, only a folder,
+# never blocking. Not O_NOFOLLOW: TC_ROOT may reach ROOT through a link,
+# and the walk judged the folder it leads to, so fstat on the descriptor
+# must find that folder. From then on every name init changes is opened
+# by that name in its own folder's descriptor, from this one down, so who
+# may rename ROOT, or a folder above it, no longer matters.
+ROOT_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK
+# The refusal when ROOT is not, when init opens it, the folder its walk
+# judged (or not the init user's, on a member's rerun); {root} is ROOT.
+ROOT_CHANGED_WORDS = ("{root} changed after init's walk looked at it: another folder or a link has its name now. "
+                      "Nothing changed.")
+# Why the walk skips an entry that fstat, once tc opened it by its name,
+# finds is not the one lstat found there: it was swapped after the walk
+# looked at it.
+CHANGED_WHY = "another entry had its name by the time tc came to change it; tc changed nothing there"
+# Why it skips a regular file it would change that has another name too
+# (st_nlink over 1): a hard link is the same file, so a change would show
+# at its other name, which may be outside the mailbox (the audit's LOW-3).
+# A message has two names only for the moment between its publish and its
+# .tmp's removal, so a rerun clears that one.
+HARD_LINK_WHY = ("a file with another name too (a hard link), which tc never changes: the change would show at "
+                 "every name")
 # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D21, ROOT never
 # group-writable. .shared and mail/ live directly in ROOT, and in a folder
 # its group may write (without the sticky bit) any member may rename
@@ -815,10 +847,11 @@ def share_entry(entry, where, gid, owner=None):
     directly in mail/, else SHARED_OWNED_FILE_MODE, D20).
 
     SHARED fix round 7 (Claude Opus 5.5, unreviewed): the audit's HIGH-1.
-    `entry` is how to reach the entry, never a path: (dir_fd, name), its
-    name in the folder open at dir_fd, which this call opens with
-    ENTRY_FLAGS and closes; or a descriptor the caller already opened on
-    the entry itself (a top folder, walk_pinned), left open. `where` is
+    `entry` is how to reach the entry, never a path: (dir_fd, name,
+    found), its name in the folder open at dir_fd, which this call opens
+    with ENTRY_FLAGS and closes (found: round 8, below); or a descriptor
+    the caller already opened on the entry itself (a top folder,
+    walk_pinned), left open. `where` is
     the entry's path, for the mode its place gets and for the words only:
     nothing opens, stats or changes it, so no folder on the way is
     resolved by name.
@@ -849,21 +882,33 @@ def share_entry(entry, where, gid, owner=None):
     a link swapped in after the open is never followed either. `changed`
     tells a fix from an entry already right.
 
+    SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
+    and LOW-3 (audits/2026-10-15-0840-quick). A name comes with the lstat
+    result the walk took of it: `entry` is (dir_fd, name, found), and
+    fstat on the open descriptor must find that same entry (st_dev and
+    st_ino), else it is skipped (CHANGED_WHY), so an entry swapped after
+    the walk looked at it is never changed, whoever owns it. And a regular
+    file with another name (st_nlink over 1) that is not right yet is
+    skipped (HARD_LINK_WHY), never changed: a hard link is the same file,
+    and a change would show at its other name, outside the mailbox too.
+    One already right is left alone, as before.
+
     @interacts  opens the entry by its name in dir_fd (or takes the
                 caller's descriptor) and fstats it; sets its group and
-                mode on the descriptor unless they are right (or, given
-                `owner`, it is not that user's); reads the user database
-                for a skip's words.
+                mode on the descriptor unless they are right (or it is
+                not the entry the walk found, or, given `owner`, not that
+                user's, or a file with another name); reads the user
+                database for a skip's words.
     @deps       shared_folder_mode, shared_file_mode, user_name; os, stat,
-                errno; ENTRY_FLAGS, LINK_WHY.
+                errno; ENTRY_FLAGS, LINK_WHY, CHANGED_WHY, HARD_LINK_WHY.
     @complexity O(1).
     @alloc      one descriptor when `entry` is a name, closed before
                 return; none when it is the caller's.
     """
     if isinstance(entry, int):  # SHARED fix round 7 (Claude Opus 5.5, unreviewed): HIGH-1, the caller's descriptor
-        fd, opened = entry, False
+        fd, opened, looked = entry, False, None
     else:
-        dir_fd, name = entry
+        dir_fd, name, looked = entry  # SHARED fix round 8 (Claude Opus 5.5, unreviewed): HIGH-1, with the walk's lstat
         try:
             fd = os.open(name, ENTRY_FLAGS, dir_fd=dir_fd)
         except FileNotFoundError:
@@ -873,6 +918,8 @@ def share_entry(entry, where, gid, owner=None):
         opened = True
     try:
         st = os.fstat(fd)
+        if looked is not None and not os.path.samestat(looked, st):  # SHARED fix round 8 (Claude Opus 5.5, unreviewed): HIGH-1
+            return None, CHANGED_WHY, False
         if stat.S_ISDIR(st.st_mode):
             kind, want = "folder", shared_folder_mode(where)
         elif stat.S_ISREG(st.st_mode):
@@ -883,6 +930,8 @@ def share_entry(entry, where, gid, owner=None):
             return kind, f"owned by {user_name(st.st_uid)}, not by this user", False
         if st.st_gid == gid and stat.S_IMODE(st.st_mode) == want:
             return kind, None, False  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): already right
+        if kind == "file" and st.st_nlink > 1:  # SHARED fix round 8 (Claude Opus 5.5, unreviewed): LOW-3
+            return None, HARD_LINK_WHY, False
         try:
             os.fchown(fd, -1, gid)
             os.fchmod(fd, want)  # after fchown, which may clear setgid
@@ -896,70 +945,88 @@ def share_entry(entry, where, gid, owner=None):
 
 
 # SHARED fix round 7 (Claude Opus 5.5, unreviewed): the audit's HIGH-1, the
-# one walk under each of the four, every folder on the way pinned.
-def walk_pinned(top):
-    """The folder `top` and every entry under it, each reached through its own folder's descriptor, never by a path: yield (path, entry, found, why), one at a time.
+# one walk under the four. SHARED fix round 8 (Claude Opus 5.5,
+# unreviewed): from ROOT's descriptor, so every folder from ROOT down is
+# pinned by identity.
+def walk_pinned(root_fd):
+    """mail/, status/, cards/ and outbox/ in the ROOT folder open at `root_fd` (pin_root), and every entry under each, each reached through its own folder's descriptor, never by a path: yield (path, entry, found, why), one at a time.
 
     The walk init's two walks share (shared_entries, fix_own_entries).
     O_NOFOLLOW guards only the last name of a path, so a walk that opens
     `top/a/b` by its path follows a link at `a`: the owner of a folder on
     the way could swap it for a link after the walk listed it, and the
     walk would then change what the link leads to, outside the mailbox
-    (the audit's HIGH-1). Here no path below `top` is ever resolved.
-    `top` itself is lstat()ed, opened with FOLDER_FLAGS (O_NOFOLLOW,
-    O_DIRECTORY) by its path under ROOT, and kept only when fstat on that
-    descriptor finds the folder the lstat found. walk_below then walks
-    every folder under it through descriptors (SHARED fix round 8, Claude
-    Opus 5.5, unreviewed: the audit's MEDIUM-1, tc's own stack walk in
-    place of os.fwalk, which recursed one frame per level).
+    (the audit's HIGH-1, audits/2026-10-15-0408-quick). Below each top,
+    walk_below enters every folder through its parent's descriptor
+    (SHARED fix round 8, Claude Opus 5.5, unreviewed: the audit's
+    MEDIUM-1, tc's own stack walk in place of os.fwalk).
 
-    path: the entry's path, for the words and for the mode its place
-    gets; nothing opens it. entry: what share_entry opens, the top's own
-    descriptor or (its folder's descriptor, its name), valid until the
-    caller asks for the next; None with a why. found: the lstat result;
-    None only with a why. why: None, or why the walk could not reach it:
-    a top that is a link (LINK_WHY), something other than a folder
-    (NOT_A_FOLDER_WHY), or changed between its lstat and its open
-    (NOT_ENTERED_WHY), or that lstat cannot reach; or walk_below's whys.
-    Only the path to `top` itself is resolved by name, as every command
-    resolves it: ROOT and the folders above it are not pinned here.
+    SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
+    (audits/2026-10-15-0840-quick). Round 7 reached each top by its path
+    under ROOT, so a ROOT swapped for a link after init's walk looked at
+    it led a member's rerun into the member's own folders elsewhere. Now
+    the walk starts from ROOT's descriptor, which pin_root checked against
+    the folder init's walk judged: each top is lstat()ed by its name in
+    that descriptor when the walk starts, and later opened by its name
+    there with FOLDER_FLAGS and kept only when fstat finds the folder that
+    lstat found. So no name from ROOT down is resolved again after the
+    walk judged ROOT, and what happens to ROOT's name, or to a folder
+    above it, after that does not reach the walk.
 
-    @interacts  lstats `top` and opens it; walk_below's below it. Writes
-                nothing.
-    @deps       walk_below; os, errno, stat; FOLDER_FLAGS, LINK_WHY,
+    path: the entry's path under ROOT as given, for the words and for the
+    mode its place gets; nothing opens it. entry: what share_entry opens,
+    the top's own descriptor, or (its folder's descriptor, its name, its
+    lstat result), valid until the caller asks for the next; None with a
+    why. found: the lstat result; None only with a why. why: None, or why
+    the walk could not reach it: a top that is a link (LINK_WHY),
+    something other than a folder (NOT_A_FOLDER_WHY), not the folder the
+    first lstat found by the time the walk came to it (NOT_ENTERED_WHY),
+    or that lstat or its open cannot reach (its error's words); or
+    walk_below's whys. A top that is not there is passed over.
+
+    @interacts  lstats each of the four by its name in `root_fd`, then
+                opens and fstats each folder among them the same way;
+                walk_below's below each. Writes nothing.
+    @deps       walk_below; os, errno, stat, pathlib; ROOT,
+                SHARED_FOLDER_NAMES, FOLDER_FLAGS, LINK_WHY,
                 NOT_A_FOLDER_WHY, NOT_ENTERED_WHY.
-    @complexity O(f) over f entries under `top`, as walk_below.
-    @alloc      the top's descriptor, closed on every path out; as
-                walk_below.
+    @complexity O(f) over f entries under the four, as walk_below, plus
+                four lstats.
+    @alloc      the four lstat results; one top's descriptor at a time,
+                closed on every way out; as walk_below. `root_fd` is the
+                caller's, never closed here.
     """
-    try:
-        st = os.lstat(top)
-    except FileNotFoundError:
-        return
-    except OSError as err:
-        yield top, None, None, err.strerror
-        return
-    if stat.S_ISLNK(st.st_mode):
-        yield top, None, st, LINK_WHY
-        return
-    if not stat.S_ISDIR(st.st_mode):
-        yield top, None, st, NOT_A_FOLDER_WHY
-        return
-    try:
-        fd = os.open(top, FOLDER_FLAGS)
-    except FileNotFoundError:
-        return
-    except OSError as err:
-        yield top, None, st, NOT_ENTERED_WHY if err.errno in (errno.ELOOP, errno.ENOTDIR) else err.strerror
-        return
-    try:
-        if not os.path.samestat(st, os.fstat(fd)):
-            yield top, None, st, NOT_ENTERED_WHY
-            return
-        yield top, fd, st, None
-        yield from walk_below(top, fd)
-    finally:
-        os.close(fd)
+    looked = []
+    for name in SHARED_FOLDER_NAMES:
+        try:
+            looked.append((name, os.lstat(name, dir_fd=root_fd), None))
+        except FileNotFoundError:
+            continue
+        except OSError as err:
+            looked.append((name, None, err.strerror))
+    for name, st, why in looked:
+        top = ROOT / name
+        if why is None and stat.S_ISLNK(st.st_mode):
+            why = LINK_WHY
+        elif why is None and not stat.S_ISDIR(st.st_mode):
+            why = NOT_A_FOLDER_WHY
+        if why is None:
+            try:
+                fd = os.open(name, FOLDER_FLAGS, dir_fd=root_fd)
+            except OSError as err:
+                gone = err.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR)
+                why = NOT_ENTERED_WHY if gone else err.strerror
+        if why is not None:
+            yield top, None, st, why
+            continue
+        try:
+            if not os.path.samestat(st, os.fstat(fd)):
+                yield top, None, st, NOT_ENTERED_WHY
+                continue
+            yield top, fd, st, None
+            yield from walk_below(top, fd)
+        finally:
+            os.close(fd)
 
 
 # SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1,
@@ -981,7 +1048,9 @@ def walk_below(top, fd):
     in after that fails O_NOFOLLOW.
 
     path, entry and found as walk_pinned: entry is (this folder's
-    descriptor, the name), valid until the caller asks for the next, or
+    descriptor, the name, its lstat result, so share_entry changes only
+    the entry the walk found; round 8, the audit's HIGH-1), valid until
+    the caller asks for the next, or
     None with a why; found is the lstat result, None only with a why. A
     name gone by its lstat is passed over. why is None, or: a folder
     whose lstat found something else, or nothing, by the time the walk
@@ -1039,7 +1108,7 @@ def walk_below(top, fd):
                         continue
                     if stat.S_ISDIR(found.st_mode):
                         pending.append((name, found))
-                    yield at / name, (held, name), found, None
+                    yield at / name, (held, name, found), found, None
                 pending.reverse()  # entered in listing order
                 continue
             if not pending:
@@ -1072,8 +1141,8 @@ def walk_below(top, fd):
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-3 and
 # LOW-15, init's walk one entry at a time.
-def shared_entries(top, gid):
-    """Share `top` and, when it is a folder, every entry under it (share_entry); yield (path, kind, why) for each, one at a time.
+def shared_entries(root_fd, gid):
+    """Share mail/, status/, cards/ and outbox/ in the ROOT open at `root_fd`, and every entry under each that is a folder (share_entry); yield (path, kind, why) for each, one at a time.
 
     A top folder that could not be changed is still walked, so what
     under it can be changed is, and the rest is counted and named. A
@@ -1086,18 +1155,22 @@ def shared_entries(top, gid):
     through its parent's, so a folder a member swaps for a link after the
     walk listed it is named and never entered, and nothing it leads to is
     changed. Before, os.walk listed each folder by its path, which follows
-    a link at any folder on the way but the last.
+    a link at any folder on the way but the last. SHARED fix round 8
+    (Claude Opus 5.5, unreviewed): the audit's HIGH-1, from ROOT down:
+    the walk starts from ROOT's descriptor (pin_root), the one walker
+    signature fix_own_entries uses too.
 
-    @interacts  lists each folder under `top` and lstats each entry
-                (walk_pinned); opens, fstats and changes each entry
-                (share_entry).
+    @interacts  lstats each top in `root_fd`, lists each folder under
+                them and lstats each entry (walk_pinned); opens, fstats
+                and changes each entry (share_entry).
     @deps       walk_pinned, share_entry.
-    @complexity O(f) over f entries under `top` (hundreds to thousands
-                under mail/: read/ is the history), as walk_pinned.
+    @complexity O(f) over f entries under the four (hundreds to
+                thousands under mail/: read/ is the history), as
+                walk_pinned.
     @alloc      as walk_pinned; one descriptor per entry, closed before
                 the next; nothing kept.
     """
-    for path, entry, _, why in walk_pinned(top):
+    for path, entry, _, why in walk_pinned(root_fd):
         if why is not None:
             yield path, None, why
         else:
@@ -1371,7 +1444,7 @@ def marker_other_owner(marker):
     return None if owner == os.geteuid() else user_name(owner)
 
 
-def settle_marker_mode(marker):
+def settle_marker_mode(marker, root_fd):
     """Set the .shared at `marker` to SHARED_MARKER_MODE when this user owns it at another mode (D21); name another user's group- or world-writable one.
 
     For init's rerun with the group .shared already names, so a .shared
@@ -1382,19 +1455,23 @@ def settle_marker_mode(marker):
     stderr says so and names whose rerun tightens it, and init's exit
     code is not changed by it. Anything that is not a regular file is
     left alone. A change that fails is refused (exit 1, words); the rest
-    of init is done by then.
+    of init is done by then. SHARED fix round 8 (Claude Opus 5.5,
+    unreviewed): the audit's HIGH-1. It is opened by its name in ROOT's
+    descriptor, `root_fd` (pin_root), never by the path `marker`, which
+    names it in the words only.
 
-    @interacts  opens and fstats `marker` and, when it is this user's at
-                another mode, fchmods it; for another user's writable one
-                reads the user database and writes one line to stderr;
-                on a failure one line to stderr and exit 1.
-    @deps       refuse, user_name; os, stat, sys; SHARED_MARKER_MODE,
-                EXIT_REFUSED.
+    @interacts  opens .shared by its name in `root_fd` and fstats it and,
+                when it is this user's at another mode, fchmods it; for
+                another user's writable one reads the user database and
+                writes one line to stderr; on a failure one line to
+                stderr and exit 1.
+    @deps       refuse, user_name; os, stat, sys; SHARED_MARKER_NAME,
+                SHARED_MARKER_MODE, EXIT_REFUSED.
     @complexity O(1).
     @alloc      one descriptor, closed before return.
     """
     try:
-        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(SHARED_MARKER_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root_fd)
         try:
             st = os.fstat(fd)
             mode = stat.S_IMODE(st.st_mode)
@@ -1415,8 +1492,13 @@ def settle_marker_mode(marker):
 # refuses: its words, and, on the init user's ROOT (ROOT and its .shared
 # both one other user's), that user's id as the one who ran init, else
 # None. When it is there, refuse_walk fixes this user's own entries (SHARED
-# fix round 6, Claude Opus 5.5, unreviewed: D29).
-WalkProblem = collections.namedtuple("WalkProblem", "words ran_init")
+# fix round 6, Claude Opus 5.5, unreviewed: D29). SHARED fix round 8
+# (Claude Opus 5.5, unreviewed): the audit's HIGH-1. root_walk_problem
+# always returns one: words None when the walk found nothing to refuse,
+# and root, the lstat result of the folder the walk judged as ROOT (None
+# when ROOT is not there yet), which pin_root checks ROOT's descriptor
+# against.
+WalkProblem = collections.namedtuple("WalkProblem", "words ran_init root", defaults=(None,))
 
 
 # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D21 and D23, nobody
@@ -1477,7 +1559,7 @@ def swap_words(path, st, is_root, marker_owner=None):
 
 
 def root_walk_problem():
-    """A WalkProblem naming the first entry from ROOT up to / that would let a member swap ROOT (swap_words), or None.
+    """A WalkProblem: its words name the first entry from ROOT up to / that would let a member swap ROOT (swap_words), or are None; its root is the folder the walk judged as ROOT.
 
     C4's "Nobody can swap ROOT" (D21, D23); ssh's StrictModes test for
     authorized_keys paths is the model. Two walks, each from ROOT up to
@@ -1500,16 +1582,28 @@ def root_walk_problem():
     a regular file (the only kind shared_group reads), is read for the
     words alone (swap_words' `marker_owner`): it gets no trust.
 
+    SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
+    (audits/2026-10-15-0840-quick). The walk's verdict always comes back,
+    words None when it found nothing to refuse, and with it `root`: the
+    lstat result of the first folder either walk found at ROOT's own
+    place (the path as given, or its real path when ROOT is reached
+    through a link), so pin_root can check the folder it opens against
+    the one judged here. On a member's rerun whose ROOT as given is the
+    init user's own link, the walk stops at that link, so `root` is the
+    lstat of the real path it leads to, and pin_root checks that folder's
+    owner too. None when ROOT is not there yet.
+
     @interacts  lstats ROOT/.shared, then each entry on both walks
-                (os.path.realpath reads the links); reads this process's
-                user id and the user database for the words. Writes
-                nothing.
+                (os.path.realpath reads the links), and ROOT's real path
+                once more when the walk stopped at the init user's link;
+                reads this process's user id and the user database for
+                the words. Writes nothing.
     @deps       swap_words, WalkProblem; os, pathlib, stat; ROOT,
                 SHARED_MARKER_NAME.
     @complexity O(d) over d entries from ROOT up to / on the two walks
                 (about ten each).
     @alloc      the two lists of paths and the set of those seen, freed on
-                return; one WalkProblem or none, returned.
+                return; one WalkProblem, returned.
     """
     try:  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28, who ran init, for the words only
         marker = os.lstat(ROOT / SHARED_MARKER_NAME)
@@ -1518,7 +1612,7 @@ def root_walk_problem():
         marker_owner = None
     given = ROOT.absolute()
     real = pathlib.Path(os.path.realpath(given))
-    seen = set()
+    seen, root = set(), None
     for walk in ([given, *given.parents], [real, *real.parents]):
         for at, path in enumerate(walk):
             if (path, at == 0) in seen:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-2, ROOT's rule always runs
@@ -1531,17 +1625,65 @@ def root_walk_problem():
             except OSError as err:
                 return WalkProblem(f"tc init: cannot look at {path} ({err.strerror}); this user needs search (x) "
                                    f"access on every folder from / down to {ROOT}. Nothing changed.", None)
+            if at == 0 and root is None and stat.S_ISDIR(st.st_mode):
+                root = st  # SHARED fix round 8 (Claude Opus 5.5, unreviewed): HIGH-1, the folder judged as ROOT
             problem = swap_words(path, st, at == 0, marker_owner)
             if problem is not None:
-                return problem
-    return None
+                if root is None and problem.ran_init is not None:  # stopped at the init user's link: where it leads
+                    try:
+                        root = os.lstat(real)
+                    except OSError:
+                        pass
+                return problem._replace(root=root)
+    return WalkProblem(None, None, root)
+
+
+# SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
+# (audits/2026-10-15-0840-quick), ROOT pinned by identity.
+def pin_root(judged, lead, owner=None):
+    """ROOT's descriptor, opened once by its path with ROOT_FLAGS and kept only when fstat finds the folder init's walk judged (`judged`, its lstat result) and, given `owner`, that user's own; else refuse, exit 1, `lead` then why.
+
+    The one name init resolves after its walk: every name it changes from
+    then on is opened by that name in its own folder's descriptor, from
+    this one down (walk_pinned, settle_marker_mode, .shared's write), so a
+    ROOT, or a folder above it, renamed or swapped for a link after the
+    walk looked at it cannot lead init anywhere else. A member's rerun
+    passes the user who ran init as `owner`, so the folder it fixes under
+    is that user's, as the walk judged. When ROOT is not that folder, or
+    not there, the words are ROOT_CHANGED_WORDS; when it will not open,
+    its error's. Nothing has changed by then.
+
+    @interacts  opens ROOT by its path and fstats it; closes it again
+                unless it is returned; on a refusal one line to stderr
+                and exit 1.
+    @deps       refuse; os, errno; ROOT, ROOT_FLAGS, ROOT_CHANGED_WORDS,
+                EXIT_REFUSED.
+    @complexity O(1).
+    @alloc      one descriptor, returned (the caller closes it), or closed
+                before the refusal.
+    """
+    changed = f"{lead}{ROOT_CHANGED_WORDS.format(root=ROOT)}"
+    try:
+        fd = os.open(ROOT, ROOT_FLAGS)
+    except OSError as err:
+        moved = err.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
+        refuse(changed if moved else f"{lead}could not open {ROOT} ({err.strerror}). Nothing changed.", EXIT_REFUSED)
+    try:
+        st = os.fstat(fd)
+        if judged is not None and os.path.samestat(judged, st) and owner in (None, st.st_uid):
+            return fd
+    except BaseException:
+        os.close(fd)
+        raise
+    os.close(fd)
+    refuse(changed, EXIT_REFUSED)
 
 
 # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, tc fixes a
 # member's own entries on the init user's ROOT itself, through a no-follow
 # open, never by path, and prints no line to paste.
-def fix_own_entries(group, gid):
-    """Give this user's own folders and files under mail/, status/, cards/ and outbox/ group `gid` and their shared mode through share_entry, one stderr line per fix and per skip. (fixed, skipped), counted.
+def fix_own_entries(group, gid, root_fd):
+    """Give this user's own folders and files under mail/, status/, cards/ and outbox/ in the ROOT open at `root_fd` group `gid` and their shared mode through share_entry, one stderr line per fix and per skip. (fixed, skipped), counted.
 
     For a member's init that the walk refused on the init user's ROOT
     (refuse_walk). Each entry is lstat()ed first, never followed. A
@@ -1558,35 +1700,43 @@ def fix_own_entries(group, gid):
     happens, so what was printed is what was done.
 
     SHARED fix round 7 (Claude Opus 5.5, unreviewed): the audit's HIGH-1.
-    Every folder on the way is pinned, not just the entry's own name:
-    the walk is walk_pinned's, which reaches each entry by its name in
-    its own folder's descriptor and enters each folder through its
-    parent's (walk_below, round 8), so no path below the four is
-    resolved. A top that is a link or not a folder is named and not
-    entered; a link is
-    listed and never entered; a folder swapped for a link, or for
-    anything else, after the walk listed it is named and never entered.
-    So no link, and no folder swapped on the way, leads this walk out of
-    the four, and nothing of another user's is changed. Round 6's os.walk
-    listed each folder by its path, which follows a link at every folder
-    on the way but the last: a recipient could swap a folder in their
-    inbox for a link after the walk listed it, and the member's own
-    folders and files at the far end were changed. The four themselves
-    are opened by their paths under ROOT, with O_NOFOLLOW on their own
-    names, so ROOT and the folders above it are resolved by name, as
-    every command resolves them; the walk does not pin those.
+    Below the four, every folder on the way is pinned, not just the
+    entry's own name: the walk is walk_pinned's, which reaches each entry
+    by its name in its own folder's descriptor and enters each folder
+    through its parent's (walk_below, round 8), so no path below the four
+    is resolved. A top that is a link or not a folder is named and not
+    entered; a link is listed and never entered; a folder swapped for a
+    link, or for anything else, after the walk listed it is named and
+    never entered. Round 6's os.walk listed each folder by its path,
+    which follows a link at every folder on the way but the last: a
+    recipient could swap a folder in their inbox for a link after the
+    walk listed it, and the member's own folders and files at the far
+    end were changed.
 
-    @interacts  lstats each top, lists each folder under it and lstats
-                each entry by its name in its folder's descriptor
-                (walk_pinned); opens and fstats this user's own folders
-                and files, and every link or other entry, and fchowns and
-                fchmods through the descriptor each of this user's that is
-                not right (share_entry); reads this process's user id and
-                the user database for a skip's words; writes one line to
-                stderr per fix and per skip.
+    SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
+    (audits/2026-10-15-0840-quick). Round 7 opened the four by their
+    paths under ROOT, and a member's walk judged ROOT and nothing above
+    it, so the init user could swap ROOT for a link after the walk passed
+    it and lead this walk into the member's own folders elsewhere. Now
+    the walk starts from `root_fd`, ROOT opened once and checked against
+    the folder the walk judged and its owner (pin_root), and each top is
+    opened by its name in it. Every folder from ROOT down is pinned by
+    identity, and share_entry changes an entry only when fstat finds the
+    one the walk's lstat found, and never a file with another name. So
+    no link, and no folder or entry swapped on the way, from ROOT down,
+    leads this walk out of the mailbox, and nothing of another user's is
+    changed.
+
+    @interacts  lstats each top in `root_fd`, lists each folder under it
+                and lstats each entry by its name in its folder's
+                descriptor (walk_pinned); opens and fstats this user's own
+                folders and files, and every link or other entry, and
+                fchowns and fchmods through the descriptor each of this
+                user's that is not right (share_entry); reads this
+                process's user id and the user database for a skip's
+                words; writes one line to stderr per fix and per skip.
     @deps       walk_pinned, share_entry, shared_folder_mode,
-                shared_file_mode, printable; os, stat, sys; ROOT,
-                SHARED_FOLDER_NAMES.
+                shared_file_mode, printable; os, stat, sys.
     @complexity O(f) over f entries under the four (hundreds to
                 thousands; read/ is the history): walk_pinned's lstat
                 each, plus one open and fstat for each of this user's and
@@ -1595,21 +1745,20 @@ def fix_own_entries(group, gid):
                 before the next; nothing kept but the two counts.
     """
     me, fixed, skipped = os.geteuid(), 0, 0
-    for top in (ROOT / name for name in SHARED_FOLDER_NAMES):
-        for path, entry, found, why in walk_pinned(top):  # SHARED fix round 7 (Claude Opus 5.5, unreviewed): HIGH-1
+    for path, entry, found, why in walk_pinned(root_fd):  # SHARED fix round 8 (Claude Opus 5.5, unreviewed): HIGH-1, from ROOT's fd
+        if why is None:
+            if (stat.S_ISDIR(found.st_mode) or stat.S_ISREG(found.st_mode)) and found.st_uid != me:
+                continue  # another user's folder or file: theirs to fix
+            kind, why, changed = share_entry(entry, path, gid, me)
             if why is None:
-                if (stat.S_ISDIR(found.st_mode) or stat.S_ISREG(found.st_mode)) and found.st_uid != me:
-                    continue  # another user's folder or file: theirs to fix
-                kind, why, changed = share_entry(entry, path, gid, me)
-                if why is None:
-                    if changed:
-                        fixed += 1
-                        mode = shared_folder_mode(path) if kind == "folder" else shared_file_mode(path)
-                        print(f"tc init: fixed {printable(path)}: group {printable(group)}, mode {mode:04o}",
-                              file=sys.stderr)
-                    continue
-            skipped += 1
-            print(f"tc init: skipped {printable(path)}: {why}", file=sys.stderr)
+                if changed:
+                    fixed += 1
+                    mode = shared_folder_mode(path) if kind == "folder" else shared_file_mode(path)
+                    print(f"tc init: fixed {printable(path)}: group {printable(group)}, mode {mode:04o}",
+                          file=sys.stderr)
+                continue
+        skipped += 1
+        print(f"tc init: skipped {printable(path)}: {why}", file=sys.stderr)
     return fixed, skipped
 
 
@@ -1632,23 +1781,38 @@ def refuse_walk(problem, group, gid, current):
     the read and the walk), nothing is changed. Any other walk problem
     is its words alone.
 
-    @interacts  on the init user's ROOT, when `current` is `group`: one
-                line to stderr, then this user's own entries under the
-                four changed through a descriptor, one line each
+    SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
+    (audits/2026-10-15-0840-quick). Before it fixes anything it opens ROOT
+    once (pin_root) and keeps it only when fstat finds the folder the
+    walk judged (problem.root) and its owner is the user who ran init;
+    else it refuses with the walk's words and ROOT_CHANGED_WORDS, and
+    nothing changes. fix_own_entries then walks from that descriptor, so
+    ROOT renamed or swapped later leads nowhere. The descriptor is closed
+    on every way out.
+
+    @interacts  on the init user's ROOT, when `current` is `group`: opens
+                and fstats ROOT (pin_root), or refuses; one line to
+                stderr, then this user's own entries under the four
+                changed through a descriptor, one line each
                 (fix_own_entries); then the last words to stderr and exit
                 1.
-    @deps       fix_own_entries, refuse; sys; EXIT_REFUSED.
+    @deps       pin_root, fix_own_entries, refuse; os, sys; EXIT_REFUSED.
     @complexity O(1), or O(f) over f entries under the four on the init
                 user's ROOT.
-    @alloc      the words, freed on exit.
+    @alloc      ROOT's descriptor, closed before the last words; the
+                words, freed on exit.
     """
     if problem.ran_init is None:
         refuse(problem.words, EXIT_REFUSED)
     if current != group:  # .shared changed since init read it: no group to fix toward
         refuse(f"{problem.words} Nothing changed.", EXIT_REFUSED)
-    print(f"{problem.words} tc fixes the entries you own under it itself, and changes nothing else.",
-          file=sys.stderr)
-    fixed, skipped = fix_own_entries(group, gid)
+    root_fd = pin_root(problem.root, f"{problem.words} ", problem.ran_init)  # SHARED fix round 8 (Claude Opus 5.5, unreviewed): HIGH-1
+    try:
+        print(f"{problem.words} tc fixes the entries you own under it itself, and changes nothing else.",
+              file=sys.stderr)
+        fixed, skipped = fix_own_entries(group, gid, root_fd)
+    finally:
+        os.close(root_fd)
     if not fixed and not skipped:
         refuse("tc init: no entry you own under it needs a fix. Nothing changed.", EXIT_REFUSED)
     refuse(f"tc init: {fixed} fixed and {skipped} skipped, each named above. Nothing else changed.", EXIT_REFUSED)
@@ -1749,6 +1913,17 @@ def cmd_init(args):
     skipped <path>: a folder when tc first looked, ...`, and never entered,
     and nothing at the far end of the link changes.
 
+    SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
+    and MEDIUM-1 (audits/2026-10-15-0840-quick). After its walk passes,
+    init opens ROOT once (pin_root) and keeps it only when fstat finds
+    the folder the walk judged, else it refuses with ROOT_CHANGED_WORDS
+    and changes nothing. From then on no name is resolved by a path: the
+    four are made, walked and changed by their names in ROOT's descriptor
+    and their own (shared_entries), and .shared is written, renamed and
+    settled by its name in ROOT's descriptor. The same holds for a
+    member's rerun (refuse_walk). The walk is tc's own stack walk, which
+    names a folder past WALK_MAX_DEPTH, never a traceback.
+
     @interacts  reads the group database and this process's groups;
                 reads ROOT/.shared (shared_group) and, unless it names g,
                 lstats it for its owner and reads the user database
@@ -1758,37 +1933,41 @@ def cmd_init(args):
                 user database for the words (root_walk_problem), before
                 and after it makes a missing ROOT and its missing parents
                 at ROOT_MODE under ROOT_UMASK; on a refusal of the init
-                user's ROOT, when .shared named g, lists each folder under
-                the four through its parent's descriptor and lstats each
-                entry by its name there (walk_pinned), and opens, fstats
-                and changes through the descriptor this user's own that
-                are not right, writing one stderr line per fix and per
-                skip (refuse_walk, fix_own_entries); sets
-                its umask (SHARED_UMASK); makes each missing top folder;
-                walks the four folders the same way (walk_pinned) and
-                opens, fstats and changes each entry by its name in its
-                folder's descriptor (shared_entries); when .shared names g, opens it and
-                sets its mode if this user owns it, or says one line if
-                another user's is writable (settle_marker_mode); else
-                creates ROOT/.shared.<pid>.tmp at SHARED_MARKER_MODE and
-                renames it to ROOT/.shared, removing its own .tmp if the
-                rename fails. Prints one line, plus one stderr line per
-                skipped entry, first, and the last refusal's line after.
-    @deps       shared_entries, shared_group, marker_other_owner,
+                user's ROOT, when .shared named g, opens and fstats ROOT
+                (pin_root), lists each folder under the four through its
+                parent's descriptor and lstats each entry by its name
+                there (walk_pinned), and opens, fstats and changes through
+                the descriptor this user's own that are not right, writing
+                one stderr line per fix and per skip (refuse_walk,
+                fix_own_entries); else opens and fstats ROOT (pin_root);
+                sets its umask (SHARED_UMASK); makes each missing top
+                folder by its name in ROOT's descriptor; walks the four
+                folders the same way (walk_pinned) and opens, fstats and
+                changes each entry by its name in its folder's descriptor
+                (shared_entries); when .shared names g, opens it by its
+                name in ROOT's descriptor and sets its mode if this user
+                owns it, or says one line if another user's is writable
+                (settle_marker_mode); else creates .shared.<pid>.tmp at
+                SHARED_MARKER_MODE in ROOT's descriptor and renames it to
+                .shared there, removing its own .tmp if the rename fails.
+                Prints one line, plus one stderr line per skipped entry,
+                first, and the last refusal's line after.
+    @deps       pin_root, shared_entries, shared_group, marker_other_owner,
                 root_walk_problem, refuse_walk, settle_marker_mode,
-                write_new_file, refuse, printable; grp, os, sys;
-                SHARED_FOLDER_NAMES, SHARED_MARKER_NAME, SHARED_MARKER_MODE,
-                INIT_USER_WORDS, OWN_FIX_WORDS, SHARED_UMASK, ROOT_MODE,
-                ROOT_UMASK.
+                write_new_file, refuse, printable; contextlib, grp, os,
+                sys; SHARED_FOLDER_NAMES, SHARED_MARKER_NAME,
+                SHARED_MARKER_MODE, INIT_USER_WORDS, OWN_FIX_WORDS,
+                SHARED_UMASK, ROOT_MODE, ROOT_UMASK.
     @complexity O(f + d) over f folders and files under the four folders:
                 the inboxes and every read/ (hundreds to thousands, growing
                 with the history), and d folders from ROOT up to / (about
                 ten, walked twice).
-    @alloc      as walk_pinned (the listings and descriptors from a top
-                down to the folder being walked, and the folders listed
-                and not yet entered), one skipped line per entry it could
-                not change, freed on exit; the four top folders when
-                missing and the .shared file, kept.
+    @alloc      ROOT's descriptor, closed on every way out; as walk_pinned
+                (one descriptor and the subfolders not yet entered per
+                folder from a top down to the one being walked, at most
+                WALK_MAX_DEPTH), one skipped line per entry it could not
+                change, freed on exit; the four top folders when missing
+                and the .shared file, kept.
     """
     group = args.group
     try:
@@ -1812,7 +1991,7 @@ def cmd_init(args):
                f"{printable(current)}; {INIT_USER_WORDS.format(owner=owner)}. Nothing changed.", EXIT_REFUSED)
     # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D21, D23, nobody can swap ROOT; walked before anything is made.
     problem = root_walk_problem()
-    if problem is not None:
+    if problem.words is not None:
         refuse_walk(problem, group, gid, current)  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29
     # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D21, ROOT is never made or left group-writable.
     os.umask(ROOT_UMASK)
@@ -1822,50 +2001,54 @@ def cmd_init(args):
         refuse(f"tc init: cannot reach {ROOT} ({err.strerror}); this user needs search (x) access on "
                f"every folder from / down to it. Nothing changed.", EXIT_REFUSED)
     problem = root_walk_problem()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): again, with ROOT there
-    if problem is not None:
+    if problem.words is not None:
         refuse_walk(problem, group, gid, current)  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29
-    os.umask(SHARED_UMASK)
-    done, skipped, fixable = {"folder": 0, "file": 0}, [], 0
-    for top in (ROOT / name for name in SHARED_FOLDER_NAMES):
-        try:
-            os.mkdir(top)  # D19: no other user has to make a top folder in a ROOT this user owns
-        except FileExistsError:
-            pass
-        except OSError as err:
-            skipped.append(f"tc init: could not make {printable(top)}: {err.strerror}")
-            continue
-        for path, kind, why in shared_entries(top, gid):
+    root_fd = pin_root(problem.root, "tc init: ")  # SHARED fix round 8 (Claude Opus 5.5, unreviewed): HIGH-1, no name resolved again
+    try:
+        os.umask(SHARED_UMASK)
+        done, skipped, fixable = {"folder": 0, "file": 0}, [], 0
+        for name in SHARED_FOLDER_NAMES:
+            try:
+                os.mkdir(name, dir_fd=root_fd)  # D19: no other user has to make a top folder in a ROOT this user owns
+            except FileExistsError:
+                pass
+            except OSError as err:
+                skipped.append(f"tc init: could not make {printable(ROOT / name)}: {err.strerror}")
+        for path, kind, why in shared_entries(root_fd, gid):
             if why is not None:
                 skipped.append(f"tc init: skipped {printable(path)}: {why}")
                 if kind is not None:  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, its owner's own init fixes it
                     fixable += 1
             elif kind is not None:
                 done[kind] += 1
-    for line in skipped:  # reported first, whatever happens to .shared
-        print(line, file=sys.stderr)
-    if current == group:
-        settle_marker_mode(marker)  # SHARED D21 (Claude Opus 5.5, unreviewed): its owner's rerun makes it 0644
-    else:
-        tmp, made = ROOT / f"{SHARED_MARKER_NAME}.{os.getpid()}.tmp", False
-        try:
-            write_new_file(tmp, f"{group}\n", SHARED_MARKER_MODE)  # SHARED D21 (Claude Opus 5.5, unreviewed)
-            made = True
-            tmp.rename(marker)  # atomic, so a reader never sees half of it
-        except OSError as err:
-            if made:
-                tmp.unlink(missing_ok=True)  # init's own .tmp, made just above
-            state = ("the mailbox stays private" if current is None
-                     else f"{marker} stays unreadable, so tc refuses every command but init"
-                     if current is ValueError else f"the mailbox stays shared with group {printable(current)}")
-            refuse(f"tc init: could not write {marker} ({err.strerror}); {state}. {done['folder']} "
-                   f"folders and {done['file']} files are in group {printable(group)}.", EXIT_REFUSED)
-    print(f"mailbox shared with group {printable(group)}: {done['folder']} folders and "
-          f"{done['file']} files in group {printable(group)}")
-    if skipped:  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, its owner's init, never a line to paste
-        lead = f"tc init: {len(skipped)} skipped, each named above"
-        refuse(f"{lead}. The owner of each folder or file among them "
-               f"{OWN_FIX_WORDS.format(group=printable(group))}." if fixable
-               else f"{lead}; its owner fixes each by hand.", EXIT_REFUSED)
+        for line in skipped:  # reported first, whatever happens to .shared
+            print(line, file=sys.stderr)
+        if current == group:
+            settle_marker_mode(marker, root_fd)  # SHARED D21 (Claude Opus 5.5, unreviewed): its owner's rerun makes it 0644
+        else:
+            tmp, made = f"{SHARED_MARKER_NAME}.{os.getpid()}.tmp", False  # by name in ROOT's descriptor (round 8)
+            try:
+                write_new_file(tmp, f"{group}\n", SHARED_MARKER_MODE, dir_fd=root_fd)  # SHARED D21 (Claude Opus 5.5, unreviewed)
+                made = True
+                os.rename(tmp, SHARED_MARKER_NAME, src_dir_fd=root_fd, dst_dir_fd=root_fd)  # atomic: never half read
+            except OSError as err:
+                if made:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(tmp, dir_fd=root_fd)  # init's own .tmp, made just above
+                state = ("the mailbox stays private" if current is None
+                         else f"{marker} stays unreadable, so tc refuses every command but init"
+                         if current is ValueError else f"the mailbox stays shared with group {printable(current)}")
+                refuse(f"tc init: could not write {marker} ({err.strerror}); {state}. {done['folder']} "
+                       f"folders and {done['file']} files are in group {printable(group)}.", EXIT_REFUSED)
+        print(f"mailbox shared with group {printable(group)}: {done['folder']} folders and "
+              f"{done['file']} files in group {printable(group)}")
+        if skipped:  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, its owner's init, never a line to paste
+            lead = f"tc init: {len(skipped)} skipped, each named above"
+            refuse(f"{lead}. The owner of each folder or file among them "
+                   f"{OWN_FIX_WORDS.format(group=printable(group))}." if fixable
+                   else f"{lead}; its owner fixes each by hand.", EXIT_REFUSED)
+    finally:
+        os.close(root_fd)
 
 
 def inbox(name, shared):
@@ -2166,7 +2349,7 @@ def inbox_lock(name, how=fcntl.LOCK_EX, deadline=None):
 
 
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a link planted at a .tmp name is refused.
-def write_new_file(path, text, mode=NEW_FILE_MODE):
+def write_new_file(path, text, mode=NEW_FILE_MODE, dir_fd=None):
     """Create `path`, which must not exist yet, at `mode`, and write `text` into it.
 
     For every .tmp tc makes before it publishes a file: a card's and
@@ -2183,7 +2366,10 @@ def write_new_file(path, text, mode=NEW_FILE_MODE):
     Opus 5.5, unreviewed): a message or card under a shared mailbox passes
     SHARED_OWNED_FILE_MODE (D20 item 2); the umask cannot add bits to it.
     SHARED D21 (Claude Opus 5.5, unreviewed): .shared passes
-    SHARED_MARKER_MODE.
+    SHARED_MARKER_MODE. SHARED fix round 8 (Claude Opus 5.5, unreviewed):
+    the audit's HIGH-1. `dir_fd`, when given, is the folder `path` is a
+    name in (.shared's .tmp, by its name in ROOT's descriptor), so no
+    folder on the way is resolved by name.
 
     @interacts  creates and writes one file; nothing else.
     @deps       os; NEW_FILE_FLAGS, NEW_FILE_MODE.
@@ -2191,7 +2377,7 @@ def write_new_file(path, text, mode=NEW_FILE_MODE):
     @alloc      the encoded text while written; one descriptor, closed on
                 return.
     """
-    with open(os.open(path, NEW_FILE_FLAGS, mode), "w") as f:
+    with open(os.open(path, NEW_FILE_FLAGS, mode, dir_fd=dir_fd), "w") as f:
         f.write(text)
 
 
