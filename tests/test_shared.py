@@ -58,7 +58,11 @@ and an entry init skips tell their owner to run tc init, which puts
 them right, and no chgrp or chmod line is printed; a relative TC_ROOT
 still prints absolute paths; and a send out of numbers names the last
 name it found taken, and blames mail/.seq only when a message's name
-was taken.
+was taken. And round 7 (SHARED fix round 7, Claude Opus 5.5,
+unreviewed): a folder on the way that a member swaps for a link after
+init's walk listed it, in a member's rerun and in the init user's own
+init, is named and never entered, and the folder the link leads to,
+with all in it, keeps its stat.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -137,7 +141,13 @@ the owner's human QA (D4, qa/human/route-shared.md).
             wrapped to count calls; plant a .tmp name in an inbox for
             each of PLANTED_NAMES numbers; and run tc as a child with
             TC_ROOT relative and the root's temp folder as its working
-            folder.
+            folder. The round 7 tests make a second folder in an inbox,
+            a file in it and in read/ (chowned and chmodded), and a
+            folder holding a folder and a file outside TC_ROOT; a wrapped
+            os.fchown renames one inbox folder aside and links the
+            outside folder at its name; and they run cmd_init in process
+            with os.lstat wrapped (a call by name in a folder's
+            descriptor is matched by the file it finds).
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
             importlib, io, json, os, pathlib, pwd, re, stat, subprocess,
             sys, time, unittest, unittest.mock); tests/_root.py.
@@ -450,6 +460,20 @@ PRE_D20_FILE_MODE = 0o664
 # where that member puts it aside to swap a link in at its name.
 OLD_OWN_MESSAGE = "000005-from-carol.md"
 ASIDE_NAME = "000005-from-carol.aside"
+# SHARED fix round 7 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
+# (audits/2026-10-15-0408-quick). Why init skips a folder it listed and
+# then did not enter, because by then a link had its name.
+NOT_ENTERED_WHY = ("a folder when tc first looked, but by the time tc came to enter it a link or another entry "
+                   "had its name, or it was gone or would not open; tc looked at nothing under it")
+# A second folder in b's inbox, beside read/, so the walk lists two folders
+# there and enters one before the other.
+SECOND_FOLDER = "kept"
+# A file in each of the two, not right yet, whose fix makes the swap.
+SWAP_TRIGGER = "000006-from-carol.md"
+# What the swapped folder is renamed to: its name plus this.
+FOLDER_ASIDE_SUFFIX = ".aside"
+# Init's last line when nothing it skipped is a folder or a file.
+SKIPPED_BY_HAND_WORDS = "tc init: {n} skipped, each named above; its owner fixes each by hand."
 # SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's LOW-1. What
 # tc read says for an inbox file still there after its rename: a hard link
 # made at the target first turns rename(2) into nothing.
@@ -1307,17 +1331,32 @@ def owner_patched_lstat(*paths_to_patch):
     file whose recorded owner is patched"). SHARED fix round 6 (Claude
     Opus 5.5, unreviewed): several paths, so a test can make ROOT and its
     .shared the init user's and leave the running user the member.
+    SHARED fix round 7 (Claude Opus 5.5, unreviewed): init's walk lstats
+    each entry by its name in its folder's descriptor (dir_fd), never by
+    its path, so such a call is matched by what it finds: the same file
+    (os.path.samestat) as one of `paths_to_patch`.
 
-    @interacts  none until called; then lstats the path it is given.
+    @interacts  none until called; then lstats the path it is given, and
+                for a dir_fd call each of `paths_to_patch` too.
     @deps       os, stat, pathlib.
     @complexity O(p) per call over p paths to patch (a handful).
     @alloc      one stat result per call.
     """
     real = os.lstat
 
+    def same_file(st, path):
+        try:
+            return os.path.samestat(st, real(path))
+        except FileNotFoundError:
+            return False
+
     def lstat(path, *args, **kwargs):
         st = real(path, *args, **kwargs)
-        if pathlib.Path(path) in paths_to_patch:
+        if kwargs.get("dir_fd") is not None:
+            hit = any(same_file(st, patched) for patched in paths_to_patch)
+        else:
+            hit = pathlib.Path(path) in paths_to_patch
+        if hit:
             fields = list(st[:stat.ST_CTIME + 1])
             fields[stat.ST_UID] = st.st_uid + 1
             return os.stat_result(fields)
@@ -1772,10 +1811,10 @@ class InitAndRefusalsTest(UmaskTestCase):
             mail = root.path / "mail"
             before = stat.S_IMODE(os.lstat(mail).st_mode)  # made by a private send: not right yet
 
-            def share_entry(path, gid, owner=None):
-                if path == mail:
+            def share_entry(entry, where, gid, owner=None):  # SHARED fix round 7 (Claude Opus 5.5, unreviewed): reached by descriptor
+                if where == mail:
                     return "folder", "Operation not permitted", False
-                return real(path, gid, owner)
+                return real(entry, where, gid, owner)
             with mock.patch.object(tc, "share_entry", share_entry):
                 code, out, err = run_init(tc, name)
             message = os.lstat(mail / "to-b" / "000001-from-a.md")
@@ -2972,6 +3011,57 @@ def stat_seen(path):
     return st.st_mode, st.st_uid, st.st_gid, st.st_ctime_ns, st.st_mtime_ns
 
 
+# SHARED fix round 7 (Claude Opus 5.5, unreviewed): the audit's HIGH-1 (audits/2026-10-15-0408-quick).
+def folder_swap(root, primary_gid):
+    """Beside b's read/, a second folder (SECOND_FOLDER), each holding a file of the running user's not right yet; outside the root, a folder of the running user's holding a folder and a file: (the two folders, the outside entries, an os.fchown that makes the swap, the list of folders it swapped).
+
+    The synthesis's trace for HIGH-1: the walk has listed b's inbox, with
+    both folders in it, and enters one of them first. On the first fchown
+    of the file in that one (its fix), the other folder, listed and not
+    yet entered, is renamed aside and a link to the outside folder put at
+    its name, as b may do in his own inbox. A walk that then lists that
+    folder by its path lists the outside folder through the link, and
+    changes what is in it.
+
+    @interacts  makes a folder in b's inbox, a file in it and in read/
+                (chowned and chmodded), and a folder holding a folder and
+                a file in the root's temp folder; the fchown returned,
+                when called, fstats its descriptor and may rename one
+                folder and make one link.
+    @deps       os, pathlib; SECOND_FOLDER, SWAP_TRIGGER,
+                PRE_D20_FILE_MODE, OWNER_FOLDER_MODE, FOLDER_ASIDE_SUFFIX.
+    @complexity O(1).
+    @alloc      the folders, files and link, removed with the temp folder;
+                the list of folders swapped, returned.
+    """
+    box = root.path / "mail" / "to-b"
+    folders = (box / "read", box / SECOND_FOLDER)
+    folders[1].mkdir()
+    other_of = {}
+    for folder, other in zip(folders, reversed(folders)):
+        trigger = folder / SWAP_TRIGGER
+        trigger.write_text("a file of the running user's in b's inbox, not right yet\n")
+        os.chown(trigger, -1, primary_gid)
+        trigger.chmod(PRE_D20_FILE_MODE)
+        other_of[os.lstat(trigger).st_ino] = other
+    outside = root.base / "outside-folder"  # the running user's own, outside the mailbox
+    outside.mkdir()
+    (outside / "sub").mkdir()
+    (outside / "notes").write_text("the running user's own notes, outside the mailbox\n")
+    outside.chmod(OWNER_FOLDER_MODE)
+    swapped = []
+    real_fchown = os.fchown
+
+    def fchown(fd, uid, group_id):
+        other = other_of.get(os.fstat(fd).st_ino)
+        if other is not None and not swapped:
+            os.rename(other, other.with_name(other.name + FOLDER_ASIDE_SUFFIX))  # b's own folder, in b's own inbox
+            other.symlink_to(outside, target_is_directory=True)
+            swapped.append(other)
+        return real_fchown(fd, uid, group_id)
+    return folders, (outside, outside / "sub", outside / "notes"), fchown, swapped
+
+
 class RootAndClaimTest(UmaskTestCase):
     """D21's ROOT and the audit's LOW-1: init never makes or leaves ROOT group-writable, and of two joins of one name at once only one claims the inbox.
 
@@ -2998,12 +3088,18 @@ class RootAndClaimTest(UmaskTestCase):
     .shared (and any other user's entry) are what a patched os.lstat
     reports as the init user's. A link swapped in for the member's entry,
     before init or while tc holds the entry open (a patched os.fchown
-    makes the swap), leaves the link's target as it was.
+    makes the swap), leaves the link's target as it was. SHARED fix round
+    7 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
+    (audits/2026-10-15-0408-quick). A folder on the way swapped for a
+    link after the walk listed it (a patched os.fchown makes the swap,
+    folder_swap) is named and never entered, in the member's rerun and in
+    the init user's own init, and the folder the link leads to keeps its
+    stat.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, user_groups,
                 tree, load_tc, run_init, owner_patched_lstat,
-                member_setup, stat_seen; pwd, unittest.mock.
+                member_setup, stat_seen, folder_swap; pwd, unittest.mock.
     @complexity O(1) per test.
     @alloc      one TcRoot per test.
     """
@@ -3434,6 +3530,104 @@ class RootAndClaimTest(UmaskTestCase):
                               f"{SKIPPED_WORDS.format(path=status, why=NOT_YOURS_WHY.format(owner=init_user))}\n"
                               f"{FIXED_COUNT_WORDS.format(fixed=0, skipped=1)}\n")
         self.assertEqual(after, before, "a change went to an entry another user owns at its open")
+
+    # SHARED fix round 7 (Claude Opus 5.5, unreviewed): the audit's HIGH-1 (audits/2026-10-15-0408-quick).
+    def test_a_folder_swapped_for_a_link_on_the_way_never_leads_a_members_rerun_outside(self):
+        """In process, the running user as a member, lstat reporting ROOT, .shared, b's inbox and the two folders in it as another user's: when the member's rerun fixes the file in the folder it enters first, the other folder, listed and not yet entered, is put aside and a link to a folder of the member's outside the root put at its name (folder_swap). That folder, the folder and the file in it keep their mode, owner, group and times; tc names the swapped folder as not entered, fixes the one file, and ends 1 fixed and 1 skipped.
+
+        The synthesis's trace for HIGH-1: O_NOFOLLOW guards only the last
+        name of a path, and os.walk lists a folder by its path after it
+        checked it for a link, so the member's own init changed the
+        member's own folders and files at the far end, outside the
+        mailbox. Must reject a walk that lists or opens any folder below
+        the four by its path (os.walk back in walk_pinned).
+
+        @interacts  init, a join, a send, a status; folder_swap's folders,
+                    files and swap; loads tc in process and runs cmd_init
+                    with os.lstat and os.fchown wrapped; lstats the
+                    outside entries and the file fixed.
+        @deps       folder_swap, stat_seen, user_groups, load_tc, run_init,
+                    owner_patched_lstat; unittest.mock; tc.user_name;
+                    RAN_INIT_WORDS, FIXES_OWN_WORDS, FIXED_WORDS,
+                    SKIPPED_WORDS, NOT_ENTERED_WHY, FIXED_COUNT_WORDS,
+                    SWAP_TRIGGER, SHARED_OWNED_FILE_MODE.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        found = user_groups()
+        (_, _, primary_gid), (_, name, gid) = found[0], found[-1]
+        with _root.TcRoot() as root:
+            setup = [root.tc("init", "--shared", "--group", name),
+                     root.tc("join", "b", env={"CLAUDECODE": "1"}),
+                     root.tc("send", "--from", "a", "--to", "b", "hi"),
+                     root.tc("status", "b", "busy")]
+            folders, outside, fchown, swapped = folder_swap(root, primary_gid)
+            box = root.path / "mail" / "to-b"
+            seen = [stat_seen(path) for path in outside]
+            tc = load_tc(root)
+            init_user = tc.user_name(os.getuid() + 1)
+            with mock.patch.object(os, "lstat", owner_patched_lstat(root.path, root.path / ".shared", box, *folders)), \
+                    mock.patch.object(os, "fchown", fchown):
+                code, out, err = run_init(tc, name)
+            after = [stat_seen(path) for path in outside]
+            entered = [folder for folder in folders if folder not in swapped]
+            fixed = [os.lstat(folder / SWAP_TRIGGER) for folder in entered]
+        for run in setup:
+            self.assertEqual(run[0], 0, run[2])
+        self.assertEqual(len(swapped), 1, "the swap never happened")
+        self.assertEqual(after, seen, "the walk went through the swapped link and changed a folder outside the root")
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertEqual(err, f"{RAN_INIT_WORDS.format(root=root.path, owner=init_user)}{FIXES_OWN_WORDS}\n"
+                              f"{FIXED_WORDS.format(path=entered[0] / SWAP_TRIGGER, group=name, mode=SHARED_OWNED_FILE_MODE)}\n"
+                              f"{SKIPPED_WORDS.format(path=swapped[0], why=NOT_ENTERED_WHY)}\n"
+                              f"{FIXED_COUNT_WORDS.format(fixed=1, skipped=1)}\n")
+        self.assertEqual([(stat.S_IMODE(st.st_mode), st.st_gid) for st in fixed], [(SHARED_OWNED_FILE_MODE, gid)],
+                         "the file in the folder entered first was not fixed")
+
+    # SHARED fix round 7 (Claude Opus 5.5, unreviewed): the audit's HIGH-1, init's own walk (audits/2026-10-15-0408-quick).
+    def test_a_folder_swapped_for_a_link_on_the_way_never_leads_the_init_users_own_init_outside(self):
+        """In process, the running user as the init user, whose init passes the walk: when init's own walk fixes the file in the folder of b's inbox it enters first, the other folder is put aside and a link to a folder of the init user's outside the root put at its name (folder_swap). That folder, the folder and the file in it keep their mode, owner, group and times; init names the swapped folder as not entered, fixes the one file, shares the rest, and exits 1.
+
+        Init's own walk (shared_entries) had the member walk's shape since
+        round 1 (the synthesis's HIGH-1): os.walk listed the swapped
+        folder by its path and changed the init user's own folder and
+        file at the far end. Must reject os.walk back in walk_pinned.
+
+        @interacts  init, a join, a send, a status; folder_swap's folders,
+                    files and swap; loads tc in process and runs cmd_init
+                    with os.fchown wrapped; lstats the outside entries and
+                    the file fixed.
+        @deps       folder_swap, stat_seen, user_groups, load_tc,
+                    run_init; unittest.mock; SKIPPED_WORDS,
+                    NOT_ENTERED_WHY, SKIPPED_BY_HAND_WORDS, SWAP_TRIGGER,
+                    SHARED_OWNED_FILE_MODE.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        found = user_groups()
+        (_, _, primary_gid), (_, name, gid) = found[0], found[-1]
+        with _root.TcRoot() as root:
+            setup = [root.tc("init", "--shared", "--group", name),
+                     root.tc("join", "b", env={"CLAUDECODE": "1"}),
+                     root.tc("send", "--from", "a", "--to", "b", "hi"),
+                     root.tc("status", "b", "busy")]
+            folders, outside, fchown, swapped = folder_swap(root, primary_gid)
+            seen = [stat_seen(path) for path in outside]
+            tc = load_tc(root)
+            with mock.patch.object(os, "fchown", fchown):
+                code, out, err = run_init(tc, name)
+            after = [stat_seen(path) for path in outside]
+            entered = [folder for folder in folders if folder not in swapped]
+            fixed = [os.lstat(folder / SWAP_TRIGGER) for folder in entered]
+        for run in setup:
+            self.assertEqual(run[0], 0, run[2])
+        self.assertEqual(len(swapped), 1, "the swap never happened")
+        self.assertEqual(after, seen, "the walk went through the swapped link and changed a folder outside the root")
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertEqual(err, f"{SKIPPED_WORDS.format(path=swapped[0], why=NOT_ENTERED_WHY)}\n"
+                              f"{SKIPPED_BY_HAND_WORDS.format(n=1)}\n")
+        self.assertEqual([(stat.S_IMODE(st.st_mode), st.st_gid) for st in fixed], [(SHARED_OWNED_FILE_MODE, gid)],
+                         "the file in the folder entered first was not fixed")
 
     # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-2.
     def test_a_root_that_links_to_its_own_folder_still_gets_the_root_rule(self):
