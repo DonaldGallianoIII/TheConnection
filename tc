@@ -55,9 +55,12 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             yet, then writes .shared at 0644, owner-write only (D21),
             unless it already names the group; then its owner's rerun
             sets it to 0644, and another member's says one line when it
-            is writable. When another user owns .shared and it names
-            another group or cannot be read, init refuses before it
-            changes anything (D21). An entry init skips, and a folder in
+            is writable, a rerun the walk lets through only where root
+            owns ROOT and every folder above it (on the init user's ROOT
+            the walk refuses it, above; round 6, the audit's LOW-3).
+            When another user owns .shared and it names another group or
+            cannot be read, init refuses before it changes anything
+            (D21). An entry init skips, and a folder in
             the wrong group, are named, and the words say its owner runs
             tc init --shared --group <g>, which fixes their own entries
             that way; tc prints no chgrp or chmod line to paste (round
@@ -2500,7 +2503,10 @@ def unread_count(name):
 def refuse(words, code):
     """Print `words` to stderr and exit with `code`.
 
-    @interacts  writes one line to stderr; exits.
+    @interacts  writes `words` to stderr, one line, or several joined by
+                newlines (refuse_lines, cmd_status's unshown files; SHARED
+                fix round 6, Claude Opus 5.5, unreviewed: the audit's
+                LOW-4); exits.
     @deps       sys.
     @complexity O(1).
     @alloc      none.

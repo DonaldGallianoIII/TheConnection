@@ -8,7 +8,9 @@ Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
         Opus 5.5, 2026-10-15; steps 15, 30 and 31 changed in round 4 by
         the SHARED fixer, Claude Opus 5.5, 2026-10-15; steps 15 and 31,
         and the paragraph after step 23, changed in round 5 by the
-        SHARED fixer, Claude Opus 5.5, 2026-10-15
+        SHARED fixer, Claude Opus 5.5, 2026-10-15; steps 15 and 31
+        changed, and step 32 added, in round 6 by the SHARED fixer,
+        Claude Opus 5.5, 2026-10-15
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
@@ -24,8 +26,11 @@ could swap through a folder above it (round 3, D20, D23). tc read calls
 neither of two such files forged, and a planted name of any length
 wakes `tc wait` at most once (round 4). A member's init on the init
 user's ROOT is refused with words that name who ran init and charge no
-one, plus the lines that fix the member's own entries, and a member who
-makes ROOT first stops the init user's init (round 5, D28). The tests in
+one, and a member who makes ROOT first stops the init user's init
+(round 5, D28). That refused init then fixes the member's own entries
+itself, through a no-follow open, and a link another member swaps in
+for one of them never leads it to a folder outside the mailbox (round
+6, D29). The tests in
 `tests/test_shared.py` prove the modes, the owners and the checks tc
 makes, but one user cannot prove another user's refusals. This script
 does, by hand.
@@ -138,25 +143,31 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
     - As ann: `chmod 644 /srv/tc-shared/.shared`, to put it back.
 15. As ann: `chmod g+w /srv/tc-shared/.shared`, as init left it before
     D21. As ben: `tc init --shared --group tcshare`.
-    - It exits 1 with one line, `tc init: /srv/tc-shared and its .shared
-      belong to ann, who ran init on this mailbox, so only ann runs init
-      on it. A member fixes their own entries by hand. Nothing changed.
-      No entry you own under it needs a fix.` The walk from ROOT up to
+    - It exits 1 with two lines. The first: `tc init: /srv/tc-shared and
+      its .shared belong to ann, who ran init on this mailbox, so only
+      ann runs init on it. tc fixes the entries you own under it itself,
+      and changes nothing else.` The second: `tc init: no entry you own
+      under it needs a fix. Nothing changed.` The walk from ROOT up to
       `/` (D23) takes a folder only from root or the user running init.
       The owner of `.shared` gets no trust (round 5, D28): whoever makes
       ROOT can make the `.shared` in it. The words name ann and charge
       no one. Steps 7, 13 and 14 still get their own words: those
       refusals come first.
     - `ls -l /srv/tc-shared/.shared` still shows `-rw-rw-r--`, owner
-      `ann`: ben's init changes nothing.
+      `ann`: ben's init never touches it.
     - As ben: `chmod 0644 /srv/tc-shared/cards/ben.json`, so one entry
-      ben owns is not right. The same init again. It exits 1, and the
-      words now end `Nothing changed. Run these for the entries you own
-      under it that are not right yet:`, then two lines, `chgrp tcshare
-      /srv/tc-shared/cards/ben.json` and `chmod 0640
-      /srv/tc-shared/cards/ben.json`. As ben, run the two lines; each
-      works. The same init once more ends `No entry you own under it
-      needs a fix.`, exit 1.
+      ben owns is not right. Run `ls -l /srv/tc-shared/cards/ann.json`
+      and `ls -ld /srv/tc-shared/mail/to-ann` and note the lines. The
+      same init again. It exits 1 with three lines: the first as above,
+      then `tc init: fixed /srv/tc-shared/cards/ben.json: group tcshare,
+      mode 0640`, then `tc init: 1 fixed and 0 skipped, each named
+      above. Nothing else changed.` No `chgrp` or `chmod` line is
+      printed (round 6, D29): tc made the change itself, through the
+      open file, never by its name.
+    - `ls -l /srv/tc-shared/cards/ben.json` shows `-rw-r-----`, group
+      `tcshare`. ann's card and inbox print the lines you noted. The
+      same init once more ends `tc init: no entry you own under it needs
+      a fix. Nothing changed.`, exit 1.
     - As ann: `tc init --shared --group tcshare`. `ls -l` now shows
       `-rw-r--r--`.
 
@@ -352,15 +363,56 @@ mail.
       0755 /srv/team/tc2`, then `TC_ROOT=/srv/team/tc2 tc init --shared
       --group tcshare`. It exits 0: this mailbox is ben's. Run `ls -A
       /srv/team/tc2` and note what it prints. As ann: the same init,
-      `TC_ROOT=/srv/team/tc2`. It exits 1 with one line, `tc init:
+      `TC_ROOT=/srv/team/tc2`. It exits 1 with two lines, `tc init:
       /srv/team/tc2 and its .shared belong to ben, who ran init on this
-      mailbox, so only ben runs init on it. A member fixes their own
-      entries by hand. Nothing changed. No entry you own under it needs a
-      fix.` `ls -A /srv/team/tc2` prints the same as before. Before round
-      5 this init exited 0 with the line of step 5, on a mailbox whose
-      group only ben can change.
+      mailbox, so only ben runs init on it. tc fixes the entries you own
+      under it itself, and changes nothing else.` and `tc init: no entry
+      you own under it needs a fix. Nothing changed.` `ls -A
+      /srv/team/tc2` prints the same as before. Before round 5 this init
+      exited 0 with the line of step 5, on a mailbox whose group only ben
+      can change.
+
+## A swapped link never leads init out of the mailbox (round 6, D29)
+
+32. A recipient swaps a link in for a member's own message, and the
+    member's init leaves the folder it points at alone. Here ann is the
+    recipient who swaps: she owns her `read/`, and under sticky the
+    folder's owner may rename anything in it. Any recipient of a
+    member's mail can do the same. The message is ben's from step 10,
+    `000001-from-ben.md`, in ann's `read/` since step 11 and still
+    owned by ben.
+    - As ben, first: `tc init --shared --group tcshare` once. Step 30
+      left files ben made by hand in ann's `read/`, at the mode ben's
+      shell gave them; this run fixes any that are not right (a `tc
+      init: fixed` line each) and exits 1, so the run below shows only
+      this step's two entries.
+    - As ben: `mkdir -m 0700 ~/tc-qa-folder`, then `ls -ld
+      ~/tc-qa-folder`, and note the line. Then `chmod 0664
+      /srv/tc-shared/mail/to-ann/read/000001-from-ben.md`, as a send
+      before D20 left a message, so ben's init has it to fix.
+    - As ann: `mv /srv/tc-shared/mail/to-ann/read/000001-from-ben.md
+      /srv/tc-shared/mail/to-ann/read/aside`, then `ln -s ~ben/tc-qa-folder
+      /srv/tc-shared/mail/to-ann/read/000001-from-ben.md`. The message's
+      name now holds a link to ben's folder.
+    - As ben: `tc init --shared --group tcshare`. It exits 1. The first
+      line is step 15's. Then, in either order, `tc init: skipped
+      /srv/tc-shared/mail/to-ann/read/000001-from-ben.md: a symlink,
+      which tc never follows` and `tc init: fixed
+      /srv/tc-shared/mail/to-ann/read/aside: group tcshare, mode 0640`
+      (the message, still ben's under its new name). The last line:
+      `tc init: 1 fixed and 1 skipped, each named above. Nothing else
+      changed.` No `chgrp` or `chmod` line is printed.
+    - As ben: `ls -ld ~/tc-qa-folder` prints the line you noted, mode
+      and group unchanged. Round 5 printed a `chgrp` and a `chmod` line
+      for the message instead, and pasting them after ann's swap changed
+      this folder.
+    - Put it back. As ann: `rm
+      /srv/tc-shared/mail/to-ann/read/000001-from-ben.md`, then `mv
+      /srv/tc-shared/mail/to-ann/read/aside
+      /srv/tc-shared/mail/to-ann/read/000001-from-ben.md`. As ben: `rmdir
+      ~/tc-qa-folder`.
 
 ## Afterward
 
-32. The mailbox, `/srv/team` and the group stay until you remove them
+33. The mailbox, `/srv/team` and the group stay until you remove them
     yourself.
