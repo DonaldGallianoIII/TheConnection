@@ -14,7 +14,11 @@ through a link. And D20 (the same round): inboxes owned by their
 recipient at 3770, message, card and status files at 0640, a send to a
 name nobody joined refused, an inbox not its card owner's refused, the
 ring marker rewritten in place; then make_folder, init and the refusals'
-words from the audit's MEDIUM-4 and LOW-1 to LOW-8.
+words from the audit's MEDIUM-4 and LOW-1 to LOW-8. And D21 (SHARED D21,
+Claude Opus 5.5, unreviewed): .shared at 0644 after init and after its
+owner's rerun, another member's init told who may change the group, a
+shared send to an inbox with no card refused with nothing written, and a
+private one still delivered.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -51,6 +55,9 @@ the owner's human QA (D4, qa/human/route-shared.md).
             unread, claim_inbox, make_folder, cmd_init, cmd_read,
             write_card and health_snapshot with os.lstat, os.fchown,
             os.fchmod, os.rename, Path.rename or share_entry wrapped.
+            The D21 tests make an inbox and its read/ by hand, write
+            .shared by hand, chmod ROOT read-only and back, and load tc
+            in process to run cmd_init with os.lstat wrapped.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
             importlib, io, json, os, pathlib, stat, subprocess, sys,
             unittest, unittest.mock); tests/_root.py.
@@ -189,6 +196,14 @@ OWNER_FOLDER_MODE = 0o700
 NO_SUPPLEMENTARY_REASON = ("the running user has no named supplementary group, so the supplementary run "
                            "(where a folder left without its chown or setgid lands in the wrong group) "
                            "is skipped")
+# SHARED D21 (Claude Opus 5.5, unreviewed): .shared's mode, written out for
+# the same reason as SHARED_FOLDER_MODE. The user who ran init reads and
+# writes it, everyone else only reads it: never group-writable.
+SHARED_MARKER_MODE = 0o644
+# What init says when another member's rerun may not rewrite .shared.
+ONLY_INIT_USER_WORDS = "only the user who ran init ({owner}) can change the group"
+# The words of every refusal init makes when it may not rewrite .shared.
+INIT_USER_WORDS = "only the user who ran init"
 
 
 def user_groups():
@@ -1529,6 +1544,148 @@ class InitAndRefusalsTest(UmaskTestCase):
             snap = tc.health_snapshot()
         self.assertIsNone(snap["shared_group"])
         self.assertIn("names no group", snap["shared_problem"])
+
+
+# SHARED D21 (Claude Opus 5.5, unreviewed): .shared is owner-write only, and
+# shared delivery needs a card.
+class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
+    """D21: .shared at 0644 after init and its owner's rerun; another member's init told who may change the group; a shared send to a card-less inbox refused; a private one delivered.
+
+    One Linux user cannot be another member, so the other member's init
+    is shown with lstat reporting another owner for .shared, and the
+    kernel's refusal of the rewrite with ROOT made read-only. The real
+    two-user case is qa/human/route-shared.md.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, UmaskTestCase, groups_to_test, primary_group,
+                tree, landed, load_tc, run_init, owner_patched_lstat.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per test and group.
+    """
+
+    def test_shared_is_0644_after_init_and_after_its_owners_rerun(self):
+        """init, then its owner's rerun, then (with a second group) a rerun that rewrites .shared: each exits 0 and leaves .shared 0644, owned by this user, naming the group.
+
+        Must reject a .shared made group-writable (0664 under init's
+        umask 002): any member in its group could change which group
+        everyone's tc uses.
+
+        @interacts  per group: two or three inits; lstats and reads
+                    .shared after each.
+        @deps       _root.TcRoot.tc, groups_to_test.
+        @complexity O(1) per group.
+        @alloc      one TcRoot per group.
+        """
+        found = groups_to_test(self)
+        for label, name, gid in found:
+            steps = [("init", name), ("owner's rerun", name)]
+            steps += [("owner's rerun with another group", other) for _, other, _ in found if other != name]
+            with self.subTest(group=label), _root.TcRoot() as root:
+                marker = root.path / ".shared"
+                seen = []
+                for step, group in steps:
+                    code, out, err = root.tc("init", "--shared", "--group", group)
+                    self.assertEqual(code, 0, f"{step}: {err}")
+                    st = os.lstat(marker)
+                    seen.append((step, stat.S_IMODE(st.st_mode), st.st_uid, marker.read_text()))
+                self.assertEqual(seen, [(step, SHARED_MARKER_MODE, os.getuid(), f"{group}\n")
+                                        for step, group in steps])
+
+    def test_another_members_init_may_not_change_the_group_and_says_who_can(self):
+        """ROOT read-only, .shared naming another group: init exits 1, and only when lstat reports .shared as another user's do the words say only the user who ran init, by name, can change the group. .shared is unchanged.
+
+        Must reject a refusal that never names who may change the group,
+        and one that tells .shared's own owner to ask someone else.
+        Skipped as root, who may write a read-only folder.
+
+        @interacts  a send; writes .shared by hand; chmods ROOT read-only
+                    and back; loads tc in process and runs cmd_init twice,
+                    the second time with os.lstat wrapped.
+        @deps       _root.TcRoot.tc, primary_group, load_tc, run_init,
+                    owner_patched_lstat; unittest.mock; tc.user_name.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root may write a read-only folder")
+        label, name, gid = primary_group()
+        with _root.TcRoot() as root:
+            root.tc("send", "--from", "a", "--to", "b", "hi")
+            marker = root.path / ".shared"
+            marker.write_text(f"{OTHER_GROUP}\n")
+            tc = load_tc(root)
+            other = tc.user_name(os.lstat(marker).st_uid + 1)
+            mode = stat.S_IMODE(os.lstat(root.path).st_mode)
+            root.path.chmod(READ_ONLY_FOLDER_MODE)
+            try:
+                own = run_init(tc, name)
+                with mock.patch.object(os, "lstat", owner_patched_lstat(marker)):
+                    members = run_init(tc, name)
+            finally:
+                root.path.chmod(mode)
+            text = marker.read_text()
+        self.assertEqual(own[0], EXIT_REFUSED, own[2])
+        self.assertIn(STAYS_SHARED_WORDS.format(group=OTHER_GROUP), own[2])
+        self.assertNotIn(INIT_USER_WORDS, own[2], "told .shared's own owner to ask someone else")
+        self.assertEqual(members[0], EXIT_REFUSED, members[2])
+        self.assertIn(f"{STAYS_SHARED_WORDS.format(group=OTHER_GROUP)}; {ONLY_INIT_USER_WORDS.format(owner=other)}",
+                      members[2])
+        self.assertEqual(text, f"{OTHER_GROUP}\n", "a refused init changed .shared")
+
+    def test_a_shared_send_to_an_inbox_with_no_card_is_refused_and_writes_nothing(self):
+        """Shared, mail/to-c and its read/ made by hand, no card for c: a send to c exits 1 with exactly C4's words, lands nothing, leaves mail/.seq as it was; the next send takes the next number.
+
+        Every send takes the recipient's inbox lock before it routes, so
+        mail/.box-c.lock is the one new entry, and the comparison leaves
+        it out. Must reject delivery into a card-less inbox (one a sender
+        made would belong to that sender, D20).
+
+        @interacts  init, a join, a send; two folders made by hand; a
+                    refused send and one more send; stats the root and
+                    reads mail/.seq before and after.
+        @deps       _root.TcRoot.tc, primary_group, tree.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        label, name, gid = primary_group()
+        with _root.TcRoot() as root:
+            setup = [root.tc("init", "--shared", "--group", name),
+                     root.tc("join", "b", env={"CLAUDECODE": "1"}),
+                     root.tc("send", "--from", "a", "--to", "b", "first")]
+            for folder in ("to-c", "to-c/read"):
+                (root.path / "mail" / folder).mkdir()  # an inbox nobody joined
+            seq = root.path / "mail" / ".seq"
+            before, seq_before = tree(root.path), seq.read_text()
+            code, out, err = root.tc("send", "--from", "a", "--to", "c", "hi")
+            after, seq_after = tree(root.path), seq.read_text()
+            following = root.tc("send", "--from", "a", "--to", "b", "second")
+        for run in setup:
+            self.assertEqual(run[0], 0, run[2])
+        self.assertEqual(code, EXIT_REFUSED, f"exited {code}: {out}{err}")
+        self.assertEqual((out, err), ("", NOBODY_WORDS.format(name="c") + "\n"))
+        after.pop("mail/.box-c.lock", None)
+        self.assertEqual(after, before, "a refused send wrote something")
+        self.assertEqual(seq_after, seq_before, "a refused send used a number")
+        self.assertEqual(following[0], 0, following[2])
+        self.assertIn("sent #2 to b", following[1])
+
+    def test_a_private_send_to_an_inbox_with_no_card_still_delivers(self):
+        """Private, mail/to-c and its read/ made by hand, no card for c: a send to c exits 0 and lands in mail/to-c (O1, unchanged by D21).
+
+        Must reject a card check that reaches a private mailbox.
+
+        @interacts  two folders made by hand; one send.
+        @deps       _root.TcRoot.tc, landed.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            for folder in ("to-c", "to-c/read"):
+                (root.path / "mail" / folder).mkdir(parents=True)
+            code, out, err = root.tc("send", "--from", "a", "--to", "c", "hi")
+            mail = landed(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(mail, ["mail/to-c/000001-from-a.md"])
 
 
 

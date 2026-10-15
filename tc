@@ -16,7 +16,7 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   mail/.box-<name>.lock                    the inbox lock: send, read, card, codex join (D14)
   mail/.ring-pending-<name>                ring owed and why, or clear (D14, D16, D20)
   cards/<name>.json                        one address card per name (C1)
-  .shared                                  the group a shared mailbox is shared with (C4)
+  .shared                                  the group a shared mailbox is shared with (C4), 0644 (D21)
 
 @interacts  writes mail/, status/ and cards/ under ROOT; no network. The waking side is
             Claude Code's background Bash: `tc wait` or `tc watch` exiting is
@@ -33,11 +33,12 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             the recipient (D20). Messages, cards and status files are made
             0640, never group-writable; mail/.seq, the locks and the ring
             marker stay 0664 and are never removed (the marker is
-            rewritten, D20). A send to a name with no card and no inbox,
-            or to an inbox its card's owner does not own, is refused,
-            exit 1 (D20). `init` reads the group database, makes the four
-            when missing (D19), sets the group and mode of every folder
-            and file under them that is not right yet, then writes .shared
+            rewritten, D20). A send to a name with no card, whether or not
+            an inbox is there (D21), or to an inbox its card's owner does
+            not own, is refused, exit 1 (D20). `init` reads the group
+            database, makes the four when missing (D19), sets the group
+            and mode of every folder and file under them that is not right
+            yet, then writes .shared at 0644, owner-write only (D21),
             unless it already names the group. Shared
             or not, the locks, mail/.seq, status files and the ring marker
             are opened without following a symlink, and an inbox or its
@@ -225,6 +226,11 @@ SHARED_MARKER_NAME = ".shared"
 # The most of .shared tc reads. A group name is a few dozen characters at
 # most, so 4 KiB bounds a hand-made file without ever cutting a real one.
 SHARED_MARKER_READ_MAX_BYTES = 4096
+# SHARED D21 (Claude Opus 5.5, unreviewed): .shared's mode. The user who
+# ran init reads and writes it; every other member only reads it, so no
+# other member can change which group everyone's tc uses. Init's umask
+# (SHARED_UMASK) takes no bit from it, so a rewrite on a rerun is 0644 too.
+SHARED_MARKER_MODE = 0o644
 # The folders a shared mailbox shares, by name under ROOT (C4). outbox/ is
 # the ssh route's (C3); init reaches it whenever it is there.
 SHARED_FOLDER_NAMES = ("mail", "status", "cards", "outbox")
@@ -920,6 +926,13 @@ def cmd_init(args):
     An entry it cannot change (a link, a FIFO, one another user owns) is
     named on stderr, and init exits 1 once the rest is done.
 
+    SHARED D21 (Claude Opus 5.5, unreviewed): .shared is made
+    SHARED_MARKER_MODE (0644), so only the user who ran init can rewrite
+    it, and a rerun that finds it naming g leaves it as it is. tc never
+    makes it group-writable. When another user owns .shared and init may
+    not replace it, the refusal says only the user who ran init can
+    change the group, naming that user.
+
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19 and the audit's
     LOW-2 to LOW-4 and LOW-7. Init first makes ROOT (it is not shared:
     no group, no mode) and then mail/, status/, cards/ and outbox/ when
@@ -938,13 +951,15 @@ def cmd_init(args):
                 parents, and each missing top folder; walks the four
                 folders and opens, fstats and changes each entry
                 (shared_entries); reads ROOT/.shared (shared_group); unless
-                it already names g, creates ROOT/.shared.<pid>.tmp and
-                renames it to ROOT/.shared, removing its own .tmp if the
-                rename fails. Prints one line, plus one stderr line per
-                skipped entry, first.
+                it already names g, creates ROOT/.shared.<pid>.tmp at
+                SHARED_MARKER_MODE and renames it to ROOT/.shared,
+                removing its own .tmp if the rename fails, and on a
+                permission error lstats ROOT/.shared for its owner and
+                reads the user database. Prints one line, plus one stderr
+                line per skipped entry, first.
     @deps       shared_entries, shared_group, write_new_file, refuse,
-                printable; grp, os, sys; SHARED_FOLDER_NAMES,
-                SHARED_MARKER_NAME, SHARED_UMASK.
+                printable, user_name; grp, os, sys; SHARED_FOLDER_NAMES,
+                SHARED_MARKER_NAME, SHARED_MARKER_MODE, SHARED_UMASK.
     @complexity O(f) over f folders and files under the four folders: the
                 inboxes and every read/ (hundreds to thousands, growing
                 with the history).
@@ -989,7 +1004,7 @@ def cmd_init(args):
     if current != group:
         tmp, made = ROOT / f"{SHARED_MARKER_NAME}.{os.getpid()}.tmp", False
         try:
-            write_new_file(tmp, f"{group}\n")
+            write_new_file(tmp, f"{group}\n", SHARED_MARKER_MODE)  # SHARED D21 (Claude Opus 5.5, unreviewed)
             made = True
             tmp.rename(marker)  # atomic, so a reader never sees half of it
         except OSError as err:
@@ -998,6 +1013,14 @@ def cmd_init(args):
             state = ("the mailbox stays private" if current is None
                      else f"{marker} stays unreadable, so tc refuses every command but init"
                      if current is ValueError else f"the mailbox stays shared with group {printable(current)}")
+            # SHARED D21 (Claude Opus 5.5, unreviewed): another member's init may not change the group.
+            if current is not None and isinstance(err, PermissionError):
+                try:
+                    owner = os.lstat(marker).st_uid
+                except OSError:
+                    owner = os.geteuid()  # gone or out of reach: no owner to name
+                if owner != os.geteuid():
+                    state += f"; only the user who ran init ({user_name(owner)}) can change the group"
             refuse(f"tc init: could not write {marker} ({err.strerror}); {state}. {done['folder']} "
                    f"folders and {done['file']} files are in group {printable(group)}.", EXIT_REFUSED)
     print(f"mailbox shared with group {printable(group)}: {done['folder']} folders and "
@@ -1180,6 +1203,8 @@ def write_new_file(path, text, mode=NEW_FILE_MODE):
     text is encoded as Path.write_text would. SHARED fix round 1 (Claude
     Opus 5.5, unreviewed): a message or card under a shared mailbox passes
     SHARED_OWNED_FILE_MODE (D20 item 2); the umask cannot add bits to it.
+    SHARED D21 (Claude Opus 5.5, unreviewed): .shared passes
+    SHARED_MARKER_MODE.
 
     @interacts  creates and writes one file; nothing else.
     @deps       os; NEW_FILE_FLAGS, NEW_FILE_MODE.
@@ -2082,17 +2107,20 @@ def deliver_local(card, sender, to, body, header_note=None):
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): under a shared
     mailbox (D20), before a number is taken: an inbox not owned by its
     card's owner refuses the send (exit 1, check_inbox, item 4); a name
-    with no card and no inbox is refused, Delivery exit 1, `tc send:
-    nobody has joined as <to> on this shared mailbox`, and one with a
-    card but no inbox is refused with words telling its owner to rejoin
-    (item 3). Nothing is made either way: only tc join makes an inbox, as
-    its recipient, so no sender ever owns another's inbox. The message is
-    made SHARED_OWNED_FILE_MODE (0640, item 2). O1's deliver plus warning
-    stays for a private mailbox.
+    with no card is refused, Delivery exit 1, `tc send: nobody has joined
+    as <to> on this shared mailbox`, and one with a card but no inbox is
+    refused with words telling its owner to rejoin (item 3). SHARED D21
+    (Claude Opus 5.5, unreviewed): the no-card refusal holds whether or
+    not an inbox is there, so a card-less inbox (one a sender made before
+    D20, or by hand) never takes mail. Nothing is made either way: only
+    tc join makes an inbox, as its recipient, so no sender ever owns
+    another's inbox. The message is made SHARED_OWNED_FILE_MODE (0640,
+    item 2). O1's deliver plus warning stays for a private mailbox.
 
     @interacts  reads ROOT/.shared (mailbox_share); lstats mail/to-<to>,
-                its read/ and, when shared, cards/<to>.json (check_inbox);
-                takes the mail/.seq flock (next_seq); private only: makes
+                its read/ and, when shared, cards/<to>.json (check_inbox,
+                then once more for the no-card refusal); takes the
+                mail/.seq flock (next_seq); private only: makes
                 mail/to-<to>/read/; stats cards/<to>.json; creates
                 NNNNNN-from-<sender>.tmp and renames it to .md in
                 mail/to-<to>/.
@@ -2105,12 +2133,13 @@ def deliver_local(card, sender, to, body, header_note=None):
     share = mailbox_share()  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20
     box_st, _ = check_inbox(to, share is not None)  # SHARED D17 (Claude Opus 5.5, unreviewed): before a number is taken
     box_existed = box_st is not None
-    if share is not None and not box_existed:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 3
-        if os.path.lexists(CARDS / f"{to}.json"):
+    if share is not None:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 3
+        if not os.path.lexists(CARDS / f"{to}.json"):  # SHARED D21 (Claude Opus 5.5, unreviewed): inbox or not
+            return Delivery(EXIT_REFUSED, f"tc send: nobody has joined as {to} on this shared mailbox", [])
+        if not box_existed:
             return Delivery(EXIT_REFUSED, f"tc send: {to} has a card but no inbox on this shared mailbox; "
                                           f"nothing sent. Ask {to}'s owner to rejoin (tc join {to}, run as "
                                           f"that Linux user), which makes the inbox.", [])
-        return Delivery(EXIT_REFUSED, f"tc send: nobody has joined as {to} on this shared mailbox", [])
     n = next_seq()
     box = MAIL / f"to-{to}" if share is not None else inbox(to, False)
     path = box / f"{n:0{SEQ_WIDTH}d}-from-{sender}.md"
