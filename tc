@@ -2381,38 +2381,71 @@ def write_new_file(path, text, mode=NEW_FILE_MODE, dir_fd=None):
         f.write(text)
 
 
+# SSH task 0 (Claude Opus 5.5, unreviewed): D18, the one path that holds
+# the route and inbox-lock steps, which tc send and the gate (C3) share.
+def route_and_deliver(sender, to, body, header_note=None):
+    """Read `to`'s card and hand the message to the route it names (C2), under one lock deadline: the route's Delivery.
+
+    The steps cmd_send held until SSH task 0, moved here unchanged so the
+    gate (C3) takes the same path (D18). No card means route local. A
+    local delivery reads the card again under the inbox lock, held shared,
+    and lands under it, so a `tc card` for this name either counts this
+    message or is read here first. The codex route takes the lock itself,
+    alone. The inbox lock is not re-entrant: nothing else takes these
+    steps. One lock_deadline is taken before any lock and handed to
+    deliver_local or deliver_codex, also when the card read under the
+    lock turned codex, so no path waits two bounds (SHARED fix rounds 3
+    and 4); any other route gets C2's arguments alone. `header_note` goes
+    to the route, which ends the message's header line with it.
+
+    Busy leaves two ways (D23). A lock held past the deadline exits 10
+    through sys.exit inside inbox_lock or next_seq, so nothing after this
+    call runs. A send out of numbers comes back as Delivery exit 10. So a
+    caller that must act only after a delivery acts on exit 0 here, never
+    in a finally.
+
+    @interacts  reads cards/<to>.json (card_route) and refuses (exit 1,
+                nothing written) a card it cannot route; for a local
+                delivery holds mail/.box-<to>.lock shared (inbox_lock;
+                held past the deadline by another process, exit 10,
+                nothing written) and reads the card again; calls one
+                ROUTES function, which writes the message.
+    @deps       card_route, lock_deadline, inbox_lock, deliver_local,
+                deliver_codex; fcntl.
+    @complexity O(1) here, plus the route's own work; the inbox lock and
+                every mail/.seq wait take at most LOCK_WAIT_SECONDS in all.
+    @alloc      the card dict, freed on return; whatever the route keeps.
+    """
+    card, deliver = card_route(to)
+    deadline = lock_deadline()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one per command
+    if deliver is deliver_local:
+        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the card read again under the shared lock.
+        with inbox_lock(to, fcntl.LOCK_SH, deadline):
+            card, deliver = card_route(to)
+            if deliver is deliver_local:
+                return deliver_local(card, sender, to, body, header_note, deadline=deadline)
+    if deliver is deliver_codex:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-3, also after a turn to codex
+        return deliver_codex(card, sender, to, body, header_note, deadline=deadline)
+    return deliver(card, sender, to, body, header_note)
+
+
 def cmd_send(args):
     """`tc send`: check, then hand the message to the route on the recipient's card (C2).
 
-    No card means route local: today's send, with today's stdout line. A
-    local delivery reads the card again under the inbox lock (shared) and
-    lands under it, so a `tc card` for this name either counts this message
-    or is read here first. The codex route takes the lock itself.
+    No card means route local: today's send, with today's stdout line.
+    route_and_deliver reads the card, takes the locks and calls the route
+    (SSH task 0, Claude Opus 5.5, unreviewed: moved there unchanged, D18).
     The route's Delivery decides the rest: words to stdout on exit 0, else
     to stderr; every warning to stderr; then its exit code.
 
     @interacts  checks both names first (C0, exit 6, nothing written); reads
                 the body (stdin when no text is given) and refuses one over
                 SEND_BODY_MAX_BYTES (exit 8) or empty (exit 1) before any
-                number is taken; reads cards/<to>.json and refuses (exit 1,
-                nothing written) a card it cannot route; for a local
-                delivery holds mail/.box-<to>.lock shared and reads the card
-                again; calls one ROUTES function, which writes the message;
-                prints. SHARED fix round 3 (Claude Opus 5.5, unreviewed): a
-                local delivery takes one lock_deadline before the inbox
-                lock and hands it to deliver_local, so the inbox lock and
-                every mail/.seq wait together take at most
-                LOCK_WAIT_SECONDS; a lock held past it refuses, exit 10,
-                nothing written (inbox_lock, next_seq, D20, D23). SHARED
-                fix round 4 (Claude Opus 5.5, unreviewed): the audit's
-                LOW-3. Every send takes that one deadline before it
-                routes and hands it to deliver_local or deliver_codex,
-                also when the card read under the lock turned codex, so
-                no path waits two bounds; any other route gets C2's
-                arguments alone.
-    @deps       require_names, read_body, refuse, card_route, inbox_lock,
-                lock_deadline, deliver_local, deliver_codex, Delivery;
-                fcntl.
+                number is taken; then route_and_deliver (the card, the
+                inbox lock for a local delivery, one lock_deadline for
+                every lock wait, the route, which writes the message);
+                prints.
+    @deps       require_names, read_body, refuse, route_and_deliver, Delivery.
     @complexity O(b) over b bytes of body, at most SEND_BODY_MAX_BYTES,
                 plus the route's own work.
     @alloc      the body string, freed on exit; whatever the route keeps.
@@ -2422,18 +2455,7 @@ def cmd_send(args):
     body = read_body(args.message)
     if not body.strip():
         refuse("tc send: empty message", EXIT_REFUSED)  # CARDS fix round 1 (Claude Opus 5.5, unreviewed)
-    card, deliver = card_route(args.to)
-    deadline = lock_deadline()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one per command
-    if deliver is deliver_local:
-        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the card read again under the shared lock.
-        with inbox_lock(args.to, fcntl.LOCK_SH, deadline):
-            card, deliver = card_route(args.to)
-            if deliver is deliver_local:
-                result = deliver_local(card, args.sender, args.to, body, deadline=deadline)
-    if deliver is deliver_codex:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-3, also after a turn to codex
-        result = deliver_codex(card, args.sender, args.to, body, deadline=deadline)
-    elif deliver is not deliver_local:
-        result = deliver(card, args.sender, args.to, body)
+    result = route_and_deliver(args.sender, args.to, body)  # SSH task 0 (Claude Opus 5.5, unreviewed): D18
     print(result.words, file=sys.stdout if result.exit == 0 else sys.stderr)
     for warning in result.warnings:
         print(warning, file=sys.stderr)
@@ -3593,11 +3615,12 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
                 taken there: the next number), links it to
                 NNNNNN-from-<sender>.md there and removes the .tmp's name;
                 stats cards/<to>.json. Every name taken: Delivery exit 10.
+                SSH task 0 (Claude Opus 5.5, unreviewed): every try's
+                steps run in publish_message, with ("read",) as the
+                history it checks; nothing about them changed.
     @deps       mailbox_share, check_inbox, lock_deadline, next_seq, inbox,
-                now_iso, write_new_file, Delivery; os; ROOT, CARDS,
-                SEQ_WIDTH, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE,
-                PUBLISH_MAX_TRIES, NO_HARD_LINK_ERRNOS, TMP_TAKEN_WHY,
-                EXIT_REFUSED, EXIT_BUSY.
+                publish_message, Delivery; os; CARDS,
+                SHARED_OWNED_FILE_MODE, NEW_FILE_MODE, EXIT_REFUSED.
     @complexity O(b) over b bytes of body, once per try: one try in an
                 honest mailbox, at most PUBLISH_MAX_TRIES, a bound reached
                 by a set-back mail/.seq or by names planted ahead of it
@@ -3623,6 +3646,70 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
     n = next_seq(deadline)
     box = MAIL / f"to-{to}" if share is not None else inbox(to, False)
     mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 2
+    # SSH task 0 (Claude Opus 5.5, unreviewed): the publish loop lives in publish_message, which the outbox shares (D25).
+    published = publish_message(box, ("read",), n, sender, to, body, header_note, mode, deadline)
+    if published.refusal is not None:
+        return published.refusal
+    warnings = published.warnings
+    joined = (CARDS / f"{to}.json").exists()  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13
+    if not (box_existed or joined):
+        warnings.append(f"new inbox: nobody has joined as {to}")
+    return Delivery(0, f"sent #{published.n} to {to}: {published.path}", warnings)
+
+
+# SSH task 0 (Claude Opus 5.5, unreviewed): the publish that deliver_local
+# held inline, lifted out so the ssh route's outbox (D25) publishes the
+# same way. What it hands back: the number and path the message landed
+# at, the warnings so far, and, when it did not land, the Delivery that
+# says why (refusal), with n and path then the last ones tried.
+Published = collections.namedtuple("Published", "n path warnings refusal")
+
+
+def publish_message(box, history, n, sender, to, body, header_note, mode, deadline):
+    """Publish one message in the folder `box` at number `n`, or the first number after it nothing has: a Published.
+
+    The message is written whole to a new .tmp (write_new_file, so
+    nothing at that name is ever written through), hard-linked to
+    NNNNNN-from-<sender>.md (os.link fails on anything at that name, where
+    a rename would replace it), and the .tmp's name removed. It skips to
+    the next number (next_seq) three ways: a name already in one of the
+    subfolders named in `history` (read/ for an inbox; sent/ and refused/
+    for an outbox), the message's own name taken, or its .tmp name taken.
+    The .tmp's FileExistsError is caught ahead of any other OSError. All
+    three share PUBLISH_MAX_TRIES and the command's one `deadline` (each
+    next_seq waits no later than it, then exits 10). Out of tries: a
+    refusal Delivery exit 10, busy (EXIT_BUSY), whose words name the last
+    name a try found taken and say mail/.seq was behind only when a try
+    found a message's own name or a history name taken (TMP_TAKEN_WHY
+    otherwise). A .tmp that cannot be made for any other reason, a link
+    that fails for a reason but a taken name, or a filesystem with no hard
+    links (NO_HARD_LINK_ERRNOS) is a refusal Delivery exit 1, nothing
+    published, no .tmp left. The header is `# #<n> from <sender> to <to>,
+    <time>`, plus `, <header_note>` when one is given; the body follows
+    a blank line, trailing whitespace cut, one newline at its end.
+
+    Lifted unchanged from deliver_local's SHARED fix rounds 2 to 7 (D20,
+    D23, DEBT-1, LOW-1 to LOW-3); their record is in deliver_local's
+    block.
+
+    @interacts  per try: lstats <box>/<h>/NNNNNN-from-<sender>.md for each
+                h in `history`, creates <box>/NNNNNN-from-<sender>.tmp at
+                `mode` (write_new_file), links it to its .md name and
+                removes the .tmp's name; every try after the first takes
+                a number (next_seq: the mail/.seq flock, waiting no later
+                than `deadline`, then exit 10). Reads the clock (now_iso).
+    @deps       next_seq, write_new_file, now_iso, Delivery; os; ROOT,
+                SEQ_WIDTH, PUBLISH_MAX_TRIES, NO_HARD_LINK_ERRNOS,
+                TMP_TAKEN_WHY, EXIT_REFUSED, EXIT_BUSY.
+    @complexity O(b) over b bytes of body, once per try: one try in an
+                honest mailbox, at most PUBLISH_MAX_TRIES, a bound reached
+                by a set-back mail/.seq or by names planted ahead of it;
+                plus h lstats per try, h = len(history), one or two.
+    @alloc      the message text while written; one message file, kept;
+                at most one .tmp per try, removed before the next; the
+                last taken name, one short string; one Published,
+                returned.
+    """
     warnings = []
     taken, behind = None, False  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): LOW-2, the name each try found taken
     # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20, never over a message; a taken name takes the next number.
@@ -3630,9 +3717,11 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
         if tries:
             n = next_seq(deadline)
         path = box / f"{n:0{SEQ_WIDTH}d}-from-{sender}.md"
-        if os.path.lexists(box / "read" / path.name):
-            taken, behind = f"read/{path.name}", True
-            continue  # a read message has this name, and tc read would rename over it
+        kept = next((f"{folder}/{path.name}" for folder in history if os.path.lexists(box / folder / path.name)),
+                    None)
+        if kept is not None:
+            taken, behind = kept, True
+            continue  # a filed message has this name (in read/, tc read would rename over it)
         tmp = path.with_suffix(".tmp")
         header = f"# #{n} from {sender} to {to}, {now_iso()}" + (f", {header_note}" if header_note else "")
         try:  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a planted link is refused
@@ -3641,7 +3730,8 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
             taken = tmp.name
             continue
         except OSError as err:
-            return Delivery(EXIT_REFUSED, f"tc send: could not create {tmp} ({err.strerror}); nothing sent", [])
+            return Published(n, path, [], Delivery(EXIT_REFUSED, f"tc send: could not create {tmp} "
+                                                                f"({err.strerror}); nothing sent", []))
         try:
             os.link(tmp, path)  # whole when it appears, and never replaces what has the name
             failed = None
@@ -3654,24 +3744,22 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
         if failed is None:
             break
         if failed.errno in NO_HARD_LINK_ERRNOS:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-3
-            return Delivery(EXIT_REFUSED, f"tc send: the filesystem under {ROOT} has no hard links "
-                                          f"({failed.strerror}), and tc needs them to publish a message without "
-                                          f"ever replacing another (D20); nothing sent. Put the mailbox (TC_ROOT) "
-                                          f"on a filesystem that has them, such as ext4.", warnings)
+            return Published(n, path, warnings, Delivery(
+                EXIT_REFUSED, f"tc send: the filesystem under {ROOT} has no hard links ({failed.strerror}), and tc "
+                              f"needs them to publish a message without ever replacing another (D20); nothing sent. "
+                              f"Put the mailbox (TC_ROOT) on a filesystem that has them, such as ext4.", warnings))
         if not isinstance(failed, FileExistsError):
-            return Delivery(EXIT_REFUSED, f"tc send: could not publish {path} ({failed.strerror}); nothing sent",
-                            warnings)
-        taken, behind = path.name, True  # a message in the inbox has this name
+            return Published(n, path, warnings, Delivery(
+                EXIT_REFUSED, f"tc send: could not publish {path} ({failed.strerror}); nothing sent", warnings))
+        taken, behind = path.name, True  # a message in the folder has this name
     else:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): DEBT-3, busy, not refused (dev exit row 10)
         why = ("mail/.seq was behind the names there: set back, or names planted ahead of it" if behind
                else TMP_TAKEN_WHY)  # SHARED fix round 7 (Claude Opus 5.5, unreviewed): LOW-1, what tc knows and no more
-        return Delivery(EXIT_BUSY, f"tc send: {PUBLISH_MAX_TRIES} message numbers in a row were taken in "
-                                      f"{box}, the last by {taken} ({why}); nothing sent. Each try moved "
-                                      f"mail/.seq on, so the next send starts past them.", warnings)
-    joined = (CARDS / f"{to}.json").exists()  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13
-    if not (box_existed or joined):
-        warnings.append(f"new inbox: nobody has joined as {to}")
-    return Delivery(0, f"sent #{n} to {to}: {path}", warnings)
+        return Published(n, path, warnings, Delivery(
+            EXIT_BUSY, f"tc send: {PUBLISH_MAX_TRIES} message numbers in a row were taken in {box}, the last by "
+                       f"{taken} ({why}); nothing sent. Each try moved mail/.seq on, so the next send starts past "
+                       f"them.", warnings))
+    return Published(n, path, warnings, None)
 
 
 # Phase fix round 1 (Claude Opus 5.5, unreviewed): D16, the ring marker and
