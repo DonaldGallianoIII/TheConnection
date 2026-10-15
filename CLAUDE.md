@@ -44,8 +44,9 @@ and a README a stranger can follow. The plan's index is
 - No installs and no network of its own. The one server is the board's
   (`board/serve.py`, contract C6): bound to 127.0.0.1 only, its feed
   behind a token made at start. The page asks no other host (D26). SSH
-  is the only way off the machine, and only through the planned `ssh`
-  route.
+  is the only way off the machine, and only through the `ssh` route:
+  `tc send` to an ssh card on this side, `tc gate` (a forced command in
+  `authorized_keys`) on the other.
 
 ### Architecture
 
@@ -104,7 +105,8 @@ The connection routes plan, run in lanes and waves
 (this file, `docs/known-bugs/` and `tests/_root.py`), merged into the dev
 branch at `a029bda`, CORE at `f5f6923`, CARDS at `4f35efc` and BOARD at
 `a2953cb`, with the P4 phase review's fixes at `eb3e187`, and SHARED
-(wave 2) at `84b97d2`. As of 2026-10-15, SSH is next, then DOCS.
+(wave 2) at `84b97d2`, and SSH (wave 2b) at `616b9db`. As of
+2026-10-15, the P3 phase review is next, then DOCS.
 
 ### Off limits
 
@@ -140,6 +142,8 @@ mail/.box-<name>.lock              the inbox lock: send's count plus write, read
 mail/.ring-pending-<name>          the codex ring's state: pending, timed out or clear; never removed (D14, D16, D20)
 cards/<name>.json                  one address card per name: kind, account, route (gitignored)
 .shared                            the group a shared mailbox uses, 0644, written by init (gitignored)
+outbox/<user>/to-<name>/           ssh mail one member queued for a far name, with sent/ and refused/ (D25, D32; gitignored)
+mail/.origins/<user>/<key>/        on the receiving side, the origin ids each far key delivered, so a retry never lands twice (D25, D33)
 status/<name>.md                   each side's latest status (gitignored)
 ```
 
@@ -323,7 +327,8 @@ names.
 
 The tool runs today on one machine: send, read, peek, wait (with
 `--keepalive`), status, log, health and watch; join, card and cards for
-address cards; a router in send with the `local` and `codex` routes;
+address cards; a router in send with the `local`, `codex` and `ssh`
+routes, with `flush` for queued ssh mail and `gate` for inbound ssh;
 `init --shared` for a mailbox several Linux users share; plus the live
 board (`python3 board/serve.py`).
 `tests/test_mailbox.py` (CORE, K1 to K8) tests send, read, peek, wait,
@@ -343,5 +348,8 @@ headless check in `tests/board-browser-check.mjs`). The P4 phase review
 (D9) closed with two fix rounds merged at `eb3e187`. The shared mailbox
 (SHARED, P3's first half) merged at `84b97d2` after eight review rounds;
 its two-user walk (`qa/human/route-shared.md`) is the owner's and not
-yet run by a person. As of 2026-10-15 the `ssh` route and the docs are
-not built. `main` stays the owner's alone.
+yet run by a person. The `ssh` route (SSH, P3's second half) merged at
+`616b9db` after its lane review and one fix round; real ssh has not run
+yet: its two-machine walk (`qa/human/route-ssh.md`) is the architect's
+under D30. As of 2026-10-15 the P3 phase review and the docs are next.
+`main` stays the owner's alone.
