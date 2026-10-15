@@ -6,12 +6,14 @@
  * diffBoard says what changed between two views. patchBoard applies a diff
  * through a drawing kit (createKit for the DOM, or a test's fake), so the
  * board is never rebuilt. createFit keeps a board laid out to its canvas.
- * Round 2: every wire and connector is routed round the boxes (routeTree,
- * routeAround) and every label is placed clear of boxes and other labels
- * (placeLabels); the routing section states the one rule. Each root's tree
- * starts with a heading, rootsList and createRoots make the list of roots
- * at the top of the page, and on a phone createFit draws outlineView's
- * outline instead of the graph.
+ * Every wire and connector is routed round the boxes (routeTree,
+ * routeTreeWire, routeAround), a parent and child's wire beside their
+ * connector, never on it, and every label is placed clear of boxes and
+ * other labels (placeLabels); the routing section states the one rule. A
+ * native pair's boxes and a reports_to cycle's root carry badge lines in
+ * words (badgesOf). Each root's tree starts with a heading, rootsList and
+ * createRoots make the list of roots at the top of the page, and on a
+ * phone createFit draws outlineView's outline instead of the graph.
  *
  * @interacts  creates elements under the container the caller passes in; uses
  *             theme.css class names; applyLook writes data-theme on <html>;
@@ -39,9 +41,10 @@
  *             is O(n + e) over two views' nodes and e edges, times their
  *             points; outlineView is O(n log n + r log r); rootsList and
  *             pillText are O(n) after the sort; createPoller is O(1) per poll
- * @alloc      one element tree, one connector path and one heading per
- *             node, one path with its title and one label with its backing
- *             per wire, each released by its own remove(); the outline's
+ * @alloc      one element tree (with one line per badge), one connector
+ *             path and one heading per node, one path with its title and
+ *             one label with its backing per wire, each released by its
+ *             own remove(); the outline's
  *             element tree, replaced when the outline changes; one button
  *             per root in the roots list, replaced when the roots change.
  *             removeBoard clears the DOM
@@ -62,6 +65,10 @@ const MIN_TEXT_PX = 11;
 // line, the note and the wire labels). tests/board-layout.test.mjs reads
 // theme.css and fails if the two drift apart.
 const BOARD_TEXT_MIN_PX = 11;
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// A tree connector to a wrapped row runs down a lane of its own parent's
+// block, this far from the block's edge and from the children beside it.
+const ROUTE_GUTTER_PX = 12;
 
 export const CONFIG = Object.freeze({
   // Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status:
@@ -70,6 +77,10 @@ export const CONFIG = Object.freeze({
   // 64 tall (round 1): three lines of 11 px or more inside a 4 px double border.
   NODE_W: 208,
   NODE_H: 64,
+  // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+  // A box carrying badge lines (a native pair, a cycle's root: words, never
+  // color alone) is BADGE_H taller per line: one 11 px line in its dashed rule.
+  BADGE_H: 16,
   PORT_SIZE: 12,
   // Wire bend: horizontal control-point reach is half the span, never less
   // than WIRE_MIN_BEND, so short wires still curve instead of kinking.
@@ -112,17 +123,24 @@ export const CONFIG = Object.freeze({
   // A message at most this many seconds old flows on its wire. The feed's
   // WRITING_WINDOW_S, so the wire moves while its sender reads as writing.
   FLOW_AGE_S: 10,
-  // Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
-  // Routing (round 2, item 2, and a2's direction). A routed wire keeps
-  // ROUTE_CLEAR px from every box; a bend costs as much as ROUTE_TURN_COST
-  // px of length, so a route takes few bends; a tree's wire to a wrapped
-  // row runs down the side of its parent's block ROUTE_GUTTER px out from
-  // it, under half of LAYOUT_COL_GAP and of LAYOUT_MARGIN, so it keeps
-  // clear of the block beside it too. A bend is drawn rounded, with a radius
-  // of at most ROUTE_CLEAR, so the curve stays as clear as the corner.
+  // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+  // Routing. A routed wire keeps ROUTE_CLEAR px from every box; a bend
+  // costs as much as ROUTE_TURN_COST px of length, so a route takes few
+  // bends. A block whose children wrap into more than one row starts them
+  // LAYOUT_LANE in, and its connectors to the wrapped rows run down the
+  // middle of that lane, ROUTE_GUTTER from the block's edge and from the
+  // children, so two parents never share one gutter. A bend is drawn
+  // rounded, with a radius of at most ROUTE_CLEAR, so the curve stays as
+  // clear as the corner.
   ROUTE_CLEAR: 10,
   ROUTE_TURN_COST: 40,
-  ROUTE_GUTTER: 12,
+  ROUTE_GUTTER: ROUTE_GUTTER_PX,
+  LAYOUT_LANE: 2 * ROUTE_GUTTER_PX,
+  // A parent and child's mail wire, or their native line, runs this far
+  // beside their connector, never on it, so the connector never fills the
+  // gaps of its dots or dashes. More than a port ring's half width
+  // (PORT_SIZE / 2) plus half a wire, so it clears both port rings.
+  TREE_WIRE_OFFSET: 8,
   // A routed piece that runs alongside a tree connector, within ROUTE_CLEAR
   // of it, costs this many times its length, so a wire between trees takes
   // the gaps between them and crosses a connector rather than shadowing it.
@@ -274,14 +292,15 @@ export function portPoint(pos, side) {
 
 /**
  * Where a node's port sits on the live board, whose ports follow its
- * top-down levels (round 2, a2's direction): side 'in' is the middle of the
- * top edge, 'out' the middle of the bottom edge, so a parent's connector
- * and its mail to a child run down.
- * Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+ * top-down levels: side 'in' is the middle of the top edge, 'out' the
+ * middle of the bottom edge, so a parent's connector and its mail to a
+ * child run down. `h` is the box's height: NODE_H, plus BADGE_H per badge
+ * line the box carries.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @complexity O(1)  @alloc one object
  */
-export function levelPort(pos, side) {
-  return { x: pos.x + CONFIG.NODE_W / 2, y: pos.y + (side === 'in' ? 0 : CONFIG.NODE_H) };
+export function levelPort(pos, side, h = CONFIG.NODE_H) {
+  return { x: pos.x + CONFIG.NODE_W / 2, y: pos.y + (side === 'in' ? 0 : h) };
 }
 
 /**
@@ -411,15 +430,19 @@ export function createRoots(doc, parent, onJump) {
  * edges (levelPort), as the live board draws them. The
  * title splits at its first ' · ': the name may shorten with an ellipsis,
  * the role words after it never do. A third line holds `note` (a status
- * line, or a reports_to that names nobody); empty, it is hidden.
+ * line, or a reports_to that names nobody); empty, it is hidden. Under it,
+ * one badge line per item of `badges` ({ lead, names, tail, text }: a
+ * native pair or a cycle's root, in words), each in a dashed rule; only
+ * the names may shorten, and the whole text is the badge's title. `h` is
+ * the box's height (NODE_H, plus BADGE_H per badge line).
  * @interacts  appends to canvas.view; remove() takes the node out again
- * @complexity O(1)  @alloc one node subtree
- * @returns {{ root, pos, setState(state, detail), setTitle(text), setNote(text), moveTo(pos), remove() }}
+ * @complexity O(1), plus O(b) over b badges  @alloc one node subtree
+ * @returns {{ root, pos, setState(state, detail), setTitle(text), setNote(text), setBadges(list),
+ *            setHeight(h), moveTo(pos), remove() }}
  */
-export function createNode(doc, canvas, { title, hue, pos, state, detail, note, levels }) {
+export function createNode(doc, canvas, { title, hue, pos, state, detail, note, levels, h, badges }) {
   const root = el(doc, 'div', 'tc-node');
   root.style.width = `${CONFIG.NODE_W}px`;
-  root.style.height = `${CONFIG.NODE_H}px`;
   root.style.setProperty('--tc-node-hue', hue || HUES[HUES.length - 1]);
   const bar = el(doc, 'span', 'tc-node-bar');
   const body = el(doc, 'span', 'tc-node-body');
@@ -432,7 +455,8 @@ export function createNode(doc, canvas, { title, hue, pos, state, detail, note, 
   const word = el(doc, 'span');
   sub.append(glyph, word);
   const noteLine = el(doc, 'span', 'tc-node-note');
-  body.append(t, sub, noteLine);
+  const badgeBox = el(doc, 'span', 'tc-node-badges');
+  body.append(t, sub, noteLine, badgeBox);
   const half = CONFIG.PORT_SIZE / 2;
   const at = levels ? levelPort : portPoint;
   const origin = { x: 0, y: 0 };
@@ -442,12 +466,31 @@ export function createNode(doc, canvas, { title, hue, pos, state, detail, note, 
   pin.style.top = `${at(origin, 'in').y - half}px`;
   const pout = el(doc, 'span', 'tc-port out');
   pout.title = 'out';
-  pout.style.left = `${at(origin, 'out').x - half}px`;
-  pout.style.top = `${at(origin, 'out').y - half}px`;
   root.append(bar, body, pin, pout);
   canvas.view.append(root);
+  let shownBadges = null;
   const node = {
     root, pos,
+    setHeight(height) {
+      const tall = height || CONFIG.NODE_H;
+      root.style.height = `${tall}px`;
+      pout.style.left = `${at(origin, 'out', tall).x - half}px`;
+      pout.style.top = `${at(origin, 'out', tall).y - half}px`;
+    },
+    setBadges(list) {
+      const items = list || [];
+      const key = items.map((b) => b.text).join('\n');
+      if (key === shownBadges) return;
+      shownBadges = key;
+      badgeBox.replaceChildren(...items.map((b) => {
+        const line = el(doc, 'span', 'tc-node-badge');
+        line.title = b.text;
+        line.append(el(doc, 'span', 'tc-node-badge-lead', b.lead), el(doc, 'span', 'tc-node-badge-names', b.names),
+          el(doc, 'span', 'tc-node-badge-tail', b.tail));
+        return line;
+      }));
+      badgeBox.hidden = !items.length;
+    },
     setState(s, d) {
       const st = STATES[s] || STATES.idle;
       root.dataset.state = s;
@@ -473,8 +516,10 @@ export function createNode(doc, canvas, { title, hue, pos, state, detail, note, 
     remove() { root.remove(); },
   };
   node.moveTo(pos);
+  node.setHeight(h);
   node.setTitle(title);
   node.setNote(note);
+  node.setBadges(badges);
   node.setState(state || 'idle', detail);
   return node;
 }
@@ -525,12 +570,30 @@ export function removeBoard(parent) {
 // ---------- the live board (C5), pure first, then its DOM kit ----------
 // Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
 
-/** Words on the board's hint lines. Each hint is a line plus words, never color alone. */
+/**
+ * Words on the board's hint lines and badges. Each hint is a line plus
+ * words, never color alone. A native pair's two boxes each carry the badge
+ * `native with <the other> · not observed`, and a reports_to cycle's root
+ * carries `reports to <name> · cycle` (C5 asks for the native words).
+ */
 export const LINK_WORDS = Object.freeze({
   reports_to: 'reports to',
   native: 'native · not observed',
+  nativeWith: 'native with',
+  notObserved: 'not observed',
   notFound: 'not found',
+  cycle: 'cycle',
 });
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// C1's word for an account nobody named. serve.py makes no native link on
+// it (D15), and the page draws no native badge on it either: two such
+// cards share no account that anyone knows.
+const ACCOUNT_UNKNOWN = 'unknown';
+
+/** True when two feed nodes may share a native badge and line: neither is on account `unknown`. @complexity O(1)  @alloc none */
+function nativeAllowed(p, q) {
+  return p.account !== ACCOUNT_UNKNOWN && q.account !== ACCOUNT_UNKNOWN;
+}
 
 /**
  * The legend: what each kind of line on the board means, in words. It is a
@@ -657,50 +720,104 @@ function treeOf(feed) {
 }
 
 /**
+ * The badge lines each node's box carries, in words: `native with b · not
+ * observed` on both boxes of a native pair (C5's words, drawn whether or
+ * not the pair also mails, never on account `unknown`, D15), and `reports
+ * to q · cycle` on a reports_to cycle's root (its reports_to names a node,
+ * yet the walk gave it no parent). Each badge is { lead, names, tail, text }:
+ * on a box only the names may shorten.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * @interacts  none; pure
+ * @complexity O(n + l + p log p) over n nodes, l links and p native partners
+ *             of one node (its names are sorted)
+ * @alloc      one partner set per node in a native pair, freed on return;
+ *             the returned map and one small object per badge
+ * @returns {{id: {lead, names, tail, text}[]}}  every node has a key
+ */
+function badgesOf(feed, known) {
+  const partners = new Map();
+  for (const l of (feed && feed.links) || []) {
+    if (l.kind !== 'native') continue;
+    const p = known.get(l.from);
+    const q = known.get(l.to);
+    if (!p || !q || p === q || !nativeAllowed(p, q)) continue;
+    for (const [m, o] of [[p.id, q.id], [q.id, p.id]]) {
+      if (!partners.has(m)) partners.set(m, new Set());
+      partners.get(m).add(o);
+    }
+  }
+  const badge = (lead, names, tail) => ({ lead, names, tail, text: `${lead}${names}${tail}` });
+  const out = nameMap();
+  for (const n of known.values()) {
+    const list = [];
+    if (n.reports_to != null && n.reports_to !== n.id && known.has(n.reports_to) && n.parent == null) {
+      list.push(badge(`${LINK_WORDS.reports_to} `, String(n.reports_to), ` · ${LINK_WORDS.cycle}`));
+    }
+    if (partners.has(n.id)) {
+      const names = [...partners.get(n.id)].sort(byName).join(', ');
+      list.push(badge(`${LINK_WORDS.nativeWith} `, names, ` · ${LINK_WORDS.notObserved}`));
+    }
+    out[n.id] = list;
+  }
+  return out;
+}
+
+/**
  * Where a C5 feed's nodes go, inside `width` board px (Infinity, the
  * default, never wraps). Roots in name order, levels top to bottom (C5),
  * on treeOf's tree. A parent sits over its children. The children, each
  * with its own subtree, fill a row left to right and wrap to a new row,
- * LAYOUT_WRAP_GAP lower, when the next one would pass the width (round 1,
- * a2's MEDIUM-1). Where a row holds a single box (a phone), the parent sits
- * at the left and its children are indented LAYOUT_INDENT under it while a
- * box still fits. Root trees fill rows the same way: LAYOUT_ROOT_GAP apart
- * side by side, LAYOUT_ROW_GAP apart one under another. Each subtree keeps
- * a band no other box enters, so no two boxes overlap, and the extent is at
- * most `width` whenever one box and the margins fit in it. Every map is
- * keyed with no prototype (or is a Map), so a node named __proto__ lays out
- * like any other.
+ * LAYOUT_WRAP_GAP lower, when the next one would pass the width, so the
+ * board keeps its text size on a narrow screen. Where a row holds a single
+ * box (a phone), the parent sits at the left and its children are indented
+ * LAYOUT_INDENT under it while a box still fits. Root trees fill rows the
+ * same way: LAYOUT_ROOT_GAP apart side by side, LAYOUT_ROW_GAP apart one
+ * under another. Each subtree keeps a band no other box enters, so no two
+ * boxes overlap, and the extent is at most `width` whenever one box and
+ * the margins fit in it. Every map is keyed with no prototype (or is a
+ * Map), so a node named __proto__ lays out like any other.
  *
- * Round 2 (item 5): each root's tree starts with a band HEAD_H + HEAD_GAP
- * tall for its heading, as wide as the tree; `heads` says where each
- * heading goes.
+ * Each box is NODE_H tall plus BADGE_H per badge line (badgesOf); `heights`
+ * and `badges` say so. Each root's tree starts with a band HEAD_H +
+ * HEAD_GAP tall for its heading, as wide as the tree; `heads` says where
+ * each heading goes.
  *
- * Round 2 (item 2): `via` says where each child's tree wire turns, for
- * routeTree. A child in its parent's first row is reached across `band`,
- * the middle of the LAYOUT_ROW_GAP under the parent, which no box enters.
- * A child in a wrapped row is reached down `gutter`, a channel beside the
- * parent's block (ROUTE_GUTTER out from its left edge, or the middle of
- * the indent on a phone) that no box enters while the block lasts, then
- * across `band`, the middle of the LAYOUT_WRAP_GAP over its row.
+ * `via` says where each child's tree connector turns, for routeTree. A
+ * child in its parent's first row is reached across `band`, the middle of
+ * the LAYOUT_ROW_GAP under the parent, which no box enters. A child in a
+ * wrapped row is reached down `gutter`, then across `band`, the middle of
+ * the LAYOUT_WRAP_GAP over its row. A block whose children wrap starts them
+ * LAYOUT_LANE in (LAYOUT_INDENT where they indent anyway), and its gutter
+ * runs down the middle of that lane: no box enters it, and every child's
+ * block starts past it, so two parents never share a gutter. A parent with
+ * two or more children keeps that lane out of the room it gives each
+ * child, so a child's block never runs past the parent's room.
  * @interacts  none; pure
- * @complexity O(n log n) over n nodes: one sort by name, then three walks
- *             that visit each node a fixed number of times
- * @alloc      the returned maps; six Maps and the row lists for the walks,
- *             freed on return
- * @returns {{ pos: {id: {x, y}}, titles: {id: string}, rows: {id: number}, roots: string[],
- *            kids: Map<string, string[]>, via: {id: {band, gutter}}, heads: {id: {x, y, w, h}},
- *            extent: {w, h} }}
+ * @complexity O(n log n + l) over n nodes and l links: one sort by name,
+ *             badgesOf, then three walks that visit each node a fixed
+ *             number of times
+ * @alloc      the returned maps; eight Maps and the row lists for the
+ *             walks, freed on return
+ * @returns {{ pos: {id: {x, y}}, heights: {id: number}, badges: {id: object[]}, titles: {id: string},
+ *            rows: {id: number}, roots: string[], kids: Map<string, string[]>, via: {id: {band, gutter}},
+ *            heads: {id: {x, y, w, h}}, extent: {w, h} }}
  *          rows is each node's depth in its tree; gutter is null for a first-row child;
  *          heads is keyed by root
  */
 export function layoutLevels(feed, width = Infinity) {
   const C = CONFIG;
-  const { nodes, kids, roots } = treeOf(feed);
+  const { nodes, known, kids, roots } = treeOf(feed);
+  const badges = badgesOf(feed, known);
+  const heights = nameMap();
+  for (const n of nodes) heights[n.id] = C.NODE_H + badges[n.id].length * C.BADGE_H;
   // Walk 1, top down: each node's depth, and the width its subtree may use.
-  // A row that cannot hold two boxes is narrow: its children indent.
+  // A row that cannot hold two boxes is narrow: its children indent. A
+  // parent with two or more children may wrap them, so it keeps its lane
+  // out of their room.
   const rows = nameMap();
   const room = new Map();
   const indent = new Map();
+  const kept = new Map();
   const order = [...roots];
   const rootRoom = width - 2 * C.LAYOUT_MARGIN;
   for (const r of roots) {
@@ -710,35 +827,43 @@ export function layoutLevels(feed, width = Infinity) {
   for (let i = 0; i < order.length; i += 1) {
     const id = order[i];
     const w = room.get(id);
+    const cs = kids.get(id) || [];
     const narrow = w < 2 * C.NODE_W + C.LAYOUT_COL_GAP;
-    indent.set(id, narrow && w - C.LAYOUT_INDENT >= C.NODE_W ? C.LAYOUT_INDENT : 0);
-    for (const c of kids.get(id) || []) {
+    const ind = narrow && w - C.LAYOUT_INDENT >= C.NODE_W ? C.LAYOUT_INDENT : 0;
+    indent.set(id, ind);
+    kept.set(id, ind || (cs.length > 1 ? C.LAYOUT_LANE : 0));
+    for (const c of cs) {
       rows[c] = rows[id] + 1;
-      room.set(c, w - indent.get(id));
+      room.set(c, w - kept.get(id));
       order.push(c);
     }
   }
   // Walk 2, bottom up: each subtree's block, its children's places inside
-  // it, where each child's tree wire turns, and where the node's own box
-  // sits in it.
+  // it, where each child's tree connector turns, and where the node's own
+  // box sits in it.
   const block = new Map();
   const inBlock = new Map();
   const ownX = new Map();
+  const lane = new Map();
   for (let i = order.length - 1; i >= 0; i -= 1) {
     const id = order[i];
     const cs = kids.get(id) || [];
+    const h = heights[id];
     if (!cs.length) {
-      block.set(id, { w: C.NODE_W, h: C.NODE_H });
+      block.set(id, { w: C.NODE_W, h });
       ownX.set(id, 0);
+      lane.set(id, 0);
       continue;
     }
     const ind = indent.get(id);
-    const lines = packRows(cs.map((c) => ({ id: c, ...block.get(c) })), room.get(id) - ind, C.LAYOUT_COL_GAP);
-    let y = C.NODE_H + C.LAYOUT_ROW_GAP;
+    const lines = packRows(cs.map((c) => ({ id: c, ...block.get(c) })), room.get(id) - kept.get(id), C.LAYOUT_COL_GAP);
+    const left = ind || (lines.length > 1 ? C.LAYOUT_LANE : 0);
+    lane.set(id, left);
+    let y = h + C.LAYOUT_ROW_GAP;
     let areaW = 0;
     lines.forEach((line, li) => {
-      let x = ind;
-      const band = li ? y - C.LAYOUT_WRAP_GAP / 2 : C.NODE_H + C.LAYOUT_ROW_GAP / 2;
+      let x = left;
+      const band = li ? y - C.LAYOUT_WRAP_GAP / 2 : h + C.LAYOUT_ROW_GAP / 2;
       for (const b of line.items) {
         inBlock.set(b.id, { x, y, band, wrapped: li > 0 });
         x += b.w + C.LAYOUT_COL_GAP;
@@ -746,8 +871,8 @@ export function layoutLevels(feed, width = Infinity) {
       areaW = Math.max(areaW, line.w);
       y += line.h + C.LAYOUT_WRAP_GAP;
     });
-    ownX.set(id, ind ? 0 : (areaW - C.NODE_W) / 2);
-    block.set(id, { w: Math.max(C.NODE_W, ind + areaW), h: y - C.LAYOUT_WRAP_GAP });
+    ownX.set(id, ind ? 0 : left + (areaW - C.NODE_W) / 2);
+    block.set(id, { w: Math.max(C.NODE_W, left + areaW), h: y - C.LAYOUT_WRAP_GAP });
   }
   // Walk 3, top down: root trees into rows, each under its heading, then
   // every box by its block.
@@ -772,8 +897,7 @@ export function layoutLevels(feed, width = Infinity) {
   for (const id of order) {
     const o = origin.get(id);
     pos[id] = { x: o.x + ownX.get(id), y: o.y };
-    const ind = indent.get(id);
-    const gutter = ind ? o.x + ind / 2 : o.x - C.ROUTE_GUTTER;
+    const gutter = o.x + lane.get(id) / 2;
     for (const c of kids.get(id) || []) {
       const at = inBlock.get(c);
       origin.set(c, { x: o.x + at.x, y: o.y + at.y });
@@ -785,7 +909,7 @@ export function layoutLevels(feed, width = Infinity) {
     : { w: 0, h: 0 };
   const titles = nameMap();
   for (const n of nodes) titles[n.id] = roleTitle(n);
-  return { pos, titles, rows, roots, kids, via, heads, extent };
+  return { pos, heights, badges, titles, rows, roots, kids, via, heads, extent };
 }
 
 /**
@@ -799,24 +923,26 @@ export function layoutWidth(canvasWidth) {
   return canvasWidth / CONFIG.MIN_FIT_SCALE;
 }
 
-// ---------- routing and labels (round 2, items 2 and 3) ----------
-// Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+// ---------- routing and labels ----------
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
 //
 // The rule, one for the whole board: every wire and connector is a run of
 // straight horizontal and vertical pieces that never enters a node box it
-// does not end at. The ports belong to the tree. A parent and its child
-// (the tree's connector, and their mail on top of it) leave the parent's
-// out port, at the middle of its bottom edge, and enter the child's in
-// port, at the middle of its top edge, turning only in gaps the layout
-// keeps empty (routeTree); so a line into a port always comes from that
-// box's parent. Every other pair (siblings, a child and a grandparent, two
-// trees, two peers) joins a side of one box to a side of the other by the
-// shortest such run with the fewest bends through the room round the
-// boxes, keeping ROUTE_CLEAR px from every box and every port
-// (routeAround), so two boxes side by side in one row are joined straight
-// across. It would rather cross a connector than run alongside one.
-// Bends are drawn with round corners of at most ROUTE_CLEAR (roundedPath),
-// which keeps the curve as clear as the corner.
+// does not end at. The ports belong to the tree. A parent's connector to
+// its child leaves the parent's out port, at the middle of its bottom
+// edge, and enters the child's in port, at the middle of its top edge,
+// turning only in gaps the layout keeps empty (routeTree); so a line into
+// a port always comes from that box's parent. Their mail wire, or their
+// native line, runs TREE_WIRE_OFFSET beside that connector and never on it
+// (routeTreeWire), so the connector never fills its dots or dashes. Every
+// other pair (siblings, a child and a grandparent, two trees, two peers)
+// joins a side of one box to a side of the other by the shortest such run
+// with the fewest bends through the room round the boxes, keeping
+// ROUTE_CLEAR px from every box and every port (routeAround), so two boxes
+// side by side in one row are joined straight across. It would rather
+// cross a connector or a tree wire than run alongside one. Bends are drawn
+// with round corners of at most ROUTE_CLEAR (roundedPath), which keeps the
+// curve as clear as the corner.
 
 /** One step in each direction: right, left, down, up. */
 const STEPS = Object.freeze([[1, 0], [-1, 0], [0, 1], [0, -1]]);
@@ -847,14 +973,15 @@ function simplify(points) {
 /**
  * The run from a parent's out port to its child's in port, on layoutLevels'
  * `via`: down into the band under the parent and across to the child (a
- * first-row child), or across to the gutter beside the parent's block,
- * down it, and across the band over the child's row (a wrapped child).
- * Every turn sits in a gap the layout keeps empty, so no box is entered.
+ * first-row child), or across to the gutter in the parent's lane, down it,
+ * and across the band over the child's row (a wrapped child). Every turn
+ * sits in a gap the layout keeps empty, so no box is entered. The out port
+ * sits on the parent's bottom edge, however many badge lines it carries.
  * @interacts  none; pure
  * @complexity O(1)  @alloc one list of at most six points
  */
 export function routeTree(lay, parent, child) {
-  const out = levelPort(lay.pos[parent], 'out');
+  const out = levelPort(lay.pos[parent], 'out', lay.heights[parent]);
   const into = levelPort(lay.pos[child], 'in');
   const v = lay.via[child];
   if (v.gutter === null) return simplify([out, { x: out.x, y: v.band }, { x: into.x, y: v.band }, into]);
@@ -862,6 +989,51 @@ export function routeTree(lay, parent, child) {
   return simplify([
     out, { x: out.x, y: drop }, { x: v.gutter, y: drop }, { x: v.gutter, y: v.band }, { x: into.x, y: v.band }, into,
   ]);
+}
+
+/**
+ * A run moved `d` px to one side of each of its pieces: side 1 is the left
+ * of the way it runs (east while it runs down), -1 the right. Every inner
+ * point of a simplified run is a right-angle bend, where the two moved
+ * pieces meet at the point moved by both, so the result keeps the run's
+ * shape d px out and has no piece in common with it.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * @complexity O(p) over p points  @alloc one list
+ */
+function offsetRun(points, d, side) {
+  const normals = points.slice(1).map((q, i) => {
+    const dx = Math.sign(q.x - points[i].x);
+    const dy = Math.sign(q.y - points[i].y);
+    return { x: side * dy * d, y: -side * dx * d };
+  });
+  const none = { x: 0, y: 0 };
+  return points.map((p, i) => {
+    const before = normals[i - 1] || none;
+    const after = normals[i] || none;
+    return { x: p.x + before.x + after.x, y: p.y + before.y + after.y };
+  });
+}
+
+/**
+ * The run a parent and child's mail wire, or their native line, takes:
+ * routeTree's run moved TREE_WIRE_OFFSET to one side (offsetRun), so it
+ * shares no piece with the connector and crosses it nowhere. It leaves the
+ * parent's bottom edge and enters the child's top edge TREE_WIRE_OFFSET
+ * beside each port, on the side the connector first turns toward (west for
+ * a child left of its parent or in a wrapped row, east otherwise), and its
+ * first level piece runs on the parent's side of the connector's. So the
+ * wires to a parent's children on its two sides keep apart; two children
+ * on one side share the parent's end of their wires, as their connectors
+ * share theirs.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * @interacts  none; pure
+ * @complexity O(1)  @alloc two lists of at most six points
+ */
+function routeTreeWire(lay, parent, child) {
+  const run = routeTree(lay, parent, child);
+  const level = run.findIndex((p, i) => i > 0 && p.y === run[i - 1].y);
+  const west = level > 0 && run[level].x < run[level - 1].x;
+  return offsetRun(run, CONFIG.TREE_WIRE_OFFSET, west ? -1 : 1);
 }
 
 /**
@@ -1272,16 +1444,18 @@ function agoWords(ageS) {
  * One group per root, in name order, headed by headWords; in it one row
  * per session of that tree, parent before children, each `depth` levels
  * under its root, with its name, its role words, its state's glyph and
- * word, its unread count and its note (as boardView's). Then the recent
- * traffic: one line per pair, its newest message, `a → b · #18 · 2 m ago`,
- * newest first.
+ * word, its unread count, its note (as boardView's) and its badges'
+ * words (badgesOf: a native pair, a cycle's root), one line each. Then the
+ * recent traffic: one line per pair, its newest message, `a → b · #18 · 2
+ * m ago`, newest first.
  * @interacts  none; pure
- * @complexity O(n log n + r log r) over n nodes and r recent wires  @alloc the returned model
- * @returns {{ groups: { root, heading, rows: { id, depth, role, state, glyph, word, unread, note }[] }[],
+ * @complexity O(n log n + l + r log r) over n nodes, l links and r recent wires  @alloc the returned model
+ * @returns {{ groups: { root, heading, rows: { id, depth, role, state, glyph, word, unread, note, badges }[] }[],
  *            traffic: { from, to, seq, text }[] }}
  */
 export function outlineView(feed) {
   const { known, kids, roots } = treeOf(feed);
+  const badges = badgesOf(feed, known);
   const groups = roots.map((root) => {
     const rows = [];
     for (const stack = [[root, 0]]; stack.length;) {
@@ -1290,7 +1464,7 @@ export function outlineView(feed) {
       const state = STATES[n.state] ? n.state : 'idle';
       rows.push({
         id, depth, role: roleTitle(n).slice(String(id).length), state, glyph: STATES[state].glyph, word: STATES[state].word,
-        unread: n.unread > 0 ? `${n.unread} unread` : '', note: noteFor(n, known),
+        unread: n.unread > 0 ? `${n.unread} unread` : '', note: noteFor(n, known), badges: badges[id].map((b) => b.text),
       });
       const children = kids.get(id) || [];
       for (let i = children.length - 1; i >= 0; i -= 1) stack.push([children[i], depth + 1]);
@@ -1313,33 +1487,36 @@ export function outlineView(feed) {
 /**
  * What to draw for a C5 feed laid out inside `width` (see layoutLevels):
  * one view per node and per edge, keyed by id. Node: title (roleTitle), pos
- * (layoutLevels), state, detail (unread count), note (`reports to N · not
- * found`, else the status line, as `last status: ...` on a down node), and
- * `connector`: on a node with a parent in the layout, the hierarchy's own
- * thin line from the parent's out port to this node's in port (routeTree),
- * with its words for a title and no label on the board (round 2, a2's
- * direction; the legend says what the thin line is); null on a root. It
- * belongs to the child, so it comes and goes and moves with it. It replaces
- * the reports_to hint, so a feed's reports_to links draw nothing of their
- * own; one that names no node is still its node's note. A root's view has
- * `head`, the heading over its tree (layoutLevels' heads, with headWords'
- * text: round 2, item 5); any other node's is null. Wires and labels keep
- * off headings as they do off boxes.
+ * and h (layoutLevels: the box's place and height), state, detail (unread
+ * count), note (`reports to N · not found`, else the status line, as `last
+ * status: ...` on a down node), `badges` (badgesOf: `native with b · not
+ * observed` on both boxes of a native pair, `reports to q · cycle` on a
+ * cycle's root), and `connector`: on a node with a parent in the layout,
+ * the hierarchy's own thin line from the parent's out port to this node's
+ * in port (routeTree), with its words for a title and no label on the
+ * board (the legend says what the thin line is); null on a root. It
+ * belongs to the child, so it comes and goes and moves with it. It
+ * replaces the reports_to hint, so a feed's reports_to links draw nothing
+ * of their own: one that names no node is its node's note, and a cycle's
+ * root carries its reports_to on a badge. A root's view has `head`, the
+ * heading over its tree (layoutLevels' heads, with headWords' text); any
+ * other node's is null. Wires and labels keep off headings as they do off
+ * boxes.
  *
- * Edges, each a run of points (round 2, item 2; the rule is in the
- * routing section above), with `words` for its title, always:
- * - a mailbox link whose two ends are nodes: on a parent and child, the
- *   connector's own run, so their mail runs down along it; on any other
- *   pair, routeAround's run from the upper node to the lower, kept off the
- *   connectors where it can be. It flows,
- *   with dashes, an arrow at the reader and the label `from → to · #seq`,
- *   when its pair's newest wire is at most FLOW_AGE_S old; quiet, it is a
- *   thin line with no label (round 2, item 3). It is down when either end
- *   is down.
- * - a native link with no mailbox link on its pair: routeAround's run, long
- *   dashed, no label; its words, `native · not observed`, are in its title
- *   and the legend. On a pair with mail too, the words go in the mail
- *   wire's title and no second line is drawn.
+ * Edges, each a run of points (the rule is in the routing section above),
+ * with `words` for its title, always:
+ * - a mailbox link whose two ends are nodes: on a parent and child,
+ *   routeTreeWire's run beside their connector; on any other pair,
+ *   routeAround's run from the upper node to the lower, kept off the
+ *   connectors and the tree wires where it can be. It flows, with dashes,
+ *   an arrow at the reader and the label `from → to · #seq`, when its
+ *   pair's newest wire is at most FLOW_AGE_S old; quiet, it is a solid line
+ *   with no label. It is down when either end is down.
+ * - a native link with no mailbox link on its pair: the same runs, long
+ *   dashed, no label; its words, `native · not observed`, are in its
+ *   title, on both boxes' badges and in the legend. On a pair with mail
+ *   too, they go in the mail wire's title and on the badges, and no second
+ *   line is drawn. On account `unknown` (D15) a native link draws nothing.
  * A label sits where placeLabels puts it (`at`), clear of every node box
  * and every other label, or is dropped (`at` null) with its words kept in
  * the title.
@@ -1359,10 +1536,11 @@ export function boardView(feed, width) {
   const boxOf = nameMap();
   for (const n of known.values()) {
     nodes[n.id] = {
-      id: n.id, title: lay.titles[n.id], pos: lay.pos[n.id], state: STATES[n.state] ? n.state : 'idle',
-      detail: n.unread > 0 ? `${n.unread} unread` : '', note: noteFor(n, known), connector: null, head: null,
+      id: n.id, title: lay.titles[n.id], pos: lay.pos[n.id], h: lay.heights[n.id],
+      state: STATES[n.state] ? n.state : 'idle', detail: n.unread > 0 ? `${n.unread} unread` : '',
+      note: noteFor(n, known), badges: lay.badges[n.id], connector: null, head: null,
     };
-    boxOf[n.id] = { x: lay.pos[n.id].x, y: lay.pos[n.id].y, w: C.NODE_W, h: C.NODE_H };
+    boxOf[n.id] = { x: lay.pos[n.id].x, y: lay.pos[n.id].y, w: C.NODE_W, h: lay.heights[n.id] };
   }
   for (const root of lay.roots) {
     nodes[root].head = { ...lay.heads[root], text: headWords(lay.titles[root], treeSize(lay.kids, root)) };
@@ -1372,7 +1550,7 @@ export function boardView(feed, width) {
   // labels keep off every box, every port ring and every heading.
   const boxes = Object.values(boxOf);
   const ports = (size) => boxes.flatMap((b) => ['in', 'out'].map((side) => {
-    const at = levelPort(b, side);
+    const at = levelPort(b, side, b.h);
     return { x: at.x - C.PORT_SIZE / 2, y: side === 'in' ? at.y - size : at.y, w: C.PORT_SIZE, h: size };
   }));
   const obstacles = [...boxes, ...ports(C.ROUTE_CLEAR), ...headBoxes];
@@ -1384,7 +1562,8 @@ export function boardView(feed, width) {
   }
   const links = (feed && feed.links) || [];
   const pairsOf = (kind) => new Set(links
-    .filter((l) => l.kind === kind && known.has(l.from) && known.has(l.to) && l.from !== l.to)
+    .filter((l) => l.kind === kind && known.has(l.from) && known.has(l.to) && l.from !== l.to
+      && (kind !== 'native' || nativeAllowed(known.get(l.from), known.get(l.to))))
     .map((l) => pairKey(l.from, l.to)));
   const mailboxPairs = pairsOf('mailbox');
   const nativePairs = pairsOf('native');
@@ -1401,32 +1580,34 @@ export function boardView(feed, width) {
       connectors.push(nodes[child].connector.points);
     }
   }
+  // The links to draw, each with its ends top-down. A parent and child's
+  // run is routeTreeWire's, found first, so every other run can keep off
+  // those as well as off the connectors.
+  const drawn = [];
   for (const l of links) {
     const p = known.get(l.from);
     const q = known.get(l.to);
     if (!p || !q || p === q || (l.kind !== 'mailbox' && l.kind !== 'native')) continue;
     const pair = pairKey(l.from, l.to);
-    // A native link whose pair also has mail rides in that wire's title.
-    if (l.kind === 'native' && mailboxPairs.has(pair)) continue;
+    // A native link whose pair also has mail rides in that wire's title and
+    // on the badges; on account `unknown` it draws nothing (D15).
+    if (l.kind === 'native' && (mailboxPairs.has(pair) || !nativeAllowed(p, q))) continue;
+    const tree = parentOf[q.id] === p.id || parentOf[p.id] === q.id;
+    let ends = upperFirst(p, q, lay.pos).map((n) => n.id);
+    if (tree) ends = parentOf[q.id] === p.id ? [p.id, q.id] : [q.id, p.id];
+    drawn.push({ l, p, q, pair, from: ends[0], to: ends[1], points: tree ? routeTreeWire(lay, ends[0], ends[1]) : null });
+  }
+  const along = [...connectors, ...drawn.filter((d) => d.points).map((d) => d.points)];
+  for (const { l, p, q, pair, from, to, points } of drawn) {
     const id = `${l.kind}:${l.from}>${l.to}`;
-    let from;
-    let to;
-    let points;
-    if (parentOf[q.id] === p.id || parentOf[p.id] === q.id) {
-      [from, to] = parentOf[q.id] === p.id ? [p.id, q.id] : [q.id, p.id];
-      points = routeTree(lay, from, to);
-    } else {
-      [from, to] = upperFirst(p, q, lay.pos).map((n) => n.id);
-      points = routeAround(obstacles, boxOf[from], boxOf[to], lay.extent, connectors);
-    }
     const w = l.kind === 'mailbox' ? flowing.get(pair) : undefined;
     const back = !!w && w.from !== from;
     const label = w ? `${w.from} → ${w.to} · #${w.seq}` : '';
     const native = l.kind === 'native' || nativePairs.has(pair);
     const said = l.kind === 'mailbox' ? (label || `${TREE_WORDS.mail} ${from} and ${to}`) : `${from} and ${to}`;
     edges[id] = {
-      id, kind: l.kind, from, to, points, label, seq: w ? w.seq : null,
-      words: native ? `${said} · ${LINK_WORDS.native}` : said,
+      id, kind: l.kind, from, to, points: points || routeAround(obstacles, boxOf[from], boxOf[to], lay.extent, along),
+      label, seq: w ? w.seq : null, words: native ? `${said} · ${LINK_WORDS.native}` : said,
       arrow: w ? (back ? 'start' : 'end') : null, flow: !!w, back,
       down: l.kind === 'mailbox' && (p.state === 'down' || q.state === 'down'),
     };
@@ -1436,7 +1617,7 @@ export function boardView(feed, width) {
   return { nodes, edges, extent: lay.extent };
 }
 
-const NODE_FIELDS = ['title', 'state', 'detail', 'note'];
+const NODE_FIELDS = ['title', 'state', 'detail', 'note', 'h'];
 const EDGE_FIELDS = ['kind', 'from', 'to', 'label', 'seq', 'words', 'arrow', 'flow', 'back', 'down'];
 
 /** True when two points sit at the same place. @complexity O(1)  @alloc none */
@@ -1449,13 +1630,19 @@ function samePoints(p, q) {
   return p.length === q.length && p.every((pt, i) => samePoint(pt, q[i]));
 }
 
-/** True when two node views would draw the same, connector and heading too. @complexity O(p) over p connector points  @alloc none */
+/** One string for a node's badges, to compare two views by. @complexity O(b) over b badges  @alloc one string */
+function badgeKey(badges) {
+  return (badges || []).map((b) => b.text).join('\n');
+}
+
+/** True when two node views would draw the same, connector, heading and badges too. @complexity O(p + b) over p connector points and b badges  @alloc two short strings */
 function sameNode(p, q) {
   const sameConnector = p.connector === q.connector || (p.connector && q.connector
     && p.connector.words === q.connector.words && samePoints(p.connector.points, q.connector.points));
   const sameHead = p.head === q.head || (p.head && q.head && p.head.text === q.head.text
     && samePoint(p.head, q.head) && p.head.w === q.head.w);
-  return NODE_FIELDS.every((f) => p[f] === q[f]) && samePoint(p.pos, q.pos) && !!sameConnector && !!sameHead;
+  return NODE_FIELDS.every((f) => p[f] === q[f]) && samePoint(p.pos, q.pos) && !!sameConnector && !!sameHead
+    && badgeKey(p.badges) === badgeKey(q.badges);
 }
 
 /** True when two edge views would draw the same. @complexity O(p) over p points  @alloc none */
@@ -1607,8 +1794,10 @@ export function createKit(doc, canvas) {
         node,
         update(n) {
           node.moveTo(n.pos);
+          node.setHeight(n.h);
           node.setTitle(n.title);
           node.setNote(n.note);
+          node.setBadges(n.badges);
           node.setState(n.state, n.detail);
           stem.setAttribute('d', n.connector ? roundedPath(n.connector.points, CONFIG.ROUTE_CLEAR) : '');
           stem.setAttribute('data-edge', `tree:${n.id}`);
@@ -1648,6 +1837,7 @@ export function createKit(doc, canvas) {
           title.append(el(doc, 'span', 'tc-row-name', r.id), el(doc, 'span', 'tc-row-role', r.role));
           row.append(title, el(doc, 'span', 'tc-row-state', `${r.glyph} ${r.word}${r.unread ? ` · ${r.unread}` : ''}`));
           if (r.note) row.append(el(doc, 'span', 'tc-row-note', r.note));
+          for (const words of r.badges) row.append(el(doc, 'span', 'tc-row-badge', words));
           group.append(row);
         }
         return group;

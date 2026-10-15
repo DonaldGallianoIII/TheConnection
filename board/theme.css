@@ -382,6 +382,8 @@
 .tc-row-role { font-size: 11px; font-weight: 500; }
 .tc-row-state { font-family: var(--tc-mono); font-size: 11px; color: var(--tc-muted); }
 .tc-row-note { flex: 1 0 100%; font-size: 11px; color: var(--tc-dim); overflow-wrap: anywhere; }
+/* A native pair's or a cycle root's words, one line each under its row. */
+.tc-row-badge { flex: 1 0 100%; font-size: 11px; color: var(--tc-muted); overflow-wrap: anywhere; }
 .tc-row[data-state="writing"] .tc-row-state { color: var(--tc-cyan); font-weight: 600; }
 .tc-row[data-state="down"] .tc-row-state { color: var(--tc-red); font-weight: 600; }
 .tc-traffic-line { font-family: var(--tc-mono); font-size: 11px; color: var(--tc-text); padding: 2px 0; overflow-wrap: anywhere; }
@@ -411,6 +413,27 @@
 .tc-node-note { font-size: 11px; color: var(--tc-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tc-node-note[hidden] { display: none; }
 .tc-node-glyph { display: inline-block; width: 1.2em; }
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * A badge line under a box's note: a native pair (`native with b · not
+ * observed`) or a reports_to cycle's root (`reports to q · cycle`). Words
+ * in a dashed rule, so it reads as a mark of its own without color; only
+ * the names may shorten, and the spaces round them stay. Its line height
+ * and rule make look.js BADGE_H. */
+.tc-node-badges { display: flex; flex-direction: column; min-width: 0; }
+.tc-node-badges[hidden] { display: none; }
+.tc-node-badge {
+  display: flex;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--tc-muted);
+  border: 1px dashed var(--tc-muted);
+  border-radius: 4px;
+  padding: 0 4px;
+  white-space: pre;
+}
+.tc-node-badge-lead, .tc-node-badge-tail { flex: none; }
+.tc-node-badge-names { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* States: glyph and word always; border weight and style as the second cue. */
 .tc-node[data-state="listening"] .tc-node-sub { color: var(--tc-muted); }

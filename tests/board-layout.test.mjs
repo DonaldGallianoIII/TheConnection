@@ -9,9 +9,11 @@
  * MIN_TEXT_PX, read against theme.css's own font sizes; and createFit,
  * which sizes the board from the ResizeObserver entry. Round 2 adds the
  * frame growing to the board, and on the 14-name feeds at both widths: no
- * wire or connector entering a node box, no label on a label or a box, a
- * parent's mail running down its connector, and two boxes in one row joined
- * straight across.
+ * wire or connector entering a node box, no label on a label or a box, and
+ * two boxes in one row joined straight across. Since then: a parent's mail
+ * (or native line) runs beside its connector and shares no piece of it,
+ * and two parents' connectors share no piece (a relay over a relay whose
+ * workers wrap, at a 1180 px window and a 700 px stage).
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
@@ -184,7 +186,7 @@ const FOURTEEN = {
 };
 // The text drawn inside the board's view, so scaled with it (round 2 adds
 // the headings over the trees).
-const BOARD_TEXT = ['.tc-node-title', '.tc-node-role', '.tc-node-sub', '.tc-node-note', '.tc-wire-label', '.tc-head'];
+const BOARD_TEXT = ['.tc-node-title', '.tc-node-role', '.tc-node-sub', '.tc-node-note', '.tc-node-badge', '.tc-wire-label', '.tc-head'];
 const CSS = readFileSync(new URL('../board/theme.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
 
 /**
@@ -320,6 +322,17 @@ function routedFeed(nodes, pairs) {
   };
 }
 
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// The shape where two parents' connectors once ran down one gutter: a
+// over b and x, b over b1 to b5. At a 1180 px window (DESK_W) and at a
+// 700 px stage, b's workers wrap and so do a's children.
+const RELAY = [
+  fed('a', 'orchestrator', 'declared', 0, null), fed('b', 'orchestrator', 'declared', 1, 'a', { reports_to: 'a' }),
+  fed('x', 'worker', 'declared', 1, 'a', { reports_to: 'a' }),
+  ...Array.from({ length: 5 }, (_, i) => fed(`b${i + 1}`, 'worker', 'declared', 2, 'b', { reports_to: 'b' })),
+];
+const MID_W = 700;
+
 const ROUTED = {
   mixed: routedFeed([
     fed('a', 'orchestrator', 'declared', 0, null), fed('b', 'orchestrator', 'declared', 1, 'a', { reports_to: 'a' }),
@@ -338,6 +351,10 @@ const ROUTED = {
   peers: routedFeed(FOURTEEN.peers.map((x) => fed(x.id, x.role, x.role_source, x.level, x.parent)), [
     ['p1', 'p2'], ['p1', 'p14'], ['p3', 'p9'], ['p5', 'p6'], ['p7', 'p13'], ['p2', 'p11'],
   ]),
+  // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+  // A relay whose worker is a relay too, and whose own workers wrap: a over
+  // b and x, b over b1 to b5, so a and b each have a wrapped row.
+  relay: routedFeed(RELAY, [['a', 'b'], ['a', 'x'], ...Array.from({ length: 5 }, (_, i) => ['b', `b${i + 1}`]), ['x', 'b5']]),
 };
 const ROUTE_WIDTHS = [DESK_W, PHONE_W];
 
@@ -360,6 +377,28 @@ function onEdge(p, b) {
 /** True when two label or node boxes overlap. @complexity O(1)  @alloc none */
 function boxesOverlap(p, q) {
   return p.x < q.x + q.w && q.x < p.x + p.w && p.y < q.y + q.h && q.y < p.y + p.h;
+}
+
+/**
+ * The first piece two runs have in common: two level pieces on one line, or
+ * two upright ones, overlapping by more than a point. Null when none.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * @complexity O(p * q) over the two runs' pieces  @alloc one small object when found
+ */
+function sharedPiece(p, q) {
+  for (let i = 1; i < p.length; i += 1) {
+    for (let j = 1; j < q.length; j += 1) {
+      const [a, b, c, d] = [p[i - 1], p[i], q[j - 1], q[j]];
+      const upright = a.x === b.x && c.x === d.x && a.x === c.x;
+      const level = a.y === b.y && c.y === d.y && a.y === c.y;
+      if (!upright && !level) continue;
+      const [u, v, s, t] = upright ? [a.y, b.y, c.y, d.y] : [a.x, b.x, c.x, d.x];
+      const lo = Math.max(Math.min(u, v), Math.min(s, t));
+      const hi = Math.min(Math.max(u, v), Math.max(s, t));
+      if (hi > lo) return upright ? { x: a.x, y: [lo, hi] } : { y: a.y, x: [lo, hi] };
+    }
+  }
+  return null;
 }
 
 /**
@@ -426,17 +465,66 @@ test('no label overlaps another label, a node box or a heading, on the 14-name f
   for (const v of Object.values(quiet.nodes)) assert.ok(!v.connector || !('label' in v.connector), `${v.id}'s connector has a label`);
 });
 
-test('a parent\'s mail runs down its connector, port to port; two boxes side by side are joined straight across', () => {
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// A wire on its connector lost its dots and dashes under it: the down
+// wire's `dotted: no listener` read solid. The wire now runs beside it.
+test('a parent\'s mail runs beside its connector and shares no piece of it; two boxes side by side are joined straight across', () => {
+  let checked = 0;
+  for (const [shape, feed] of Object.entries(ROUTED)) {
+    const parentOf = Object.fromEntries(feed.nodes.map((x) => [x.id, x.parent]));
+    for (const width of ROUTE_WIDTHS) {
+      const view = boardView(feed, layoutWidth(width));
+      for (const e of Object.values(view.edges)) {
+        if (parentOf[e.to] !== e.from) continue;
+        checked += 1;
+        const shared = sharedPiece(e.points, view.nodes[e.to].connector.points);
+        assert.equal(shared, null, `${shape} at ${width} px: ${e.id} lies on its connector at ${JSON.stringify(shared)}`);
+      }
+    }
+  }
+  assert.ok(checked >= 2 * ROUTE_WIDTHS.length, `only ${checked} parent and child wires were checked`);
   const view = boardView(ROUTED.mixed, layoutWidth(DESK_W));
   const wire = view.edges['mailbox:a>b'];
-  assert.deepEqual(wire.points, view.nodes.b.connector.points, 'a\'s mail to b leaves the connector');
-  assert.deepEqual(wire.points[0], levelPort(view.nodes.a.pos, 'out'), 'the wire does not leave a\'s out port');
-  assert.deepEqual(wire.points.at(-1), levelPort(view.nodes.b.pos, 'in'), 'the wire does not reach b\'s in port');
+  const out = levelPort(view.nodes.a.pos, 'out', view.nodes.a.h);
+  const into = levelPort(view.nodes.b.pos, 'in');
+  assert.deepEqual([wire.points[0].y, Math.abs(wire.points[0].x - out.x)], [out.y, CONFIG.TREE_WIRE_OFFSET],
+    'a\'s mail to b does not leave a\'s bottom edge TREE_WIRE_OFFSET beside the out port');
+  assert.deepEqual([wire.points.at(-1).y, Math.abs(wire.points.at(-1).x - into.x)], [into.y, CONFIG.TREE_WIRE_OFFSET],
+    'a\'s mail to b does not reach b\'s top edge TREE_WIRE_OFFSET beside the in port');
   assert.deepEqual([wire.from, wire.back, wire.arrow], ['a', true, 'start'], 'b\'s reply to a does not point at a');
+  // A native line on a parent and child with no mail runs beside their connector too.
+  const pair = boardView({
+    nodes: [fed('a', 'orchestrator', 'declared', 0, null, { kind: 'claude', account: 'home' }),
+      fed('b', 'worker', 'declared', 1, 'a', { kind: 'claude', account: 'home', reports_to: 'a' })],
+    links: [{ from: 'a', to: 'b', kind: 'native' }], wires: [],
+  }, layoutWidth(DESK_W));
+  assert.equal(sharedPiece(pair.edges['native:a>b'].points, pair.nodes.b.connector.points), null, 'the native line lies on the connector');
   const peers = view.edges['mailbox:p1>p2'];
   assert.equal(view.nodes.p1.pos.y, view.nodes.p2.pos.y, 'p1 and p2 are not in one row');
   assert.equal(peers.points.length, 2, `p1 to p2 bends: ${JSON.stringify(peers.points)}`);
   assert.equal(peers.points[0].y, peers.points[1].y, 'p1 to p2 is not level');
+});
+
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// Two parents' connectors once ran down one gutter, so a top relay's
+// worker read as its sub-relay's. Each wrapping block now has a lane.
+test('every connector trunk serves one parent: a over b and x, b over b1 to b5, at a 1180 px window and a 700 px stage', () => {
+  const parentOf = Object.fromEntries(RELAY.map((x) => [x.id, x.parent]));
+  for (const width of [DESK_W, MID_W]) {
+    const where = `at ${width} px`;
+    const view = boardView({ nodes: RELAY, links: [], wires: [] }, layoutWidth(width));
+    const lay = layoutLevels({ nodes: RELAY }, layoutWidth(width));
+    assert.ok(lay.via.x.gutter !== null && lay.via.b5.gutter !== null, `${where}: a's or b's children do not wrap, so the shape tests nothing`);
+    const conns = Object.values(view.nodes).filter((v) => v.connector).map((v) => ({ id: v.id, points: v.connector.points }));
+    for (let i = 0; i < conns.length; i += 1) {
+      for (let j = i + 1; j < conns.length; j += 1) {
+        const [p, q] = [conns[i], conns[j]];
+        if (parentOf[p.id] === parentOf[q.id]) continue;
+        const shared = sharedPiece(p.points, q.points);
+        assert.equal(shared, null, `${where}: the connector to ${p.id} (under ${parentOf[p.id]}) and to ${q.id} (under ${parentOf[q.id]}) share ${JSON.stringify(shared)}`);
+      }
+    }
+  }
 });
 
 // Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.

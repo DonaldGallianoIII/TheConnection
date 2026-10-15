@@ -8,7 +8,9 @@
  * title), a down node's stale status, the tree's own connector in place
  * of the reports_to hint (round 2), and the page's poll loop
  * (createPoller) on fake timers and a fake fetch that the test settles by
- * hand, so no real clock or network is read.
+ * hand, so no real clock or network is read. Since then: the badge lines
+ * on a native pair's boxes and outline rows, with mail or without and
+ * never on account `unknown`, and on a reports_to cycle's root.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
@@ -22,7 +24,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   STATES, NOTE_WORDS, CONN_WORDS, LINK_WORDS, boardView, diffBoard, createBoard, patchBoard, pillText, layoutLevels,
-  levelPort, createPoller, CONFIG,
+  levelPort, createPoller, outlineView, CONFIG,
 } from '../board/look.js';
 
 /**
@@ -171,13 +173,14 @@ test('the tree draws its own connector, with no label; native words go in the ti
   assert.deepEqual(Object.keys(view.edges).filter((id) => id.startsWith('reports_to')), [], 'a reports_to link drew a line of its own');
   const stem = view.nodes.b.connector;
   assert.ok(stem, 'b has no connector to its parent');
-  assert.deepEqual(stem.points[0], levelPort(view.nodes.a.pos, 'out'), 'the connector does not leave a\'s out port');
+  assert.deepEqual(stem.points[0], levelPort(view.nodes.a.pos, 'out', view.nodes.a.h), 'the connector does not leave a\'s out port');
   assert.deepEqual(stem.points.at(-1), levelPort(view.nodes.b.pos, 'in'), 'the connector does not reach b\'s in port');
   assert.equal(stem.words, 'b reports to a');
   assert.equal(view.nodes.a.connector, null, 'a root has a connector');
   const native = view.edges['native:a>b'];
   assert.equal(native.label, '', 'a native line carries a label on the board');
   assert.ok(native.words.endsWith(LINK_WORDS.native), `native words not in the title: ${native.words}`);
+  assert.deepEqual(view.nodes.a.badges.map((b) => b.text), ['native with b · not observed'], 'a carries no native badge');
   assert.equal(view.nodes.r.note, 'reports to ghost · not found');
   assert.equal(view.nodes.z.note, 'last status: gone quiet', 'a down node shows its status as current');
   assert.equal(view.edges['mailbox:a>z'].down, true, 'a wire to a down node is not marked down');
@@ -228,7 +231,7 @@ test('nodes named __proto__, constructor and toString lay out and draw like any 
   assert.deepEqual(kit.created, { nodes: 4, edges: 2 });
 });
 
-test('a mailbox wire and a native line on one pair draw one path, the native words in its title', () => {
+test('a mailbox wire and a native line on one pair draw one path, the native words in its title and on both boxes', () => {
   const view = boardView({
     nodes: [node('a', { kind: 'claude' }), node('b', { kind: 'claude' })],
     wires: [{ from: 'a', to: 'b', seq: 5, age_s: 0 }],
@@ -240,6 +243,71 @@ test('a mailbox wire and a native line on one pair draw one path, the native wor
   assert.equal(wire.label, 'a → b · #5');
   assert.ok(wire.at, 'the label found no room on a board of two boxes');
   assert.equal(wire.words, `a → b · #5 · ${LINK_WORDS.native}`);
+  assert.deepEqual([view.nodes.a.badges.length, view.nodes.b.badges.length], [1, 1], 'a pair that mails lost its native badges');
+});
+
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// C5 draws a native pair with the words `native · not observed`. Each box
+// of the pair carries them on a badge, `native with <the other> · not
+// observed`, whether or not the pair mails, and so does each outline row.
+// Never on account `unknown` (D15): serve.py makes no such link, and a
+// hand-made one draws no badge either.
+const NATIVE_FEED = {
+  nodes: [
+    node('a', { kind: 'claude', account: 'home' }), node('b', { kind: 'claude', account: 'home' }),
+    node('c', { kind: 'claude', account: 'lab' }), node('d', { kind: 'claude', account: 'lab' }),
+    node('e', { kind: 'claude', account: 'lab' }),
+    node('u1', { kind: 'claude', account: 'unknown' }), node('u2', { kind: 'claude', account: 'unknown' }),
+  ],
+  wires: [{ from: 'a', to: 'b', seq: 5, age_s: 0 }],
+  links: [
+    mailbox('a', 'b'), { from: 'a', to: 'b', kind: 'native' },
+    { from: 'c', to: 'd', kind: 'native' }, { from: 'c', to: 'e', kind: 'native' }, { from: 'd', to: 'e', kind: 'native' },
+    { from: 'u1', to: 'u2', kind: 'native' },
+  ],
+};
+const NATIVE_WORDS = {
+  a: ['native with b · not observed'], b: ['native with a · not observed'],
+  c: ['native with d, e · not observed'], d: ['native with c, e · not observed'], e: ['native with c, d · not observed'],
+  u1: [], u2: [],
+};
+
+test('both boxes and both outline rows of a native pair say native with the other, not observed, with mail or without', () => {
+  const view = boardView(NATIVE_FEED);
+  const onBoxes = Object.fromEntries(Object.values(view.nodes).map((v) => [v.id, v.badges.map((b) => b.text)]));
+  assert.deepEqual(onBoxes, NATIVE_WORDS, 'the graph\'s badges');
+  for (const v of Object.values(view.nodes)) {
+    assert.equal(v.h, CONFIG.NODE_H + v.badges.length * CONFIG.BADGE_H, `${v.id}'s box is not one badge line taller per badge`);
+    for (const b of v.badges) assert.equal(`${b.lead}${b.names}${b.tail}`, b.text, `${v.id}'s badge parts do not make its words`);
+  }
+  const ids = Object.keys(view.nodes);
+  for (let i = 0; i < ids.length; i += 1) {
+    for (let j = i + 1; j < ids.length; j += 1) {
+      const [p, q] = [view.nodes[ids[i]], view.nodes[ids[j]]];
+      const meet = p.pos.x < q.pos.x + CONFIG.NODE_W && q.pos.x < p.pos.x + CONFIG.NODE_W && p.pos.y < q.pos.y + q.h && q.pos.y < p.pos.y + p.h;
+      assert.ok(!meet, `${p.id}'s box overlaps ${q.id}'s at their drawn heights`);
+    }
+  }
+  const rows = Object.fromEntries(outlineView(NATIVE_FEED).groups.flatMap((g) => g.rows).map((r) => [r.id, r.badges]));
+  assert.deepEqual(rows, NATIVE_WORDS, 'the outline\'s lines');
+  assert.equal(Object.values(view.edges).filter((e) => e.kind === 'native').length, 3, 'a native pair with no mail lost its long dash');
+});
+
+test('a reports_to cycle\'s root says whom it reports to, on a badge and in the outline', () => {
+  const feed = {
+    nodes: [
+      node('p', { role: 'orchestrator', role_source: 'declared', reports_to: 'q' }),
+      node('q', { role: 'orchestrator', role_source: 'declared', level: 1, parent: 'p', reports_to: 'p' }),
+      node('r', { reports_to: 'ghost' }), node('s', { reports_to: 's' }),
+    ],
+    wires: [], links: [{ from: 'p', to: 'q', kind: 'reports_to' }, { from: 'q', to: 'p', kind: 'reports_to' }],
+  };
+  const view = boardView(feed);
+  assert.deepEqual(view.nodes.p.badges.map((b) => b.text), ['reports to q · cycle'], 'the cycle\'s root hides its reports_to');
+  for (const id of ['q', 'r', 's']) assert.deepEqual(view.nodes[id].badges, [], `${id} carries a badge`);
+  assert.equal(view.nodes.r.note, 'reports to ghost · not found');
+  const row = outlineView(feed).groups.flatMap((g) => g.rows).find((r) => r.id === 'p');
+  assert.deepEqual(row.badges, ['reports to q · cycle']);
 });
 
 test('a down node\'s status reads as its last status, never as its state now', () => {
