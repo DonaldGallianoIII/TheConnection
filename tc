@@ -140,6 +140,25 @@ THREAD_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 NEW_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 # The new file's mode before the umask, the same as open() gives one.
 NEW_FILE_MODE = 0o666
+# Phase fix round 1 (Claude Opus 5.5, unreviewed): D16, the ring marker's
+# states and the backoff after a ring that timed out.
+# The first line of mail/.ring-pending-<name> says why a ring is owed. Only
+# RING_TIMED_OUT holds later rings back. codex's own words go on the second
+# line, so nothing codex prints can pass for a state.
+RING_JOINED = "joined with unread mail"
+RING_RINGING = "ringing"
+RING_FAILED = "failed"
+RING_TIMED_OUT = "timed out"
+# After a ring times out, sends to that name skip the ring for this long. A
+# hung `codex queue` would otherwise cost every send its full
+# CODEX_RING_SECONDS (ten sends, 300 s of the senders' time). Five minutes
+# rides out a short codex outage, and the marker stays, so the first send
+# after it rings again. A ring that fails fast (codex exits non-zero) costs
+# one process start, so it holds nothing back.
+RING_BACKOFF_SECONDS = 300
+# How the backoff's words name a time: the local clock to the second, which
+# is all a sender needs to know when a send rings again.
+CLOCK_FORMAT = "%H:%M:%S"
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -237,14 +256,16 @@ def inbox_lock(name, how=fcntl.LOCK_EX):
     """Hold mail/.box-<name>.lock (flock) for the `with` block.
 
     One lock per inbox. Held alone (LOCK_EX) by the codex route from its
-    unread count to its message's rename, by `tc read` from its glob to its
-    last rename, and by `tc card` from its unread count to its card's
-    rename. A local send holds it shared (LOCK_SH) from its card read to its
-    rename: local senders never queue behind each other, only behind those
-    three. So a send never lands between a reader's glob and its renames
-    (the lost wake, D14), and never lands in an inbox after a `tc card` for
-    that name counted it (LOW-9). Nothing slow runs under it: the codex ring
-    waits until it is released.
+    unread count to its ring marker, by `tc read` from its glob to its
+    last rename, by `tc card` from its unread count to its card's rename,
+    and by `tc join` for a codex card from its card's rename to its ring
+    marker (D16). A local send holds it shared (LOCK_SH) from its card read
+    to its rename: local senders never queue behind each other, only
+    behind those four. So a send never lands between a reader's glob and
+    its renames (the lost wake, D14), and never lands in an inbox after a
+    `tc card` for that name counted it (LOW-9). Nothing slow runs under it:
+    the codex ring waits until it is released, and `tc read` prints after
+    it is released, so a reader stalled on its stdout never blocks a send.
 
     @interacts  makes mail/; opens mail/.box-<name>.lock, creating it empty
                 (append mode, so it never truncates what is there), and holds
@@ -335,15 +356,22 @@ def show(paths):
 def cmd_read(args):
     """`tc read <name>`: print unread mail and move it to read/.
 
+    The lock covers the glob and the renames only. The mail is printed
+    from read/ after the lock is released, so a reader whose stdout stalls
+    (a pager left open, a Ctrl-Z) never blocks a send to this name. The
+    price: a print that fails after the renames leaves that mail in read/
+    unseen, where `tc log` still shows it.
+
     @interacts  checks the name first (C0, exit 6, nothing written); a name
                 with no inbox gets `no unread mail` and nothing is created
                 (O2); else holds mail/.box-<name>.lock alone from its glob to
                 its last rename (D14), makes mail/to-<name>/read/ if missing,
-                reads and renames each unread file; prints to stdout.
+                and renames each unread file into it; then, with the lock
+                released, reads each moved file and prints to stdout.
     @deps       require_names, inbox_lock, unread, show.
     @complexity O(u) over u unread messages (single digits).
     @alloc      the list of paths and each file's text while printed; one
-                open lock file.
+                open lock file while the lock is held.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     if not (MAIL / f"to-{args.name}").is_dir():  # CARDS R3 (Claude Opus 5.5, unreviewed): O2
@@ -352,14 +380,17 @@ def cmd_read(args):
     # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14. A codex send
     # cannot land between this glob and these renames, so it never skips its
     # ring for mail this read did not print.
+    # Phase fix round 1 (Claude Opus 5.5, unreviewed): print after the
+    # release, so a stalled stdout holds no lock.
     with inbox_lock(args.name):
-        msgs = unread(args.name)
-        if not msgs:
-            print(f"no unread mail for {args.name}")
-            return
-        show(msgs)
-        for p in msgs:
+        moved = []
+        for p in unread(args.name):
             p.rename(p.parent / "read" / p.name)
+            moved.append(p.parent / "read" / p.name)
+    if not moved:
+        print(f"no unread mail for {args.name}")
+        return
+    show(moved)
 
 
 def cmd_peek(args):
@@ -605,15 +636,33 @@ def cmd_join(args):
     CLAUDE_CODE_SESSION_ID, CLAUDE_PID and CLAUDE_CONFIG_DIR. Nothing else,
     so the native path's socket and token never reach a card.
 
+    A codex card is written under the inbox lock (D16). Mail that landed
+    before this join was never rung for this thread: it came while the
+    name had no card, or was rung to a thread that has since gone. So with
+    unread mail waiting, the join writes the ring marker, and the next
+    send rings this thread whatever the count; it also prints `<n> unread
+    waiting for <name>: run tc read <name>` so this session can read now.
+    With none waiting it removes any marker, since nothing is owed, so an
+    old thread's backoff never holds back this thread's first ring.
+
     @interacts  checks both names (C0, exit 6) and a self-report (exit 6);
                 refuses a CODEX_THREAD_ID that is not a thread id (exit 1,
                 D14) and --kind codex with no CODEX_THREAD_ID (exit 1); then
                 writes cards/<name>.json through write_card, replacing any
-                card there and resetting joined_at; prints one line.
+                card there and resetting joined_at. For a codex card, holds
+                mail/.box-<name>.lock alone (making mail/) while it writes
+                the card, counts mail/to-<name>/*.md and writes or removes
+                mail/.ring-pending-<name>. Prints one line, plus the waiting
+                line; a marker it cannot write or remove is said on stderr.
     @deps       require_names, refuse_self_report, refuse, account_label,
-                write_card, describe_card, now_iso, THREAD_ID_PATTERN; os.
-    @complexity O(1), plus O(t) over t characters of CODEX_THREAD_ID.
-    @alloc      one card dict, freed on exit; one card file, kept.
+                write_card, describe_card, now_iso, THREAD_ID_PATTERN,
+                inbox_lock, unread_count, write_ring_marker, RING_JOINED;
+                os, sys.
+    @complexity O(1), plus O(t) over t characters of CODEX_THREAD_ID; a
+                codex card adds O(u) over u unread messages (single digits).
+    @alloc      one card dict, freed on exit; one card file, kept; for a
+                codex card one open lock file, and the marker file, kept
+                until a ring exits 0.
     """
     require_names(args.name, args.reports_to)
     refuse_self_report(args.name, args.reports_to)
@@ -649,8 +698,31 @@ def cmd_join(args):
         "reports_to": args.reports_to,
         "joined_at": now_iso(),
     }
-    write_card(card)
+    if card["route"] != "codex":
+        write_card(card)
+        print(f"joined as {describe_card(card)}")
+        return
+    # Phase fix round 1 (Claude Opus 5.5, unreviewed): D16. Mail waiting at
+    # a codex join leaves the ring marker, so the next send rings this thread.
+    marker = MAIL / f".ring-pending-{args.name}"
+    with inbox_lock(args.name):
+        write_card(card)
+        waiting = unread_count(args.name)
+        if waiting:
+            problem = write_ring_marker(args.name, RING_JOINED, f"tc join found {waiting} unread")
+        else:
+            try:
+                marker.unlink(missing_ok=True)
+                problem = None
+            except OSError as err:
+                problem = err
     print(f"joined as {describe_card(card)}")
+    if waiting:
+        print(f"{waiting} unread waiting for {args.name}: run tc read {args.name}")
+    if problem is not None:
+        print(f"tc join: {marker} could not be {'written' if waiting else 'removed'} "
+              f"({problem.strerror}), so the next send to {args.name} may not ring it",
+              file=sys.stderr)
 
 
 def cmd_card(args):
@@ -859,8 +931,93 @@ def deliver_local(card, sender, to, body, header_note=None):
     return Delivery(0, f"sent #{n} to {to}: {path}", warnings)
 
 
+# Phase fix round 1 (Claude Opus 5.5, unreviewed): D16, the ring marker and
+# the clock its backoff reads.
+# What ring_codex hands back when a ring did not go through: why, in words,
+# and whether codex ran past CODEX_RING_SECONDS (the one outcome that holds
+# later rings back).
+RingFailure = collections.namedtuple("RingFailure", "reason timed_out")
+
+
+def wall_clock():
+    """Seconds since the epoch, on the same scale as a file's st_mtime.
+
+    The clock the ring backoff reads (D16), in a function of its own so a
+    test replaces it and never sleeps RING_BACKOFF_SECONDS.
+
+    @interacts  reads the system clock.
+    @deps       time.
+    @complexity O(1).
+    @alloc      none.
+    """
+    return time.time()
+
+
+def clock_words(seconds):
+    """`seconds` since the epoch as the local time of day, HH:MM:SS (CLOCK_FORMAT).
+
+    @interacts  reads the local time zone.
+    @deps       datetime; CLOCK_FORMAT.
+    @complexity O(1).
+    @alloc      one short string, returned.
+    """
+    return datetime.datetime.fromtimestamp(seconds).strftime(CLOCK_FORMAT)
+
+
+def write_ring_marker(name, state, detail):
+    """Write mail/.ring-pending-<name> whole. None when written, else the OSError.
+
+    The first line is `state` (one of the RING_* words), the second the
+    time and `detail`. A new .tmp made by write_new_file (a planted link
+    is refused), then a rename over any marker there, so a reader never
+    sees half of one.
+
+    @interacts  creates mail/.ring-pending-<name>.<pid>.tmp and renames it
+                to mail/.ring-pending-<name>.
+    @deps       write_new_file, now_iso; os.
+    @complexity O(d) over d characters of `detail`.
+    @alloc      the text, freed on return; the marker file, kept until a
+                ring exits 0.
+    """
+    tmp = MAIL / f".ring-pending-{name}.{os.getpid()}.tmp"
+    try:
+        write_new_file(tmp, f"{state}\n{now_iso()} {detail}\n")
+        tmp.rename(MAIL / f".ring-pending-{name}")  # atomic, like a message
+    except OSError as err:
+        return err
+    return None
+
+
+def ring_backoff(marker):
+    """When the last ring timed out under RING_BACKOFF_SECONDS ago: that time (the marker's mtime). Else None.
+
+    Only a marker whose first line is RING_TIMED_OUT holds a ring back. Its
+    time is the file's mtime, set when the timeout rewrote it, and its age
+    is read on wall_clock(). A marker dated after now (the clock was set
+    back) holds nothing, so a clock change cannot stop rings for long. A
+    marker that cannot be read holds nothing either: the send rings, as
+    D14 has it.
+
+    @interacts  reads and stats `marker`; reads the clock (wall_clock).
+                Writes nothing.
+    @deps       wall_clock; RING_TIMED_OUT, RING_BACKOFF_SECONDS.
+    @complexity O(1): one short file.
+    @alloc      the marker's text, freed on return.
+    """
+    try:
+        state = marker.read_text().partition("\n")[0]
+        stamp = marker.stat().st_mtime
+    except (OSError, ValueError):
+        return None
+    if state == RING_TIMED_OUT and 0 <= wall_clock() - stamp < RING_BACKOFF_SECONDS:
+        return stamp
+    return None
+
+
 # CARDS R4 (Claude Opus 5.5, unreviewed): the codex route, a doorbell (D3).
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14, a failed ring is never lost.
+# Phase fix round 1 (Claude Opus 5.5, unreviewed): D16, the marker before the
+# ring, and the backoff after a timeout.
 def deliver_codex(card, sender, to, body, header_note=None):
     """Route codex: deliver_local under the inbox lock, then ring the Codex thread when a wake is owed.
 
@@ -868,30 +1025,45 @@ def deliver_codex(card, sender, to, body, header_note=None):
     a Codex session is woken by `codex queue`, which hands its thread a
     line to act on when its turn ends or the session is resumed.
 
-    Under mail/.box-<to>.lock, held alone (D14): count unread, look for the
-    marker mail/.ring-pending-<to>, deliver, and decide. A ring is owed when
-    the inbox held no unread mail before this send (one ring per batch) or
-    the marker says an earlier ring failed. The ring runs after the lock is
-    released, so a slow ring never holds up `tc read`. A ring that exits 0
-    removes the marker. Every other outcome writes it (.tmp, then rename),
-    so the next send to <to> rings again: codex exiting non-zero, a
-    timeout, codex missing, or a card whose thread_id is missing or not a
-    thread id, which is never handed to codex. The mail is in the inbox
-    either way, so the send still exits 0. Two senders racing an empty
-    inbox may both ring; accepted.
+    Under mail/.box-<to>.lock, held alone (D14): count unread, read the
+    marker mail/.ring-pending-<to>, deliver, and decide. A ring is owed
+    when the inbox held no unread mail before this send (one ring per
+    batch) or the marker is there: an earlier ring failed, a sender died
+    while it rang, or `tc join` found mail waiting (D16). The ring is held
+    instead when the marker says the last ring timed out under
+    RING_BACKOFF_SECONDS ago (D16): the marker is kept as it is, and the
+    warning says when a send rings again. When a ring is owed, the marker
+    is written (RING_RINGING) before the lock is released, so a sender
+    killed mid-ring leaves it for the next send. So two quick sends to an
+    empty inbox may both ring: the second finds the first one's marker.
+    That is two doorbells and one read, harmless, and it is what keeps a
+    wake from being lost; do not "fix" it back.
+
+    The ring runs after the lock is released, so a slow ring never holds
+    up `tc read`. A ring that exits 0 removes the marker. A timeout
+    rewrites it as RING_TIMED_OUT, which starts the backoff; every other
+    failure rewrites it as RING_FAILED, and the next send rings again:
+    codex exiting non-zero, codex missing, or a card whose thread_id is
+    missing or not a thread id, which is never handed to codex. The mail
+    is in the inbox either way, so the send still exits 0. A marker that
+    cannot be written before the ring is not said on its own: if the ring
+    then fails, the second write fails the same way and its warning says
+    a later send may not ring.
 
     @interacts  holds mail/.box-<to>.lock while it counts mail/to-<to>/*.md
-                (before and after), stats mail/.ring-pending-<to> and writes
-                the message through deliver_local. Then, when a ring is
-                owed, rings through ring_codex (one `codex queue` run, at
-                most CODEX_RING_SECONDS) and removes the marker on exit 0,
-                or creates mail/.ring-pending-<to>.<pid>.tmp and renames it
-                over the marker.
-    @deps       inbox_lock, unread_count, deliver_local, ring_codex,
-                write_new_file, now_iso, Delivery; os.
+                (before and after), reads and stats mail/.ring-pending-<to>,
+                writes the message through deliver_local and, when a ring
+                is owed, the marker (write_ring_marker). Then rings through
+                ring_codex (one `codex queue` run, at most
+                CODEX_RING_SECONDS) and removes the marker on exit 0, or
+                rewrites it. Reads the clock through wall_clock.
+    @deps       inbox_lock, unread_count, deliver_local, ring_backoff,
+                write_ring_marker, ring_codex, clock_words, wall_clock,
+                Delivery; RING_RINGING, RING_FAILED, RING_TIMED_OUT,
+                RING_BACKOFF_SECONDS.
     @complexity O(u + b) over u unread messages (counted twice) and b
                 bytes of body, plus one codex run of at most
-                CODEX_RING_SECONDS.
+                CODEX_RING_SECONDS; no run while a backoff holds.
     @alloc      the ring's words, freed on return; one message file, kept;
                 the marker file, kept until a ring exits 0.
     """
@@ -899,13 +1071,23 @@ def deliver_codex(card, sender, to, body, header_note=None):
     with inbox_lock(to):
         waiting = unread_count(to)
         owed = marker.exists()
+        held = ring_backoff(marker) if owed else None
         landed = deliver_local(card, sender, to, body, header_note)
         count = unread_count(to)
-    if landed.exit != 0 or (waiting and not owed):
+        ring = landed.exit == 0 and held is None and (owed or not waiting)
+        if ring:
+            write_ring_marker(to, RING_RINGING, f"a send from {sender} is ringing")
+    if landed.exit != 0:
         return landed
     words, warnings = [landed.words], list(landed.warnings)
-    reason = ring_codex(card, sender, to, count)
-    if reason is None:
+    if held is not None:
+        warnings.append(f"ring pending for {to}: the last ring timed out at {clock_words(held)}; "
+                        f"a send after {clock_words(held + RING_BACKOFF_SECONDS)} rings again")
+        return Delivery(landed.exit, landed.words, warnings)
+    if not ring:
+        return landed
+    failure = ring_codex(card, sender, to, count)
+    if failure is None:
         words.append(f"rang codex {to} (queued; delivered when its turn ends or the session is resumed)")
         try:
             marker.unlink(missing_ok=True)
@@ -913,28 +1095,34 @@ def deliver_codex(card, sender, to, body, header_note=None):
             warnings.append(f"rang codex {to}, but {marker} could not be removed ({err.strerror}); "
                             f"the next send to {to} rings again")
         return Delivery(landed.exit, "\n".join(words), warnings)
-    tmp = MAIL / f".ring-pending-{to}.{os.getpid()}.tmp"
-    try:
-        write_new_file(tmp, f"{now_iso()} ring failed: {reason}\n")
-        tmp.rename(marker)  # atomic, like a message
-    except OSError as err:
-        warnings.append(f"ring failed for {to}: {reason}; the mail is in its inbox; {marker} could not "
-                        f"be written ({err.strerror}), so a later send may not ring")
+    problem = write_ring_marker(to, RING_TIMED_OUT if failure.timed_out else RING_FAILED, failure.reason)
+    if problem is not None:
+        warnings.append(f"ring failed for {to}: {failure.reason}; the mail is in its inbox; {marker} could "
+                        f"not be written ({problem.strerror}), so a later send may not ring")
+    elif failure.timed_out:
+        try:
+            stamp = marker.stat().st_mtime
+        except OSError:
+            stamp = wall_clock()
+        warnings.append(f"ring failed for {to}: {failure.reason}; the mail is in its inbox; "
+                        f"a send after {clock_words(stamp + RING_BACKOFF_SECONDS)} rings again")
     else:
-        warnings.append(f"ring failed for {to}: {reason}; the mail is in its inbox; "
+        warnings.append(f"ring failed for {to}: {failure.reason}; the mail is in its inbox; "
                         f"the next send to {to} rings again")
     return Delivery(landed.exit, "\n".join(words), warnings)
 
 
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the ring, apart from its bookkeeping.
 def ring_codex(card, sender, to, count):
-    """Ring the Codex thread named on `card` once. None when codex exits 0, else why not, in words.
+    """Ring the Codex thread named on `card` once. None when codex exits 0, else a RingFailure.
 
-    A thread_id that is missing, or is not a str of THREAD_ID_PATTERN's
-    shape, never reaches codex's argv (D14): the words say which. The
-    line names the mailbox root as well as tc, both quoted, so a Codex
-    session whose own default root differs reads and replies in this one
-    (REC-9). codex runs in a session of its own: past CODEX_RING_SECONDS
+    The RingFailure says why not, in words, and whether codex ran past
+    CODEX_RING_SECONDS (timed_out), which is all the caller's backoff
+    needs (D16). A thread_id that is missing, or is not a str of
+    THREAD_ID_PATTERN's shape, never reaches codex's argv (D14): the
+    words say which. The line names the mailbox root as well as tc, both
+    quoted, so a Codex session whose own default root differs reads and
+    replies in this one (REC-9). codex runs in a session of its own: past CODEX_RING_SECONDS
     its whole process group is killed, so a child it started (a node
     CLI's native codex) is not left behind (LOW-7). Its output is decoded
     with errors="replace", so odd bytes never fail a send (LOW-8).
@@ -944,18 +1132,20 @@ def ring_codex(card, sender, to, count):
                 stdin from /dev/null, reads its stdout and stderr until it
                 exits or CODEX_RING_SECONDS pass, then SIGKILLs its process
                 group (that group only) and reaps it. Writes nothing.
-    @deps       THREAD_ID_PATTERN, CODEX_RING_SECONDS, ROOT; subprocess,
-                os, signal, shlex, pathlib; the `codex` CLI on PATH.
+    @deps       THREAD_ID_PATTERN, CODEX_RING_SECONDS, ROOT, RingFailure;
+                subprocess, os, signal, shlex, pathlib; the `codex` CLI on
+                PATH.
     @complexity O(t) over t characters of the thread_id, plus one codex run
                 of at most CODEX_RING_SECONDS.
     @alloc      the message and codex's captured output, freed on return;
-                one child and its two pipes, closed and reaped on return.
+                one child and its two pipes, closed and reaped on return;
+                one RingFailure on a failure.
     """
     thread = card.get("thread_id") if card else None
     if thread is None or thread == "":
-        return "its card has no thread_id"
+        return RingFailure("its card has no thread_id", False)
     if not isinstance(thread, str) or not THREAD_ID_PATTERN.fullmatch(thread):
-        return "its card's thread_id is not a thread id"
+        return RingFailure("its card's thread_id is not a thread id", False)
     # CARDS fix round 1 (Claude Opus 5.5, unreviewed): REC-9, LOW-7, LOW-8.
     run = f"TC_ROOT={shlex.quote(str(ROOT.resolve()))} {shlex.quote(str(pathlib.Path(__file__).resolve()))}"
     message = (f"MAIL: {count} unread for {to}. Run: {run} read {to}, act on it, "
@@ -973,12 +1163,12 @@ def ring_codex(card, sender, to, count):
                 except ProcessLookupError:
                     pass  # every process in the group is already gone
                 proc.wait()
-                return f"no answer in {CODEX_RING_SECONDS} s"
+                return RingFailure(f"no answer in {CODEX_RING_SECONDS} s", True)
     except OSError as err:
-        return f"could not run codex ({err.strerror})"
+        return RingFailure(f"could not run codex ({err.strerror})", False)
     if proc.returncode != 0:
         lines = said.strip().splitlines()
-        return lines[0] if lines else f"codex exited {proc.returncode} with no stderr"
+        return RingFailure(lines[0] if lines else f"codex exited {proc.returncode} with no stderr", False)
     return None
 
 

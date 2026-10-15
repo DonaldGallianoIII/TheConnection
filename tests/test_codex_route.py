@@ -30,9 +30,15 @@ thread_id of any other shape never reaches codex's argv.
             os.killpg) for one call, so nothing runs and no signal is sent;
             two run a fake with PATH set to put it first for that call, one
             of them with the ring's timeout patched down to
-            SHORT_RING_SECONDS.
-@deps       python3 stdlib (fcntl, importlib, json, os, pathlib, shlex,
-            signal, subprocess, sys, tempfile, time, unittest,
+            SHORT_RING_SECONDS. D16's tests (phase fix round 1, Claude
+            Opus 5.5, unreviewed): two more load tc and run deliver_codex
+            with the clock (wall_clock) replaced, so no test sleeps out the
+            backoff; one fake kills the tc send that started it, by that
+            send's own pid, once it has checked the pid is that send; one
+            test leaves a `tc read` stalled on a stdout pipe it never
+            drains, and the harness kills it by its own pid.
+@deps       python3 stdlib (datetime, fcntl, importlib, json, os, pathlib,
+            shlex, signal, subprocess, sys, tempfile, time, unittest,
             unittest.mock); tests/_root.py; ../tc. test_router.py and
             test_cards.py import RELEASE_CEILING_SECONDS and
             wait_until_blocked from here.
@@ -45,6 +51,7 @@ thread_id of any other shape never reaches codex's argv.
             lock file while a test holds a lock.
 """
 
+import datetime
 import fcntl
 import importlib.machinery
 import importlib.util
@@ -164,6 +171,47 @@ STAND_IN_PID = 424242
 # /proc/<pid>/stat: the state letter after the ")" that closes comm. A
 # zombie (Z) has exited and only waits to be reaped.
 ZOMBIE_STATE = "Z"
+
+# Phase fix round 1 (Claude Opus 5.5, unreviewed): D16's words and numbers,
+# written here rather than read from tc.
+# What `tc join` prints after its joined line when mail is waiting.
+WAITING_WORDS = "{n} unread waiting for {to}: run tc read {to}\n"
+# A ring that timed out, and a send that finds the backoff still running.
+RING_TIMED_OUT_WORDS = "ring failed for {to}: {reason}; the mail is in its inbox; a send after {until} rings again"
+RING_PENDING_WORDS = "ring pending for {to}: the last ring timed out at {at}; a send after {until} rings again"
+RING_BACKOFF_SECONDS = 300
+# How the warnings name a time.
+CLOCK_FORMAT = "%H:%M:%S"
+# The first line of the marker after a ring that timed out, and after one
+# that failed fast.
+TIMED_OUT_STATE = "timed out"
+FAILED_STATE = "failed"
+# Where the patched clock stands: this far after the timeout (inside the
+# window), and this far past the window's end.
+INSIDE_WINDOW_SECONDS = 10
+PAST_WINDOW_SECONDS = 1
+# A second thread, for a rejoin.
+OTHER_THREAD = "t2"
+# A fake that records its call and its parent's pid, then sends SIGKILL to
+# that parent, the `tc send` ringing it, as a person's Ctrl-C or a closed
+# terminal would end a sender mid-ring. It kills only a parent whose
+# command line holds the tc path TC and "send", so it never touches a pid
+# that is not this test's own send.
+KILLING_FAKE_BODY = """import json, os, signal, sys
+parent = os.getppid()
+with open(RECORD + ".tmp", "w") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "pid": os.getpid(), "parent": parent}) + "\\n")
+os.replace(RECORD + ".tmp", RECORD)
+with open(f"/proc/{parent}/cmdline", "rb") as f:
+    words = f.read().split(b"\\0")
+if TC.encode() in words and b"send" in words:
+    os.kill(parent, signal.SIGKILL)
+"""
+# One message larger than a pipe's default buffer on Linux (64 KiB), so a
+# `tc read` whose stdout nobody drains stops partway through printing it.
+STALL_BODY_BYTES = 256 * 1024
+# How long a send to that inbox may take while the reader is stalled.
+STALLED_READ_SEND_CEILING_SECONDS = 1
 
 
 def own_fake(root, body, **constants):
@@ -306,17 +354,28 @@ def gone(pid):
         time.sleep(POLL_SECONDS)
 
 
-def ring_argv(root, n, to, sender):
+def ring_argv(root, n, to, sender, thread=THREAD):
     """The argv a ring must hand codex, after the program name, for a send under `root`.
 
     @interacts  none.
-    @deps       RING_MESSAGE, TC_PATH; shlex.
+    @deps       RING_MESSAGE, TC_PATH, THREAD; shlex.
     @complexity O(1).
     @alloc      one list, returned.
     """
-    return ["queue", "--thread", THREAD, "--message",
+    return ["queue", "--thread", thread, "--message",
             RING_MESSAGE.format(n=n, to=to, tc=shlex.quote(TC_PATH), sender=sender,
                                 root=shlex.quote(str(root.path.resolve())))]
+
+
+def clock(seconds):
+    """`seconds` since the epoch as the local HH:MM:SS the warnings print.
+
+    @interacts  reads the local time zone.
+    @deps       datetime; CLOCK_FORMAT.
+    @complexity O(1).
+    @alloc      one short string, returned.
+    """
+    return datetime.datetime.fromtimestamp(seconds).strftime(CLOCK_FORMAT)
 
 
 def load_tc(root, where=None):
@@ -736,7 +795,9 @@ class CodexRouteTest(unittest.TestCase):
         sent. The test also checks the ring's stdin is /dev/null, it waits
         30 s, it starts codex in a session of its own and kills that group
         (CARDS fix round 1, LOW-7), and it decodes with errors="replace"
-        (LOW-8).
+        (LOW-8). Since D16 the words name when a send rings again (the
+        marker's time plus RING_BACKOFF_SECONDS), and the marker says
+        `timed out`.
 
         @interacts  loads tc in process; patches subprocess.Popen and
                     os.killpg for one deliver_codex call, which writes one
@@ -781,9 +842,13 @@ class CodexRouteTest(unittest.TestCase):
                     mock.patch.object(os, "killpg", lambda pid, sig: killed.append((pid, sig))):
                 got = tc.deliver_codex(card, "a", "c", "hi")
             landed = sorted(p.name for p in (root.path / "mail" / "to-c").glob("*.md"))
+            marker = root.path / "mail" / ".ring-pending-c"
+            stamp, state = marker.stat().st_mtime, marker.read_text().splitlines()[0]
         self.assertEqual(got.exit, 0)
-        self.assertIn(RING_FAILED_WORDS.format(to="c", reason=f"no answer in {CODEX_RING_SECONDS} s"),
+        self.assertIn(RING_TIMED_OUT_WORDS.format(to="c", reason=f"no answer in {CODEX_RING_SECONDS} s",
+                                                  until=clock(stamp + RING_BACKOFF_SECONDS)),
                       got.warnings)
+        self.assertEqual(state, TIMED_OUT_STATE)
         self.assertEqual(landed, ["000001-from-a.md"])
         self.assertEqual(len(seen), 1, "codex was not called exactly once")
         argv, kwargs = seen[0]
@@ -824,8 +889,10 @@ class CodexRouteTest(unittest.TestCase):
             finally:
                 kill_own_fake(ring["child"], record)
                 kill_own_fake(ring["pid"], record)
+            stamp = (root.path / "mail" / ".ring-pending-c").stat().st_mtime
         self.assertEqual(got.exit, 0)
-        self.assertIn(RING_FAILED_WORDS.format(to="c", reason=f"no answer in {SHORT_RING_SECONDS} s"),
+        self.assertIn(RING_TIMED_OUT_WORDS.format(to="c", reason=f"no answer in {SHORT_RING_SECONDS} s",
+                                                  until=clock(stamp + RING_BACKOFF_SECONDS)),
                       got.warnings)
         self.assertTrue(fake_gone, "the timed-out codex is still running")
         self.assertTrue(child_gone, "codex's own child outlived the timed-out ring")
@@ -905,6 +972,245 @@ class CodexRouteTest(unittest.TestCase):
         self.assertNotIn("Traceback", err)
         self.assertEqual(landed, ["000001-from-a.md"])
         self.assertTrue(marked)
+
+    # Phase fix round 1 (Claude Opus 5.5, unreviewed): D16 C1, mail before a join.
+    def test_mail_from_before_a_codex_join_is_rung_by_the_next_send(self):
+        """send to cx with no card, join cx as codex, send again: one ring, and join said what waits.
+
+        The first send lands local (no card), so nothing rang for it. The
+        join finds it, writes the marker and prints the waiting line; the
+        next send rings this thread although the inbox was not empty. Must
+        reject a join that ignores unread mail: the second send would find
+        1 unread, no marker, and never ring.
+
+        @interacts  two sends, one join (CODEX_THREAD_ID set, CLAUDECODE
+                    unset), one fake codex.
+        @deps       _root.TcRoot.tc, _root.TcRoot.fake_bin, ring_argv.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("codex", CODEX_QUEUE_EXIT["queued"])
+            record = folder.parent / "calls.jsonl"
+            marker = root.path / "mail" / ".ring-pending-cx"
+            first = root.tc("send", "--from", "a", "--to", "cx", "one")
+            rang_before_join = record.exists()
+            joined = root.tc("join", "cx", env={"CODEX_THREAD_ID": THREAD, "CLAUDECODE": None})
+            marked = marker.exists()
+            second = root.tc("send", "--from", "a", "--to", "cx", "two")
+            ran = record.exists()
+            recorded = calls()
+            cleared = not marker.exists()
+        self.assertEqual(first[0], 0, f"first send exited {first[0]}: {first[2]}")
+        self.assertFalse(rang_before_join, "a send to a name with no card rang codex")
+        self.assertEqual(joined, (0, "joined as cx (codex, account unknown, route codex)\n"
+                                     + WAITING_WORDS.format(n=1, to="cx"), ""))
+        self.assertTrue(marked, "the join left no marker with mail waiting")
+        self.assertTrue(ran, f"{record} missing: the fake codex never ran, so no send rang cx")
+        self.assertEqual(second[0], 0, f"second send exited {second[0]}: {second[2]}")
+        self.assertEqual([call["argv"] for call in recorded], [ring_argv(root, 2, "cx", "a")])
+        self.assertTrue(cleared, "a ring that exited 0 left the marker")
+
+    def test_a_rejoin_on_a_new_thread_is_rung_by_the_next_send(self):
+        """A ring to t1 exits 0; cx rejoins on t2 with that mail unread; the next send rings t2.
+
+        Must reject a join that ignores unread mail: every later send would
+        find unread mail, no marker, and never ring t2.
+
+        @interacts  two joins, two sends, one fake codex.
+        @deps       _root.TcRoot.tc, _root.TcRoot.fake_bin, ring_argv.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("codex", CODEX_QUEUE_EXIT["queued"])
+            self.join_codex(root, "cx")
+            root.tc("send", "--from", "a", "--to", "cx", "one")
+            rejoined = root.tc("join", "cx", env={"CODEX_THREAD_ID": OTHER_THREAD})
+            sent = root.tc("send", "--from", "b", "--to", "cx", "two")
+            record = folder.parent / "calls.jsonl"
+            self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
+            recorded = calls()
+        self.assertEqual(rejoined[0], 0, f"rejoin exited {rejoined[0]}: {rejoined[2]}")
+        self.assertTrue(rejoined[1].endswith(WAITING_WORDS.format(n=1, to="cx")), rejoined[1])
+        self.assertEqual(sent[0], 0, f"send exited {sent[0]}: {sent[2]}")
+        self.assertEqual([call["argv"] for call in recorded],
+                         [ring_argv(root, 1, "cx", "a"), ring_argv(root, 2, "cx", "b", OTHER_THREAD)])
+
+    def test_a_sender_killed_mid_ring_leaves_the_marker(self):
+        """A fake that kills its own sender mid-ring: the marker stays, and the next send rings.
+
+        The marker is written before the ring, so a sender that dies while
+        codex runs still leaves it. Must reject a marker written only after
+        a failed ring: the killed send writes none, and the next send finds
+        1 unread, no marker, and does not ring.
+
+        @interacts  one join, two sends; this file's own fake, which sends
+                    SIGKILL to the send that started it (checked by its
+                    command line first), then a harness fake.
+        @deps       own_fake, kill_own_fake, ring_argv; _root.TcRoot.tc,
+                    _root.TcRoot.fake_bin.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            env, record = own_fake(root, KILLING_FAKE_BODY, TC=TC_PATH)
+            self.join_codex(root)
+            marker = root.path / "mail" / ".ring-pending-c"
+            killed = root.tc("send", "--from", "a", "--to", "c", "one", env=env)
+            self.assertTrue(record.exists(), f"{record} missing: the killing fake never ran")
+            kill_own_fake(json.loads(record.read_text().splitlines()[0])["pid"], record)
+            marked = marker.exists()
+            folder, calls = root.fake_bin("codex", CODEX_QUEUE_EXIT["queued"])
+            after = root.tc("send", "--from", "b", "--to", "c", "two")
+            ran = (folder.parent / "calls.jsonl").exists()
+            recorded = calls()
+            landed = sorted(p.name for p in (root.path / "mail" / "to-c").glob("*.md"))
+        self.assertEqual(killed[0], -signal.SIGKILL, f"the fake did not kill the send mid-ring: {killed}")
+        self.assertTrue(marked, "a send killed mid-ring left no marker")
+        self.assertTrue(ran, "the second fake codex never ran, so the next send did not ring")
+        self.assertEqual(after[0], 0, f"the next send exited {after[0]}: {after[2]}")
+        self.assertEqual([call["argv"] for call in recorded], [ring_argv(root, 2, "c", "b")])
+        self.assertEqual(landed, ["000001-from-a.md", "000002-from-b.md"])
+
+    def test_a_ring_that_timed_out_holds_rings_for_the_backoff_window(self):
+        """In process: a ring times out; a send inside the window rings nothing and warns; one after it rings.
+
+        The ring's timeout is patched to SHORT_RING_SECONDS and this file's
+        sleeping fake outlasts it. The clock (wall_clock) is then set
+        INSIDE_WINDOW_SECONDS after the marker's time, then past
+        RING_BACKOFF_SECONDS, so the test never sleeps 300 s. Must reject a
+        send inside the window that rings: the harness fake would record a
+        call. The mail lands and every send exits 0.
+
+        @interacts  loads tc in process; runs deliver_codex three times,
+                    first with PATH putting this file's sleeping fake first
+                    (killed by the ring's own timeout, then by its pid in
+                    case), then with the harness fake first and wall_clock
+                    replaced.
+        @deps       load_tc, own_fake, kill_own_fake, clock, ring_argv;
+                    _root.TcRoot.fake_bin; unittest.mock.
+        @complexity O(1): about SHORT_RING_SECONDS.
+        @alloc      one TcRoot and one module.
+        """
+        card = {"name": "c", "kind": "codex", "route": "codex", "thread_id": THREAD}
+        with _root.TcRoot() as root:
+            env, record = own_fake(root, SLOW_FAKE_BODY, SLEEP=ORPHAN_SLEEP_SECONDS)
+            folder, calls = root.fake_bin("codex", CODEX_QUEUE_EXIT["queued"])
+            tc = load_tc(root)
+            marker = root.path / "mail" / ".ring-pending-c"
+            with mock.patch.dict(os.environ, env), \
+                    mock.patch.object(tc, "CODEX_RING_SECONDS", SHORT_RING_SECONDS):
+                timed_out = tc.deliver_codex(card, "a", "c", "one")
+            self.assertTrue(record.exists(), f"{record} missing: the sleeping fake never ran")
+            kill_own_fake(json.loads(record.read_text().splitlines()[0])["pid"], record)
+            stamp, state = marker.stat().st_mtime, marker.read_text().splitlines()[0]
+            with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}), \
+                    mock.patch.object(tc, "wall_clock", lambda: stamp + INSIDE_WINDOW_SECONDS):
+                held = tc.deliver_codex(card, "a", "c", "two")
+            rang_inside = calls()
+            kept = (marker.stat().st_mtime, marker.read_text().splitlines()[0]) if marker.exists() else None
+            with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}), \
+                    mock.patch.object(tc, "wall_clock",
+                                      lambda: stamp + RING_BACKOFF_SECONDS + PAST_WINDOW_SECONDS):
+                rang = tc.deliver_codex(card, "a", "c", "three")
+            self.assertTrue((folder.parent / "calls.jsonl").exists(), "the harness fake codex never ran")
+            recorded = calls()
+            cleared = not marker.exists()
+            landed = sorted(p.name for p in (root.path / "mail" / "to-c").glob("*.md"))
+        until = clock(stamp + RING_BACKOFF_SECONDS)
+        self.assertEqual(timed_out.exit, 0)
+        self.assertIn(RING_TIMED_OUT_WORDS.format(to="c", reason=f"no answer in {SHORT_RING_SECONDS} s",
+                                                  until=until), timed_out.warnings)
+        self.assertEqual(state, TIMED_OUT_STATE)
+        self.assertEqual(rang_inside, [], "a send inside the backoff window rang codex")
+        self.assertEqual(held.exit, 0)
+        self.assertEqual(held.warnings, [RING_PENDING_WORDS.format(to="c", at=clock(stamp), until=until)])
+        self.assertEqual(kept, (stamp, TIMED_OUT_STATE), "a send inside the window changed the marker")
+        self.assertEqual(rang.exit, 0)
+        self.assertEqual([call["argv"] for call in recorded], [ring_argv(root, 3, "c", "a")])
+        self.assertTrue(rang.words.endswith(RANG_WORDS.format(to="c")), rang.words)
+        self.assertTrue(cleared, "a ring that exited 0 left the marker")
+        self.assertEqual(landed, ["000001-from-a.md", "000002-from-a.md", "000003-from-a.md"])
+
+    def test_a_ring_that_fails_fast_holds_nothing_back(self):
+        """In process: codex exits 1, then the very next send, with the clock inside the window, rings.
+
+        Only a timeout starts the backoff. Must reject a backoff after a
+        fast failure: the second send would ring nothing.
+
+        @interacts  loads tc in process; runs deliver_codex twice with PATH
+                    putting the harness fake first, the second time with
+                    wall_clock replaced.
+        @deps       load_tc, ring_argv; _root.TcRoot.fake_bin; unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        card = {"name": "c", "kind": "codex", "route": "codex", "thread_id": THREAD}
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin(
+                "codex", [CODEX_QUEUE_EXIT["unknown thread"], CODEX_QUEUE_EXIT["queued"]],
+                stderr=FAKE_UNKNOWN_THREAD_STDERR)
+            tc = load_tc(root)
+            marker = root.path / "mail" / ".ring-pending-c"
+            with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}):
+                failed = tc.deliver_codex(card, "a", "c", "one")
+                stamp, state = marker.stat().st_mtime, marker.read_text().splitlines()[0]
+                with mock.patch.object(tc, "wall_clock", lambda: stamp + INSIDE_WINDOW_SECONDS):
+                    again = tc.deliver_codex(card, "a", "c", "two")
+            self.assertTrue((folder.parent / "calls.jsonl").exists(), "the fake codex never ran")
+            recorded = calls()
+        self.assertIn(RING_FAILED_WORDS.format(to="c", reason="fake codex: no thread t1"), failed.warnings)
+        self.assertEqual(again.exit, 0)
+        self.assertEqual([call["argv"] for call in recorded],
+                         [ring_argv(root, 1, "c", "a"), ring_argv(root, 2, "c", "a")],
+                         "a send right after a fast failure did not ring")
+        self.assertEqual(state, FAILED_STATE)
+        self.assertTrue(again.words.endswith(RANG_WORDS.format(to="c")), again.words)
+
+    # Phase fix round 1 (Claude Opus 5.5, unreviewed): tc read prints after the lock.
+    def test_a_stalled_reader_never_blocks_a_send(self):
+        """A `tc read b` whose stdout pipe nobody drains: a send to b still lands within 1 s.
+
+        The message is larger than a pipe's buffer, so the reader stops
+        partway through printing it. It renamed the mail into read/ under
+        the inbox lock and prints after letting go. Must reject a read that
+        prints under the lock: the send would wait for it forever (it is
+        killed at STALLED_READ_SEND_CEILING_SECONDS).
+
+        @interacts  two sends, one background read left stalled (the
+                    harness kills it by its own pid); reads /proc/locks.
+        @deps       _root.TcRoot.tc, _root.TcRoot.start,
+                    _root.flock_holders; subprocess, time.
+        @complexity O(STALL_BODY_BYTES), plus at most BLOCK_CEILING_SECONDS
+                    / POLL_SECONDS polls.
+        @alloc      one TcRoot, one background child, one message of
+                    STALL_BODY_BYTES.
+        """
+        with _root.TcRoot() as root:
+            root.tc("send", "--from", "a", "--to", "b", stdin="x" * STALL_BODY_BYTES)
+            lock = root.path / "mail" / ".box-b.lock"
+            moved = root.path / "mail" / "to-b" / "read" / "000001-from-a.md"
+            reader = root.start("read", "b")
+            deadline = time.monotonic() + BLOCK_CEILING_SECONDS
+            while not moved.exists() and reader.pid not in _root.flock_holders(lock):
+                if reader.poll() is not None or time.monotonic() >= deadline:
+                    self.fail(f"tc read b neither moved its mail nor held {lock.name} "
+                              f"within {BLOCK_CEILING_SECONDS} s")
+                time.sleep(POLL_SECONDS)
+            try:
+                code, out, err = root.tc("send", "--from", "c", "--to", "b", "hi",
+                                         timeout=STALLED_READ_SEND_CEILING_SECONDS)
+            except subprocess.TimeoutExpired:
+                self.fail(f"a send to b waited past {STALLED_READ_SEND_CEILING_SECONDS} s "
+                          f"behind a reader stalled on its stdout")
+            stalled = reader.poll() is None
+            landed = sorted(p.name for p in (root.path / "mail" / "to-b").glob("*.md"))
+            read_once = moved.exists()
+        self.assertTrue(stalled, "the reader finished printing, so it never stalled: this test proves nothing")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(landed, ["000002-from-c.md"])
+        self.assertTrue(read_once, "the stalled reader's mail is not in read/")
 
 
 if __name__ == "__main__":
