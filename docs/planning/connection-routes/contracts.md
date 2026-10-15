@@ -31,7 +31,7 @@ pause; no lane reuses a number for a new meaning.
 | 7 | refused by the gate | `gate` | this plan (C3) |
 | 8 | message over `SEND_BODY_MAX_BYTES` | `send`, `gate` | this plan (C0) |
 | 9 | usage error: an unknown command, flag or missing argument; the usage text goes to stderr | every command (the parser) | this plan (D12) |
-| 10 | busy: another process held `mail/.seq` or an inbox lock past `LOCK_WAIT_SECONDS`; nothing written; try again. Never from `wait` or `watch`, so the re-arm rule below is unchanged. The ssh route and `flush` treat a far 10 like a dropped connection: the message stays queued (C3) | `send`, `read`, `card`, `join`, the codex route | this plan (D23) |
+| 10 | busy: another process held `mail/.seq` or an inbox lock past `LOCK_WAIT_SECONDS`, or a send found `PUBLISH_MAX_TRIES` message numbers in a row taken by hand-made files (the next send starts past them); nothing written; try again. Never from `wait` or `watch`, so the re-arm rule below is unchanged. The ssh route and `flush` treat a far 10 like a dropped connection: the message stays queued (C3) | `send`, `read`, `card`, `join`, the codex route | this plan (D23) |
 
 Why 9 (D12): argparse exits 2 on a usage error, the same code as a `wait`
 timeout. A mistyped listener exits at once, its session reads 2 as a
@@ -358,10 +358,14 @@ For a separate Linux user per account on one machine.
 - **Nobody can swap ROOT** (D21, D23). Init makes a missing ROOT `0755`
   and refuses a ROOT that its group or anyone may write. It then walks
   every folder from ROOT up to `/` and refuses, with words naming the
-  folder, one owned by anyone but root or the user running init, or
-  writable by its group or anyone without the sticky bit: ssh's own test
-  for `authorized_keys` paths. Any of those would let a member rename
-  ROOT and put their own `.shared` in its place.
+  folder, one owned by anyone but root, the user running init, or the
+  owner of an existing `.shared` (the user D21 already trusts with the
+  group), or writable by its group or anyone without the sticky bit:
+  ssh's own test for `authorized_keys` paths. Any of those would let a
+  member rename ROOT and put their own `.shared` in its place. Before
+  the first init there is no `.shared`, so only root and the user
+  running it pass; afterwards a member's same-group rerun reaches D21's
+  own checks.
 - **A held lock costs a failed send, never a hang** (D20, D23). `mail/.seq`
   and the inbox locks are group-writable, so a member can hold one. tc
   waits at most `LOCK_WAIT_SECONDS` per command for them, then exits 10
