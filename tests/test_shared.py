@@ -21,7 +21,11 @@ another member's init refused before it changes anything (another group,
 or an unreadable .shared) and told who may change the group, a shared
 send to an inbox with no card refused with nothing written, and a
 private one still delivered. And, from BOARD's review, a status file's
-age never taken through a link.
+age never taken through a link. And D20's bound (SHARED fix round 2,
+Claude Opus 5.5, unreviewed): a mail/.seq set back never makes a send
+replace a message, unread or read, and a lock held by another process
+makes send, read, a codex join, tc card and a codex send fail within
+LOCK_WAIT_SECONDS, never hang.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -64,9 +68,12 @@ the owner's human QA (D4, qa/human/route-shared.md).
             os.geteuid replaced. The
             status age test makes a folder outside TC_ROOT, a file in it
             and a link to it in status/, and chmods that folder to no
-            access and back.
+            access and back. The round 2 tests write mail/.seq by hand,
+            hold flocks on lock files and the ring marker in this process
+            while tc children run under timeouts (several roots at once),
+            and read every file under a root before and after.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
-            importlib, io, json, os, pathlib, stat, subprocess, sys,
+            importlib, io, json, os, pathlib, stat, subprocess, sys, time,
             unittest, unittest.mock); tests/_root.py.
 @complexity O(1) per test: a handful of tc runs over a root of a few dozen
             entries, once per group tested (one or two).
@@ -87,6 +94,7 @@ import pathlib
 import stat
 import subprocess
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -225,6 +233,18 @@ PRE_D21_MARKER_MODE = 0o664
 # Why a test that needs a group other than the one .shared names is skipped.
 NO_SECOND_GROUP_REASON = ("the running user has no named supplementary group, so no init can ask for a group "
                           "other than the one .shared names")
+# SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20's bound, no lost
+# mail and no hang. Written out, not read from tc, for the same reason.
+# How long tc waits for a lock another process holds before it refuses.
+LOCK_WAIT_SECONDS = 3
+# Python start-up and tc's imports on a busy machine, on top of the wait.
+# A refused command that runs past the wait plus this is hung.
+LOCK_REFUSE_MARGIN_SECONDS = 3
+# What tc says when a lock is held past LOCK_WAIT_SECONDS; {what} says whose.
+LOCK_HELD_WORDS = "another process is holding {what}'s lock"
+# The number a member sets mail/.seq back to, so the next send's number
+# names a message already there.
+SET_BACK_SEQ = 5
 
 
 def user_groups():
@@ -1877,6 +1897,203 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(mail, ["mail/to-c/000001-from-a.md"])
 
+
+# SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20's bound.
+def contents(path):
+    """Every entry under `path`: {relative path: bytes for a file, "folder" or "other"}, from lstat, never through a link.
+
+    @interacts  lstats every entry and reads every regular file. Writes
+                nothing.
+    @deps       os, stat, pathlib.
+    @complexity O(e + b) over e entries (a few dozen) and b bytes in their
+                files (a few KiB).
+    @alloc      one dict, returned.
+    """
+    out = {}
+    for entry in path.rglob("*"):
+        mode = os.lstat(entry).st_mode
+        out[str(entry.relative_to(path))] = (entry.read_bytes() if stat.S_ISREG(mode) else
+                                             "folder" if stat.S_ISDIR(mode) else "other")
+    return out
+
+
+class NoLostMailNoHangTest(UmaskTestCase):
+    """D20's bound through the group-writable files: a mail/.seq set back never makes a send replace a message, and a lock held by another process makes a command fail within LOCK_WAIT_SECONDS, never hang.
+
+    The audit's MEDIUM-1 and MEDIUM-3 (audits/2026-10-14-2259-quick). One
+    Linux user stands in for the hostile member: it sets mail/.seq back,
+    or holds a lock's flock in this process, as any member of the group
+    could.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, UmaskTestCase, primary_group, contents;
+                contextlib, fcntl, subprocess, time.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per case.
+    """
+
+    def set_back_and_send(self, root, shared):
+        """Join b (after init when `shared`), send two messages, set mail/.seq back so the next number names an existing one: the runs, in order.
+
+        @interacts  init when `shared`, a join, two sends, one write of
+                    mail/.seq by hand.
+        @deps       _root.TcRoot.tc, primary_group; SET_BACK_SEQ.
+        @complexity O(1).
+        @alloc      the list of runs, returned.
+        """
+        runs = [root.tc("init", "--shared", "--group", primary_group()[1])] if shared else []
+        runs += [root.tc("join", "b", env={"CLAUDECODE": "1"}),
+                 root.tc("send", "--from", "a", "--to", "b", "first")]
+        (root.path / "mail" / ".seq").write_text(str(SET_BACK_SEQ))
+        runs.append(root.tc("send", "--from", "a", "--to", "b", "the unread one"))
+        (root.path / "mail" / ".seq").write_text(str(SET_BACK_SEQ))
+        return runs
+
+    def test_a_send_after_mail_seq_is_set_back_never_replaces_unread_mail(self):
+        """Private and shared: unread #6 from a in b's inbox and mail/.seq set back to 5: the next send from a lands as #7, and #6 is unchanged, byte for byte.
+
+        Must reject a publish that renames over what has the name (D20:
+        the member who set mail/.seq back makes the sender's own unread
+        #6 vanish, and the send still says `sent #6`).
+
+        @interacts  per mode: set_back_and_send, one more send; reads the
+                    inbox.
+        @deps       set_back_and_send, _root.TcRoot.tc.
+        @complexity O(1) per mode.
+        @alloc      one TcRoot per mode.
+        """
+        sixth = f"{SET_BACK_SEQ + 1:06d}-from-a.md"
+        seventh = f"{SET_BACK_SEQ + 2:06d}-from-a.md"
+        for shared in (False, True):
+            with self.subTest(shared=shared), _root.TcRoot() as root:
+                runs = self.set_back_and_send(root, shared)
+                box = root.path / "mail" / "to-b"
+                before = (box / sixth).read_bytes()
+                code, out, err = root.tc("send", "--from", "a", "--to", "b", "after the set back")
+                after = (box / sixth).read_bytes()
+                names = sorted(p.name for p in box.iterdir() if p.name != "read")
+                landed_text = (box / seventh).read_text() if (box / seventh).exists() else ""
+                for run in runs:
+                    self.assertEqual(run[0], 0, run[2])
+                self.assertEqual(after, before, "a send after mail/.seq was set back replaced unread #6")
+                self.assertEqual(code, 0, err)
+                self.assertIn(f"sent #{SET_BACK_SEQ + 2} to b", out)
+                self.assertEqual(names, ["000001-from-a.md", sixth, seventh], "a .tmp was left or a name lost")
+                self.assertIn("after the set back", landed_text)
+
+    def test_a_send_after_mail_seq_is_set_back_never_takes_a_read_messages_name(self):
+        """Private and shared: b has read #1, then mail/.seq is set back to 0: the next send lands as #2, and after b reads it read/#1 is unchanged, byte for byte.
+
+        tc read renames each message into read/ under its own name, so a
+        send that took #1 again would make that read replace the old #1.
+        Must reject a publish that checks only the inbox.
+
+        @interacts  per mode: init when shared, a join, a send, two reads,
+                    one write of mail/.seq by hand, one more send.
+        @deps       _root.TcRoot.tc, primary_group.
+        @complexity O(1) per mode.
+        @alloc      one TcRoot per mode.
+        """
+        for shared in (False, True):
+            with self.subTest(shared=shared), _root.TcRoot() as root:
+                runs = [root.tc("init", "--shared", "--group", primary_group()[1])] if shared else []
+                runs += [root.tc("join", "b", env={"CLAUDECODE": "1"}),
+                         root.tc("send", "--from", "a", "--to", "b", "first, read"),
+                         root.tc("read", "b")]
+                read = root.path / "mail" / "to-b" / "read"
+                before = (read / "000001-from-a.md").read_bytes()
+                (root.path / "mail" / ".seq").write_text("0")
+                sent = root.tc("send", "--from", "a", "--to", "b", "second")
+                again = root.tc("read", "b")
+                after = (read / "000001-from-a.md").read_bytes()
+                history = sorted(p.name for p in read.iterdir())
+                for run in runs:
+                    self.assertEqual(run[0], 0, run[2])
+                self.assertEqual(after, before, "a read replaced read/#1 after mail/.seq was set back")
+                self.assertEqual(sent[0], 0, sent[2])
+                self.assertIn("sent #2 to b", sent[1])
+                self.assertEqual(again[0], 0, again[2])
+                self.assertIn("second", again[1])
+                self.assertEqual(history, ["000001-from-a.md", "000002-from-a.md"])
+
+    def test_a_held_lock_makes_each_command_fail_within_the_bound_and_write_nothing(self):
+        """This process holds mail/.seq or a name's inbox lock (LOCK_EX), one root per case: send, read, a codex join, tc card and a codex send each exit 1 within LOCK_WAIT_SECONDS plus the margin, say whose lock, and change nothing; a codex send with the ring marker held lands, rings once, and says the marker could not be cleared within two waits.
+
+        The cases run at once, so the test costs about two waits, not
+        seven. Each child runs under a timeout, so a tc that waits on the
+        flock forever fails here instead of hanging the suite. Must reject
+        a plain blocking flock on mail/.seq, the inbox lock or the marker
+        (D20: a member who holds one hangs every other member's command
+        for as long as it likes).
+
+        @interacts  per case, a root: sends, a codex join and a fake codex
+                    as setup; one lock file opened and flocked here; the
+                    whole root read before and after; one background tc.
+        @deps       _root.TcRoot.tc, start, fake_bin, contents;
+                    contextlib, fcntl, subprocess, time; LOCK_WAIT_SECONDS,
+                    LOCK_REFUSE_MARGIN_SECONDS, LOCK_HELD_WORDS, THREAD.
+        @complexity O(1): seven children at once, each at most
+                    LOCK_WAIT_SECONDS of waiting (the marker case two).
+        @alloc      seven TcRoots, seven open lock files and seven
+                    children, all released when the stack closes.
+        """
+        codex = {"CODEX_THREAD_ID": THREAD, "CLAUDECODE": None}
+        send_b = ["send", "--from", "a", "--to", "b", "second"]
+        cases = [  # label, setup, the lock held, argv, env, whose lock the words name
+            ("send, inbox lock", "send b", "mail/.box-b.lock", send_b, None, "b"),
+            ("send, mail/.seq", "send b", "mail/.seq", send_b, None, "mail/.seq"),
+            ("read, inbox lock", "send b", "mail/.box-b.lock", ["read", "b"], None, "b"),
+            ("codex join, inbox lock", None, "mail/.box-x.lock", ["join", "x"], codex, "x"),
+            ("card, inbox lock", None, "mail/.box-x.lock", ["card", "x", "--ssh", "u@h"], None, "x"),
+            ("codex send, inbox lock", "join c", "mail/.box-c.lock", ["send", "--from", "a", "--to", "c", "hi"],
+             None, "c"),
+            ("codex send, ring marker", "join c", "mail/.ring-pending-c", ["send", "--from", "a", "--to", "c", "hi"],
+             None, "mail/.ring-pending-c"),
+        ]
+        seen = {}
+        with contextlib.ExitStack() as stack:
+            running = []
+            for label, setup, held_at, argv, env, whose in cases:
+                root = stack.enter_context(_root.TcRoot())
+                folder, _ = root.fake_bin("codex", 0)
+                if setup == "send b":
+                    self.assertEqual(root.tc("send", "--from", "a", "--to", "b", "first")[0], 0)
+                if setup == "join c":
+                    self.assertEqual(root.tc("join", "c", env=codex)[0], 0)
+                lock = root.path / held_at
+                lock.parent.mkdir(parents=True, exist_ok=True)
+                if label.endswith("ring marker"):
+                    lock.write_text(f"{CLEAR_STATE}\n")
+                held = stack.enter_context(open(lock, "a"))
+                fcntl.flock(held, fcntl.LOCK_EX)
+                waits = 2 if label.endswith("ring marker") else 1
+                ceiling = waits * LOCK_WAIT_SECONDS + LOCK_REFUSE_MARGIN_SECONDS
+                before = contents(root.path)
+                proc = root.start(*argv, env=env)
+                running.append((label, root, proc, time.monotonic() + ceiling, ceiling, before,
+                                folder.parent / "calls.jsonl", whose))
+            for label, root, proc, deadline, ceiling, before, record, whose in running:
+                try:
+                    out, err = proc.communicate(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    self.fail(f"{label}: tc still waited {ceiling} s on a lock this test held: it hangs")
+                what = str(root.path / whose) if "/" in whose else whose
+                rang = len(record.read_text().splitlines()) if record.exists() else 0
+                seen[label] = (proc.returncode, out, err, what, before, contents(root.path), rang)
+        for label, (code, out, err, what, before, after, rang) in seen.items():
+            with self.subTest(case=label):
+                if label.endswith("ring marker"):
+                    self.assertEqual(code, 0, err)
+                    self.assertIn("sent #1 to c", out)
+                    self.assertIn(f"could not be cleared ({LOCK_HELD_WORDS.format(what=what)})", err)
+                    self.assertEqual(rang, 1)
+                    self.assertEqual(after["mail/.ring-pending-c"], f"{CLEAR_STATE}\n".encode(),
+                                     "a marker write went through a lock this test held")
+                    continue
+                self.assertEqual(code, EXIT_REFUSED, err)
+                self.assertEqual(err, f"tc: {LOCK_HELD_WORDS.format(what=what)}; try again\n")
+                self.assertEqual(after, before, "a refused command changed the root")
+                self.assertEqual(rang, 0, "a refused codex send rang")
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1.
