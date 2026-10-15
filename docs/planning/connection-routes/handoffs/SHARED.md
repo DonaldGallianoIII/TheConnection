@@ -1,25 +1,7 @@
 # Handoff: SHARED (P3, wave 2)
 
 Model:  Claude Opus 5.5 (the SHARED lane agent)
-Status: unreviewed. Fix round 1 done (audit
-        `audits/2026-10-14-2100-standard`, brief `fixes/round-1.md`).
-        The D21 round done (the SHARED fixer, Claude Opus 5.5). Fix
-        round 2 done (audit `audits/2026-10-14-2259-quick`, brief
-        `fixes/round-2.md`, the SHARED fixer, Claude Opus 5.5). Fix
-        round 3 done (audit `audits/2026-10-14-2358-quick`, brief
-        `fixes/round-3.md`, the SHARED fixer, Claude Opus 5.5). Fix
-        round 4 done (audit `audits/2026-10-15-0102-quick`, brief
-        `fixes/round-4.md`, the SHARED fixer, Claude Opus 5.5). Fix
-        round 5 done (audit `audits/2026-10-15-0201-quick`, brief
-        `fixes/round-5.md`, its item 5 under the work set the architect
-        amended to add one router test; the SHARED fixer, Claude Opus
-        5.5). Fix round 6 done (audit `audits/2026-10-15-0300-quick`,
-        brief `fixes/round-6.md`, the SHARED fixer, Claude Opus 5.5).
-        Fix round 7 done (audit `audits/2026-10-15-0408-quick`, brief
-        `fixes/round-7.md`, the SHARED fixer, Claude Opus 5.5). Fix
-        round 8 done (audit `audits/2026-10-15-0840-quick`, brief
-        `fixes/round-8.md` and one test the coordinator added, the
-        SHARED fixer, Claude Opus 5.5).
+Status: unreviewed
 Date:   2026-10-14; rounds 3 to 8 2026-10-15
 Branch: Claude-Development-TheConnection-SHARED, from
         Claude-Development-TheConnection at c8708e5 (after P0, P1 and P2
@@ -36,6 +18,29 @@ Branch: Claude-Development-TheConnection-SHARED, from
         ef3885c (C4 with D29; D20, D21, D29). Round 8 builds to
         5dce726 (C4 with D29; D20, D21, D23, D29).
 Where:  ~/TheConnection-lanes/shared
+
+## Fix rounds
+
+Moved here from the Status line by the P3 fixer, round 1c (Claude Opus
+5.5, unreviewed: the P3 review's LOW-38), word for word.
+
+Fix round 1 done (audit `audits/2026-10-14-2100-standard`, brief
+`fixes/round-1.md`). The D21 round done (the SHARED fixer, Claude Opus
+5.5). Fix round 2 done (audit `audits/2026-10-14-2259-quick`, brief
+`fixes/round-2.md`, the SHARED fixer, Claude Opus 5.5). Fix round 3 done
+(audit `audits/2026-10-14-2358-quick`, brief `fixes/round-3.md`, the
+SHARED fixer, Claude Opus 5.5). Fix round 4 done (audit
+`audits/2026-10-15-0102-quick`, brief `fixes/round-4.md`, the SHARED
+fixer, Claude Opus 5.5). Fix round 5 done (audit
+`audits/2026-10-15-0201-quick`, brief `fixes/round-5.md`, its item 5
+under the work set the architect amended to add one router test; the
+SHARED fixer, Claude Opus 5.5). Fix round 6 done (audit
+`audits/2026-10-15-0300-quick`, brief `fixes/round-6.md`, the SHARED
+fixer, Claude Opus 5.5). Fix round 7 done (audit
+`audits/2026-10-15-0408-quick`, brief `fixes/round-7.md`, the SHARED
+fixer, Claude Opus 5.5). Fix round 8 done (audit
+`audits/2026-10-15-0840-quick`, brief `fixes/round-8.md` and one test
+the coordinator added, the SHARED fixer, Claude Opus 5.5).
 
 ## Commits
 
@@ -1865,6 +1870,17 @@ the architect's yes, and the one the second added (an unreadable
     toward a group the pinned ROOT's `.shared` does not name. LOW. A fix:
     read `.shared` again by its name in ROOT's descriptor after
     `pin_root`, and refuse when it does not name `--group`.
+
+## What was not built
+
+Added by the P3 fixer, round 1c (Claude Opus 5.5, unreviewed: the P3
+review's LOW-39). None of the lane's tasks: H1 (`tc init --shared` and
+the umask, with the D19, D20 and D21 parts phases.md folds into it) and
+D17 (the sticky folders, no planted links) are both built, in the
+Commits table above. The phase's exit has a human half, a second Linux
+user sending, reading and waiting on the same mailbox (D4): it is
+written as `qa/human/route-shared.md` and has not been run by a person.
+What each audit round left for later is under Not in this round, below.
 
 ## Not in this round
 

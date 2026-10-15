@@ -20,8 +20,12 @@ Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
         in fix round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15;
         step 29's words changed for D35 (3), steps 30 and 31 added after
         it, and every step after them renumbered by two, in P3 fix round
-        1b by the P3 fixer, Claude Opus 5.5, 2026-10-15 (the step numbers
-        earlier in this list are as each round wrote them)
+        1b by the P3 fixer, Claude Opus 5.5, 2026-10-15; steps 5 and 37
+        to 42 brought to P3 fix round 1c (init makes mail/.origins/, the
+        note beside a waiting file, the squatted line's sentence, the
+        flush count's words, `ls -la` for the send lock) by the P3 fixer,
+        Claude Opus 5.5, 2026-10-15 (the step numbers earlier in this
+        list are as each round wrote them)
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
@@ -93,11 +97,15 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
 ## ann shares the mailbox
 
 5. As ann: `tc init --shared --group tcshare`.
-   - It prints `mailbox shared with group tcshare: 4 folders and 0 files
+   - It prints `mailbox shared with group tcshare: 5 folders and 0 files
      in group tcshare` and exits 0.
    - `ls -ld /srv/tc-shared/mail /srv/tc-shared/status
      /srv/tc-shared/cards /srv/tc-shared/outbox` shows each as
      `drwxrwsr-t`, owner `ann`, group `tcshare` (3775: setgid, sticky).
+   - `ls -ld /srv/tc-shared/mail/.origins` shows the same, owner `ann`:
+     init makes the folder every member's gate files origin ids under,
+     so it is the init user's and never the first filer's (D36 (3), P3
+     fix round 1c).
    - `ls -l /srv/tc-shared/.shared` shows `-rw-r--r--`, owner `ann`
      (0644: only ann can write it, D21).
    - `tc health`, as ann and as ben, ends with `mailbox shared with
@@ -595,6 +603,10 @@ on the far machine. Both are made up; use yours.
       shows each as `drwxr-s---`, owner `ben`, group `tcshare` (2750:
       setgid, no group write). `ls -l` of the file shows `-rw-r-----`,
       owner `ben` (0640).
+    - Beside it, `<n>-from-ben.md.stderr` holds this try's words, its
+      first line the same `could not reach farbox-tc (...)`, and `ls -l`
+      shows it `-rw-r-----`, owner `ben` (D36 (4), P3 fix round 1c). Each
+      later failed try replaces it.
 38. A member who makes another member's branch first (D33). As ben,
     before ann has sent anything over ssh: `mkdir
     /srv/tc-shared/outbox/ann`. Then as ann: `tc send --from ann --to
@@ -605,7 +617,7 @@ on the far machine. Both are made up; use yours.
       user who ran init (ann) clears it with one command: mv -T
       /srv/tc-shared/outbox/ann /srv/tc-shared/outbox/.squatted-ann-1`.
     - `tc health`, as ann, has a line `squatted
-      /srv/tc-shared/outbox/ann: a folder ben owns, not ann's own branch;
+      /srv/tc-shared/outbox/ann: a folder ben owns, not ann's own branch.
       The user who ran init (ann) runs: mv -T ...`, the same command.
     - As ann, run that `mv -T` line exactly as printed. `tc health` then
       has no `squatted` line.
@@ -614,13 +626,14 @@ on the far machine. Both are made up; use yours.
       `sent over ssh to farbox-tc: sent #... to far-b: ...`. ann's queue
       holds only ann's files, so ben's file is not ahead of hers.
     - `ls /srv/tc-shared/outbox/ann/to-far-b/sent/` lists ann's message,
-      and `ls -l /srv/tc-shared/outbox/ann/` shows her send lock,
-      `.send-<16 hex digits>.lock`, as `-rw-------`, owner `ann` (0600).
+      and `ls -la /srv/tc-shared/outbox/ann/` (`-a`: the lock's name
+      starts with a dot) shows her send lock, `.send-<16 hex
+      digits>.lock`, as `-rw-------`, owner `ann` (0600).
     - On the far machine, `tc read far-b` shows it, from the gate's key
       name, never from `ann`.
 40. As ann: `tc flush`.
-    - It prints `1 waiting for farbox-tc belong to other members (ben);
-      each member sends their own with tc flush`, then `nothing of yours
+    - It prints `1 waiting for farbox-tc from other members (ben); each
+      member sends their own with tc flush`, then `nothing of yours
       waiting in the outbox`, and exits 0.
     - ben's file is where it was, unchanged: `ls -l` shows the same
       line as in step 37.
@@ -642,10 +655,11 @@ on the far machine. Both are made up; use yours.
     - As ben: `cat /srv/tc-shared/outbox/ann/.send-*.lock`: `Permission
       denied`, so ben cannot open ann's send lock and hold it.
 42. Put it back. As ben: `rm
-    /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md` (ben's own file)
-    and `rmdir /srv/tc-shared/outbox/.squatted-ann-1` (the folder ben
-    made in step 38, moved aside). As ann: run `qa/human/route-ssh.md`'s
-    undo steps.
+    /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md
+    /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md.stderr` (ben's own
+    file and its note) and `rmdir
+    /srv/tc-shared/outbox/.squatted-ann-1` (the folder ben made in step
+    38, moved aside). As ann: run `qa/human/route-ssh.md`'s undo steps.
 
 ## Afterward
 

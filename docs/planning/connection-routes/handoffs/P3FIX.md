@@ -608,3 +608,316 @@ Noticed and left, by tier:
 - A retry's ring rule reads step 1 as False and needs unread mail now.
 
 No pause was written.
+
+---
+
+# Round 1c: D36's gate, origins and stuck queues; the LOWs
+
+Model:  Claude Opus 5.5 (the P3 fixer, round 1c)
+Status: unreviewed
+Date:   2026-10-15
+Branch: Claude-Development-TheConnection-P3FIX, from round 1b's head
+        `9f974c5`
+Brief:  audits/2026-10-15-1409-full/fixes/round-1c.md (in the public
+        checkout), against synthesis.md's LOW list, DEBT-5, its fix
+        disagreements and REC-7, REC-12, REC-13, and the dev branch's
+        D36, exit row 10, C3 and C4
+
+## Commits
+
+| Brief's | Commit | Items | Subject |
+|---|---|---|---|
+| (a) | `3d48b8c` | 1 | The gate's health --json is an allow list |
+| (b) | `d95ef89` | 2 | tc init makes mail/.origins/; a shared gate never does |
+| (c) | `4545832` | 3 | A far write failure that passes answers 10; each failed try leaves a note; health lists stuck mail (with LOW-11) |
+| (d) | `402c676` | 4 | The automated round trip |
+| (e) | `1267813` | 5, 6 | The round's tc and test LOWs |
+| (f) | `ad63f74` | 7 | The board dates messages in the folders its scan opened; test_shared's guard words |
+| (g) | the commit that adds this section | 8 | The records, both QA scripts, this handoff |
+
+## What was built
+
+### Item 1: the gate's health is an allow list (D36 (5), DEBT-5, LOW-2)
+
+`GATE_HEALTH_KEYS` (tc:884) names, level by level, what the gate's
+`health --json` gives a far key: `time`, `machine` (`load1`, `cores`,
+`mem_avail_pct`, `gpus`), `sessions` (`claude`, `codex`), `listeners`,
+`watchers`, `mail` (each name's `unread`, `newest_mail_age_s`,
+`status_age_s`) and `shared_group`. These are the keys it gave at
+`616b9db` less `mail_problem` and `shared_problem`. `gate_health`
+(tc:7582) keeps only what the list names; a value that should be a dict
+and is not becomes null. `cmd_gate` (tc:7606) prints
+`gate_health(health_snapshot(cards=False, gpu=False, branches=False))`.
+Round 1b's `held` switch on `health_snapshot` (tc:8239) is gone; the
+list leaves `held_by_others` and `stuck_outbox` home.
+
+### Item 2: init makes mail/.origins/ (D36 (3), LOW-3, REC-13)
+
+- Init's own walk makes a missing `mail/.origins/` by its name in the
+  `mail/` descriptor the walk judged, before `mail/` is listed
+  (`shared_entries`, tc:1736), so the walk gives it the group and 3775
+  like the four, and the init user owns it. A first try opened `mail/`
+  once more before the walk; RootPinnedTest's swap test went red on it
+  (the extra open moved the swap ahead of the walk, which then entered
+  the folder swapped in), so it moved into the walk. A member's rerun
+  makes nothing. A fresh init now says `5 folders`.
+- `origin_folder` (tc:3524) makes `mail/.origins/` only on a private
+  mailbox. On a shared one a missing folder raises `OriginsNotMade`
+  (tc:3520), and `file_origin` (tc:3622) warns with
+  `ORIGINS_NOT_MADE_WORDS` (tc:911): the message is delivered, nothing is
+  made or filed, and the words say the user who ran init runs `tc init
+  --shared --group <g>` again to make it; until then a retry may deliver
+  twice, a duplicate, never a loss.
+
+### Item 3: a far 10 for a write that passes; notes; stuck mail (D36 (4), LOW-4, LOW-11)
+
+- `PASSING_WRITE_ERRNOS` (tc:694: ENOSPC, EDQUOT, EIO) and
+  `PASSING_WORDS` (tc:696). `route_and_deliver` passes
+  `busy_on_passing=not forward` (tc:3427, tc:3432) through
+  `deliver_local` and `deliver_codex` to `publish_message` (tc:5434), so
+  only the gate's delivery turns a `.tmp` that cannot be made, written
+  (tc:5525) or linked (tc:5546) for such a reason into Delivery exit 10.
+  tc send's own stays exit 1, since row 10 names only the gate for this.
+- LOW-11 rode here, since item 3's "nothing left behind" needs it:
+  `write_new_file` (tc:3307) removes the file it just made when the write
+  fails, by the same name and `dir_fd`, and only while that name still
+  holds the file it made (samestat on the fstat at the create). That
+  covers a message's `.tmp`, a card's, `.shared`'s, the origin token's
+  and a note's; the docs of `write_card`, `cmd_init` and `origin_token`
+  say so.
+- Notes: `note_path`, `write_note`, `carry_note` (tc:6931 to 6976).
+  `file_outcome` (tc:7022) writes, on every kept try, a note beside the
+  waiting file whose first line is the kept words' summary, then what
+  ssh printed on stderr through `printable_lines`, then the cut line;
+  written to a `.tmp` and renamed over the last note. On sent or refused
+  the note moves with the file (hard link, then its old name removed;
+  never removed outright), and a refusal's own words then replace it in
+  `refused/`, as a later try's would.
+- `OUTBOX_STALE_SECONDS` (tc:1007, a day) and `stuck_outbox` (tc:8033):
+  `outbox/` opened by its path, each branch by name (pin_folder), listed
+  in its descriptor (outbox_files); for a file past the bound, its queue
+  is opened again by name in the branch's descriptor and the note's
+  first line read there (`note_first_line`, tc:8005, at most
+  `NOTE_LINE_READ_MAX_BYTES`). The age is against `wall_clock`.
+  `health_snapshot` adds `stuck_outbox` with `branches`, and `tc health`
+  a `stuck` line each (tc:8424).
+
+### Item 4: the round trip (REC-7)
+
+`RoundTripTest` (tests/test_ssh_route.py:1045) opens two harness roots,
+one per machine. home-a sends to far-b through the loopback fake into the
+far root's real gate as key home-a; far-b replies from that same far
+mailbox through its own return key into the near root's real gate. Each
+inbox is checked by content, each fake asserted called. The brief named
+a third TC_ROOT; two are used on purpose: the far side's harness root is
+the far mailbox itself, so the reply leaves from the mailbox the message
+landed in. A third root would send the reply from a mailbox that never
+received anything.
+
+### Items 5 and 6: the LOWs
+
+- LOW-12: `encoding="utf-8"` on every text tc writes: `next_seq`
+  (tc:3241), `write_new_file` (tc:3353), `cmd_status` (tc:4542),
+  `write_ring_marker` (tc:5642).
+- LOW-13: `tc init --help` (tc:8643) says setgid folders, mail, card and
+  status files at 0640, ROOT/.shared.
+- LOW-14, option A: the squatted line puts the fix in a sentence of its
+  own (tc:8421).
+- LOW-15: a far 10's why is `exit 10: <first far line>` (tc:6880);
+  `kept_summary` (tc:7005) says `<target> was busy (...)` for it, in the
+  words and the note, and flush's stop line says the same (tc:7491). A
+  255 still reads `could not reach`.
+- LOW-16: `n waiting for <target> from other members (...)` (tc:7506).
+- LOW-17: a divider over the core mailbox code (tc:2686).
+- LOW-19: `ROUTES` after cmd_flush under its own router divider
+  (tc:7518).
+- LOW-20: `how = (` (tc:7101).
+- LOW-21: the three long tc lines (module block, the ring states'
+  comment, deliver_local's block; write_new_file's was rewritten with
+  LOW-11) and tests/test_board_leak.py:133.
+- LOW-22: K3's 50 senders, timed five times on this machine (32 cores,
+  load 3.4 to 4.1) from the first spawn to all 50 seen blocked in
+  /proc/locks: 0.207, 0.202, 0.210, 0.195, 0.211 s. The slowest is
+  under half the 2 s budget, so the budget is unchanged and
+  tests/test_mailbox.py is untouched. A 2 to 4 core runner is still not
+  measured.
+- LOW-23, option A: the dead `assertNotIn` at tests/test_cards.py:314
+  dropped.
+- LOW-24: OriginIdTest, FarAnswerTest and BranchTest open with what they
+  test; the attribution is a comment above each.
+- LOW-25: `threading` (and `errno`) in tests/test_ssh_route.py's @deps.
+- LOW-26: three triple blank lines in tests/test_shared.py, one double
+  blank line between methods in tests/test_gate.py.
+- LOW-28, option A: tests/test_shared.py and tests/test_ssh_route.py
+  name their importers; tests/test_codex_route.py's list is current
+  (kill_own_fake, own_fake, test_health.py). tests/test_router.py's
+  line is not written: that file is outside this round's work set.
+
+### Item 7: the board dates by name (round 1a's MEDIUM and LOW)
+
+- board/serve.py: `scan_messages(mail, held)` (serve.py:580) keeps each
+  inbox and read/ descriptor open in the caller's `ExitStack`
+  (serve.py:654); a Message's path is a `MessagePath` (serve.py:399), a
+  str that carries its folder's descriptor and its name; `stat_at`
+  (serve.py:746) stats a MessagePath by its name in that folder
+  (`dir_fd`, never following a link) and anything else by its path,
+  never followed; `file_age` (serve.py:764) and `file_time`
+  (serve.py:790) use it. `feed()` holds the stack around the scan and
+  `feed_from` (serve.py:1239), which is the rest of the old feed() body,
+  unchanged, so every descriptor closes before feed() returns. A str
+  subclass was chosen over a new Message field so tests/test_board_feed.py,
+  outside this round's work set, still counts `file_time` calls by path
+  text.
+- tests/test_shared.py: the docstrings that named `check_inbox`'s lstat,
+  `message_files`' lstat, pathlib's glob or `real_folder` as the guard
+  now name the pinned inbox and the listing in the open folder
+  (CommandsSayWhatTheyCannotSeeTest and four tests).
+
+### Item 8: records
+
+- handoffs/SHARED.md: `Status: unreviewed` alone; the round history
+  moved, word for word, under `## Fix rounds` (LOW-38); `## What was
+  not built` added before `## Not in this round` (LOW-39).
+- handoffs/SSH.md:394: the S1 row names the test's current name, and
+  the name it had at `7700fc1`, where the row ran (LOW-40).
+- qa/human/route-shared.md: step 5 says `5 folders` and checks
+  `mail/.origins/`; step 37 checks the note beside ben's waiting file;
+  step 38's squatted line has its period; step 39 uses `ls -la` for the
+  send lock (LOW-41); step 40's count reads `from other members`; step
+  42 removes the note too. No step was added or renumbered.
+- qa/human/route-ssh.md: the note on an older far tc says 7 (and 11
+  only for a far tc with no gate at all) (LOW-42); `TC_ROOT` pinned in
+  both gate lines, steps 4 and 20 (REC-12); step 12 lists the gate's
+  keys; steps 15 and 16 check the note and its move into `sent/`; step
+  17 has round 1b's holder words and round 1c's `was busy`. No step was
+  added or renumbered.
+
+## Mutations
+
+Each was applied with the Edit tool to a scratch copy of the tree,
+checked equal to the worktree first, run, and put back by copying the
+file over it again and checking it equal (`cmp`). Every red below is an
+assertion line, not an error.
+
+| Item | Mutation | Red, by subtest | Red line |
+|---|---|---|---|
+| 1 (the brief's) | the old deny list back: cmd_gate prints health_snapshot less `held_by_others` | both new tests | `self.assertEqual(health_keys(json.loads(out)),` and `self.assertNotIn(NEW_HEALTH_KEY, out, "a key the allow list does not name reached the far key")` |
+| 2 | init's walk makes no mail/.origins/ | the init test | `self.assertEqual(init, (0, f"mailbox shared with group {group}: 5 folders and 0 files in group {group}\n", ""))` |
+| 2 | origin_folder makes mail/.origins/ on a shared mailbox too | the missing-folder test | `self.assertEqual(first, (0, f"sent #1 to b: ...", ORIGINS_NOT_MADE_WORDS.format(...)))` |
+| 3 | `busy_on_passing` ignored (both checks `if False`) | all nine stage subtests; all three far gate subtests | `self.assertEqual(gated, (EXIT_BUSY, "", PASSING_WORDS.format(what=what, why=os.strerror(number))` and `self.assertEqual((code, out, err), (EXIT_QUEUED, "", ...KEPT_WORDS.format(...` (the words before LOW-15) |
+| 3, LOW-11 | write_new_file never removes its file | the three write-stage subtests | `self.assertEqual(left, [], "a write that failed left a file in the inbox")` |
+| 3 | carry_note returns at once | both NoteTest subtests | `self.assertFalse(left, "the note stayed beside the queue once its file was filed")` |
+| 3 | no note written on a kept try | both NoteTest subtests; all three far gate subtests; StuckOutboxTest | `self.assertEqual(after_send.splitlines()[:1], ...)`, `self.assertEqual(note_lines[:1], ...)`, `self.assertEqual(stuck, [` |
+| LOW-12 | write_new_file opens with no encoding | the locale test | `self.assertEqual((gated[0], sent[0]), (0, 0), (gated, sent))` (both 1) |
+| LOW-15 | kept_summary says `could not reach` for a far 10 | the far 10 subtest; the flush test | `self.assertEqual(err, words.format(target=TARGET, reason=reason, path=path))` and `self.assertNotIn("could not reach", err, ...)` |
+| 7 (the brief's) | file_age by `os.stat(path)` and file_time by `os.stat(path, follow_symlinks=False)`, as before | row (j), both kinds | `self.assertLessEqual(abs((age if age is not None else 0) - REAL_AGE_SECONDS), AGE_SLACK_SECONDS,` (99000 s off: the planted file's 100000 s age) |
+
+The first runs of item 3's three loops asserted after `with
+self.subTest(...), TcRoot()` closed, round 1b's slip, so a red stopped
+each loop at its first case. They were nested before the commit, and
+every red above counts each case.
+
+## Tests whose words or helpers changed
+
+- tests/test_inbox_pinned.py: row (g) reads `mail_problem` with `get()`
+  (the gate's row has none now); row (h) the new plural; row (j) runs
+  `board_scan_and_dates` (tests/test_inbox_pinned.py:329) and asserts
+  the dates (:523).
+- tests/test_shared.py: `shared_as` and three init-tree tests expect
+  `mail/.origins` at 3775 (`ORIGINS_FOLDER`).
+- tests/test_gate.py: `GateInProcessTest.run_gate` calls the new
+  module-level `gate_in_process`.
+- tests/test_ssh_route.py: the far 10 case of the kept test expects
+  `BUSY_KEPT_WORDS`; `far_gate_ssh` takes `fail_errno`.
+- tests/test_flush.py: `OTHERS_WORDS`; the far 10 test's line.
+
+## Behavior changes, said plainly
+
+1. The gate's `health --json` drops `mail_problem` and `shared_problem`,
+   and gives nothing health gains later unless the list names it.
+2. A fresh `tc init --shared` makes five folders, not four; on a shared
+   mailbox a gate never makes `mail/.origins/`, and with none there its
+   delivery warns and files nothing.
+3. A far gate out of space, quota or disk health answers 10, and the
+   near side keeps the message; a failed ssh try leaves a `.stderr` note
+   beside the waiting file; `tc health` gains `stuck` lines and the
+   `stuck_outbox` key.
+4. A far 10 reads `<target> was busy (exit 10: ...)`; flush's count
+   reads `from other members`; the squatted line has a period before
+   its fix; `tc init --help` changed.
+5. tc writes UTF-8 whatever the locale; a write that fails leaves no
+   file.
+6. The board holds two descriptors per name for the length of one poll.
+
+## Verified
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'`: 320 run, OK
+  at `3d48b8c`; 323 at `d95ef89`; 327 at `4545832`; 328 at `402c676`;
+  329 at `1267813` and at `ad63f74` (each run on a `git archive` copy of
+  the commit, or on the worktree when it equaled the commit). Round 1b
+  ended at 318.
+- `node --test tests/*.test.mjs`: 66 pass at each of those commits.
+- New tests, with `-v`, listed in the report to the architect.
+- K3's timing, above. No hand run of `tc` beyond the suite.
+- Not run: both human scripts; real ssh and real codex, never.
+
+## What was not built
+
+As the brief says, not in this round:
+
+- LOW-10 (measure first), LOW-18 and LOW-27 (they move code and tests;
+  they ride with DEBT-11's split), and the DEBTs.
+- LOW-29 to LOW-37 are the architect's. For the architect, besides: C3's
+  far-10 bullet could say the near words now read `was busy`; C4's mode
+  list and init bullet already carry `mail/.origins/` (D36); CLAUDE.md's
+  layout could add the `.stderr` note beside a waiting file.
+- D28's wait exit record: after the merge.
+- LOW-28's line in tests/test_router.py: outside this round's work set.
+
+## Work set
+
+The brief's WORK SET line leaves out two files this round edited:
+board/serve.py and tests/test_inbox_pinned.py. Item 7 names both (the
+board's `file_age` and `file_time`, and round 1a's row (j)), and items 1
+and 5 changed what rows (g) and (h) of tests/test_inbox_pinned.py read,
+so those two lines changed with them. Each edit is its item's own. A
+third file LOW-28's option A reaches, tests/test_router.py, was left
+alone.
+
+## Noticed and left, by tier
+
+- LOW: a shared mailbox whose `mail/.origins/` a member made before this
+  round keeps that member as its owner. Init's rerun names it as another
+  user's and changes nothing, and no words tell the init user the way
+  out: move it aside (`mv -T`), then run init again, which makes a new
+  one of the init user's.
+- LOW: `tc send --origin` run by a far key with no forced command is not
+  the gate, so its write failure that passes still exits 1; row 10 names
+  only the gate.
+- LOW: `cmd_status` takes its text from argv unchecked; under a locale
+  whose encoding is not UTF-8, a non-ASCII status arrives
+  surrogate-escaped and the UTF-8 write raises (a traceback). The
+  message path checks its body (read_body); status does not.
+- LOW: tests/test_cards.py:72, `NOT_BUILT_NOTE`, has no user since
+  LOW-23's line went; it is outside the brief's two-line fence there.
+- LOW: the note's `.tmp` and its rename act in this user's own branch by
+  path, as DEBT-2's other outbox moves do (only the init user can swap a
+  level).
+- LOW: the board holds two descriptors per name per poll; past about
+  500 names a poll would meet the usual 1024 open-file limit and read
+  the rest as unreadable.
+- REC: no human step shows D36 (3)'s warning, D36 (4)'s far 10 or a
+  `stuck` line (a full disk or a day's wait); the unit tests cover them.
+
+## Assumptions
+
+- Only the gate's delivery turns a passing write failure into 10, as
+  exit row 10 says; tc send keeps 1.
+- A note's first line is the kept words' summary, without the path.
+- A refusal replaces the moved note's words with its own: the last try's
+  words, as on every try.
+- `stuck_outbox` names the member by the branch's name, and the target
+  by the name the message is for, as C3 says.
+- REC-7 uses two roots, not three (item 4).
+
+No pause was written.
