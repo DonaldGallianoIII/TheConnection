@@ -71,7 +71,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import _root  # noqa: E402  (needs the path line above)
-from test_codex_route import THREAD, load_tc, ring_argv  # noqa: E402
+from test_codex_route import FINISH_CEILING_SECONDS, THREAD, load_tc, ring_argv  # noqa: E402
 from test_router import files_under  # noqa: E402
 from test_shared import UmaskTestCase, owner_patched_fstat, primary_group  # noqa: E402
 from test_ssh_route import login  # noqa: E402
@@ -84,6 +84,7 @@ NO_FORWARD_WORDS = "tc gate: {name} is not a local name; the gate does not forwa
 HEADER_NOTE = f", via ssh gate, key {KEY}"
 ALREADY_WORDS = "already delivered (origin {origin})\n"
 TOO_LARGE_WORDS = "tc send: message over 1 MiB; this is a mailbox for words\n"
+NOT_UTF8_WORDS = "tc send: message is not valid UTF-8 text; nothing written\n"
 MAX_BYTES = 1048576
 # The exit table's rows the gate uses.
 EXIT_REFUSED = 1
@@ -471,6 +472,57 @@ class GateTest(unittest.TestCase):
         self.assertEqual(rang, 1)
         self.assertEqual(seen, "filed\n", "the ring ran before the origin id was filed")
 
+    def test_a_file_planted_at_the_origins_folders_name_is_a_warning_after_delivery(self):
+        """A regular file at mail/.origins (a member's touch): a gated send with --origin delivers, exits 0, warns that the id could not be filed, and prints no traceback.
+
+        SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's
+        MEDIUM-2. Must reject a filing whose folder is made outside its
+        try: a traceback or an exit 1 after delivery reads as a refusal
+        to the far sender, which files a delivered message in refused/.
+
+        @interacts  one file planted by hand; one gate run.
+        @deps       gate.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            planted = root.path / "mail" / ".origins"
+            planted.parent.mkdir()
+            planted.write_text("planted\n")
+            code, out, err = gate(root, f"/x/tc send --from a --to b --origin {ORIGIN}")
+            landed = sorted(p.name for p in (root.path / "mail" / "to-b").glob("*.md"))
+            kept = planted.read_text()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(landed, [f"000001-from-{KEY}.md"])
+        self.assertIn(f"origin {ORIGIN} could not be filed", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(kept, "planted\n")
+
+    def test_a_body_that_is_not_utf8_is_refused_with_words_and_nothing_written(self):
+        """A body of bytes that are not UTF-8, piped to the gate with Python's stdin handler forced to surrogateescape (as LANG=C.UTF-8 gives) and to strict: exit 1, C3's kind of words, no traceback, nothing under the root, no number taken.
+
+        SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's
+        MEDIUM-3. Must reject a body that takes a number and leaves an
+        empty .tmp in the inbox before a traceback.
+
+        @interacts  per handler: one gate run through /bin/sh with printf
+                    feeding raw bytes, PYTHONIOENCODING set for the call.
+        @deps       files_under; _root.TcRoot.start, _root.TC; shlex, sys.
+        @complexity O(1): two runs.
+        @alloc      one TcRoot per handler.
+        """
+        for handler in ("surrogateescape", "strict"):
+            with self.subTest(handler=handler), _root.TcRoot() as root:
+                script = (f"printf 'hi \\377\\376 there' | {shlex.quote(sys.executable)} "
+                          f"{shlex.quote(str(_root.TC))} gate --as {KEY}")
+                proc = root.start(argv=["/bin/sh", "-c", script],
+                                  env={"SSH_ORIGINAL_COMMAND": "/x/tc send --from a --to b",
+                                       "PYTHONIOENCODING": f"utf-8:{handler}"})
+                out, err = proc.communicate(timeout=FINISH_CEILING_SECONDS)
+                after = files_under(root)
+            self.assertEqual((proc.returncode, out, err), (EXIT_REFUSED, "", NOT_UTF8_WORDS))
+            self.assertEqual(after, [], f"a body that is not UTF-8 wrote {after}")
+
     def test_tc_send_with_origin_delivers_once_and_a_bad_id_is_a_usage_error(self):
         """A far key with no forced command runs tc send itself: `--origin` delivers once, the repeat says already delivered; a bad id exits 9 and writes nothing.
 
@@ -521,6 +573,38 @@ class GateInProcessTest(unittest.TestCase):
             except SystemExit as stop:
                 code = stop.code
         return code, out.getvalue(), err.getvalue()
+
+    def test_tc_send_refuses_a_body_that_is_not_utf8_from_stdin_or_its_argument(self):
+        """In process: cmd_send with stdin bytes that are not UTF-8, its handler strict and then surrogateescape, and with a text argument holding a lone surrogate (as Python decodes such an argument): each exits 1 with the words, and nothing is written.
+
+        SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's
+        MEDIUM-3, on tc send's side (an ssh card would leave the .tmp in
+        the outbox).
+
+        @interacts  loads tc; calls cmd_send three times with sys.stdin
+                    swapped and output captured.
+        @deps       load_tc, text_stdin, files_under; io, contextlib,
+                    argparse, unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            tc = load_tc(root)
+            got = []
+            cases = [(None, io.TextIOWrapper(io.BytesIO(b"hi \xff\xfe there"), encoding="utf-8", errors=handler))
+                     for handler in ("strict", "surrogateescape")] + [("hi \udcff there", text_stdin(""))]
+            for message, stdin in cases:
+                code = 0
+                with mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(io.StringIO()) as out, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    try:
+                        tc.cmd_send(argparse.Namespace(sender="a", to="b", message=message, origin=None))
+                    except SystemExit as stop:
+                        code = stop.code
+                got.append((code, out.getvalue(), err.getvalue()))
+            after = files_under(root)
+        self.assertEqual(got, [(EXIT_REFUSED, "", NOT_UTF8_WORDS)] * len(cases))
+        self.assertEqual(after, [], f"a body that is not UTF-8 wrote {after}")
 
     def test_the_gate_starts_no_program(self):
         """In process, with every way to start a program swapped for one that raises: each refused case exits 7, health answers, and a local send lands, and none starts a program (D18).

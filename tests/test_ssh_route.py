@@ -3,9 +3,10 @@ Tests for the ssh route (SSH S1, contract C3, decisions D13, D22, D23 and
 D25, and D32 and D33 since fix round 1): `tc send` to an ssh card
 publishes the message in the sender's own outbox branch, runs ssh once
 with C3's argv, an origin id unique to the message and the body on
-stdin, and files the message by the far tc's answer: sent/ on 0, kept on
-255, a timeout or a far 10, refused/ on any other code. A target with a
-queue gets no ssh run.
+stdin, and files the message by the far tc's answer: sent/ on 0 (the far
+warnings shown), kept on 255, a timeout or a far 10, refused/ on any
+other code (a code tc does not know exits 11), keeping at most a cap of
+what the far side prints. A target with a queue gets no ssh run.
 
 Model:  Claude Opus 5.5 (the SSH lane agent), 2026-10-15; changed in fix
         round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15
@@ -23,11 +24,13 @@ it watched is reachable.
             lock (outbox/<login>/.send-<key>.lock) themselves and read
             /proc/locks to see a child blocked on it. Some make folders,
             a link or a file by hand in outbox/ and rename them (SSH fix
-            round 1, Claude Opus 5.5, unreviewed: D32's branches). One
-            test writes a loopback wrapper `ssh` in the root's temp
+            round 1, Claude Opus 5.5, unreviewed: D32's branches). Two
+            tests write a loopback wrapper `ssh` in the root's temp
             folder that runs the fake and then this branch's own `tc
-            gate` under a second TC_ROOT there, as a far machine would,
-            and writes mail/.seq by hand. Six tests load tc as a module
+            gate` under a second TC_ROOT there, as a far machine would;
+            one writes mail/.seq by hand, one plants a file in the far
+            mailbox. One test's wrapper prints past tc's output cap on
+            stdout after the fake. Six tests load tc as a module
             (TC_ROOT set to the harness root first, put back after) and
             work in process, under the root only: one calls
             route_and_deliver with PATH set for that call to a wrapper
@@ -109,6 +112,21 @@ NOT_TRIED_WORDS = ("{target} was not tried: another tc is sending to it right no
 FAKE_CONNECT_STDERR = "ssh: connect to host h port 22: Connection refused\n"
 FAKE_BUSY_STDERR = "tc: another process is holding b's lock; try again\n"
 FAKE_REFUSED_STDERR = "tc gate: refused\n"
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): a far tc's warning on a
+# delivery that went through (D33 part 8), written here as tc words it.
+FAKE_NEW_INBOX_STDERR = "new inbox: nobody has joined as b\n"
+# The far codes tc does not know that the row 11 test sends (D33 part 7):
+# a far tc that queued it itself, and a far shell's command not found.
+UNKNOWN_FAR_CODES = (4, 127)
+EXIT_FAR_UNKNOWN = 11
+# The most of each far stream tc keeps (tc's SSH_OUTPUT_MAX_BYTES, written
+# here), and how far past it the test's fake prints.
+OUTPUT_CAP_BYTES = 65536
+PAST_CAP_TIMES = 3
+# A terminal escape the far side prints (clear the screen), and what it
+# reads as once through tc's printable filter.
+RAW_ESCAPE = "\x1b[2J"
+SHOWN_ESCAPE = "\\x1b[2J"
 # D25's origin id: 32 hex digits of the mailbox's token, the outbox number,
 # 32 hex digits of the message's own random part (D33 part 4; SSH fix
 # round 1, Claude Opus 5.5, unreviewed), the sender. The outbox file's
@@ -934,6 +952,142 @@ class OriginIdTest(unittest.TestCase):
             tc = load_tc(root)
         far_worst = tc.SSH_CONNECT_SECONDS + tc.CODEX_RING_SECONDS + FAR_LOCK_WAITS * tc.LOCK_WAIT_SECONDS
         self.assertGreater(tc.SSH_SEND_SECONDS, far_worst)
+
+
+class FarAnswerTest(unittest.TestCase):
+    """SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 7 and 8 and the audit's MEDIUM-2, MEDIUM-4 and LOW-4. What the far side says reaches the sender bounded and filtered, its warnings on a delivery included, and a far code tc does not know exits 11.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, far_gate_ssh.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per test or case.
+    """
+
+    def test_a_far_warning_on_exit_0_reaches_the_sender_in_send_and_in_flush(self):
+        """A fake that exits 0 and warns `new inbox: nobody has joined as b` on stderr: tc send exits 0 and prints `u@h said: <warning>` on stderr; a message queued and then flushed past the same fake gets the same line, after `tc flush: #2 to b: `.
+
+        The audit's MEDIUM-5. Must reject a far warning dropped on a
+        success: a card naming a far name nobody joined would deliver into
+        a dead inbox with a clean line.
+
+        @interacts  one tc card, two sends, one flush, three fakes.
+        @deps       assert_called.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("ssh", 0, stderr=FAKE_NEW_INBOX_STDERR)
+            root.tc("card", "b", "--ssh", TARGET)
+            code, out, err = root.tc("send", "--from", "a", "--to", "b", "one")
+            assert_called(self, folder, calls)
+            down, down_calls = root.fake_bin("ssh", SSH_CONNECT_FAILED, stderr=FAKE_CONNECT_STDERR)
+            kept = root.tc("send", "--from", "a", "--to", "b", "two")
+            assert_called(self, down, down_calls)
+            up, up_calls = root.fake_bin("ssh", 0, stderr=FAKE_NEW_INBOX_STDERR)
+            flushed = root.tc("flush")
+            assert_called(self, up, up_calls)
+        said = f"{TARGET} said: {FAKE_NEW_INBOX_STDERR}"
+        self.assertEqual((code, err), (0, said))
+        self.assertEqual(kept[0], EXIT_QUEUED, kept)
+        self.assertEqual(flushed[0], 0, flushed)
+        self.assertIn(f"tc flush: #2 to b: {said}", flushed[2])
+
+    def test_a_far_code_tc_does_not_know_exits_11_and_is_filed_with_its_code(self):
+        """A fake exiting 4 (a far tc that queued it itself), then 127 (a far shell's not found): exit 11, the message in refused/, the words and the note naming the far code; nothing waits.
+
+        D33 part 7, the audit's LOW-1. Must reject a far code passed
+        through as this tc's own: a far 4 would read as `kept, run tc
+        flush` for a message filed in refused/.
+
+        @interacts  per code: one tc card, one send, one fake call.
+        @deps       assert_called, outbox, queue.
+        @complexity O(1): two cases.
+        @alloc      one TcRoot per case.
+        """
+        for far in UNKNOWN_FAR_CODES:
+            with self.subTest(far=far), _root.TcRoot() as root:
+                folder, calls = root.fake_bin("ssh", far, stderr=f"far side said {far}\n")
+                root.tc("card", "b", "--ssh", TARGET)
+                code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi")
+                assert_called(self, folder, calls)
+                filed = queue(root, "b") / "refused" / "000001-from-a.md"
+                note = filed.with_name(filed.name + ".stderr")
+                note_text = note.read_text() if note.exists() else ""
+                waiting, refused = outbox(root, "b"), outbox(root, "b", "refused")
+            self.assertEqual(code, EXIT_FAR_UNKNOWN, err)
+            self.assertEqual(err, f"far side said {far}\nrefused by {TARGET} with far exit {far}, a code tc does not "
+                                  f"know (exit {EXIT_FAR_UNKNOWN}); filed in {filed}, and nothing retries it\n")
+            self.assertEqual((waiting, refused), ([], ["000001-from-a.md"]))
+            self.assertIn(f"the far side exited {far};", note_text)
+
+    def test_what_the_far_side_prints_past_the_cap_is_dropped_and_said_and_the_note_is_filtered(self):
+        """A fake that prints a terminal escape and three times the cap on stderr, and three times the cap on stdout, then exits 7: tc exits 7, keeps the cap of each, says it cut both, and the note beside the refused file holds the escape only through the printable filter.
+
+        The audit's MEDIUM-4 and LOW-4. Must reject a capture with no cap
+        (a far side that prints without end costs this machine gigabytes)
+        and a note that keeps the far bytes raw.
+
+        @interacts  writes a wrapper `ssh` in the root's temp folder that
+                    runs the fake and then prints to stdout; one tc card,
+                    one send.
+        @deps       assert_called, queue; shlex.
+        @complexity O(c) over c = PAST_CAP_TIMES x OUTPUT_CAP_BYTES bytes
+                    per stream.
+        @alloc      one TcRoot and the printed text, a few hundred KB.
+        """
+        past = PAST_CAP_TIMES * OUTPUT_CAP_BYTES
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("ssh", EXIT_GATE_REFUSED, stderr=RAW_ESCAPE + "e" * past)
+            loud = root.base / "loud-ssh"
+            loud.mkdir()
+            wrapper = loud / "ssh"
+            wrapper.write_text(f'#!/bin/sh\n{shlex.quote(str(folder / "ssh"))} "$@"\ncode=$?\n'
+                               f"head -c {past} /dev/zero | tr '\\000' o\nexit $code\n")
+            wrapper.chmod(OWN_WRAPPER_MODE)
+            root.tc("card", "b", "--ssh", TARGET)
+            code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi",
+                                     env={"PATH": f"{loud}{os.pathsep}{root.env['PATH']}"})
+            assert_called(self, folder, calls)
+            note = queue(root, "b") / "refused" / "000001-from-a.md.stderr"
+            note_text = note.read_text() if note.exists() else ""
+        self.assertEqual(code, EXIT_GATE_REFUSED, err[-500:])
+        self.assertLess(len(err), 2 * OUTPUT_CAP_BYTES, "tc printed past the cap")
+        self.assertRegex(err, rf"tc kept the first {OUTPUT_CAP_BYTES} bytes of what {TARGET} printed on "
+                              rf"(stdout and stderr|stderr and stdout), and dropped the rest")
+        self.assertLess(len(note_text), 2 * OUTPUT_CAP_BYTES, "the note kept past the cap")
+        self.assertIn(SHOWN_ESCAPE, note_text)
+        self.assertNotIn(RAW_ESCAPE, note_text, "the note holds the far side's escape raw")
+
+    def test_a_delivered_message_whose_far_filing_fails_is_filed_in_sent_with_the_far_warning(self):
+        """Through the loopback fake's real far gate, with a regular file planted at the far mail/.origins: the send exits 0, the message lands far and is filed in sent/, never refused/, and the far warning that its id could not be filed reaches the sender; no traceback.
+
+        The audit's MEDIUM-2. Must reject a far filing that fails after
+        delivery with a traceback or an exit 1, which this side files as
+        refused, with `nothing retries it`.
+
+        @interacts  writes the loopback wrapper; plants one file in the far
+                    mailbox; one tc card, one send.
+        @deps       far_gate_ssh, assert_called, outbox.
+        @complexity O(1).
+        @alloc      one TcRoot and the far mailbox in its temp folder.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("ssh", 0)
+            far = root.base / "far"
+            (far / "mail").mkdir(parents=True)
+            (far / "mail" / ".origins").write_text("planted\n")
+            env = far_gate_ssh(root, folder, far)
+            root.tc("card", "b", "--ssh", TARGET)
+            code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi", env=env)
+            assert_called(self, folder, calls)
+            filed = (outbox(root, "b", "sent"), outbox(root, "b", "refused"))
+            landed = sorted(p.name for p in (far / "mail" / "to-b").glob("*.md"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(filed, (["000001-from-a.md"], []))
+        self.assertEqual(landed, [f"000001-from-{FAR_KEY}.md"])
+        self.assertIn(f"{TARGET} said: origin ", err)
+        self.assertIn("could not be filed", err)
+        self.assertNotIn("Traceback", err)
 
 
 class BranchTest(unittest.TestCase):

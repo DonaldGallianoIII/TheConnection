@@ -135,8 +135,9 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             D23); each ring marker write waits as long for the marker's
             flock, and then says so.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
-            grp, hashlib, json, pathlib, pwd, re, resource, secrets, shlex,
-            shutil, signal, stat, subprocess, time, datetime, os, sys); Linux only
+            grp, hashlib, json, pathlib, pwd, re, resource, secrets,
+            selectors, shlex, shutil, signal, stat, subprocess, time,
+            datetime, os, sys); Linux only
             (flock, RLIMIT_AS, O_NOFOLLOW, O_NONBLOCK, /proc). nvidia-smi
             optional; the codex CLI for the codex route; the ssh client
             for the ssh route, with a POSIX login shell on the far side
@@ -223,6 +224,7 @@ import pwd
 import re
 import resource
 import secrets
+import selectors
 import shlex
 import shutil
 import signal
@@ -254,7 +256,9 @@ WAIT_MEMORY_CAP_BYTES = 256 * 1024 * 1024
 EXIT_ALERT = 5
 # CARDS R6 (Claude Opus 5.5, unreviewed): a usage error (D12). argparse's own
 # code is 2, the same as a wait timeout, so a mistyped listener would read as
-# a timeout and re-arm the same typo in a loop of paid wakes.
+# a timeout and re-arm the same typo in a loop of paid wakes. Row 9 also
+# covers a malformed `--origin` on `tc send` (D33 part 6; SSH fix round 1,
+# Claude Opus 5.5, unreviewed: the audit's LOW-2).
 EXIT_USAGE = 9
 # CARDS R1 (Claude Opus 5.5, unreviewed): mailbox names, contract C0.
 # A name becomes a folder name here and a word on a remote command line over
@@ -274,7 +278,10 @@ EXIT_BAD_NAME = 6
 # .tmp that cannot be made. join: --kind codex with no thread, a
 # CODEX_THREAD_ID that is not a thread id. join and card: a card .tmp that
 # cannot be made. card: unread mail here without --force. Today's
-# empty-message exit already meant this.
+# empty-message exit already meant this. SSH fix round 1 (Claude Opus 5.5,
+# unreviewed): the audit's LOW-2 and MEDIUM-3. gate: an empty message (D33
+# part 6). send and gate: a message that is not valid UTF-8. The ssh route:
+# a branch of the outbox that is not the sender's own (D33 part 1).
 EXIT_REFUSED = 1
 # One JSON file per name. A path built from ROOT, like MAIL and STATUS.
 CARDS = ROOT / "cards"
@@ -302,6 +309,11 @@ REMOTE_TC_PREFIXES = ("/", "~/")
 # writes, and small enough that a runaway pipe never fills the disk.
 SEND_BODY_MAX_BYTES = 1048576
 SEND_TOO_LARGE_WORDS = "tc send: message over 1 MiB; this is a mailbox for words"
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-3. A
+# message is UTF-8 text: tc writes it as such and reads it back strictly
+# (read_regular_file), so a body that is not is refused before anything
+# is written or numbered, by tc send and by the gate.
+SEND_NOT_UTF8_WORDS = "tc send: message is not valid UTF-8 text; nothing written"
 # A message over SEND_BODY_MAX_BYTES, refused before it takes a number.
 EXIT_TOO_LARGE = 8
 # CARDS R4 (Claude Opus 5.5, unreviewed): the codex route (C2, D3).
@@ -516,7 +528,9 @@ LOCK_HELD_WORDS = "another process is holding {what}'s lock"
 # never exit with it, so the re-arm rule is unchanged. SHARED fix round 4
 # (Claude Opus 5.5, unreviewed): dev exit row 10 amended. Also a send that
 # found PUBLISH_MAX_TRIES message numbers in a row taken by hand-made
-# files: the next send starts past them, so it too may run again.
+# files: the next send starts past them, so it too may run again. SSH fix
+# round 1 (Claude Opus 5.5, unreviewed): the gate exits with it too (D33
+# part 6), and the ssh route and tc flush keep a far 10 queued (D23).
 EXIT_BUSY = 10
 # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1.
 # The name tc read gives an inbox file whose own name read/ already holds,
@@ -608,8 +622,16 @@ REFUSAL_NOTE_SUFFIX = ".stderr"
 MESSAGE_NAME_PATTERN = re.compile(rf"([0-9]+)-from-({NAME_PATTERN.pattern})\.md")
 # How the outcome of one ssh run is sorted (ssh_run): the far tc took it,
 # it never got there or the far tc was busy (kept for tc flush), or the
-# far tc said no (filed in refused/, never retried).
+# far side said no (filed in refused/, never retried).
 SSH_SENT, SSH_KEPT, SSH_REFUSED = "sent", "kept", "refused"
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 7, the audit's
+# MEDIUM-4. The most of each of the far side's stdout and stderr tc keeps
+# from one ssh run; the rest is read and dropped. 64 KiB holds a far tc's
+# every answer many times over, and bounds what a hostile far side can make
+# this machine hold, print or keep in a refusal note.
+SSH_OUTPUT_MAX_BYTES = 65536
+# How much of a pipe one read or write takes at a time while ssh runs.
+PIPE_CHUNK_BYTES = 65536
 # D25's origin token: random bytes made once per mailbox, written as hex in
 # outbox/ORIGIN_TOKEN_NAME, never the hostname. 16 bytes (32 hex digits)
 # make two mailboxes' tokens differ in practice. A token is not a secret:
@@ -685,6 +707,15 @@ SQUATTED_NAME = ".squatted-{name}-{k}"
 # inbound ssh (C3, D16, D18, D25).
 # Row 7 of the exit table: refused by the gate.
 EXIT_GATE_REFUSED = 7
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 7, the audit's
+# LOW-1. The far codes that are the far tc's own answer, passed through as
+# this tc's exit: 1 refused with words, 6 bad name, 7 refused by its gate,
+# 8 too large. Row 11 of the exit table: any other far code (a far 4, an
+# older far tc's 9, a far shell's 127) is refused by the far side with a
+# code tc does not know, filed in refused/ with the far code in the words
+# and the note; nothing retries it.
+FAR_ANSWER_CODES = (EXIT_REFUSED, EXIT_BAD_NAME, EXIT_GATE_REFUSED, EXIT_TOO_LARGE)
+EXIT_FAR_UNKNOWN = 11
 # C3's words: anything the gate does not allow, and a gated message to a
 # name whose local card says ssh (D18: the gate never forwards).
 GATE_REFUSED_WORDS = "tc gate: refused"
@@ -3073,8 +3104,10 @@ def cmd_send(args):
 
     @interacts  checks both names first (C0, exit 6, nothing written); reads
                 the body (stdin when no text is given) and refuses one over
-                SEND_BODY_MAX_BYTES (exit 8) or empty (exit 1) before any
-                number is taken; then deliver_once (the origin's filing,
+                SEND_BODY_MAX_BYTES (exit 8), not UTF-8 (exit 1, SSH fix
+                round 1) or empty (exit 1) before any number is taken; a
+                malformed --origin is a usage error before that (exit 9,
+                row 9); then deliver_once (the origin's filing,
                 when given; route_and_deliver: the card, the inbox lock
                 for a local delivery, one lock_deadline for every lock
                 wait, the route, which writes the message); prints
@@ -4120,16 +4153,26 @@ def card_route(to):
 
 
 def read_body(message):
-    """The message body: `message` when given, else stdin. Over the limit exits 8.
+    """The message body: `message` when given, else stdin. Over the limit exits 8; not UTF-8 exits 1.
 
-    Reads at most SEND_BODY_MAX_BYTES + 1 bytes from stdin and decodes them
-    as sys.stdin would, so the body is the same text today's send saw. A
-    text argument is measured in the bytes it came in as. Runs before
+    Reads at most SEND_BODY_MAX_BYTES + 1 bytes from stdin. A text
+    argument is measured in the bytes it came in as. Runs before
     next_seq(), so a refusal uses no number (C0).
 
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-3.
+    The bytes are decoded as strict UTF-8, whatever error handler
+    sys.stdin has (strict under en_US.UTF-8, surrogateescape under
+    C.UTF-8), and a text argument (which Python decodes with
+    surrogateescape) must encode as strict UTF-8: anything else is
+    refused with SEND_NOT_UTF8_WORDS, exit 1, nothing written and no
+    number taken. Before, the gate under surrogateescape took a number,
+    left an empty .tmp in the inbox and ended in a traceback.
+
     @interacts  reads stdin when `message` is empty; on a body over the
-                limit, writes SEND_TOO_LARGE_WORDS to stderr and exits.
-    @deps       refuse; os, sys.
+                limit, writes SEND_TOO_LARGE_WORDS to stderr and exits 8;
+                on one that is not UTF-8, SEND_NOT_UTF8_WORDS and exit 1.
+    @deps       refuse; sys; SEND_BODY_MAX_BYTES, SEND_TOO_LARGE_WORDS,
+                SEND_NOT_UTF8_WORDS, EXIT_TOO_LARGE, EXIT_REFUSED.
     @complexity O(b) over b bytes, at most SEND_BODY_MAX_BYTES + 1.
     @alloc      the raw bytes (up to SEND_BODY_MAX_BYTES + 1) and the
                 decoded string, which is returned. A str stores every
@@ -4139,13 +4182,20 @@ def read_body(message):
                 character is below U+0100).
     """
     if message:
-        if len(os.fsencode(message)) > SEND_BODY_MAX_BYTES:
+        try:
+            size = len(message.encode("utf-8"))  # SSH fix round 1 (Claude Opus 5.5, unreviewed): MEDIUM-3, strict
+        except UnicodeEncodeError:
+            refuse(SEND_NOT_UTF8_WORDS, EXIT_REFUSED)
+        if size > SEND_BODY_MAX_BYTES:
             refuse(SEND_TOO_LARGE_WORDS, EXIT_TOO_LARGE)
         return message
     raw = sys.stdin.buffer.read(SEND_BODY_MAX_BYTES + 1)
     if len(raw) > SEND_BODY_MAX_BYTES:
         refuse(SEND_TOO_LARGE_WORDS, EXIT_TOO_LARGE)
-    return raw.decode(sys.stdin.encoding, sys.stdin.errors)
+    try:
+        return raw.decode("utf-8")  # SSH fix round 1 (Claude Opus 5.5, unreviewed): MEDIUM-3, strict whatever stdin's handler
+    except UnicodeDecodeError:
+        refuse(SEND_NOT_UTF8_WORDS, EXIT_REFUSED)
 
 
 def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on_landed=None):
@@ -4777,8 +4827,14 @@ SshWhere = collections.namedtuple("SshWhere", "target remote why")
 # How one ssh run came out (ssh_run): kind is SSH_SENT, SSH_KEPT or
 # SSH_REFUSED; code the exit code (None when ssh never finished); out and
 # err the far side's stdout and stderr; reason, for a kept message, why in
-# words.
-SshOutcome = collections.namedtuple("SshOutcome", "kind code out err reason")
+# words. SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's
+# MEDIUM-4. out and err are at most SSH_OUTPUT_MAX_BYTES each, and cut
+# names the streams that held more ("stdout", "stderr"), which tc says.
+SshOutcome = collections.namedtuple("SshOutcome", "kind code out err reason cut")
+# What ssh_capture hands back: the exit code (None when the run passed
+# SSH_SEND_SECONDS and was killed), the kept stdout and stderr, decoded,
+# and the names of the streams it cut.
+Captured = collections.namedtuple("Captured", "code out err cut")
 # One message waiting directly in an outbox/<user>/to-<to>/: its number and
 # sender (from its name), the name it is for, its path and its lstat
 # result.
@@ -5336,6 +5392,83 @@ def printable_lines(text):
     return "\n".join(printable(line) for line in text.splitlines())
 
 
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-4,
+# what the far side prints is read with a cap.
+def ssh_capture(argv, text):
+    """Run `argv` with `text` on its stdin for at most SSH_SEND_SECONDS, keeping at most SSH_OUTPUT_MAX_BYTES of each of its stdout and stderr: a Captured. Raises OSError when it will not start.
+
+    The child's three pipes are served together through a selector, so a
+    far side that prints while it reads never deadlocks: stdin is written
+    PIPE_CHUNK_BYTES at a time, and each output pipe read the same way,
+    the first SSH_OUTPUT_MAX_BYTES kept and the rest read and dropped, so
+    the child never blocks on a full pipe and this side never holds more.
+    Past SSH_SEND_SECONDS the child is killed and reaped (that process
+    only, as subprocess.run's timeout did) and the code is None. A child
+    that closed stdin early (a broken pipe) gets no more of the text.
+    Output is decoded as UTF-8 with errors="replace", so odd bytes from
+    the far side never fail a send.
+
+    @interacts  starts one child (subprocess.Popen) and reads and writes
+                its pipes until they close, or kills it at the bound.
+                Writes nothing to disk.
+    @deps       subprocess, selectors, os, time; SSH_SEND_SECONDS,
+                SSH_OUTPUT_MAX_BYTES, PIPE_CHUNK_BYTES, Captured.
+    @complexity O(b + p) over b bytes of `text` and p bytes the child
+                prints (read once each, at most SSH_SEND_SECONDS), plus
+                the child's run.
+    @alloc      the encoded text; at most SSH_OUTPUT_MAX_BYTES kept per
+                output stream, plus one PIPE_CHUNK_BYTES read at a time;
+                one child and its pipes, reaped and closed before return.
+    """
+    data = text.encode("utf-8")
+    deadline = time.monotonic() + SSH_SEND_SECONDS
+    with subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc, \
+            selectors.DefaultSelector() as pipes:
+        kept = {proc.stdout: bytearray(), proc.stderr: bytearray()}
+        names, cut, sent = {proc.stdout: "stdout", proc.stderr: "stderr"}, [], 0
+        for stream in kept:
+            pipes.register(stream, selectors.EVENT_READ)
+        if data:
+            os.set_blocking(proc.stdin.fileno(), False)
+            pipes.register(proc.stdin, selectors.EVENT_WRITE)
+        else:
+            proc.stdin.close()
+        while pipes.get_map():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                proc.kill()
+                proc.wait()
+                return Captured(None, "", "", ())
+            for key, _ in pipes.select(left):
+                if key.fileobj is proc.stdin:
+                    try:
+                        sent += os.write(key.fd, data[sent:sent + PIPE_CHUNK_BYTES])
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        sent = len(data)
+                    if sent >= len(data):
+                        pipes.unregister(proc.stdin)
+                        proc.stdin.close()
+                    continue
+                chunk = os.read(key.fd, PIPE_CHUNK_BYTES)
+                if not chunk:
+                    pipes.unregister(key.fileobj)
+                    continue
+                room = SSH_OUTPUT_MAX_BYTES - len(kept[key.fileobj])
+                kept[key.fileobj] += chunk[:max(room, 0)]
+                if len(chunk) > room and names[key.fileobj] not in cut:
+                    cut.append(names[key.fileobj])
+        try:
+            code = proc.wait(timeout=max(deadline - time.monotonic(), 0))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return Captured(None, "", "", ())
+        out, err = (kept[stream].decode("utf-8", errors="replace") for stream in (proc.stdout, proc.stderr))
+    return Captured(code, out, err, tuple(cut))
+
+
 def ssh_run(where, sender, to, origin, text):
     """Send one message over ssh to `where` (an SshWhere) and sort the far side's answer: an SshOutcome.
 
@@ -5344,49 +5477,54 @@ def ssh_run(where, sender, to, origin, text):
     "<remote tc> send --from <sender> --to <to> --origin <id>", the words
     after the remote tc joined with shlex.join. `--` comes right before
     the target, so no target reads as an option. The body goes on stdin,
-    never on the command line; output is decoded with errors="replace",
-    so odd bytes from the far side never fail a send. Sorted: exit 0 is
-    SSH_SENT; SSH_CONNECT_FAILED (255), a far EXIT_BUSY (10, D23), a run
-    past SSH_SEND_SECONDS, ssh killed by a signal, or ssh that would not
-    start is SSH_KEPT, with why; any other exit is the far tc's answer,
-    SSH_REFUSED (6 bad name, 7 refused by its gate, 8 too large, and the
-    rest).
+    never on the command line. Sorted: exit 0 is SSH_SENT;
+    SSH_CONNECT_FAILED (255), a far EXIT_BUSY (10, D23), a run past
+    SSH_SEND_SECONDS, ssh killed by a signal, or ssh that would not start
+    is SSH_KEPT, with why; any other exit is the far side's answer,
+    SSH_REFUSED (file_outcome passes 1, 6, 7 and 8 through and turns any
+    other into exit 11, D33 part 7).
+
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-4.
+    The run goes through ssh_capture, which keeps at most
+    SSH_OUTPUT_MAX_BYTES of each of the far side's stdout and stderr and
+    says which it cut, so a far side that prints without end costs this
+    machine a bounded amount, not gigabytes.
 
     @interacts  runs `ssh` (found on PATH) once, feeding `text` on its
                 stdin and reading its stdout and stderr, for at most
-                SSH_SEND_SECONDS, then kills it (subprocess.run). Writes
+                SSH_SEND_SECONDS, then kills it (ssh_capture). Writes
                 nothing here.
-    @deps       subprocess, shlex; SSH_CONNECT_SECONDS, SSH_SEND_SECONDS,
-                SSH_CONNECT_FAILED, EXIT_BUSY, SSH_SENT, SSH_KEPT,
-                SSH_REFUSED, SshOutcome; the ssh client.
-    @complexity O(b) over b bytes of `text`, plus one ssh run of at most
-                SSH_SEND_SECONDS.
-    @alloc      the argv, the captured output and one SshOutcome,
-                returned; one child and its pipes, reaped and closed
-                before return.
+    @deps       ssh_capture, printable; shlex; SSH_CONNECT_SECONDS,
+                SSH_SEND_SECONDS, SSH_CONNECT_FAILED, EXIT_BUSY, SSH_SENT,
+                SSH_KEPT, SSH_REFUSED, SshOutcome; the ssh client.
+    @complexity O(b + p) over b bytes of `text` and p bytes the far side
+                prints, plus one ssh run of at most SSH_SEND_SECONDS.
+    @alloc      the argv, at most SSH_OUTPUT_MAX_BYTES of each output
+                stream and one SshOutcome, returned; one child and its
+                pipes, reaped and closed before return.
     """
     argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_CONNECT_SECONDS}",
             "--", where.target,
             where.remote + " " + shlex.join(["send", "--from", sender, "--to", to, "--origin", origin])]
     try:
-        done = subprocess.run(argv, input=text, capture_output=True, encoding="utf-8", errors="replace",
-                              timeout=SSH_SEND_SECONDS)
-    except subprocess.TimeoutExpired:
-        return SshOutcome(SSH_KEPT, None, "", "", f"no answer in {SSH_SEND_SECONDS} s")
+        done = ssh_capture(argv, text)
     except OSError as err:
-        return SshOutcome(SSH_KEPT, None, "", "", f"could not run ssh ({err.strerror})")
-    code, first = done.returncode, (done.stderr.strip().splitlines() or [""])[0]
+        return SshOutcome(SSH_KEPT, None, "", "", f"could not run ssh ({err.strerror})", ())
+    if done.code is None:
+        return SshOutcome(SSH_KEPT, None, "", "", f"no answer in {SSH_SEND_SECONDS} s", ())
+    code, first = done.code, (done.err.strip().splitlines() or [""])[0]
     if code == 0:
-        return SshOutcome(SSH_SENT, code, done.stdout, done.stderr, None)
+        return SshOutcome(SSH_SENT, code, done.out, done.err, None, done.cut)
     if code == SSH_CONNECT_FAILED:
-        return SshOutcome(SSH_KEPT, code, done.stdout, done.stderr,
-                          printable(first) if first else f"ssh exited {SSH_CONNECT_FAILED}")
+        return SshOutcome(SSH_KEPT, code, done.out, done.err,
+                          printable(first) if first else f"ssh exited {SSH_CONNECT_FAILED}", done.cut)
     if code == EXIT_BUSY:
-        return SshOutcome(SSH_KEPT, code, done.stdout, done.stderr,
-                          f"the far tc was busy, exit {EXIT_BUSY}" + (f": {printable(first)}" if first else ""))
+        return SshOutcome(SSH_KEPT, code, done.out, done.err,
+                          f"the far tc was busy, exit {EXIT_BUSY}" + (f": {printable(first)}" if first else ""),
+                          done.cut)
     if code < 0:
-        return SshOutcome(SSH_KEPT, code, done.stdout, done.stderr, f"ssh was killed by signal {-code}")
-    return SshOutcome(SSH_REFUSED, code, done.stdout, done.stderr, None)
+        return SshOutcome(SSH_KEPT, code, done.out, done.err, f"ssh was killed by signal {-code}", done.cut)
+    return SshOutcome(SSH_REFUSED, code, done.out, done.err, None, done.cut)
 
 
 def file_away(path, folder):
@@ -5444,46 +5582,69 @@ def file_outcome(path, where, outcome):
     then where the message went; nothing retries it. What the far side
     said is printed through printable_lines.
 
-    @interacts  see file_away; for a refusal, creates the note beside
-                the message (write_new_file).
-    @deps       file_away, write_new_file, printable_lines, mailbox_share;
-                EXIT_QUEUED, OUTBOX_SENT, OUTBOX_REFUSED,
-                REFUSAL_NOTE_SUFFIX, SHARED_OWNED_FILE_MODE,
-                NEW_FILE_MODE, SSH_SENT, SSH_KEPT.
-    @complexity O(s) over s characters the far side printed.
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 7 and 8, the
+    audit's MEDIUM-4, MEDIUM-5, LOW-1 and LOW-4. On SSH_SENT each line of
+    the far tc's stderr (its warnings, such as `new inbox: nobody has
+    joined as <to>`) comes back as a warning, `<target> said: <line>`, as
+    a local send's warnings do. A refusal passes the far code through only
+    for FAR_ANSWER_CODES (1, 6, 7, 8); any other far code exits
+    EXIT_FAR_UNKNOWN (11), its words naming the far code. The note beside
+    a refused message goes through printable_lines, as the printed copy
+    does, so it holds no raw terminal escape. When ssh_capture cut either
+    stream at SSH_OUTPUT_MAX_BYTES, a warning says so (and the note too).
+
+    @interacts  see file_away; for a refusal, reads ROOT/.shared
+                (share_or_raise) and creates the note beside the message
+                (write_new_file).
+    @deps       file_away, write_new_file, printable_lines, share_or_raise;
+                EXIT_QUEUED, EXIT_FAR_UNKNOWN, FAR_ANSWER_CODES,
+                OUTBOX_SENT, OUTBOX_REFUSED, REFUSAL_NOTE_SUFFIX,
+                SHARED_OWNED_FILE_MODE, NEW_FILE_MODE,
+                SSH_OUTPUT_MAX_BYTES, SSH_SENT, SSH_KEPT.
+    @complexity O(s) over s characters the far side printed, at most
+                SSH_OUTPUT_MAX_BYTES per stream.
     @alloc      the words and warnings, returned; the filed message and
                 its note, kept.
     """
+    cut = [f"tc kept the first {SSH_OUTPUT_MAX_BYTES} bytes of what {where.target} printed on "
+           f"{' and '.join(outcome.cut)}, and dropped the rest"] if outcome.cut else []
     if outcome.kind == SSH_KEPT:
         return (EXIT_QUEUED, f"could not reach {where.target} ({outcome.reason}); kept in outbox: {path}. "
-                             f"Run: tc flush", [])
+                             f"Run: tc flush", cut)
+    said = printable_lines(outcome.err.strip())
     if outcome.kind == SSH_SENT:
         answer = printable_lines(outcome.out.strip())
         words = f"sent over ssh to {where.target}" + (f": {answer}" if answer else "")
+        warnings = [f"{where.target} said: {line}" for line in said.splitlines() if line.strip()] + cut
         try:
             file_away(path, OUTBOX_SENT)
         except OSError as err:
-            return (0, words, [f"sent, but {path} could not be filed in {OUTBOX_SENT}/ ({err.strerror}); it "
-                               f"stays in the outbox, so the next tc flush sends it again and the far side "
-                               f"answers already delivered"])
-        return (0, words, [])
-    said = printable_lines(outcome.err.strip())
+            return (0, words, warnings + [f"sent, but {path} could not be filed in {OUTBOX_SENT}/ ({err.strerror}); "
+                                          f"it stays in the outbox, so the next tc flush sends it again and the "
+                                          f"far side answers already delivered"])
+        return (0, words, warnings)
     lead = f"{said}\n" if said else ""
+    code = outcome.code if outcome.code in FAR_ANSWER_CODES else EXIT_FAR_UNKNOWN
+    how =(f"refused by {where.target} (exit {code})" if code == outcome.code else
+           f"refused by {where.target} with far exit {outcome.code}, a code tc does not know (exit {code})")
     try:
         filed = file_away(path, OUTBOX_REFUSED)
     except OSError as err:
-        return (outcome.code, f"{lead}refused by {where.target} (exit {outcome.code}); {path} could not be filed "
-                              f"in {OUTBOX_REFUSED}/ ({err.strerror}), so it stays in the outbox and the next "
-                              f"tc flush sends it again", [])
-    warnings = []
+        return (code, f"{lead}{how}; {path} could not be filed in {OUTBOX_REFUSED}/ ({err.strerror}), so it stays "
+                      f"in the outbox and the next tc flush sends it again", cut)
+    warnings = list(cut)
     note = filed.with_name(filed.name + REFUSAL_NOTE_SUFFIX)
-    mode = SHARED_OWNED_FILE_MODE if mailbox_share() is not None else NEW_FILE_MODE
     try:
-        write_new_file(note, f"the far tc exited {outcome.code}; its stderr:\n{outcome.err}", mode)
+        mode = SHARED_OWNED_FILE_MODE if share_or_raise() is not None else NEW_FILE_MODE
+    except OSError:
+        mode = SHARED_OWNED_FILE_MODE
+    try:
+        write_new_file(note, "".join(f"{line}\n" for line in [f"the far side exited {outcome.code}; its stderr, "
+                                                             f"through tc's printable filter:", *said.splitlines(),
+                                                             *cut]), mode)
     except OSError as err:
         warnings.append(f"the far stderr could not be kept beside it at {note} ({err.strerror})")
-    return (outcome.code, f"{lead}refused by {where.target} (exit {outcome.code}); filed in {filed}, and "
-                          f"nothing retries it", warnings)
+    return (code, f"{lead}{how}; filed in {filed}, and nothing retries it", warnings)
 
 
 def outbox_text(body):
@@ -5896,11 +6057,14 @@ def cmd_gate(args):
     thread id and a fixed line that never holds the body.
 
     @interacts  checks --as (C0, exit 6); reads SSH_ORIGINAL_COMMAND; for
-                a send, reads the body from stdin (read_body) and
+                a send, reads the body from stdin (read_body: over the
+                limit exit 8, not UTF-8 exit 1; empty, exit 1, row 1) and
                 delivers it (deliver_once: see route_and_deliver and the
-                routes it reaches, local and codex); for health, reads
-                /proc and mail/ (health_snapshot); prints; on a refusal
-                one line to stderr and exit 7.
+                routes it reaches, local and codex; an inbox lock or
+                mail/.seq held past LOCK_WAIT_SECONDS exits 10, row 10,
+                nothing written); for health, reads /proc and mail/
+                (health_snapshot); prints; on a refusal one line to stderr
+                and exit 7.
     @deps       require_names, gate_command, read_body, refuse,
                 deliver_once, print_delivery, health_snapshot; json, os;
                 GATE_REFUSED_WORDS, GATE_HEADER_NOTE, EXIT_GATE_REFUSED,
