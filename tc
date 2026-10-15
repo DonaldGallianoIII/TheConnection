@@ -34,7 +34,13 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             or not, the locks, mail/.seq, status files and the ring marker
             are opened without following a symlink, and an inbox or its
             read/ is lstat()ed before use: a link at any of them is
-            refused, exit 1 (D17).
+            refused, exit 1 (D17). A FIFO or anything else that is not a
+            regular file at a lock, mail/.seq or a status file is refused
+            at once, exit 1, never waited on (D19). Messages are read only
+            from regular files: read, peek and log name anything else and
+            never read it, read leaves it in place, and wait, the counts
+            and health leave it out; health and watch never take a linked
+            lock for a listener's (D19).
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
             grp, json, pathlib, re, resource, shlex, shutil, signal, stat,
             subprocess, time, datetime, os, sys); Linux only (flock,
@@ -221,6 +227,14 @@ SHARED_TOP_FOLDER_MODE = 0o3775
 # word, which Linux caps at 128 KiB; 1 MiB is far past that and bounds what
 # a hand-made file can make it print.
 STATUS_READ_MAX_BYTES = 1048576
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, messages are read
+# only from regular files. A message's header line and the blank line after
+# it run to a few hundred bytes (a number, two names of at most
+# NAME_MAX_CHARS, a time); 4 KiB leaves room for the gate's note (C3).
+MESSAGE_HEADER_MAX_BYTES = 4096
+# The most of one message file that read, peek and log read: the largest
+# body a send writes, plus its header. A file over it is named, not shown.
+MESSAGE_READ_MAX_BYTES = SEND_BODY_MAX_BYTES + MESSAGE_HEADER_MAX_BYTES
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -466,38 +480,75 @@ def shared_folder_mode(path):
     return SHARED_TOP_FOLDER_MODE if path in [ROOT / name for name in SHARED_FOLDER_NAMES] else SHARED_FOLDER_MODE
 
 
-def open_by_name(path, flags):
-    """Open `path` with `flags` and O_NOFOLLOW, and create it when nothing is there. A descriptor.
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, a FIFO at a lock's
+# name is refused at once (O_NONBLOCK, then S_ISREG).
+def open_regular(path, flags, mode=NEW_FILE_MODE):
+    """Open the regular file at `path` with `flags`, making it at `mode` when nothing is there. A descriptor.
 
-    For each file tc opens by a name a group member can also write (D17):
-    the wait, watch and inbox locks, mail/.seq and status/<name>.md. A
-    symlink at the name, dangling or not, is refused (exit 1, words), so
-    nothing is read or written through it. A file already there is opened
+    Every open adds O_NOFOLLOW and O_NONBLOCK (D17, D19), and fstat checks
+    the result before it is returned. So a symlink raises OSError (errno
+    ELOOP), a FIFO never blocks (OSError ENXIO when it has no reader,
+    else ValueError), a folder raises OSError (EISDIR) or ValueError, and
+    anything else that is not a regular file raises ValueError. The
+    descriptor returned is blocking again. A file already there is opened
     without O_CREAT, and only a missing one is made, with O_CREAT and
-    O_EXCL (mode NEW_FILE_MODE before the umask), then opened again if
-    another process made it in between. The split matters under C4: in a
-    sticky, group-writable folder (mail/, status/), Linux with
+    O_EXCL (`mode` before the umask), then opened again if another
+    process made it in between. The split matters under C4: in a sticky,
+    group-writable folder (mail/, status/), Linux with
     fs.protected_regular = 2 refuses an O_CREAT open of a file that
     another user made, even one the group may write.
 
-    @interacts  opens one file, creating it empty when missing; on a link,
-                one line to stderr and exit 1.
-    @deps       refuse; os, errno; NEW_FILE_MODE, EXIT_REFUSED.
-    @complexity O(1): at most three open calls.
-    @alloc      one descriptor, returned; the caller closes it.
+    @interacts  opens and fstats one file, creating it empty when missing.
+    @deps       os, stat; NEW_FILE_MODE.
+    @complexity O(1): at most three open calls and one fstat.
+    @alloc      one descriptor, returned (the caller closes it), or closed
+                before anything is raised.
     """
     problem = None
     for how in (flags, flags | os.O_CREAT | os.O_EXCL, flags):
         try:
-            return os.open(path, how | os.O_NOFOLLOW, NEW_FILE_MODE)
+            fd = os.open(path, how | os.O_NOFOLLOW | os.O_NONBLOCK, mode)
         except (FileNotFoundError, FileExistsError) as err:
             problem = err  # missing: make it; made in between: open that one
-        except OSError as err:
-            if err.errno == errno.ELOOP:
-                refuse(f"tc: {path} is a symlink, which tc never follows; nothing written through it",
-                       EXIT_REFUSED)
+            continue
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("it is not a regular file")
+            os.set_blocking(fd, True)
+        except BaseException:
+            os.close(fd)
             raise
+        return fd
     raise problem
+
+
+def open_by_name(path, flags, mode=NEW_FILE_MODE):
+    """open_regular, refusing (exit 1, words) a symlink, a FIFO or anything else that is not a regular file. A descriptor.
+
+    For each file tc opens by a name a group member can also write (D17,
+    D19): the wait, watch and inbox locks, mail/.seq and
+    status/<name>.md. A symlink at the name, dangling or not, is refused,
+    and so is a FIFO, at once instead of hanging tc; nothing is read or
+    written through either.
+
+    @interacts  see open_regular; on a refusal, one line to stderr and
+                exit 1.
+    @deps       open_regular, refuse; errno; NEW_FILE_MODE, EXIT_REFUSED.
+    @complexity O(1): at most three open calls and one fstat.
+    @alloc      one descriptor, returned; the caller closes it.
+    """
+    try:
+        return open_regular(path, flags, mode)
+    except ValueError:
+        problem = "is not a regular file, which tc never opens"
+    except OSError as err:
+        if err.errno == errno.ELOOP:
+            problem = "is a symlink, which tc never follows"
+        elif err.errno in (errno.ENXIO, errno.EISDIR):  # a FIFO with no reader, a folder
+            problem = "is not a regular file, which tc never opens"
+        else:
+            raise
+    refuse(f"tc: {path} {problem}; nothing written through it", EXIT_REFUSED)
 
 
 def check_inbox(name):
@@ -613,8 +664,76 @@ def inbox(name):
     return box
 
 
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, a message is a
+# regular file; anything else among them is skipped and named, never read.
+def real_folder(path):
+    """True when lstat finds a real folder at `path`: not a symlink to one, not missing.
+
+    @interacts  lstats `path`. Writes nothing.
+    @deps       os, stat.
+    @complexity O(1).
+    @alloc      one stat result, freed on return.
+    """
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def message_files(folder):
+    """The *.md entries in `folder` as (messages, skipped): (path, lstat result) for each regular file, by name; (path, why) for the rest (D19).
+
+    Checked with lstat, never followed: a symlink, a FIFO or a folder
+    named like a message is skipped, so read, peek, log, wait and the
+    counts leave it out, and no wait wakes for it. A missing folder holds
+    nothing, and an entry gone before its lstat is left out. The caller
+    makes sure `folder` itself is a real folder.
+
+    @interacts  lists `folder` and lstats each *.md entry. Writes nothing.
+    @deps       os, stat, pathlib.
+    @complexity O(e) over e *.md entries: single digits in an inbox; a
+                read/ is the history (hundreds to thousands), listed only
+                by log and health.
+    @alloc      two lists, returned.
+    """
+    messages, skipped = [], []
+    for path in sorted(folder.glob("*.md")):
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            messages.append((path, st))
+        else:
+            skipped.append((path, "it is a symlink, which tc never follows" if stat.S_ISLNK(st.st_mode)
+                            else "it is not a regular file"))
+    return messages, skipped
+
+
+def inbox_messages(name):
+    """The unread mail in mail/to-<name>/ as (paths, skipped): the regular files, by name, and (path, why) for each other *.md entry.
+
+    Goes through inbox(), so a linked inbox or read/ refuses (exit 1,
+    check_inbox) and a missing one is made.
+
+    @interacts  see inbox and message_files.
+    @deps       inbox, message_files.
+    @complexity O(u) over u *.md entries in the inbox (single digits).
+    @alloc      two lists, returned.
+    """
+    messages, skipped = message_files(inbox(name))
+    return [path for path, _ in messages], skipped
+
+
 def unread(name):
-    return sorted(p for p in inbox(name).glob("*.md"))
+    """The unread messages in mail/to-<name>/: each *.md there that is a regular file, by name (D19).
+
+    @interacts  see inbox_messages.
+    @deps       inbox_messages.
+    @complexity O(u) over u *.md entries in the inbox (single digits).
+    @alloc      one list of paths, returned.
+    """
+    return inbox_messages(name)[0]
 
 
 def next_seq():
@@ -739,10 +858,45 @@ def cmd_send(args):
         sys.exit(result.exit)
 
 
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, every message
+# printed is read through read_regular_file.
 def show(paths):
+    """Print each message at `paths`, then `---`; return (path, why) for each one read_regular_file will not read (D19).
+
+    Each file is opened with O_NOFOLLOW and O_NONBLOCK and read only when
+    fstat calls it a regular file of at most MESSAGE_READ_MAX_BYTES, so a
+    link put in place of a message is never followed and a FIFO never
+    blocks. Line ends print as read_text gave them (universal newlines).
+
+    @interacts  opens, fstats and reads each file; prints to stdout.
+    @deps       read_regular_file; MESSAGE_READ_MAX_BYTES.
+    @complexity O(u + b) over u paths and b bytes read, each file at most
+                MESSAGE_READ_MAX_BYTES + 1.
+    @alloc      each file's text while it prints; the list of the unshown,
+                returned.
+    """
+    unshown = []
     for p in paths:
-        print(p.read_text())
+        try:
+            text = read_regular_file(p, MESSAGE_READ_MAX_BYTES)
+        except (OSError, ValueError) as err:
+            unshown.append((p, err.strerror if isinstance(err, OSError) and err.strerror else str(err)))
+            continue
+        print(text.replace("\r\n", "\n").replace("\r", "\n"))
         print("---")
+    return unshown
+
+
+def refuse_lines(lines):
+    """When `lines` holds any: print them to stderr, one each, and exit 1. Else nothing.
+
+    @interacts  writes to stderr and exits when `lines` is not empty.
+    @deps       refuse; EXIT_REFUSED.
+    @complexity O(n) over n lines (single digits).
+    @alloc      the joined text.
+    """
+    if lines:
+        refuse("\n".join(lines), EXIT_REFUSED)
 
 
 def cmd_read(args):
@@ -754,17 +908,25 @@ def cmd_read(args):
     price: a print that fails after the renames leaves that mail in read/
     unseen, where `tc log` still shows it.
 
+    Only regular files move (D19). A symlink, a FIFO or a folder named
+    like a message is left in place, named on stderr and never read; so is
+    a moved file read_regular_file will not read. Either makes the read
+    exit 1 after it prints the rest.
+
     @interacts  checks the name first (C0, exit 6, nothing written); a name
                 with no inbox gets `no unread mail` and nothing is created
                 (O2); else holds mail/.box-<name>.lock alone from its glob to
                 its last rename (D14), refuses an inbox or read/ that is a
                 symlink (exit 1, nothing moved: check_inbox, D17), makes
-                mail/to-<name>/read/ if missing, and renames each unread
-                file into it; then, with the lock released, reads each
-                moved file and prints to stdout.
-    @deps       require_names, inbox_lock, unread, show.
-    @complexity O(u) over u unread messages (single digits).
-    @alloc      the list of paths and each file's text while printed; one
+                mail/to-<name>/read/ if missing, lstats each *.md entry and
+                renames each regular file into read/; then, with the lock
+                released, reads each moved file (read_regular_file) and
+                prints to stdout, and names each one it will not show on
+                stderr.
+    @deps       require_names, inbox_lock, inbox_messages, show,
+                refuse_lines, printable.
+    @complexity O(u) over u *.md entries in the inbox (single digits).
+    @alloc      the lists of paths and each file's text while printed; one
                 open lock file while the lock is held.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
@@ -777,36 +939,45 @@ def cmd_read(args):
     # Phase fix round 1 (Claude Opus 5.5, unreviewed): print after the
     # release, so a stalled stdout holds no lock.
     with inbox_lock(args.name):
+        messages, skipped = inbox_messages(args.name)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19
         moved = []
-        for p in unread(args.name):
+        for p in messages:
             p.rename(p.parent / "read" / p.name)
             moved.append(p.parent / "read" / p.name)
     if not moved:
         print(f"no unread mail for {args.name}")
-        return
-    show(moved)
+    unshown = show(moved)
+    refuse_lines([f"tc read: {printable(p)} not shown and left in place ({why})" for p, why in skipped]
+                 + [f"tc read: {printable(p)} not shown ({why})" for p, why in unshown])
 
 
 def cmd_peek(args):
     """`tc peek <name>`: print unread mail and leave it unread.
 
+    Only regular files count and print (D19). A symlink, a FIFO or a
+    folder named like a message is named on stderr and never read, and the
+    peek exits 1 after it prints the rest.
+
     @interacts  checks the name first (C0, exit 6, nothing written); a name
                 with no inbox gets `no unread mail` and nothing is created
                 (O2); else refuses an inbox or read/ that is a symlink
                 (exit 1, nothing read: check_inbox, D17), makes
-                mail/to-<name>/read/ if missing and reads each unread file;
-                prints to stdout.
-    @deps       require_names, unread, show.
-    @complexity O(u) over u unread messages (single digits).
-    @alloc      the list of paths and each file's text while printed.
+                mail/to-<name>/read/ if missing, lstats each *.md entry and
+                reads each regular file (read_regular_file); prints to
+                stdout, and names each one it will not show on stderr.
+    @deps       require_names, inbox_messages, show, refuse_lines,
+                printable.
+    @complexity O(u) over u *.md entries in the inbox (single digits).
+    @alloc      the lists of paths and each file's text while printed.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     if not (MAIL / f"to-{args.name}").is_dir():  # CARDS R3 (Claude Opus 5.5, unreviewed): O2
         print(f"no unread mail for {args.name}")
         return
-    msgs = unread(args.name)
+    msgs, skipped = inbox_messages(args.name)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19
     print(f"{len(msgs)} unread for {args.name}")
-    show(msgs)
+    unshown = show(msgs)
+    refuse_lines([f"tc peek: {printable(p)} not shown ({why})" for p, why in skipped + unshown])
 
 
 def cmd_wait(args):
@@ -898,10 +1069,42 @@ def cmd_status(args):
 
 
 def cmd_log(args):
-    every = sorted(MAIL.glob("to-*/**/*.md"), key=lambda p: p.name)
+    """`tc log [--last N]`: every message, unread and read, in number order.
+
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19. Only real
+    inbox folders are entered (lstat): a symlink at mail/to-<name> or at
+    its read/ is named on stderr and never entered. Only regular files
+    print (message_files, then show); anything else is named. Either makes
+    log exit 1 after it prints the rest.
+
+    @interacts  lists mail/, lstats each inbox, its read/ and each *.md
+                entry, reads each message shown (read_regular_file);
+                prints to stdout, and to stderr for what it will not show.
+                Writes nothing.
+    @deps       real_folder, message_files, show, refuse_lines, printable;
+                os; MAIL.
+    @complexity O(t) over t message files ever (low hundreds per job), one
+                lstat each and one read for each one shown.
+    @alloc      the list of every message path and the skipped entries,
+                freed on exit; each file's text while it prints.
+    """
+    every, skipped = [], []
+    for box in sorted(MAIL.glob("to-*")) if MAIL.is_dir() else []:
+        for folder in (box, box / "read"):
+            if not real_folder(folder):
+                if os.path.islink(folder):
+                    skipped.append((folder, "it is a symlink, not a real folder; tc never enters it"))
+                if folder == box:
+                    break
+                continue
+            messages, bad = message_files(folder)
+            every += [path for path, _ in messages]
+            skipped += bad
+    every.sort(key=lambda p: p.name)
     if not every:
         print("mailbox empty")
-    show(every[-args.last:] if args.last else every)
+    unshown = show(every[-args.last:] if args.last else every)
+    refuse_lines([f"tc log: {printable(p)} not shown ({why})" for p, why in skipped + unshown])
 
 
 # ---------- cards: who each name is and how mail reaches it (C1) ----------
@@ -911,14 +1114,19 @@ def cmd_log(args):
 def unread_count(name):
     """How many unread messages mail/to-<name>/ holds; 0 with no inbox.
 
-    Unlike unread(), it never creates the inbox.
+    Unlike unread(), it never creates the inbox. SHARED fix round 1
+    (Claude Opus 5.5, unreviewed): only a real folder counts (lstat), so a
+    linked inbox holds 0, as send, read and wait refuse it; and only
+    regular files count (message_files), as `tc read` moves only those.
 
-    @interacts  globs mail/to-<name>/*.md. Writes nothing.
-    @deps       pathlib.
-    @complexity O(u) over u unread messages (single digits).
-    @alloc      one list of paths, freed on return.
+    @interacts  lstats mail/to-<name>; lists it and lstats each *.md
+                entry. Writes nothing.
+    @deps       real_folder, message_files; MAIL.
+    @complexity O(u) over u *.md entries in the inbox (single digits).
+    @alloc      two lists, freed on return.
     """
-    return len(list((MAIL / f"to-{name}").glob("*.md")))
+    box = MAIL / f"to-{name}"
+    return len(message_files(box)[0]) if real_folder(box) else 0
 
 
 def refuse(words, code):
@@ -1812,8 +2020,18 @@ def _flock_holders():
     return holders
 
 
-def _lock_key(path):
-    st = path.stat()
+def _lock_key(st):
+    """The 'major:minor:inode' key /proc/locks gives the file whose stat result is `st`.
+
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): it takes the stat
+    result, so the caller decides whether a link is followed (listeners
+    never follows one).
+
+    @interacts  none.
+    @deps       os.
+    @complexity O(1).
+    @alloc      one short string, returned.
+    """
     return f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}"
 
 
@@ -1821,7 +2039,19 @@ def listeners(kind="wait"):
     """Each name that ever ran `tc <kind>`, with the pid holding its lock or None.
 
     Reads /proc/locks instead of trying the lock, so probing never races a
-    listener that is starting up.
+    listener that is starting up. SHARED fix round 1 (Claude Opus 5.5,
+    unreviewed): each lock is lstat()ed, and one that is not a regular
+    file (a symlink planted at a name's lock, a FIFO) is left out. A
+    link's target may be another listener's lock, and the proof of life
+    (CLAUDE.md rule 6) must never follow it, so tc health, tc watch and
+    the board report no listener from a link.
+
+    @interacts  reads /proc/locks; lists mail/ and lstats each lock file.
+                Writes nothing.
+    @deps       _flock_holders, _lock_key; os, stat; MAIL.
+    @complexity O(k + n) over k lines in /proc/locks (tens) and n lock
+                files of this kind (a few dozen).
+    @alloc      the holder map and one dict of names, returned.
     """
     holders = _flock_holders()
     out = {}
@@ -1831,9 +2061,13 @@ def listeners(kind="wait"):
     for lock in sorted(MAIL.glob(f"{prefix}*.lock")):
         name = lock.name[len(prefix):-len(".lock")]
         try:
-            out[name] = holders.get(_lock_key(lock))
+            st = os.lstat(lock)
         except OSError:
             out[name] = None
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): a planted link is nobody's lock
+        out[name] = holders.get(_lock_key(st))
     return out
 
 
@@ -1850,16 +2084,36 @@ def _age(seconds):
 
 
 def mailbox_summary():
+    """Each inbox's unread count, the age of its newest mail and of its status, by name.
+
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): an inbox is a real
+    folder at mail/to-<name> (lstat). A linked one is left out, as send,
+    read and wait refuse it, so tc health and the board never count or
+    date a folder outside the mailbox. Only regular *.md files count
+    (message_files), unread and in a read/ that is itself a real folder;
+    their ages come from lstat, never through a link.
+
+    @interacts  lists mail/; lstats each inbox, its read/ and each *.md
+                entry; stats each name's status file. Writes nothing.
+    @deps       real_folder, message_files; time; MAIL, STATUS.
+    @complexity O(n + m) over n inboxes (a few dozen) and m message files
+                in every inbox and read/ (hundreds to thousands, growing
+                with the history), one lstat each.
+    @alloc      one dict per inbox, returned; each inbox's message lists
+                while it is counted.
+    """
     now = time.time()
-    names = sorted({p.name[len("to-"):] for p in MAIL.glob("to-*") if p.is_dir()}) if MAIL.exists() else []
     out = {}
-    for name in names:
-        box = MAIL / f"to-{name}"
-        every = list(box.glob("*.md")) + list((box / "read").glob("*.md"))
-        newest = max((p.stat().st_mtime for p in every), default=None)
+    for box in sorted(MAIL.glob("to-*")) if MAIL.exists() else []:
+        if not real_folder(box):
+            continue
+        name = box.name[len("to-"):]
+        unread = message_files(box)[0]
+        history = message_files(box / "read")[0] if real_folder(box / "read") else []
+        newest = max((st.st_mtime for _, st in unread + history), default=None)
         st = STATUS / f"{name}.md"
         out[name] = {
-            "unread": len(list(box.glob("*.md"))),
+            "unread": len(unread),
             "newest_mail_age_s": None if newest is None else round(now - newest),
             "status_age_s": round(now - st.stat().st_mtime) if st.exists() else None,
         }

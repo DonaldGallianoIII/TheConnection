@@ -6,7 +6,11 @@ init, and the `mailbox shared with group <g>` or `mailbox private` line in
 sticky bit on mail/, status/, cards/ and outbox/, a symlink planted at a
 lock, mail/.seq, a status file or the ring marker refused with its target
 unchanged, a symlink planted as an inbox or its read/ refused with nothing
-landing, and a file already there reopened without O_CREAT.
+landing, and a file already there reopened without O_CREAT. And D19
+(SHARED fix round 1, Claude Opus 5.5, unreviewed): a link or FIFO planted
+as a message never printed and left in place, a FIFO at a lock's name
+refused within FIFO_REFUSE_SECONDS, and no listener or count taken
+through a link.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -28,21 +32,29 @@ route-shared.md).
             tests make folders, symlinks, message files and link targets by
             hand (the targets in the root's temp folder, outside TC_ROOT),
             run a fake codex through the harness, and load tc in process
-            once, with os.open wrapped to record its flags.
-@deps       python3 stdlib (grp, importlib, json, os, pathlib, stat, sys,
-            unittest, unittest.mock); tests/_root.py.
+            once, with os.open wrapped to record its flags. The D19 tests
+            make FIFOs and links by hand, hold an flock on one lock file in
+            this process, and load tc in process to call show() (stdout
+            captured), listeners() and unread_count().
+@deps       python3 stdlib (contextlib, fcntl, grp, importlib, io, json, os,
+            pathlib, stat, subprocess, sys, unittest, unittest.mock);
+            tests/_root.py.
 @complexity O(1) per test: a handful of tc runs over a root of a few dozen
             entries, once per group tested (one or two).
 @alloc      one TcRoot per test and group, removed when its context exits.
 """
 
+import contextlib
+import fcntl
 import grp
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import pathlib
 import stat
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -92,6 +104,19 @@ LISTEN_SECONDS = "3"
 QUIET = ["--load-ratio", "100000", "--mem-min-pct", "0", "--gpu-max-c", "100000"]
 # The thread a codex card carries in these tests.
 THREAD = "t1"
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19.
+# What tc says when it refuses a FIFO, or anything else that is not a
+# regular file, at a name it opens.
+FIFO_WORDS = "is not a regular file, which tc never opens"
+# D19's bound (phases.md H1): a FIFO at a lock's name is refused within
+# this many seconds, never waited on. It also bounds a read, peek or log
+# that must not block on a FIFO planted as a message.
+FIFO_REFUSE_SECONDS = 2
+# A wait that polls once and times out: its first poll comes at once, then
+# it sleeps out the rest.
+ONE_POLL_SECONDS = "1"
+# The body of the real message beside each planted entry.
+REAL_TEXT = "real mail from a"
 
 
 def groups_to_test():
@@ -591,6 +616,173 @@ class NoPlantedLinksTest(unittest.TestCase):
                 creating = [f for f in flags if f & os.O_CREAT]
                 self.assertEqual(len(creating), 1, f"{path.name}: {len(creating)} opens with O_CREAT")
                 self.assertTrue(creating[0] & os.O_EXCL, f"{path.name}: O_CREAT without O_EXCL")
+
+
+
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19 and the audit's MEDIUM-5 and LOW-9.
+class RegularFilesOnlyTest(unittest.TestCase):
+    """D19: messages only from regular files, a FIFO at a lock's name refused, and no listener or count taken through a link.
+
+    None of this needs a shared mailbox: the checks hold either way.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, plant, landed, load_tc.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per case.
+    """
+
+    def test_a_link_or_fifo_planted_as_a_message_is_never_printed_and_stays_in_place(self):
+        """A link to a file outside the mailbox and a FIFO, each named like a message in to-x, and to-zzz a link to a folder: peek, read and log never print the target, never block, and leave both in place.
+
+        Each prints the real message beside them, names each planted entry
+        on stderr and exits 1. read moves only the real message into
+        read/, and a wait with only the planted two left times out instead
+        of waking. show() itself, handed the link in process, prints
+        nothing and names it (never the FIFO in process, where a broken
+        show() would block this test with no timeout). Must reject a show() that follows a
+        link (the target prints), a read of the FIFO (it blocks), a read
+        that moves the link, and a wait that counts it.
+
+        @interacts  one send; a link, a FIFO and a linked folder made by
+                    hand; peek, read, log and a one-poll wait; loads tc in
+                    process for show(), with stdout captured.
+        @deps       _root.TcRoot.tc, plant, load_tc; contextlib, io;
+                    tc.show.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            root.tc("send", "--from", "a", "--to", "x", REAL_TEXT)
+            box = root.path / "mail" / "to-x"
+            target = plant(root, "mail/to-x/000099-from-z.md")
+            fifo = box / "000098-from-z.md"
+            os.mkfifo(fifo)
+            elsewhere = root.base / "elsewhere"
+            elsewhere.mkdir()
+            (elsewhere / "000097-from-z.md").write_text(TARGET_TEXT)
+            (root.path / "mail" / "to-zzz").symlink_to(elsewhere, target_is_directory=True)
+            runs = {}
+            for label, argv in (("peek", ["peek", "x"]), ("read", ["read", "x"]), ("log", ["log"])):
+                try:
+                    runs[label] = root.tc(*argv, timeout=FIFO_REFUSE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    self.fail(f"tc {label} blocked on the FIFO in mail/to-x past {FIFO_REFUSE_SECONDS} s")
+            waited = root.tc("wait", "x", "--timeout", ONE_POLL_SECONDS)
+            left = (os.path.islink(box / "000099-from-z.md"),
+                    os.path.lexists(fifo) and stat.S_ISFIFO(os.lstat(fifo).st_mode))
+            moved = sorted(p.name for p in (box / "read").iterdir())
+            after = target.read_text()
+            tc = load_tc(root)
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                unshown = tc.show([box / "000099-from-z.md"])
+        for label, (code, out, err) in runs.items():
+            with self.subTest(run=label):
+                self.assertNotIn(TARGET_TEXT.strip(), out + err, f"tc {label} printed a link's target")
+                self.assertIn(REAL_TEXT, out, f"tc {label} did not print the real message")
+                self.assertEqual(code, EXIT_REFUSED, f"tc {label} exited {code}: {err}")
+                self.assertIn("000099-from-z.md not shown", err)
+                self.assertIn("000098-from-z.md not shown", err)
+        self.assertIn("to-zzz not shown", runs["log"][2])
+        self.assertIn("left in place", runs["read"][2])
+        self.assertEqual(left, (True, True), "tc read moved the planted link or FIFO")
+        self.assertEqual(moved, ["000001-from-a.md"])
+        self.assertEqual(waited[0], EXIT_TIMEOUT, f"tc wait woke for a planted entry: {waited}")
+        self.assertEqual(after, TARGET_TEXT)
+        self.assertEqual(printed.getvalue(), "", "show() printed what it was handed through a link")
+        self.assertEqual([p.name for p, why in unshown], ["000099-from-z.md"])
+
+    def test_a_fifo_at_a_lock_seq_or_status_is_refused_within_2_s(self):
+        """A FIFO at the wait, watch or inbox lock, mail/.seq or status/x.md: exit 1 within FIFO_REFUSE_SECONDS, the words, the FIFO left, no mail.
+
+        One fresh root per case. Must reject an open without O_NONBLOCK
+        (the wait, watch, inbox lock and status opens block forever) and
+        one without the S_ISREG check (mail/.seq opens, then the send
+        fails with a traceback, not words).
+
+        @interacts  per case: one FIFO made by hand, then one tc run.
+        @deps       _root.TcRoot.tc, landed.
+        @complexity O(1) per case, five cases.
+        @alloc      one TcRoot per case.
+        """
+        send = ["send", "--from", "a", "--to", "x", "hi"]
+        cases = [
+            ("wait lock", "mail/.wait-x.lock", ["wait", "x", "--timeout", LISTEN_SECONDS]),
+            ("watch lock", "mail/.watch-x.lock",
+             ["watch", "x", "--heartbeat", LISTEN_SECONDS, "--poll", "1", *QUIET]),
+            ("inbox lock", "mail/.box-x.lock", send),
+            ("mail/.seq", "mail/.seq", send),
+            ("status/x.md, post", "status/x.md", ["status", "x", "busy"]),
+        ]
+        for label, at, argv in cases:
+            with self.subTest(case=label):
+                with _root.TcRoot() as root:
+                    fifo = root.path / at
+                    fifo.parent.mkdir(parents=True, exist_ok=True)
+                    os.mkfifo(fifo)
+                    try:
+                        code, out, err = root.tc(*argv, timeout=FIFO_REFUSE_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        self.fail(f"{label}: tc blocked on the FIFO past {FIFO_REFUSE_SECONDS} s")
+                    still = stat.S_ISFIFO(os.lstat(fifo).st_mode)
+                    mail = landed(root)
+                self.assertEqual(code, EXIT_REFUSED, f"{label}: exited {code}: {err}")
+                self.assertIn(FIFO_WORDS, err, label)
+                self.assertTrue(still, f"{label}: the FIFO was replaced")
+                self.assertEqual(mail, [], f"{label}: mail landed")
+
+    def test_a_linked_lock_is_never_reported_as_a_listener(self):
+        """In process: mail/.wait-b.lock a link to a's lock, which this process holds: listeners() names a with this pid, and never b.
+
+        Must reject a lock key read through the link (b would show a's
+        holder, while b's own tc wait is refused).
+
+        @interacts  loads tc in process; makes mail/, one lock file and one
+                    link by hand; holds an flock on the lock while
+                    listeners() reads /proc/locks.
+        @deps       load_tc; fcntl; tc.listeners.
+        @complexity O(1).
+        @alloc      one TcRoot, one module and one open file.
+        """
+        with _root.TcRoot() as root:
+            tc = load_tc(root)
+            mail = root.path / "mail"
+            mail.mkdir()
+            lock = mail / ".wait-a.lock"
+            lock.write_text("")
+            (mail / ".wait-b.lock").symlink_to(lock)
+            with open(lock, "w") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                seen = tc.listeners("wait")
+        self.assertEqual(seen, {"a": os.getpid()})
+
+    def test_a_linked_inbox_and_a_planted_message_are_left_out_of_health_and_counts(self):
+        """mail/to-z a link to a folder holding a message, and a link planted as a message in to-x: health and unread_count count neither.
+
+        Must reject a summary that follows the linked inbox (z would show,
+        with 1 unread) and a count of the planted link (x would show 2).
+
+        @interacts  one send; one planted link and one linked folder made by
+                    hand; one tc health --json; loads tc in process for
+                    unread_count.
+        @deps       _root.TcRoot.tc, plant, load_tc; json; tc.unread_count.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            root.tc("send", "--from", "a", "--to", "x", REAL_TEXT)
+            plant(root, "mail/to-x/000099-from-z.md")
+            elsewhere = root.base / "elsewhere"
+            elsewhere.mkdir()
+            (elsewhere / "000001-from-z.md").write_text(TARGET_TEXT)
+            (root.path / "mail" / "to-z").symlink_to(elsewhere, target_is_directory=True)
+            code, out, err = root.tc("health", "--json")
+            tc = load_tc(root)
+            counts = {name: tc.unread_count(name) for name in ("x", "z")}
+        self.assertEqual(code, 0, err)
+        mail = json.loads(out)["mail"]
+        self.assertEqual(sorted(mail), ["x"], "tc health counted a linked inbox")
+        self.assertEqual(mail["x"]["unread"], 1, "tc health counted a planted link as mail")
+        self.assertEqual(counts, {"x": 1, "z": 0})
 
 
 if __name__ == "__main__":
