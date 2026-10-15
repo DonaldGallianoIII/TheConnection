@@ -45,26 +45,29 @@ the keys below and ignores the rest, and never takes cards from health:
                            STATUS_PREVIEW_CHARS
   nodes[].state            below
   nodes[].role,            computed here, C5 "Roles and levels"; `parent` is
-  role_source, level,      this lane's addition (pause BOARD-3): the node the
-  parent                   level walk hangs it under, or None
+  role_source, level,      the parent the level walk used (D15, pause
+  parent                   BOARD-3), or None: a root has none, and so does
+                           the node that breaks a reports_to cycle
   wires, links             message file names under mail/to-*/ and
                            mail/to-*/read/; ages from each file's mtime (a
                            stat, never an open)
 
-State, first match wins, in C5's order (pause BOARD-1): `listening` (a pid
-holds the name's lock in /proc/locks), `writing` (its newest sent message is
-at most WRITING_WINDOW_S old), `doorbell` (route codex), `remote` (route
-ssh), `down` (seen listening by this Board within DOWN_WINDOW_S, not now),
-`idle`. `down` lives in this object's memory only: after a restart nothing
-is down until it has been seen listening again.
+State, first match wins, in D15's order: `writing` (its newest sent message
+is at most WRITING_WINDOW_S old, listener or not), `down` (no pid now, and
+seen listening by this Board within DOWN_WINDOW_S), `listening` (a pid holds
+the name's lock in /proc/locks), `doorbell` (route codex), `remote` (route
+ssh), `idle`. A message whose mtime is in the future has no age, so it never
+makes its sender writing. `down` lives in this object's memory only: after a
+restart nothing is down until it has been seen listening again.
 
 Roles and levels follow C5 step by step. Partners are the names a node has
 exchanged mail with, either way, itself excluded; a partner need not be a
 node. A parent is always a node: declared from the card's reports_to when
 it names a node, else inferred as the one partner of a node with exactly
-one partner when that partner has HUB_MIN_PARTNERS or more. A reports_to
-that names no node, or the node itself, gives no parent and stops
-inference. Nodes the walk from the roots cannot reach hang on a reports_to
+one partner when that partner has HUB_MIN_PARTNERS or more, unless that
+partner's card declares this node as its own parent (D15: inference never
+inverts a declared edge). A reports_to that names no node, or the node
+itself, gives no parent and stops inference. Nodes the walk from the roots cannot reach hang on a reports_to
 cycle; the cycle member whose name sorts first becomes a root (assumption
 in the BOARD handoff: a node below a cycle is not on it, so it stays below).
 
@@ -191,10 +194,15 @@ DEFAULT_ROUTE = "local"
 ROUTE_CODEX = "codex"
 ROUTE_SSH = "ssh"
 KIND_CLAUDE = "claude"
+# Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+# The account C1 writes when neither --account nor CLAUDE_CONFIG_DIR names
+# one. Two cards on it share no known account, so they get no native link
+# (D15): the link would claim a shared account that no card knows.
+ACCOUNT_UNKNOWN = "unknown"
 
-# C5's states, in the order the first match wins (pause BOARD-1).
-LISTENING, WRITING, DOORBELL, REMOTE, DOWN, IDLE = (
-    "listening", "writing", "doorbell", "remote", "down", "idle")
+# C5's states, in the order the first match wins (D15).
+WRITING, DOWN, LISTENING, DOORBELL, REMOTE, IDLE = (
+    "writing", "down", "listening", "doorbell", "remote", "idle")
 ORCHESTRATOR, WORKER, PEER = "orchestrator", "worker", "peer"
 DECLARED, INFERRED = "declared", "inferred"
 LINK_MAILBOX, LINK_REPORTS_TO, LINK_NATIVE = "mailbox", "reports_to", "native"
@@ -346,7 +354,10 @@ def file_age(path, now):
     """Whole seconds since `path` was last written, or None if it is gone.
 
     A message read between the scan and this stat moved to read/; its age
-    is None for this poll and right on the next.
+    is None for this poll and right on the next. An mtime ahead of `now`
+    (a touched file, or a clock stepped back) is no age at all: None, so a
+    message from the future never reads as just sent. Rounding gives half a
+    second of grace to a file written in the same instant as `now`.
 
     @interacts  stats `path`; never opens it.
     @deps       os.
@@ -354,9 +365,10 @@ def file_age(path, now):
     @alloc      none.
     """
     try:
-        return max(0, round(now - os.stat(path).st_mtime))
+        age = round(now - os.stat(path).st_mtime)
     except OSError:
         return None
+    return age if age >= 0 else None
 
 
 def parents_of(names, cards, partners):
@@ -366,7 +378,9 @@ def parents_of(names, cards, partners):
     node itself. A reports_to that names no node (or itself) gives no
     parent, and nothing is inferred over it. Inferred, when nothing is
     declared: the one partner of a node with exactly one partner, when that
-    partner is a node with HUB_MIN_PARTNERS or more partners.
+    partner is a node with HUB_MIN_PARTNERS or more partners and its card
+    does not report to this node (D15: an inferred edge never runs against
+    a declared one, whatever order the names sort in).
 
     @interacts  none; pure.
     @deps       none.
@@ -383,7 +397,8 @@ def parents_of(names, cards, partners):
         mine = partners.get(name, ())
         if len(mine) == 1:
             (only,) = mine
-            if only in names and len(partners.get(only, ())) >= HUB_MIN_PARTNERS:
+            if (only in names and len(partners.get(only, ())) >= HUB_MIN_PARTNERS
+                    and cards.get(only, {}).get("reports_to") != name):
                 found[name] = (only, INFERRED)
     return found
 
@@ -553,16 +568,19 @@ class Board:
             route = card.get("route") or DEFAULT_ROUTE
             mine = newest_sent.get(name)
             sent_age = file_age(mine.path, now) if mine else None
-            if pid:
-                state = LISTENING
-            elif sent_age is not None and sent_age <= WRITING_WINDOW_S:
+            # D15's order. Down needs `not pid`: every live listener was
+            # just stamped into last_listening_at above, so the map alone
+            # would call each one down.
+            if sent_age is not None and sent_age <= WRITING_WINDOW_S:
                 state = WRITING
+            elif not pid and name in self.last_listening_at:
+                state = DOWN
+            elif pid:
+                state = LISTENING
             elif route == ROUTE_CODEX:
                 state = DOORBELL
             elif route == ROUTE_SSH:
                 state = REMOTE
-            elif name in self.last_listening_at:
-                state = DOWN
             else:
                 state = IDLE
             role, role_source = roles[name]
@@ -574,7 +592,9 @@ class Board:
                 "status": status_preview(self.tc.STATUS, name),
                 "role": role, "role_source": role_source,
                 "reports_to": card.get("reports_to"), "level": levels[name],
-                "parent": parents[name][0] if name in parents else None,
+                # The parent the walk used (D15): a cycle's root sits at
+                # level 0 under no one, though its reports_to stays above.
+                "parent": parents[name][0] if name in parents and levels[name] > 0 else None,
             })
 
         recent = sorted(heapq.nlargest(WIRE_HISTORY, messages, key=lambda msg: msg.seq),
@@ -589,7 +609,7 @@ class Board:
                   if cards[name]["reports_to"] not in (None, name)]
         by_account = {}
         for name in sorted(cards):
-            if cards[name]["kind"] == KIND_CLAUDE and cards[name]["account"] is not None:
+            if cards[name]["kind"] == KIND_CLAUDE and cards[name]["account"] not in (None, ACCOUNT_UNKNOWN):
                 by_account.setdefault(cards[name]["account"], []).append(name)
         for account in sorted(by_account):
             same = by_account[account]

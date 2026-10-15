@@ -1,8 +1,8 @@
 /**
  * Tests for the live board's diff and patch in board/look.js: patchBoard
  * keeps what stays, removes what went and adds what came, through a fake
- * drawing kit, so no DOM library is needed. Also the two new states and
- * what boardView draws for a feed's wires and links.
+ * drawing kit, so no DOM library is needed. Also the two new states, what
+ * boardView draws for a feed's wires and links, and the pill's words.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  STATES, boardView, diffBoard, createBoard, patchBoard, CONFIG,
+  STATES, boardView, diffBoard, createBoard, patchBoard, pillText, CONFIG,
 } from '../board/look.js';
 
 /**
@@ -165,4 +165,15 @@ test('hint lines carry words: reports to, native, and a reports_to that names no
   assert.equal(view.nodes.r.note, 'reports to ghost · not found');
   assert.equal(view.nodes.z.note, 'gone quiet');
   assert.equal(view.edges['mailbox:a>z'].down, true, 'a wire to a down node is not marked down');
+});
+
+// Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+test('the pill counts listeners by pid, so a listener that is writing still counts (D15)', () => {
+  const feed = {
+    nodes: [
+      node('w', { state: 'writing', listener_pid: 11 }), node('l', { listener_pid: 12 }),
+      node('i', { state: 'idle', listener_pid: null }),
+    ],
+  };
+  assert.deepEqual(pillText(feed), { text: 'live · 2 listening', state: 'up', listening: 2 });
 });

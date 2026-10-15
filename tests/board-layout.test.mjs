@@ -33,7 +33,8 @@ const SHAPES = {
   sideBySide: [n('x', 'orchestrator', 'declared', 0, null), n('x1', 'worker', 'declared', 1, 'x'),
     n('x2', 'worker', 'declared', 1, 'x'), n('y', 'orchestrator', 'inferred', 0, null),
     n('y1', 'worker', 'inferred', 1, 'y'), n('y2', 'worker', 'inferred', 1, 'y')],
-  cycle: [n('p', 'orchestrator', 'declared', 0, 'q'), n('q', 'orchestrator', 'declared', 1, 'p')],
+  // A cycle's root carries no parent: the walk used none for it (D15).
+  cycle: [n('p', 'orchestrator', 'declared', 0, null), n('q', 'orchestrator', 'declared', 1, 'p')],
   ghost: [n('r', 'peer', 'inferred', 0, null, { reports_to: 'ghost' })],
   sharedWorker: [n('a', 'orchestrator', 'declared', 0, null), n('a2', 'worker', 'declared', 1, 'a'),
     n('b', 'worker', 'declared', 1, 'a'), n('x', 'orchestrator', 'inferred', 0, null),

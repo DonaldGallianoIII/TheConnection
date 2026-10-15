@@ -1,5 +1,5 @@
 {
-  "_about": "Fake sessions and traffic for demo.html, in the live feed's shape (C5): two trees side by side. a is an orchestrator over b and docs, b is an orchestrator over c and d, and z is a second orchestrator over y1 and y2 that mails a. Every state shows: listening, idle, no listener (d), doorbell (c, codex), remote (y2, ssh), and writing when c or y2 sends. Each script step is one message; demo.html draws it as a wire flowing toward its reader. Names are made up. Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.",
+  "_about": "Fake sessions and traffic for demo.html, in the live feed's shape (C5): two trees side by side. a is an orchestrator over b and docs, b is an orchestrator over c and d, and z is a second orchestrator over y1 and y2 that mails a. Every state shows: listening, idle, no listener (d), doorbell (c, codex), remote (y2, ssh), and writing on whichever box sends, listener or not (D15). Each script step is one message; demo.html draws it as a wire flowing toward its reader. Names are made up. Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.",
   "stepMs": 1800,
   "window": {
     "file": "connection.board",

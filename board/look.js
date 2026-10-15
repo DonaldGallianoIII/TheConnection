@@ -9,15 +9,16 @@
  * @interacts  creates elements under the container the caller passes in; uses
  *             theme.css class names; applyLook writes data-theme on <html>;
  *             never touches innerHTML, storage or globals. layoutLevels,
- *             boardView, diffBoard, roleTitle, hueFor, hintPath and
- *             fitTransform read only their arguments; patchBoard writes only
+ *             boardView, diffBoard, roleTitle, hueFor, hintPath, pillText
+ *             and fitTransform read only their arguments; patchBoard writes only
  *             the board object it is given and calls only its kit
  * @deps       browser DOM and SVG for the drawing functions; the pure layer
  *             needs neither (node --test runs it with no DOM library)
  * @complexity every drawing function is O(1) per call; a board with n nodes
  *             and w wires costs O(n + w) to build. layoutLevels, boardView,
  *             diffBoard and patchBoard are O(n + l + r) over n feed nodes,
- *             l links and r recent wires (C5: n tens, l tens, r <= 50)
+ *             l links and r recent wires (C5: n tens, l tens, r <= 50);
+ *             pillText is O(n)
  * @alloc      one element tree per node, one path + label per wire, each
  *             released by its own remove(); removeBoard releases everything
  *             createBoard made. A board object from createBoard holds one
@@ -476,6 +477,25 @@ function pairKey(p, q) {
 function upperFirst(p, q, pos) {
   const order = [p, q].sort((m, n) => (pos[m.id].y - pos[n.id].y) || (pos[m.id].x - pos[n.id].x) || byName(m.id, n.id));
   return order;
+}
+
+/**
+ * The pill's words and state for a feed: `live · N listening`, or
+ * `N listening · M down` while a node is down. Listeners are counted by
+ * listener_pid (a pid tc read from /proc/locks), never by state: under D15
+ * a listener that just sent reads writing and is still listening.
+ * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+ * @interacts  none; pure
+ * @complexity O(n) over n feed nodes  @alloc one object
+ * @returns {{ text, state, listening }}  state: 'up' | 'warn', for createWindow's setConn
+ */
+export function pillText(feed) {
+  const nodes = (feed && feed.nodes) || [];
+  const listening = nodes.filter((n) => n.listener_pid).length;
+  const down = nodes.filter((n) => n.state === 'down').length;
+  return down
+    ? { text: `${listening} listening · ${down} down`, state: 'warn', listening }
+    : { text: `live · ${listening} listening`, state: 'up', listening };
 }
 
 /** A node's third line: a reports_to that names no node, else its status. @complexity O(1)  @alloc one string */

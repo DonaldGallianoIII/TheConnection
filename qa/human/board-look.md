@@ -27,13 +27,14 @@ Updated for the shapes demo by Claude Opus 5.5 (the BOARD lane agent),
      always run toward the session reading the message.
    - An arrowhead sits at the reader's end and a label like `a → b · #41`
      floats over the wire. `z → a · #45` runs between the two orchestrators.
-   - When `c` or `y2` sends, its box gets a thicker border and its second line
-     reads `✎ writing`. A listening sender stays `● listening`.
+   - The box that sends gets a thicker border and its second line reads
+     `✎ writing` for its step, whether it was listening or not (D15: writing
+     comes first).
 4. Check each state reads without color (turn your screen to grayscale, or use
    the browser's devtools "emulate achromatopsia"):
    - `● listening` (`a`, `b`, `z`, `y1`), `○ idle` (`docs`), `✕ no listener`
      (`d`), `◎ doorbell` (`c`), `⇄ remote · not checked` (`y2`), and
-     `✎ writing` when `c` or `y2` sends, all show as words.
+     `✎ writing` on whichever box sends, all show as words.
    - `d` has a dashed border and its wire to `b` is dotted. `c` has a double
      border; `y2` a dotted one.
    - Thin lines with the words `reports to` run from the top of `b`, `docs`,

@@ -104,10 +104,10 @@ const ro = new ResizeObserver(fit);
 ro.observe(canvas.root);
 
 // One step's feed: the fixed nodes and links, plus the step's message as a
-// wire with age 0. Its sender reads as writing unless it is listening,
-// which wins, as in the live feed (pause BOARD-1).
+// wire with age 0. Its sender reads writing, listener or not, as in the live
+// feed: D15 puts writing first, so a busy session shows its activity.
 const feedFor = (s) => ({
-  nodes: demo.nodes.map((n) => (n.id === s.from && n.state !== 'listening' ? { ...n, state: 'writing' } : n)),
+  nodes: demo.nodes.map((n) => (n.id === s.from ? { ...n, state: 'writing' } : n)),
   links: demo.links,
   wires: [{ from: s.from, to: s.to, seq: s.seq, age_s: 0 }],
 });

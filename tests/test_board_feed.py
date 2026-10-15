@@ -21,11 +21,13 @@ renamed, mail/.seq raised), and the feed reads only their names.
             module; each Board loads tc with TC_ROOT set to the test's root.
             Writes cards, status lines and message files in that root only.
 @deps       python3 stdlib (fcntl, importlib, json, os, pathlib, sys,
-            threading, time, unittest); tests/_root.py; board/serve.py; ../tc.
+            threading, time, unittest, unittest.mock); tests/_root.py;
+            board/serve.py; ../tc.
 @complexity O(1) per test: at most 52 message files, 9 names, two
             listeners, and a few feed() calls, each O(n + m + e) in serve.py
             plus tc's health snapshot (tens of ms, most of it nvidia-smi
-            when present).
+            when present). The D15 state test swaps the snapshot for a
+            stand-in, so it starts no listener and no child.
 @alloc      one TcRoot per test, removed when its context exits; the feeds
             are plain dicts dropped at the end of each test.
 """
@@ -39,6 +41,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 # Run as `python3 -m unittest tests.test_board_feed` from the repo root,
@@ -65,6 +68,20 @@ PAST_WRITING_S = 20
 CYCLE_CEILING_SECONDS = 2
 # Mode for a message body nobody may open.
 NO_ACCESS = 0o000
+# Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+# A fixed fake "now" for tests that age files by hand with os.utime, so no
+# test logic reads the wall clock. Any epoch works; this one is in 2030.
+FAKE_NOW = 1_900_000_000.0
+# A send this many seconds before "now" is inside WRITING_WINDOW_S; one
+# OLD_SEND_S back is well past it.
+RECENT_SEND_S = 3
+OLD_SEND_S = 60
+# An mtime this far ahead of "now": a touched file or a clock stepped back.
+FUTURE_S = 3600
+# The pid a stand-in snapshot names. Nothing checks it; no process has it.
+STAND_IN_PID = 4242
+# C1's word for an account nobody named, written here, not read from serve.py.
+ACCOUNT_UNKNOWN = "unknown"
 
 
 def load_serve():
@@ -132,7 +149,7 @@ def write_card(root, name, kind="claude", account="work", route="local",
 
 
 def put_message(root, seq, sender, to):
-    """Write one read message the way tc lays one out, without tc's router.
+    """Write one read message the way tc lays one out, without tc's router; return its path.
 
     The file is mail/to-<to>/read/NNNNNN-from-<sender>.md, written to a
     .tmp sibling and renamed, and mail/.seq is raised to `seq` under its
@@ -143,7 +160,7 @@ def put_message(root, seq, sender, to):
                 mail/to-<to>/read/ if needed.
     @deps       fcntl, pathlib.
     @complexity O(1).
-    @alloc      none retained.
+    @alloc      the returned path.
     """
     mail = pathlib.Path(root) / "mail"
     folder = mail / f"to-{to}" / "read"
@@ -159,6 +176,7 @@ def put_message(root, seq, sender, to):
         counter.seek(0)
         counter.truncate()
         counter.write(str(top))
+    return path
 
 
 def by_id(feed):
@@ -170,6 +188,39 @@ def by_id(feed):
     @alloc      one dict, returned.
     """
     return {node["id"]: node for node in feed["nodes"]}
+
+
+def age_file(path, at):
+    """Set `path`'s mtime (and atime) to `at`, seconds since the epoch.
+
+    @interacts  writes one file's times.
+    @deps       os.
+    @complexity O(1).
+    @alloc      none.
+    """
+    os.utime(path, (at, at))
+
+
+def check_parents_match_walk(test, feed):
+    """Every node's parent is the one the level walk used (D15, phases.md B1).
+
+    A node at level 0 has no parent; any other node's parent is a node one
+    level up. A cycle's root is at level 0, so it carries no parent.
+
+    @interacts  none.
+    @deps       by_id.
+    @complexity O(n) over n nodes.
+    @alloc      one dict, freed on return.
+    """
+    nodes = by_id(feed)
+    for name, node in nodes.items():
+        parent = node["parent"]
+        if node["level"] == 0:
+            test.assertIsNone(parent, f"{name} is a root at level 0 but carries parent {parent}")
+        else:
+            test.assertIn(parent, nodes, f"{name} at level {node['level']} has no parent node")
+            test.assertEqual(node["level"], nodes[parent]["level"] + 1,
+                             f"{name} is not one level under its parent {parent}")
 
 
 def every_path(root):
@@ -195,13 +246,14 @@ class FeedTest(unittest.TestCase):
     def test_states_pids_wires_and_down_with_unreadable_bodies(self):
         """Two listeners, a codex card, an ssh card and three messages; then one listener dies.
 
-        First feed: four nodes in states listening, listening, doorbell,
-        remote; the pids are the harness's; three wires with the right
-        from, to and seq. Both listeners sent mail inside the writing
-        window, so this also pins listening over writing (pause BOARD-1).
-        The feed writes nothing. Second feed on the same Board, 20 s
-        later on its clock, after b's listener is killed: b is down. A new
-        Board has seen nobody listening, so b is idle there.
+        A feed at the real time: both listeners sent inside the writing
+        window, so both read writing and keep their pids (D15: writing
+        comes first). First feed, its clock past the window: four nodes in
+        states listening, listening, doorbell, remote; the pids are the
+        harness's; three wires with the right from, to and seq. The feeds
+        write nothing. Second feed on the same Board, 20 s later on its
+        clock, after b's listener is killed: b is down. A new Board has
+        seen nobody listening, so b is idle there.
 
         The three messages run between a and b only. Once CARDS' router is
         in tc, a send to a name with a codex card rings `codex` and one to
@@ -211,7 +263,7 @@ class FeedTest(unittest.TestCase):
         Must reject a feed that opens message bodies: every body is mode
         000 before the first feed.
 
-        @interacts  three `tc send`, two `tc read`; two listeners; three
+        @interacts  three `tc send`, two `tc read`; two listeners; four
                     feed() calls.
         @deps       _root.TcRoot.tc, _root.TcRoot.listener, serve.Board.
         @complexity O(1).
@@ -243,6 +295,9 @@ class FeedTest(unittest.TestCase):
                 with root.listener("b", LISTENER_TIMEOUT_SECONDS) as pid_b:
                     clock.now = time.time()
                     before = every_path(root.path)
+                    inside = board.feed()
+                    # Past the window, so the senders read listening.
+                    clock.now += PAST_WRITING_S
                     first = board.feed()
                     after = every_path(root.path)
                 clock.now += PAST_WRITING_S
@@ -250,6 +305,9 @@ class FeedTest(unittest.TestCase):
             fresh = serve.Board(root=root.path, clock=clock).feed()
 
         self.assertEqual(before, after, "feed() changed the root's file list")
+        busy = by_id(inside)
+        self.assertEqual({name: (busy[name]["state"], busy[name]["listener_pid"]) for name in ("a", "b")},
+                         {"a": ("writing", pid_a), "b": ("writing", pid_b)})
         nodes = by_id(first)
         self.assertEqual(sorted(nodes), ["a", "b", "cx", "far"], json.dumps(first, indent=1))
         self.assertEqual({name: nodes[name]["state"] for name in nodes},
@@ -258,9 +316,9 @@ class FeedTest(unittest.TestCase):
         self.assertEqual([(w["from"], w["to"], w["seq"]) for w in first["wires"]],
                          [("a", "b", 1), ("b", "a", 2), ("a", "b", 3)])
         for wire in first["wires"]:
-            self.assertLessEqual(wire["age_s"], WRITING_WINDOW_S,
-                                 f"wire {wire} is past the writing window, so listening "
-                                 f"never had to beat writing")
+            self.assertGreater(wire["age_s"], WRITING_WINDOW_S,
+                               f"wire {wire} is inside the writing window, so its sender "
+                               f"reads writing, not listening")
         self.assertEqual(set(first["machine"]), {"load1", "cores", "mem_avail_pct"})
 
         later = by_id(second)
@@ -308,6 +366,110 @@ class FeedTest(unittest.TestCase):
         self.assertEqual((now["w"]["state"], now["peer"]["state"]), ("writing", "idle"))
         self.assertEqual(later["w"]["state"], "idle")
 
+    # Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+    def test_state_order_follows_d15(self):
+        """D15's order: writing, down, listening, doorbell, remote, idle; the first match wins.
+
+        One Board, a stand-in health snapshot that names the listeners, and
+        message files aged by hand against a fake clock. Feed 1 sees w1,
+        w2, d1, d2, l1 and l2 listening. Feed 2, 20 s later: w1 (still
+        listening) and w2 (stopped) each sent 3 s ago and read writing; d1
+        (codex card) and d2 (ssh card) stopped and read down, not doorbell
+        or remote; l1 (listening, sent 60 s ago) and l2 (codex, listening)
+        read listening; cx doorbell, far remote, i1 idle. Feed 3, past the
+        window: w1 reads listening again and w2 down (phases.md B1).
+
+        Must reject the old chain (w1 would read listening, d1 doorbell)
+        and a plain reorder that drops `not pid` from down: every live
+        listener is in last_listening_at, so l1 would read down.
+
+        @interacts  five cards and three message files in a fresh TcRoot;
+                    three feed() calls with tc.health_snapshot swapped for a
+                    stand-in.
+        @deps       _root.TcRoot, write_card, put_message, age_file,
+                    serve.Board, unittest.mock.
+        @complexity O(1): nine names, three messages.
+        @alloc      one TcRoot, removed on exit.
+        """
+        names = ("w1", "w2", "d1", "d2", "l1", "l2", "cx", "far", "i1")
+        listening = {}
+
+        def stand_in():
+            """A health snapshot in tc's shape naming `listening` and an inbox for each name.
+
+            @interacts  reads `listening`.
+            @deps       none.
+            @complexity O(n) over the nine names.
+            @alloc      one small dict, returned.
+            """
+            return {"time": "2030-03-17T12:00:00-05:00",
+                    "machine": {"load1": 0.0, "cores": 1, "mem_avail_pct": 50.0, "gpus": None},
+                    "sessions": {"claude": 0, "codex": 0}, "listeners": dict(listening),
+                    "watchers": {},
+                    "mail": {name: {"unread": 0, "newest_mail_age_s": None, "status_age_s": None}
+                             for name in names}}
+
+        def states(feed):
+            """{name: (state, listener_pid)} for one feed.
+
+            @interacts  none.
+            @deps       by_id.
+            @complexity O(n) over n nodes.
+            @alloc      one dict, returned.
+            """
+            return {name: (node["state"], node["listener_pid"]) for name, node in by_id(feed).items()}
+
+        with _root.TcRoot() as root:
+            for name, route in (("d1", "codex"), ("d2", "ssh"), ("l2", "codex"),
+                                ("cx", "codex"), ("far", "ssh")):
+                write_card(root.path, name, kind="codex" if route == "codex" else "claude",
+                           route=route, thread_id="t1" if route == "codex" else None)
+            clock = FakeClock(FAKE_NOW)
+            board = serve.Board(root=root.path, clock=clock)
+            with mock.patch.object(board.tc, "health_snapshot", stand_in):
+                listening.update(dict.fromkeys(("w1", "w2", "d1", "d2", "l1", "l2"), STAND_IN_PID))
+                board.feed()
+                clock.now += PAST_WRITING_S
+                for seq, (sender, ago) in enumerate((("w1", RECENT_SEND_S), ("w2", RECENT_SEND_S),
+                                                     ("l1", OLD_SEND_S)), start=1):
+                    age_file(put_message(root.path, seq, sender, "i1"), clock.now - ago)
+                listening.clear()
+                listening.update(dict.fromkeys(("w1", "l1", "l2"), STAND_IN_PID))
+                second = states(board.feed())
+                clock.now += PAST_WRITING_S
+                third = states(board.feed())
+
+        self.assertEqual(second, {
+            "w1": ("writing", STAND_IN_PID), "w2": ("writing", None),
+            "d1": ("down", None), "d2": ("down", None),
+            "l1": ("listening", STAND_IN_PID), "l2": ("listening", STAND_IN_PID),
+            "cx": ("doorbell", None), "far": ("remote", None), "i1": ("idle", None),
+        })
+        self.assertEqual((third["w1"], third["w2"], third["l1"]),
+                         (("listening", STAND_IN_PID), ("down", None), ("listening", STAND_IN_PID)))
+
+    def test_a_message_from_the_future_is_not_writing(self):
+        """A message whose mtime is an hour ahead of now gives its sender no age: not writing.
+
+        Its wire and its mailbox link carry no age either, so the page does
+        not animate it. Must reject `max(0, ...)` in file_age, which turns
+        a future mtime into "just now".
+
+        @interacts  one card and one message file in a fresh TcRoot; one
+                    feed().
+        @deps       _root.TcRoot, write_card, put_message, age_file,
+                    serve.Board.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            write_card(root.path, "f")
+            age_file(put_message(root.path, 1, "f", "g"), FAKE_NOW + FUTURE_S)
+            feed = serve.Board(root=root.path, clock=FakeClock(FAKE_NOW)).feed()
+        self.assertEqual(by_id(feed)["f"]["state"], "idle", json.dumps(feed["nodes"]))
+        self.assertEqual([(w["from"], w["age_s"]) for w in feed["wires"]], [("f", None)])
+        self.assertEqual([link["last_age_s"] for link in feed["links"] if link["kind"] == "mailbox"], [None])
+
 
 class ShapesTest(unittest.TestCase):
     """D7's shapes through feed(): roles, role_source, levels, parents, links.
@@ -319,7 +481,10 @@ class ShapesTest(unittest.TestCase):
     """
 
     def shape(self, cards=(), talks=()):
-        """Feed for a root with these cards and these exchanges; also checks ids are unique.
+        """Feed for a root with these cards and these exchanges; checks ids and parents.
+
+        Every node is drawn once, and each parent is the one the walk used
+        (check_parents_match_walk), in every shape.
 
         `cards` is (name, reports_to) pairs, each a claude card on one
         account. `talks` is (x, y) pairs: one message x to y and one y to
@@ -327,7 +492,8 @@ class ShapesTest(unittest.TestCase):
 
         @interacts  writes cards and message files in a fresh TcRoot; one
                     feed().
-        @deps       _root.TcRoot, write_card, put_message, serve.Board.
+        @deps       _root.TcRoot, write_card, put_message, serve.Board,
+                    check_parents_match_walk.
         @complexity O(c + t) over c cards and t exchanges.
         @alloc      one TcRoot, removed before return; the feed, returned.
         """
@@ -342,6 +508,7 @@ class ShapesTest(unittest.TestCase):
             feed = serve.Board(root=root.path).feed()
         ids = [node["id"] for node in feed["nodes"]]
         self.assertEqual(len(ids), len(set(ids)), f"a node is drawn twice: {ids}")
+        check_parents_match_walk(self, feed)
         return feed
 
     def assertNodes(self, feed, expected):
@@ -457,12 +624,15 @@ class ShapesTest(unittest.TestCase):
         self.assertFalse(worker.is_alive(), f"feed() did not return within {CYCLE_CEILING_SECONDS} s")
         nodes = by_id(result["feed"])
         self.assertEqual((nodes["p"]["level"], nodes["q"]["level"]), (0, 1))
+        check_parents_match_walk(self, result["feed"])
 
     def test_a_node_below_a_cycle_stays_below_it(self):
         """p and q report to each other, and a reports to q: a hangs under q at level 2.
 
         a sorts before p and q but is not on the cycle, so it never becomes
-        the root that breaks it (assumption in the BOARD handoff).
+        the root that breaks it (assumption in the BOARD handoff). p, the
+        cycle's root, carries no parent, since the walk used none for it
+        (D15); its reports_to still names q.
 
         @interacts  one shape root.
         @deps       shape, assertNodes.
@@ -472,7 +642,8 @@ class ShapesTest(unittest.TestCase):
         feed = self.shape(cards=[("p", "q"), ("q", "p"), ("a", "q")])
         nodes = by_id(feed)
         self.assertEqual({name: (nodes[name]["level"], nodes[name]["parent"]) for name in nodes},
-                         {"p": (0, "q"), "q": (1, "p"), "a": (2, "q")})
+                         {"p": (0, None), "q": (1, "p"), "a": (2, "q")})
+        self.assertEqual(nodes["p"]["reports_to"], "q")
 
     def test_a_reports_to_naming_nobody(self):
         """r reports to ghost, which is no node: r is a root and keeps the name.
@@ -488,6 +659,31 @@ class ShapesTest(unittest.TestCase):
         self.assertEqual((nodes["r"]["level"], nodes["r"]["parent"], nodes["r"]["reports_to"]),
                          (0, None, "ghost"))
         self.assertIn({"from": "r", "to": "ghost", "kind": "reports_to"}, feed["links"])
+
+    # Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+    def test_inference_never_inverts_a_declared_edge(self):
+        """b reports to the top node by card, which mails only b; b also mails x (D15).
+
+        The top node is level 0 and b level 1 under it, with the names in
+        either sort order: the top node is z, then a. Must reject rule 2
+        with no D15 guard: with z, z is inferred under its own worker b
+        (levels b 0, x 1, z 1). With a, the unguarded rule makes a cycle
+        whose root is a, and a cycle's root carries no parent, so that
+        order draws the same either way; z is the order that goes red.
+
+        @interacts  two shape roots.
+        @deps       shape, assertNodes.
+        @complexity O(1).
+        @alloc      two feeds.
+        """
+        for top in ("z", "a"):
+            with self.subTest(top=top):
+                feed = self.shape(cards=[("b", top)], talks=[(top, "b"), ("b", "x")])
+                self.assertNodes(feed, {
+                    top: ("orchestrator", "declared", 0, None),
+                    "b": ("orchestrator", "inferred", 1, top),
+                    "x": ("worker", "inferred", 2, "b"),
+                })
 
     def test_two_orchestrators_share_a_worker(self):
         """b reports to a by card, and x also mails b: b once, at level 1 under a.
@@ -550,6 +746,28 @@ class ShapesTest(unittest.TestCase):
             links = serve.Board(root=root.path).feed()["links"]
         self.assertEqual(links, [{"from": "b", "to": "a", "kind": "reports_to"},
                                  {"from": "a", "to": "b", "kind": "native"}])
+
+    # Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+    def test_no_native_link_on_account_unknown(self):
+        """Two claude cards on account unknown get no native link; two on home get one (D15).
+
+        The home pair is the control, so the test cannot pass by never
+        making native links. Must reject a filter that drops only a missing
+        account.
+
+        @interacts  writes four cards in a fresh TcRoot; one feed().
+        @deps       _root.TcRoot, write_card, serve.Board.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            for name in ("p", "q"):
+                write_card(root.path, name, account=ACCOUNT_UNKNOWN)
+            for name in ("m", "n"):
+                write_card(root.path, name, account="home")
+            links = serve.Board(root=root.path).feed()["links"]
+        self.assertEqual([link for link in links if link["kind"] == "native"],
+                         [{"from": "m", "to": "n", "kind": "native"}])
 
 
 if __name__ == "__main__":

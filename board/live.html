@@ -39,7 +39,7 @@
  */
 import {
   createWindow, createCanvas, setFooter, createLookSwitch, pickLook, applyLook,
-  createBoard, createKit, patchBoard, fitTransform,
+  createBoard, createKit, patchBoard, fitTransform, pillText,
 } from './look.js';
 
 // C6 and O7: a wire moves within 3 s of a send, and one feed costs the
@@ -86,17 +86,16 @@ ro.observe(canvas.root);
 const draw = (feed) => {
   patchBoard(board, feed);
   fit();
-  const states = feed.nodes.map((n) => n.state);
-  const listening = states.filter((s) => s === 'listening').length;
-  const down = states.filter((s) => s === 'down').length;
-  win.setConn(down ? `${listening} listening · ${down} down` : `live · ${listening} listening`, down ? 'warn' : 'up');
+  // Listeners by pid, not by state (D15: a listener that sent reads writing).
+  const pill = pillText(feed);
+  win.setConn(pill.text, pill.state);
   canvas.hud.textContent = feed.nodes.length
     ? 'live · dashes run toward the reader · arrow marks the reader'
     : 'no sessions yet · send a message or start a listener';
   const m = feed.machine;
   setFooter(document, win.foot, [
     { text: `load ${m.load1} / ${m.cores}` }, { text: `mem free ${m.mem_avail_pct}%` }, { spacer: true },
-    { text: `${feed.nodes.length} sessions · ${listening} listening` }, { text: `at ${feed.at}` },
+    { text: `${feed.nodes.length} sessions · ${pill.listening} listening` }, { text: `at ${feed.at}` },
   ]);
 };
 
