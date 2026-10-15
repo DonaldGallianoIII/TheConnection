@@ -65,7 +65,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             up to PUBLISH_MAX_TRIES. tc read never replaces a file in
             read/ either: an inbox file whose name read/ already holds
             moves to read/by-hand-<k>-<name>, said beside it (SHARED fix
-            round 3). One command waits at most LOCK_WAIT_SECONDS in all
+            round 3), with <name> cut to fit the filesystem's name limit,
+            so the inbox always empties (round 4). One command waits at most LOCK_WAIT_SECONDS in all
             for the flocks on mail/.seq and its inbox lock (one deadline,
             a one-shot SIGALRM timer), and then refuses, exit 10 (busy,
             D23); each ring marker write waits as long for the marker's
@@ -82,7 +83,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             send may wait on the marker twice).
             read/peek/wait-poll O(u), u unread messages in one inbox,
             single digits in practice; read adds one lstat per message,
-            and one per by-hand name already taken. log O(t), t total messages ever,
+            and one per by-hand name already taken (plus a name-limit
+            lookup and two owner lstats per by-hand move). log O(t), t total messages ever,
             low hundreds per job. health O(p + k + n + m + c): p processes
             on the machine (hundreds), k lines in /proc/locks (tens), n
             mailbox names and c cards (a few dozen each), m message files in
@@ -344,10 +346,14 @@ EXIT_BUSY = 10
 # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1.
 # The name tc read gives an inbox file whose own name read/ already holds,
 # {k} the first count from 1 that read/ does not hold. tc never reuses a
-# number, so a second file of that name was written by hand, and read/
-# keeps both. The name starts with a letter, so it never matches a
+# number, so one of the two files of that name was not written by tc, and
+# read/ keeps both. The name starts with a letter, so it never matches a
 # message's NNNNNN-from-<sender>.md: tc never makes it, and no scan of
-# message names (the board's) reads a number or a sender from it.
+# message names (the board's) reads a number or a sender from it. SHARED
+# fix round 4 (Claude Opus 5.5, unreviewed): when the whole name would pass
+# the filesystem's limit, {name} is the inbox file's name with its stem cut
+# from the end and its .md kept (by_hand_name), so the move never fails on
+# length and the inbox always empties.
 BY_HAND_NAME = "by-hand-{k}-{name}"
 # How many message numbers one send tries before it gives up. A send links
 # its .tmp to the message's name, which never replaces a file, so a name
@@ -1756,29 +1762,79 @@ def refuse_lines(lines):
         refuse("\n".join(lines), EXIT_REFUSED)
 
 
+# SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's HIGH-1, a by-hand name always fits.
+def by_hand_name(k, name, limit):
+    """BY_HAND_NAME for count `k` and the inbox file's `name`, at most `limit` bytes as the filesystem stores it (os.fsencode).
+
+    A name that fits is kept whole. Else its stem is cut from the end,
+    one character at a time (never half a character), and its suffix
+    (.md) is kept, so a planted name of any length up to the limit still
+    gets a by-hand name the rename can make.
+
+    @interacts  none; string work only.
+    @deps       os; BY_HAND_NAME.
+    @complexity O(c) over c characters of `name` (at most `limit`, 255 on
+                ext4).
+    @alloc      the cut stem and the name, returned.
+    """
+    stem, suffix = os.path.splitext(name)
+    room = limit - len(os.fsencode(BY_HAND_NAME.format(k=k, name=suffix)))
+    kept = 0
+    for c in stem:
+        size = len(os.fsencode(c))
+        if size > room:
+            break
+        room -= size
+        kept += 1
+    return BY_HAND_NAME.format(k=k, name=stem[:kept] + suffix)
+
+
 # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, tc read never replaces a file in read/.
 def by_hand_target(path):
     """Where tc read moves the inbox file at `path` when read/ already holds its name: read/BY_HAND_NAME, k the first count from 1 that nothing holds.
 
     For cmd_read, under the inbox lock it holds alone. Each name is
-    checked with lstat (os.path.lexists), never followed. lexists says
-    False for a name it cannot look at, so the search always ends; a
-    rename into a read/ tc cannot reach then fails and the file is named,
-    left unread.
+    checked with lstat, never followed. SHARED fix round 4 (Claude Opus
+    5.5, unreviewed): the audit's HIGH-1. Each name is cut to fit read/'s
+    name limit (os.pathconf PC_NAME_MAX, by_hand_name), and only
+    FileNotFoundError makes a name free. Any other OSError (the name limit
+    or a by-hand name tc cannot look at) is raised, never taken as free,
+    so the search always ends and cmd_read names the file, left unread.
 
-    @interacts  lstats read/by-hand-<k>-<name> for k = 1, 2, ... until one
-                is free. Writes nothing.
-    @deps       os, pathlib; BY_HAND_NAME.
-    @complexity O(t) over t names by-hand-<k>-<name> already in read/
+    @interacts  reads read/'s name limit (pathconf); lstats
+                read/by-hand-<k>-<name> for k = 1, 2, ... until one is
+                free. Writes nothing. Raises OSError as above.
+    @deps       by_hand_name; os, pathlib.
+    @complexity O(t * c) over t names by-hand-<k>-<name> already in read/
                 (none in an honest mailbox; each one a file someone made by
-                hand).
+                hand) and c characters of the name (by_hand_name).
     @alloc      one path per k tried; the free one, returned.
     """
     read = path.parent / "read"
+    limit = os.pathconf(read, "PC_NAME_MAX")
     k = 1
-    while os.path.lexists(read / BY_HAND_NAME.format(k=k, name=path.name)):
+    while True:
+        target = read / by_hand_name(k, path.name, limit)
+        try:
+            os.lstat(target)
+        except FileNotFoundError:
+            return target
         k += 1
-    return read / BY_HAND_NAME.format(k=k, name=path.name)
+
+
+# SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, owners as plain facts.
+def owner_words(path):
+    """` (owned by <login>)` for the entry at `path`, lstat()ed, never followed; an empty string when lstat cannot reach it.
+
+    @interacts  lstats `path`; reads the user database.
+    @deps       user_name, printable; os.
+    @complexity O(1).
+    @alloc      one short string, returned.
+    """
+    try:
+        return f" (owned by {printable(user_name(os.lstat(path).st_uid))})"
+    except OSError:
+        return ""
 
 
 def cmd_read(args):
@@ -1801,14 +1857,11 @@ def cmd_read(args):
 
     SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1
     (D20). A rename replaces whatever holds its target, so before each move
-    tc lstats read/<name>. When that name is taken (a member put a file
-    named like a read message in the inbox, which the group may write
-    under C4), the file moves to the first free read/by-hand-<k>-<name>
-    instead (BY_HAND_NAME, by_hand_target), and the read prints, just
-    before it, that a second file of that name arrived after the first was
-    read, and that tc never reuses a number, so someone wrote it by hand.
-    Nothing in read/ is replaced, and the inbox still empties, so tc wait
-    never wakes for that file again. The note is words, not a refusal: the
+    tc lstats read/<name>. When that name is taken (a member made a file
+    under a message's name in the inbox or in read/, which the group may
+    write under C4), the inbox file moves to the first free
+    read/by-hand-<k>-<name> instead (BY_HAND_NAME, by_hand_target).
+    Nothing in read/ is replaced. The note is words, not a refusal: the
     file is shown and moved, and the read exits 0 for it. The lstat and
     the rename are two steps, and that is safe here: only tc read moves
     mail into read/, and only under this lock, so a name found free cannot
@@ -1817,6 +1870,18 @@ def cmd_read(args):
     or read/'s owner (the reader) may replace or remove a file there; so a
     name found free and taken before the rename can only be that member's
     own new file, and the rename replaces nothing but the planter's own.
+
+    SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
+    and MEDIUM-1 (D20). The by-hand name is cut to fit read/'s name limit
+    (by_hand_name), so a planted name of any length moves, the inbox
+    empties, and tc wait wakes for it at most once. tc cannot tell which
+    of the two files it wrote, so the note, printed just before the moved
+    file, names neither as the forgery: two files had the name, tc never
+    reuses a number, so one of them was not written by tc, and both are
+    kept, at read/<name> (unchanged) and at the by-hand name (the one from
+    the inbox, shown below). Under a shared mailbox it adds each file's
+    owner as a plain fact (owner_words), with no verdict. A by-hand search
+    that fails (by_hand_target raises) files the message as not moved.
 
     @interacts  checks the name first (C0, exit 6, nothing written); a name
                 with no inbox gets `no unread mail` and nothing is created
@@ -1830,17 +1895,21 @@ def cmd_read(args):
                 (exit 1, inbox_messages, SHARED fix round 3), in a private mailbox makes
                 mail/to-<name>/read/ if missing, lstats each *.md entry,
                 lstats read/<name> for each regular file (and, when it is
-                taken, read/by-hand-<k>-<name> until one is free) and
+                taken, reads read/'s name limit and lstats
+                read/by-hand-<k>-<name> until one is free) and
                 renames the file there; then, with the lock released,
-                prints the by-hand note before each file that has one,
-                reads each moved file (read_regular_file) and prints to
-                stdout, and names each one it will not show or could not
-                move on stderr.
+                prints the by-hand note before each file that has one
+                (under a shared mailbox lstatting both files and reading
+                the user database for their owners), reads each moved
+                file (read_regular_file) and prints to stdout, and names
+                each one it will not show or could not move on stderr.
     @deps       require_names, mailbox_share, inbox_lock, inbox_messages,
-                by_hand_target, show, refuse_lines, printable; os.
-    @complexity O(u + t) over u *.md entries in the inbox (single digits)
-                and t names by-hand-<k>-<name> already in read/ (none in an
-                honest mailbox).
+                by_hand_target, owner_words, show, refuse_lines,
+                printable; os.
+    @complexity O(u + t * c) over u *.md entries in the inbox (single
+                digits), t names by-hand-<k>-<name> already in read/ (none
+                in an honest mailbox) and c characters of a by-hand name
+                (at most 255).
     @alloc      the lists of paths and each file's text while printed; one
                 open lock file while the lock is held.
     """
@@ -1858,23 +1927,24 @@ def cmd_read(args):
         messages, skipped = inbox_messages(args.name, shared)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19
         moved, stuck = [], []
         for p in messages:
-            target, first = p.parent / "read" / p.name, None
-            if os.path.lexists(target):  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): MEDIUM-1, never over read/
-                target, first = by_hand_target(p), p.name
-            try:
+            target, twin = p.parent / "read" / p.name, None
+            try:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): HIGH-1, a failed by-hand search is stuck, never a traceback
+                if os.path.lexists(target):  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): MEDIUM-1, never over read/
+                    twin, target = target, by_hand_target(p)
                 p.rename(target)
             except OSError as err:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, not this user's to move
                 stuck.append((p, err.strerror))
                 continue
-            moved.append((target, first))
+            moved.append((target, twin))
     if not moved and not stuck:  # mail it could not move is still unread
         print(f"no unread mail for {args.name}")
     unshown = []
-    for path, first in moved:
-        if first is not None:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): MEDIUM-1, said beside it
-            print(f"tc read: a second {printable(first)} arrived after the first was read. tc never reuses "
-                  f"a number, so someone wrote this one by hand. The first stays in read/, unchanged; this "
-                  f"one is kept as {printable(path)}:")
+    for path, twin in moved:
+        if twin is not None:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): MEDIUM-1, neither file named the forgery
+            print(f"tc read: two files had the name {printable(twin.name)}, one in read/ and one in the inbox. "
+                  f"tc never reuses a number, so one of them was not written by tc. Both are kept: "
+                  f"{printable(twin)}{owner_words(twin) if shared else ''}, unchanged, and "
+                  f"{printable(path)}{owner_words(path) if shared else ''}, from the inbox, shown below:")
         unshown += show([path])
     refuse_lines([f"tc read: {printable(p)} not shown and left in place ({why})" for p, why in skipped]
                  + [f"tc read: {printable(p)} not moved to read/ ({why}); left unread" for p, why in stuck]

@@ -33,7 +33,11 @@ init refuses a ROOT the group may write, sticky or not, and any folder
 from ROOT up to /, as given and by its real path, that another user
 owns or the group may write without the sticky bit; a send on a
 filesystem without hard links says so; and an inbox a command cannot
-look into stops it with words, never a traceback.
+look into stops it with words, never a traceback. And round 4 (SHARED
+fix round 4, Claude Opus 5.5, unreviewed): tc read names neither file
+as the forgery when two share a name, whichever was planted, and a
+planted name up to the filesystem's name limit still moves, so tc wait
+wakes for it at most once.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -88,7 +92,10 @@ the owner's human QA (D4, qa/human/route-shared.md).
             and an inbox, and put each back; make links by hand; read the
             user database; and load tc in process to run cmd_init with
             os.lstat wrapped (or root_walk_problem replaced) and
-            deliver_local with os.link replaced.
+            deliver_local with os.link replaced. The round 4 tests write
+            files under long names into an inbox and its read/, read
+            read/'s name limit (os.pathconf) and run tc wait in the
+            foreground under ONE_POLL_SECONDS.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
             importlib, io, json, os, pathlib, re, stat, subprocess, sys,
             time, unittest, unittest.mock); tests/_root.py.
@@ -292,11 +299,26 @@ GROUP_UNKNOWN_WORDS = "mailbox shared, group unknown: "
 # from tc, for the same reason as SHARED_FOLDER_MODE.
 # Row 10 of the exit table, busy: a lock held past LOCK_WAIT_SECONDS.
 EXIT_BUSY = 10
-# What tc read says before a file whose name read/ already holds.
-SECOND_FILE_WORDS = "tc read: a second {name} arrived after the first was read."
-BY_HAND_WORDS = "tc never reuses a number, so someone wrote this one by hand."
+# SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1
+# (audits/2026-10-15-0102-quick). What tc read says before a file whose
+# name read/ already holds: both files, neither called the forgery.
+# {kept_owner} and {moved_owner} are OWNED_BY_WORDS under a shared
+# mailbox, else empty.
+TWIN_WORDS = ("tc read: two files had the name {name}, one in read/ and one in the inbox. tc never reuses a "
+              "number, so one of them was not written by tc. Both are kept: {kept}{kept_owner}, unchanged, and "
+              "{moved}{moved_owner}, from the inbox, shown below:")
+OWNED_BY_WORDS = " (owned by {login})"
 # Where tc read keeps that file: the first by-hand name read/ does not hold.
 BY_HAND_NAME = "by-hand-{k}-{name}"
+# SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's HIGH-1.
+# Before round 4 a planted name of 246 to 255 bytes could not take the
+# by-hand prefix; 250 sits inside that range. The other case is read/'s
+# own limit (os.pathconf PC_NAME_MAX), read at run time.
+LONG_NAME_BYTES = 250
+# A message name's suffix, which a cut by-hand name keeps whole.
+MESSAGE_SUFFIX = ".md"
+# The text of a file planted straight into read/ under a message's name.
+IN_READ_TEXT = "planted by hand in read/ under the same name\n"
 # The texts of the file a member plants in an inbox under a read
 # message's name, and of one planted straight into read/ at the first
 # by-hand name.
@@ -2055,12 +2077,15 @@ class NoLostMailNoHangTest(UmaskTestCase):
     could. SHARED fix round 3 (Claude Opus 5.5, unreviewed): that member
     also plants a file under a read message's name, and holds mail/.seq
     on and off from a child process (audits/2026-10-14-2358-quick,
-    MEDIUM-1 and LOW-2); a held lock exits 10 (D23).
+    MEDIUM-1 and LOW-2); a held lock exits 10 (D23). SHARED fix round 4
+    (Claude Opus 5.5, unreviewed): the member plants in read/ as well as
+    in the inbox, and under a name up to the filesystem's limit
+    (audits/2026-10-15-0102-quick, MEDIUM-1 and HIGH-1).
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, contents,
-                load_tc; contextlib, errno, fcntl, subprocess, sys, time,
-                unittest.mock; SEQ_HOLDER.
+                load_tc; contextlib, errno, fcntl, os, pwd, subprocess,
+                sys, time, unittest.mock; SEQ_HOLDER.
     @complexity O(1) per test.
     @alloc      one TcRoot per case.
     """
@@ -2240,13 +2265,18 @@ class NoLostMailNoHangTest(UmaskTestCase):
         D20, a member makes the owner's read destroy a read message), a
         by-hand search that takes a name already held, a read that leaves
         the planted file unread (tc wait would wake on it for good), and a
-        new name the board would read a sender from.
+        new name the board would read a sender from. SHARED fix round 4
+        (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1. The words are
+        TWIN_WORDS, the same as when the plant is in read/ (the next test):
+        both paths, each owner when shared, neither file called the
+        forgery.
 
         @interacts  per mode: init when shared, a join, three sends, two
-                    reads; two files written by hand.
-        @deps       _root.TcRoot.tc, primary_group; BY_HAND_NAME,
-                    SECOND_FILE_WORDS, BY_HAND_WORDS, PLANTED_TEXT,
-                    TAKEN_TEXT, BOARD_MESSAGE_NAME.
+                    reads; two files written by hand; reads the user
+                    database.
+        @deps       _root.TcRoot.tc, primary_group; pwd; BY_HAND_NAME,
+                    TWIN_WORDS, OWNED_BY_WORDS, PLANTED_TEXT, TAKEN_TEXT,
+                    BOARD_MESSAGE_NAME.
         @complexity O(1) per mode.
         @alloc      one TcRoot per mode.
         """
@@ -2275,9 +2305,107 @@ class NoLostMailNoHangTest(UmaskTestCase):
                 self.assertEqual(kept_text, PLANTED_TEXT, "the planted file is not at the first free by-hand name")
                 self.assertEqual(left, [], "tc read left the planted file unread")
                 self.assertEqual(code, 0, err)
-                self.assertIn(f"{SECOND_FILE_WORDS.format(name=name)} {BY_HAND_WORDS}", out)
+                owner = OWNED_BY_WORDS.format(login=pwd.getpwuid(os.getuid()).pw_name) if shared else ""
+                self.assertIn(TWIN_WORDS.format(name=name, kept=read / name, kept_owner=owner, moved=kept,
+                                                moved_owner=owner), out)
                 self.assertIn(PLANTED_TEXT, out)
                 self.assertIsNone(BOARD_MESSAGE_NAME.match(kept.name), "the board would read a sender from it")
+
+    # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, the other order.
+    def test_a_file_planted_in_read_under_an_unread_name_is_kept_and_neither_file_is_called_forged(self):
+        """Private and shared: unread #1 from a in b's inbox, and a file planted in read/ under its name: tc read b exits 0, the plant stays at read/000001-from-a.md and the real message moves to read/by-hand-1-000001-from-a.md, each byte for byte, and the read prints TWIN_WORDS (both paths, each owner when shared) and the real text.
+
+        A member may make names in the 3770 read/ as easily as in the
+        inbox, so tc cannot tell which of the two it wrote. Must reject
+        words that call the inbox file hand-written (here it is the real
+        message: the owner's agent would be told carl's mail is forged),
+        and a read that replaces or changes either file.
+
+        @interacts  per mode: init when shared, a join, a send, a read; one
+                    file written by hand; reads the user database.
+        @deps       _root.TcRoot.tc, primary_group; pwd; BY_HAND_NAME,
+                    TWIN_WORDS, OWNED_BY_WORDS, IN_READ_TEXT, REAL_TEXT.
+        @complexity O(1) per mode.
+        @alloc      one TcRoot per mode.
+        """
+        name = "000001-from-a.md"
+        for shared in (False, True):
+            with self.subTest(shared=shared), _root.TcRoot() as root:
+                runs = [root.tc("init", "--shared", "--group", primary_group()[1])] if shared else []
+                runs += [root.tc("join", "b", env={"CLAUDECODE": "1"}),
+                         root.tc("send", "--from", "a", "--to", "b", REAL_TEXT)]
+                box = root.path / "mail" / "to-b"
+                read = box / "read"
+                real = (box / name).read_bytes()
+                (read / name).write_text(IN_READ_TEXT)
+                code, out, err = root.tc("read", "b")
+                moved = read / BY_HAND_NAME.format(k=1, name=name)
+                planted_after = (read / name).read_bytes()
+                moved_after = moved.read_bytes() if moved.exists() else None
+                left = sorted(p.name for p in box.glob("*.md"))
+                owner = OWNED_BY_WORDS.format(login=pwd.getpwuid(os.getuid()).pw_name) if shared else ""
+                for run in runs:
+                    self.assertEqual(run[0], 0, run[2])
+                self.assertEqual(code, 0, err)
+                self.assertIn(TWIN_WORDS.format(name=name, kept=read / name, kept_owner=owner, moved=moved,
+                                                moved_owner=owner), out)
+                self.assertEqual(planted_after, IN_READ_TEXT.encode(), "tc read replaced the file planted in read/")
+                self.assertEqual(moved_after, real, "the real message is not at the by-hand name, byte for byte")
+                self.assertIn(REAL_TEXT, out)
+                self.assertEqual(left, [], "tc read left the real message unread")
+
+    # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's HIGH-1, a wake at most once.
+    def test_a_planted_name_at_the_length_limit_moves_and_wakes_tc_wait_at_most_once(self):
+        """Shared: a file planted in b's inbox and in read/ under one name, LONG_NAME_BYTES long, then (a fresh root) exactly read/'s limit (PC_NAME_MAX, .md included): tc wait b exits 0 for it, tc read b exits 0 and moves it to a by-hand name that fits the limit and keeps .md, the inbox is empty, and a second tc wait b times out (exit 2), never 0 at once.
+
+        The audit's HIGH-1 (audits/2026-10-15-0102-quick). Must reject a
+        by-hand name that takes the prefix whole: past the limit the
+        rename fails, the file stays in the inbox, and every re-armed tc
+        wait exits 0 at once, a paid wake loop a member can start (D20).
+        A member plants these under a shared mailbox, so the test runs
+        shared; the move is one code path, shared or not.
+
+        @interacts  per case: init, a join, two files written by hand, two
+                    waits (the second runs ONE_POLL_SECONDS), one read;
+                    reads read/'s name limit and lists the inbox and read/.
+        @deps       _root.TcRoot.tc, primary_group; os; LONG_NAME_BYTES,
+                    MESSAGE_SUFFIX, BY_HAND_NAME, IN_READ_TEXT,
+                    PLANTED_TEXT, ONE_POLL_SECONDS, EXIT_TIMEOUT.
+        @complexity O(1) per case, two cases; about ONE_POLL_SECONDS of
+                    waiting each.
+        @alloc      one TcRoot per case.
+        """
+        for case in ("LONG_NAME_BYTES", "PC_NAME_MAX"):
+            with self.subTest(name=case), _root.TcRoot() as root:
+                runs = [root.tc("init", "--shared", "--group", primary_group()[1]),
+                        root.tc("join", "b", env={"CLAUDECODE": "1"})]
+                box = root.path / "mail" / "to-b"
+                read = box / "read"
+                limit = os.pathconf(read, "PC_NAME_MAX")
+                size = LONG_NAME_BYTES if case == "LONG_NAME_BYTES" else limit
+                name = "x" * (size - len(MESSAGE_SUFFIX)) + MESSAGE_SUFFIX
+                (read / name).write_text(IN_READ_TEXT)
+                (box / name).write_text(PLANTED_TEXT)
+                first = root.tc("wait", "b", "--timeout", ONE_POLL_SECONDS)
+                code, out, err = root.tc("read", "b")
+                left = sorted(p.name for p in box.glob("*.md"))
+                second = root.tc("wait", "b", "--timeout", ONE_POLL_SECONDS)
+                kept = [p for p in read.iterdir() if p.name.startswith(BY_HAND_NAME.format(k=1, name=""))]
+                kept_text = kept[0].read_text() if len(kept) == 1 else None
+                in_read = (read / name).read_text()
+                for run in runs:
+                    self.assertEqual(run[0], 0, run[2])
+                self.assertEqual(len(os.fsencode(name)), size)
+                self.assertEqual(first[0], 0, f"the first tc wait did not wake for the planted file: {first}")
+                self.assertEqual(second[0], EXIT_TIMEOUT,
+                                 f"a planted {size}-byte name woke tc wait again after tc read: {second}")
+                self.assertEqual(left, [], "tc read left the planted file in the inbox")
+                self.assertEqual(code, 0, err)
+                self.assertEqual(len(kept), 1, f"by-hand files in read/: {kept}")
+                self.assertLessEqual(len(os.fsencode(kept[0].name)), limit, "the by-hand name passes the limit")
+                self.assertTrue(kept[0].name.endswith(MESSAGE_SUFFIX), kept[0].name)
+                self.assertEqual(kept_text, PLANTED_TEXT)
+                self.assertEqual(in_read, IN_READ_TEXT, "tc read changed the file already in read/")
 
     # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-2.
     def test_one_sends_waits_on_mail_seq_share_one_deadline(self):
