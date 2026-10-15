@@ -115,7 +115,11 @@ partner is a lower relay is drawn as that relay's `worker`, marked
 
 @interacts  loads ../tc as a module from its source, compiled in memory,
             with TC_ROOT set for the load only, then calls tc.now_iso(), tc.listeners("wait") (reads
-            /proc/locks, globs mail/.wait-*.lock) and tc.mailbox_summary()
+            ROOT/.shared and /proc/locks, opens mail/ and each
+            mail/to-<name>/ by name and lstats the .wait.lock in it, its
+            owner's since D35; on a private mailbox, until every listener
+            started before has re-armed, also mail/.wait-*.lock: P3 fix
+            round 1b, Claude Opus 5.5, unreviewed) and tc.mailbox_summary()
             (globs and stats mail/ and status/ under tc's ROOT); reads the
             load average and /proc/meminfo itself. Never runs nvidia-smi
             and never scans the process list. Reads cards/*.json and the
@@ -144,8 +148,10 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             (/proc: /proc/locks through tc, the load average and
             /proc/meminfo read here).
 @complexity feed(), per poll: O(k + m (log W + log K) + n + c^2). The
-            snapshot: tc.listeners is O(k + n), k lines in /proc/locks
-            (tens) and n names (single digits to tens);
+            snapshot: tc.listeners is O(k + n log n), k lines in
+            /proc/locks (tens) and n names (single digits to tens), one
+            inbox opened and one lock lstat()ed per name (P3 fix round
+            1b, Claude Opus 5.5, unreviewed: D35);
             tc.mailbox_summary is O(n + m), since it stats every message
             file, m of them (about 800 after two weeks of heavy use, and
             only growing, since read/ is kept). Here: every inbox listed

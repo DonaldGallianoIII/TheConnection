@@ -14,7 +14,7 @@ folder, removed when the context exits:
     with TcRoot() as root:
         code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi")
         with root.listener("c", 30) as pid:
-            ...                     # pid holds mail/.wait-c.lock right now
+            ...                     # pid holds mail/to-c/.wait.lock right now
         folder, calls = root.fake_bin("codex", 0)  # first on every later child's PATH
         root.tc("send", "--from", "a", "--to", "d", "hi")
         calls()                     # [] when the fake never ran
@@ -128,6 +128,11 @@ REFUSED_TOOLS = ("ssh", "codex")
 # ssh fails with 255 and a shell with 126 or 127, so 97 means one thing: a
 # test reached a real tool's name with no fake in front of it.
 REFUSED_EXIT_CODE = 97
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1). The name of a
+# listener's lock inside its own inbox, mail/to-<name>/WAIT_LOCK_NAME: tc's
+# WAKE_LOCK_NAME for a wait, written here, since the harness imports
+# nothing from tc. Before round 1b it was mail/.wait-<name>.lock.
+WAIT_LOCK_NAME = ".wait.lock"
 # /proc/locks columns: "1: FLOCK ADVISORY WRITE <pid> <maj>:<min>:<inode> 0 EOF".
 # A blocked waiter's line has "->" in column 1, so it never matches FLOCK.
 LOCKS_KIND_COLUMN = 1
@@ -541,7 +546,9 @@ class TcRoot:
         """Start `tc wait <name> --timeout <timeout>`; yield its pid once proven.
 
         Proven means /proc/locks shows that pid holding
-        mail/.wait-<name>.lock. Before starting anything it raises
+        mail/to-<name>/.wait.lock (WAIT_LOCK_NAME, in the name's own inbox
+        since D35; P3 fix round 1b, Claude Opus 5.5, unreviewed). Before
+        starting anything it raises
         ListenerNotProven if the name already has unread mail in this root:
         a `tc wait` started over waiting mail exits at once, so it cannot
         be held. Then, every LOCK_POLL_SECONDS, it checks the deadline and
@@ -560,10 +567,11 @@ class TcRoot:
         exception carries on.
 
         @interacts  globs mail/to-<name>/*.md; starts one `tc wait` child;
-                    reads /proc/locks; writes its output to
-                    listener-<name>-*.out in the temp folder.
+                    stats mail/to-<name>/.wait.lock and reads /proc/locks;
+                    writes its output to listener-<name>-*.out in the temp
+                    folder.
         @deps       subprocess, tempfile, time; flock_holders, _stop,
-                    _report_unreaped.
+                    _report_unreaped; WAIT_LOCK_NAME.
         @complexity O(u) over u unread files to check the inbox (0 when it
                     goes on), then at most P = LOCK_CEILING_SECONDS /
                     LOCK_POLL_SECONDS = 100 reads of /proc/locks, each O(k)
@@ -578,7 +586,7 @@ class TcRoot:
                 f"unread message(s). A tc wait started over waiting mail exits at once, "
                 f"so it cannot be held as a listener. Read the mail first, or listen on "
                 f"another name.")
-        lock = self.path / "mail" / f".wait-{name}.lock"
+        lock = self.path / "mail" / f"to-{name}" / WAIT_LOCK_NAME  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35
         with tempfile.NamedTemporaryFile(dir=self.base, prefix=f"listener-{name}-",
                                          suffix=".out", delete=False) as out:
             proc = subprocess.Popen([sys.executable, str(TC), "wait", name, "--timeout", str(timeout)],

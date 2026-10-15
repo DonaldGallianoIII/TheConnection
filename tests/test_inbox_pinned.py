@@ -41,7 +41,13 @@ name. Under D35 that first look is tc's pinned open, so every later act
 must happen in the folder it opened. tc join's first look is
 claim_inbox's lstat of the joiner's own inbox, which only that owner
 could race against itself; its row waits for the first open,
-unread_count's pin, the act under test.
+unread_count's pin, the act under test. P3 fix round 1b (Claude Opus
+5.5, unreviewed): tc wait's first look is now hold_wake_lock's pin, which
+opens the inbox to take the wait lock in it (D35 (1)); its row lets that
+one look pass (Row.skip) and swaps after the poll's own pin, the act
+under test. The two health rows let two pass the same way: listeners
+opens the inbox first, once for its wait lock and once for its watch
+lock, and mailbox_summary's pin, the act under test, comes third.
 
 Each subtest asserts, in this order: the swap happened; the far end's
 tree is unchanged (names, kinds, sizes, modify and change times); nothing
@@ -65,12 +71,13 @@ inbox (moved aside, still pinned) holds after the act.
             board/serve.py and calls scan_messages for the board row; the
             swap renames one folder in the root and makes a link or moves
             a folder in; lstats every entry of the far end before and
-            after; collects garbage after each command, ResourceWarning
-            ignored for it (tc wait keeps its lock file open for its
-            process's life). Writes nothing outside the root's temp folder.
-@deps       python3 stdlib (argparse, collections, contextlib, gc,
+            after. Writes nothing outside the root's temp folder. (P3 fix
+            round 1b, Claude Opus 5.5, unreviewed: tc wait closes its lock
+            file on every way out now, so the garbage collection with
+            ResourceWarning ignored that round 1a needed is gone.)
+@deps       python3 stdlib (argparse, collections, contextlib,
             importlib, io, json, os, pathlib, resource, stat, sys, time,
-            unittest, unittest.mock, warnings); tests/_root.py; UmaskTestCase, as_member,
+            unittest, unittest.mock); tests/_root.py; UmaskTestCase, as_member,
             load_tc and primary_group from test_shared.py; ../tc;
             ../board/serve.py.
 @complexity O(r x k) subtests over r = 13 rows and k = 2 kinds of swap,
@@ -83,7 +90,6 @@ inbox (moved aside, still pinned) holds after the act.
 import argparse
 import collections
 import contextlib
-import gc
 import importlib.util
 import io
 import json
@@ -94,7 +100,6 @@ import stat
 import sys
 import time
 import unittest
-import warnings
 from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -162,14 +167,23 @@ LOOKS = ("open", "lstat", "stat")
 OPENS = ("open",)
 # The ring marker's first line after a codex join finds unread mail.
 JOINED_STATE = "joined with unread mail"
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): the wait lock's name in
+# its owner's own inbox (D35 (1)), written here rather than read from tc.
+WAIT_LOCK = ".wait.lock"
 # What run_in_process hands back: the exit code (0 when the call
 # returned, the words of an exception it raised), stdout, stderr, and
 # what the call returned.
 Ran = collections.namedtuple("Ran", "code out err value")
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): how many times health's
+# listeners opens an inbox before mailbox_summary does: once for the wait
+# lock in it and once for the watch lock (D35 (1)).
+LISTENER_LOOKS = 2
 # One row: its family, its label, whether it swaps an inbox or a branch,
 # whether ann joins as codex, whether ann's message is read in setup, the
-# os calls its swap waits on, and what it patches for its call.
-Row = collections.namedtuple("Row", "family label target codex read_first looks environ stdin")
+# os calls its swap waits on, what it patches for its call, and how many
+# looks at the folder it lets pass before the one it swaps after (P3 fix
+# round 1b, Claude Opus 5.5, unreviewed: tc wait's lock pin comes first).
+Row = collections.namedtuple("Row", "family label target codex read_first looks environ stdin skip", defaults=(0,))
 # Real os.lstat, bound once here, so the patches in place while a swap
 # runs never color what the far end looks like.
 REAL_LSTAT = os.lstat
@@ -243,8 +257,8 @@ def files_in(folder):
 
 
 @contextlib.contextmanager
-def swap_after_first_look(target, swap, looks):
-    """While entered, os.open, os.lstat and os.stat (those named in `looks`) are wrapped: the first call aimed at `target` returns, and then `swap` runs, once. Yields the list of where that call was aimed (empty until it happens).
+def swap_after_first_look(target, swap, looks, skip=0):
+    """While entered, os.open, os.lstat and os.stat (those named in `looks`) are wrapped: the first call aimed at `target` returns, and then `swap` runs, once. Yields the list of where that call was aimed (empty until it happens). `skip` calls aimed at `target` pass first, untouched (P3 fix round 1b, Claude Opus 5.5, unreviewed).
 
     Where a call is aimed: by a name in a folder's descriptor, that
     folder's path now (/proc/self/fd) and the name; by a path, the path
@@ -256,10 +270,10 @@ def swap_after_first_look(target, swap, looks):
                 calls `swap` once.
     @deps       contextlib, os, pathlib, unittest.mock.
     @complexity O(1) per wrapped call.
-    @alloc      one list, holding at most one path.
+    @alloc      one list, holding at most one path; one counter.
     """
     given, real = pathlib.Path(target), pathlib.Path(os.path.realpath(target))
-    made = []
+    made, passed = [], [0]
 
     def wrap(call):
         def wrapped(path, *args, **kwargs):
@@ -269,6 +283,9 @@ def swap_after_first_look(target, swap, looks):
                 aimed = (pathlib.Path(os.readlink(f"/proc/self/fd/{dir_fd}")) / os.fsdecode(path)
                          if dir_fd is not None else pathlib.Path(os.path.abspath(os.fsdecode(path))))
                 if aimed in (given, real):
+                    if passed[0] < skip:
+                        passed[0] += 1
+                        return result
                     made.append(aimed)
                     swap()
             return result
@@ -322,11 +339,11 @@ ROWS = (
         {"SSH_ORIGINAL_COMMAND": f"{FAR_TC} send --from someone --to {OWNER}"}, SENT_TEXT),
     Row("c", "tc peek", "inbox", False, False, LOOKS, {}, None),
     Row("d", "tc read", "inbox", False, False, LOOKS, {}, None),
-    Row("e", "tc wait's poll", "inbox", False, False, LOOKS, {}, None),
+    Row("e", "tc wait's poll", "inbox", False, False, LOOKS, {}, None, skip=1),
     Row("f", "tc log", "inbox", False, False, LOOKS, {}, None),
-    Row("g", "tc health --json", "inbox", False, False, LOOKS, {}, None),
+    Row("g", "tc health --json", "inbox", False, False, LOOKS, {}, None, skip=LISTENER_LOOKS),
     Row("g", "the gate's health --json", "inbox", False, False, LOOKS,
-        {"SSH_ORIGINAL_COMMAND": f"{FAR_TC} health --json"}, ""),
+        {"SSH_ORIGINAL_COMMAND": f"{FAR_TC} health --json"}, "", skip=LISTENER_LOOKS),
     Row("h", "tc flush's count of other members' branches", "branch", False, False, LOOKS, {}, None),
     Row("i", "tc card", "inbox", False, False, LOOKS, {}, None),
     Row("i", "a codex tc join", "inbox", False, False, OPENS, {"CODEX_THREAD_ID": THREAD}, None),
@@ -439,7 +456,8 @@ class InboxPinnedTest(UmaskTestCase):
                              "tc read did not move the real message into the real read/")
         elif row.label == "tc wait's poll":
             self.assertEqual((ran.code, ran.out), (0, f"MAIL: 1 unread for {OWNER}. Run: tc read {OWNER}\n"))
-            self.assertEqual(files_in(real), ["000001-from-ben.md"])
+            self.assertEqual(files_in(real), [WAIT_LOCK, "000001-from-ben.md"],
+                             "the wait's lock is not in the real inbox beside its mail (D35 (1))")
         elif row.label == "tc log":
             self.assertIn(REAL_TEXT, ran.out, "tc log did not show the real message")
             self.assertEqual((ran.code, ran.err), (0, ""))
@@ -497,8 +515,8 @@ class InboxPinnedTest(UmaskTestCase):
                     far end before and after.
         @deps       build, act, check, primary_group, as_member, load_tc,
                     swap_after_first_look, run_in_process, snapshot,
-                    plant, text_stdin; contextlib, gc, os, resource, sys,
-                    unittest.mock, warnings; ROWS, LINK, REAL_FOLDER, ASIDE_PREFIX,
+                    plant, text_stdin; contextlib, os, resource, sys,
+                    unittest.mock; ROWS, LINK, REAL_FOLDER, ASIDE_PREFIX,
                     INBOX_PLANT, BRANCH_PLANT, PLANTED_AGE_SECONDS,
                     PLANTED_TEXT, PLANTED_SENDER.
         @complexity O(r x k): r = 13 rows, k = 2 kinds.
@@ -532,11 +550,8 @@ class InboxPinnedTest(UmaskTestCase):
                             stack.enter_context(mock.patch.object(sys, "stdin", text_stdin(row.stdin)))
                         stack.enter_context(mock.patch.object(resource, "setrlimit", lambda *args: None))
                         stack.enter_context(mock.patch.object(tc, "gpu_stats", lambda: None))
-                        made = stack.enter_context(swap_after_first_look(target, swap, row.looks))
+                        made = stack.enter_context(swap_after_first_look(target, swap, row.looks, row.skip))
                         ran = run_in_process(self.act(tc, root, row))
-                    with warnings.catch_warnings():  # tc wait keeps its lock file open for its process's life
-                        warnings.simplefilter("ignore", ResourceWarning)
-                        gc.collect()  # in process, that file is freed here, quietly, before the root goes
                     far_end = outside if kind == LINK else target
                     shown = ran.out + ran.err + repr(ran.value)
                     self.assertTrue(made, "the swap never happened: tc never looked at the folder")

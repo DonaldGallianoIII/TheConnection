@@ -6,8 +6,9 @@ Tests for `tc health` and `tc watch` against a throwaway TC_ROOT.
             Claude Opus 5.5, unreviewed) runs tc through tests/_root.py
             instead, so no identity variable of the session reaches it; one
             of its tests (phase fix round 1, Claude Opus 5.5, unreviewed)
-            makes two card files, an inbox and a lock file by hand, with
-            ESC in them.
+            makes two card files, two inboxes and a lock file in one of
+            them by hand, with ESC in them (the lock in its inbox since
+            P3 fix round 1b, Claude Opus 5.5, unreviewed: D35).
 @deps       python3 stdlib (json, os, pathlib, subprocess, sys, tempfile,
             time, unittest); tests/_root.py for HealthCardsTest
 @complexity O(1) per test; the slowest waits a few poll intervals (about 5 s)
@@ -183,8 +184,8 @@ class HealthCardsTest(unittest.TestCase):
         Must reject a card field or a file name printed raw: the terminal
         would act on it.
 
-        @interacts  two hand-written card files, one inbox folder and one
-                    lock file made by hand; one tc health.
+        @interacts  two hand-written card files, two inbox folders and one
+                    lock file in the second, made by hand; one tc health.
         @deps       _root.TcRoot.tc.
         @complexity O(1): one health run.
         @alloc      one TcRoot.
@@ -197,7 +198,8 @@ class HealthCardsTest(unittest.TestCase):
             (cards / f"{ESC}q.json").write_text("{ not json")
             mail = root.path / "mail"
             (mail / f"to-{ESC}x").mkdir(parents=True)
-            (mail / f".wait-{ESC}y.lock").touch()
+            (mail / f"to-{ESC}y").mkdir()  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35, the lock in its inbox
+            (mail / f"to-{ESC}y" / ".wait.lock").touch()
             code, out, err = root.tc("health")
         self.assertEqual(code, 0, err)
         self.assertNotIn(ESC, out, "tc health printed a raw ESC")

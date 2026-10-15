@@ -12,7 +12,11 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   mail/to-<name>/read/...                  read (moved there by `tc read`)
   status/<name>.md                         latest self-reported status
   mail/.seq                                message counter (flock guarded)
-  mail/.watch-<name>.lock                  held by `tc watch <name>` while it runs
+  mail/to-<name>/.wait.lock                held by `tc wait <name>` while it runs; its owner's alone, 0600 (D35)
+  mail/to-<name>/.watch.lock               held by `tc watch <name>` while it runs; its owner's alone, 0600 (D35)
+  mail/to-<name>/.wait.lock.planted-<k>    what someone else had put at a lock's name, moved aside by the owner's tc
+  mail/.wait-<name>.lock, .watch-<name>.lock  the locks' place before D35, read only on a private mailbox, and only
+                                           until every listener started before has re-armed (the switch-over)
   mail/.box-<name>.lock                    the inbox lock: send, read, card, codex join (D14)
   mail/.ring-pending-<name>                ring owed and why, or clear (D14, D16, D20)
   cards/<name>.json                        one address card per name (C1)
@@ -57,9 +61,20 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             the recipient (D20), or 2750 for an outbox branch and every
             folder in it (D33). Messages, cards and status files are made
             0640, never group-writable, and the send lock 0600 (D33);
-            mail/.seq, the locks and the ring
+            mail/.seq, the inbox locks and the ring
             marker stay 0664 and are never removed (the marker is
-            rewritten, D20). A send to a name with no card, whether or not
+            rewritten, D20). P3 fix round 1b (Claude Opus 5.5,
+            unreviewed): D35 (1) and D36 (2). The wait and watch locks
+            live in their owner's own inbox at 0600, opened by name in its
+            pinned descriptor; whatever else has a lock's name there is
+            moved aside with words, so no member holds or redirects
+            another's listener, and listeners names only a pid of the
+            inbox's owner. On a shared mailbox only the owner of a name's
+            card may run `wait` or `watch` for it, and a name nobody
+            joined is refused, exit 1, nothing made. The switch-over: on a
+            private mailbox only, a lock still held at the old place in
+            mail/ stops a new `wait` or `watch` with exit 3 and is named
+            by listeners. A send to a name with no card, whether or not
             an inbox is there (D21), or to an inbox its card's owner does
             not own, is refused, exit 1 (D20). `init` reads the group
             database, makes a missing ROOT 0755 and refuses a ROOT its
@@ -187,8 +202,11 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             every inbox and read/ and the m message files among them
             (one stat each and a sort per folder: hundreds to thousands,
             and it grows with the history; the board's feed runs the same
-            count every poll, mailbox_summary). Each watch poll O(k + n) plus one
-            nvidia-smi run where it exists; it reads no cards. O(p) once per
+            count every poll, mailbox_summary). Each watch poll O(k + n
+            log n): /proc/locks, then one inbox open and one lstat per
+            name for its lock (listeners; P3 fix round 1b, Claude Opus
+            5.5, unreviewed: D35), plus one nvidia-smi run where it
+            exists; it reads no cards. O(p) once per
             heartbeat. join O(1), or O(u) for a codex card's unread count;
             card O(u) for its unread count; cards O(c). init O(f + d) over f
             folders and files under the shared folders (hundreds to
@@ -227,8 +245,13 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             them on every way out. `wait` measured flat at
             13 MB RSS over 200k polls; it also hard-caps itself at
             WAIT_MEMORY_CAP_BYTES so a runaway dies alone. `wait` holds
-            mail/.wait-<name>.lock for its lifetime; the kernel releases it
-            when the process exits or is killed.
+            mail/to-<name>/.wait.lock (`watch` its .watch.lock) for its
+            lifetime and closes it on every way out (P3 fix round 1b,
+            Claude Opus 5.5, unreviewed: D35); the kernel releases it
+            when the process exits or is killed. One wait or watch lock
+            per name that ever listened, kept in its inbox, and one
+            .planted-<k> file per entry moved aside from a lock's name,
+            kept.
 @rng        SSH S1 and SSH fix round 1 (Claude Opus 5.5, unreviewed):
             os.urandom(ORIGIN_TOKEN_BYTES) once per mailbox, for its
             origin token (origin_token, D25); secrets.token_hex
@@ -793,6 +816,57 @@ ORIGINS_NAME = ".origins"
 # C3's words for a message whose origin id is already filed: the far
 # sender's retry, after a crash or a timeout, delivers nothing twice.
 ALREADY_DELIVERED_WORDS = "already delivered (origin {origin})"
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1), each member's
+# listener is theirs alone (the audit's HIGH-2, audits/2026-10-15-1409-full).
+# The wait and watch locks live in their owner's own inbox, by these names
+# ({kind} is "wait" or "watch"), made by that owner at WAKE_LOCK_MODE and
+# opened by name in the inbox's pinned descriptor. Each starts with a dot
+# and never ends in MESSAGE_SUFFIX, so no listing of messages, tc's or the
+# board's, reads one as mail.
+WAKE_LOCK_NAME = ".{kind}.lock"
+WAKE_LOCK_KINDS = ("wait", "watch")
+WAKE_LOCK_NAMES = tuple(WAKE_LOCK_NAME.format(kind=kind) for kind in WAKE_LOCK_KINDS)
+# A wake lock's mode: its owner reads and writes it, nobody else can open
+# it. flock needs only a read-only open, so a lock the group could read
+# could be held by any member (the send lock's reason too, D33 part 2).
+WAKE_LOCK_MODE = 0o600
+# Where the owner's tc moves anything else it finds at a wake lock's name
+# (another user's file, a link, a FIFO, a folder, a file with a second
+# name), in the same inbox: {lock} is the lock's name and {k} the first
+# count from 1 that nothing holds. The owner owns the inbox, so sticky lets
+# its tc rename what is in it. The name says what happened to it and never
+# ends in MESSAGE_SUFFIX.
+PLANTED_ASIDE_NAME = "{lock}.planted-{k}"
+# How many entries one start of tc wait or tc watch moves aside before it
+# refuses, exit 1, with words. An honest mailbox needs none; a member who
+# plants a new entry the moment the last one moved is racing on purpose,
+# and three moves show that without looping.
+WAKE_LOCK_TRIES = 3
+# The switch-over (D35 (1), the architect's call). Before P3 fix round 1b
+# the wait and watch locks lived directly in mail/, by this name ({name}
+# the listener's), and every session on this machine runs this tc on a
+# private mailbox: a tc wait started before the change holds its old lock
+# until it next exits and re-arms, up to the keepalive. So on a private
+# mailbox only, listeners also reports an old lock's holder, and a new tc
+# wait or tc watch exits 3 while the old lock for its name is held. A
+# shared mailbox never reads the old place: it is the hole D35 closes.
+# This name and the code that reads it can go once every session has
+# re-armed (a later task).
+OLD_WAKE_LOCK_NAME = ".{kind}-{name}.lock"
+# D36 (2), only a name's owner listens for it: C4's words, exit 1, nothing
+# made, on a shared mailbox for a tc wait or tc watch run by anyone but the
+# owner of the name's card, and for a name nobody has joined.
+ONLY_OWNER_LISTENS_WORDS = "tc {kind}: {name}'s inbox belongs to {owner}; only {owner} listens for it"
+NOBODY_JOINED_LISTEN_WORDS = ("tc {kind}: nobody has joined as {name} on this shared mailbox; its owner runs "
+                              "tc join {name} first")
+# What a second tc wait or tc watch for a name says before it exits 3,
+# word for word as before round 1b, by kind; {name} is the name.
+ALREADY_WORDS = {"wait": "ALREADY LISTENING: another `tc wait {name}` is running. Not starting a second.",
+                 "watch": "ALREADY WATCHING: another `tc watch {name}` is running. Not starting a second."}
+# The owner's own wait or watch on a shared mailbox whose inbox is gone:
+# only tc join makes an inbox there (D20), so the words say to rejoin.
+NO_INBOX_LISTEN_WORDS = ("tc {kind}: {name} has a card but no inbox on this shared mailbox; nothing made. Run "
+                         "tc join {name}, which makes it.")
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -1587,13 +1661,17 @@ def shared_folder_mode(path, uid=None):
 
 
 def shared_file_mode(path, uid=None):
-    """The mode init gives a file under the shared folders: SHARED_WRITABLE_FILE_MODE directly in mail/, SEND_LOCK_MODE for a send lock in its owner's outbox branch, else SHARED_OWNED_FILE_MODE.
+    """The mode init gives a file under the shared folders: SHARED_WRITABLE_FILE_MODE directly in mail/, WAKE_LOCK_MODE for a wait or watch lock in an inbox, SEND_LOCK_MODE for a send lock in its owner's outbox branch, else SHARED_OWNED_FILE_MODE.
 
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 items 2 and 5.
     The files directly in mail/ are the ones every member must write
-    (mail/.seq, the locks, the ring marker); messages live one level
+    (mail/.seq, the inbox locks, the ring marker); messages live one level
     down, in an inbox or its read/. Cards, status files and messages are
     never group-writable.
+
+    P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1). A wait or
+    watch lock (a name in WAKE_LOCK_NAMES, directly in an inbox) is its
+    owner's alone, so init never opens it to the group.
 
     SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 2. A send lock
     (a name SEND_LOCK_NAME gives, directly in the outbox branch of `uid`,
@@ -1603,13 +1681,15 @@ def shared_file_mode(path, uid=None):
     @interacts  reads the user database (branch_user) for a file directly
                 in an outbox branch. Writes nothing.
     @deps       branch_user; pathlib; ROOT, MAIL, OUTBOX_NAME,
-                SEND_LOCK_NAME, SHARED_WRITABLE_FILE_MODE,
-                SHARED_OWNED_FILE_MODE, SEND_LOCK_MODE.
+                SEND_LOCK_NAME, WAKE_LOCK_NAMES, SHARED_WRITABLE_FILE_MODE,
+                SHARED_OWNED_FILE_MODE, SEND_LOCK_MODE, WAKE_LOCK_MODE.
     @complexity O(1), and at most one user lookup.
     @alloc      none.
     """
     if path.parent == MAIL:
         return SHARED_WRITABLE_FILE_MODE
+    if path.parent.parent == MAIL and path.parent.name.startswith("to-") and path.name in WAKE_LOCK_NAMES:  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1)
+        return WAKE_LOCK_MODE
     lead, _, tail = SEND_LOCK_NAME.partition("{key}")
     if (path.parent.parent == ROOT / OUTBOX_NAME and path.name.startswith(lead) and path.name.endswith(tail)
             and path.parent.name == branch_user(uid)):  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 2
@@ -1663,8 +1743,10 @@ def open_by_name(path, flags, mode=NEW_FILE_MODE):
     """open_regular, refusing (exit 1, words) a symlink, a FIFO or anything else that is not a regular file. A descriptor.
 
     For each file tc opens by a name a group member can also write (D17,
-    D19): the wait, watch and inbox locks, mail/.seq and
-    status/<name>.md. A symlink at the name, dangling or not, is refused,
+    D19): the inbox locks, mail/.seq and status/<name>.md (P3 fix round
+    1b, Claude Opus 5.5, unreviewed: the wait and watch locks live in
+    their owner's inbox since D35, open_wake_lock). A symlink at the
+    name, dangling or not, is refused,
     and so is a FIFO, at once instead of hanging tc; nothing is read or
     written through either. SHARED fix round 1 (Claude Opus 5.5,
     unreviewed): a file this user may not open (another member's status
@@ -3820,63 +3902,311 @@ def cmd_peek(args):
     refuse_lines([f"tc peek: {printable(p)} not shown ({why})" for p, why in skipped + unshown])
 
 
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1) and D36 (2), each
+# member's listener is theirs alone, and only a name's owner listens for it.
+def move_aside(box_fd, name, path, kind):
+    """Move whatever has the name `name` in the inbox open at `box_fd` to the first free PLANTED_ASIDE_NAME there, for tc `kind` (wait or watch): one line of words naming what was there, whose it was and where it went; None when nothing was there by then. `path` names it, in the words only.
+
+    For a wait or watch lock's name, where the owner's tc found something
+    that is not its own lock (open_wake_lock): another user's file, a
+    link, a FIFO, a folder or a file with a second name. The owner owns
+    the inbox, so sticky lets its tc rename what another member made in
+    it. lstat by name says what it is and whose; the rename, by name in
+    the same descriptor, moves a link as itself, so what a link leads to
+    is never touched. A rename that fails is refused, exit 1, with words,
+    and nothing is made.
+
+    @interacts  lstats `name` and each aside name tried, by name in
+                `box_fd`; renames one entry there; reads this process's
+                user id and the user database for the words; on a failed
+                rename one line to stderr and exit 1.
+    @deps       name_taken, refuse, user_name; os, stat;
+                PLANTED_ASIDE_NAME, EXIT_REFUSED.
+    @complexity O(k) over k aside names already taken (none in practice).
+    @alloc      the words, returned.
+    """
+    try:
+        st = os.lstat(name, dir_fd=box_fd)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        what = "a symlink"
+    elif stat.S_ISFIFO(st.st_mode):
+        what = "a FIFO"
+    elif stat.S_ISDIR(st.st_mode):
+        what = "a folder"
+    elif not stat.S_ISREG(st.st_mode):
+        what = "not a regular file"
+    elif st.st_nlink > 1:
+        what = "a file with another name too (a hard link)"
+    else:
+        what = "a file"
+    k = 1
+    while name_taken(PLANTED_ASIDE_NAME.format(lock=name, k=k), box_fd):
+        k += 1
+    aside = PLANTED_ASIDE_NAME.format(lock=name, k=k)
+    try:
+        os.rename(name, aside, src_dir_fd=box_fd, dst_dir_fd=box_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        refuse(f"tc {kind}: {path} is {what} owned by {user_name(st.st_uid)}, not this user's own {kind} lock, "
+               f"and tc could not move it aside ({err.strerror}); nothing made", EXIT_REFUSED)
+    return (f"tc {kind}: {path} was {what} owned by {user_name(st.st_uid)}, not this user's own {kind} lock; "
+            f"moved it aside to {path.with_name(aside)} and made a new one")
+
+
+def open_wake_lock(box_fd, box, kind):
+    """This user's own wait or watch lock (`kind`) in the inbox open at `box_fd` (its path `box`, for the words), opened by name and never through a link: (descriptor, words), one line of words per entry moved aside first. Refuses (exit 1, words) what it can neither use nor move.
+
+    Made with O_CREAT | O_EXCL at WAKE_LOCK_MODE when nothing has the
+    name. One already there is opened with O_NOFOLLOW | O_NONBLOCK and
+    used only when fstat finds a regular file with one name (st_nlink 1)
+    that this user owns; an own file at another mode is set to
+    WAKE_LOCK_MODE through its descriptor. Anything else there (another
+    user's file, a link, a FIFO, a folder, a file with a second name) is
+    moved aside inside the inbox with words (move_aside), and the lock is
+    made again, at most WAKE_LOCK_TRIES times. Read only: flock needs no
+    more. The descriptor comes back blocking; the caller closes it.
+
+    @interacts  creates, or opens and fstats, one file by its name in
+                `box_fd`; fchmods an own one at another mode; may move
+                entries aside (move_aside); on a refusal one line to
+                stderr and exit 1.
+    @deps       move_aside, refuse; os, stat; WAKE_LOCK_NAME,
+                WAKE_LOCK_MODE, WAKE_LOCK_TRIES, EXIT_REFUSED.
+    @complexity O(1): at most WAKE_LOCK_TRIES + 1 tries of two opens, an
+                fstat and a move each.
+    @alloc      one descriptor, returned, or closed before anything is
+                raised; one line of words per move.
+    """
+    name = WAKE_LOCK_NAME.format(kind=kind)
+    path = box / name
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    said = []
+    for tries in range(WAKE_LOCK_TRIES + 1):
+        try:
+            fd = os.open(name, flags | os.O_CREAT | os.O_EXCL, WAKE_LOCK_MODE, dir_fd=box_fd)
+        except FileExistsError:
+            try:
+                fd = os.open(name, flags, dir_fd=box_fd)
+            except FileNotFoundError:
+                continue  # gone between the two opens: made on the next try
+            except OSError:
+                fd = None  # a link (ELOOP), another user's file (EACCES), ...: not this user's lock
+        except OSError as err:
+            refuse(f"tc {kind}: could not make {path} ({err.strerror}); nothing made", EXIT_REFUSED)
+        if fd is not None:
+            try:
+                st = os.fstat(fd)
+                if stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.geteuid():
+                    if stat.S_IMODE(st.st_mode) != WAKE_LOCK_MODE:
+                        os.fchmod(fd, WAKE_LOCK_MODE)
+                    os.set_blocking(fd, True)
+                    return fd, said
+            except BaseException:
+                os.close(fd)
+                raise
+            os.close(fd)
+        if tries == WAKE_LOCK_TRIES:
+            break
+        moved = move_aside(box_fd, name, path, kind)
+        if moved is not None:
+            said.append(moved)
+    refuse("\n".join(said + [f"tc {kind}: something else had the name {path} again each time tc moved one aside "
+                             f"({WAKE_LOCK_TRIES} times); nothing made"]), EXIT_REFUSED)
+
+
+def old_wake_lock_held(name, kind):
+    """The switch-over (OLD_WAKE_LOCK_NAME, private mailboxes only): True when mail/.<kind>-<name>.lock, where a tc wait or tc watch started before P3 fix round 1b holds its lock, is held now.
+
+    Opened read only, never through a link, never blocking and never made,
+    and tested with a non-blocking shared flock that is let go at once. A
+    file a holder keeps exclusive refuses it; nothing there, or anything
+    but a regular file, is held by nobody. The caller never asks on a
+    shared mailbox, where the old place is the hole D35 closes. This can
+    go once every session has re-armed (a later task).
+
+    @interacts  opens mail/.<kind>-<name>.lock by its path, fstats it,
+                takes and lets go a shared flock on it, closes it. Writes
+                nothing.
+    @deps       fcntl, os, stat; MAIL, OLD_WAKE_LOCK_NAME.
+    @complexity O(1).
+    @alloc      one descriptor, closed before return.
+    """
+    try:
+        fd = os.open(MAIL / OLD_WAKE_LOCK_NAME.format(kind=kind, name=name), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def refuse_other_listener(name, kind):
+    """D36 (2), on a shared mailbox: refuse (exit 1, C4's words, nothing made) a tc wait or tc watch (`kind`) for `name` run by anyone but the owner of cards/<name>.json, or for a name nobody has joined. Else nothing.
+
+    The card's owner is its lstat's st_uid: under the sticky cards/ only
+    that user can replace it (D20), so the card names who listens.
+
+    @interacts  lstats cards/<name>.json; reads this process's user id and
+                the user database for the words; on a refusal one line to
+                stderr and exit 1.
+    @deps       refuse, user_name; os; CARDS, ONLY_OWNER_LISTENS_WORDS,
+                NOBODY_JOINED_LISTEN_WORDS, EXIT_REFUSED.
+    @complexity O(1).
+    @alloc      the words, on a refusal.
+    """
+    card = CARDS / f"{name}.json"
+    try:
+        owner = os.lstat(card).st_uid
+    except FileNotFoundError:
+        refuse(NOBODY_JOINED_LISTEN_WORDS.format(kind=kind, name=name), EXIT_REFUSED)
+    except OSError as err:
+        refuse(f"tc {kind}: could not look at {card} ({err.strerror}); nothing made", EXIT_REFUSED)
+    if owner != os.geteuid():
+        refuse(ONLY_OWNER_LISTENS_WORDS.format(kind=kind, name=name, owner=user_name(owner)), EXIT_REFUSED)
+
+
+def already_listening(name, kind):
+    """Say another tc wait or tc watch (`kind`) for `name` is running, as tc always has, and exit EXIT_ALREADY_LISTENING (3).
+
+    @interacts  prints one line to stdout; exits 3.
+    @deps       sys; ALREADY_WORDS, EXIT_ALREADY_LISTENING.
+    @complexity O(1).
+    @alloc      none.
+    """
+    print(ALREADY_WORDS[kind].format(name=name))
+    sys.exit(EXIT_ALREADY_LISTENING)
+
+
+def hold_wake_lock(name, kind, share):
+    """Take and hold `name`'s wait or watch lock (`kind`), the one in its owner's own inbox: the open lock file, its flock held. The caller closes it, which lets go. Every refusal and exit 3 comes before anything is held, with nothing left open.
+
+    D35 (1): the lock lives in mail/to-<name>/ at WAKE_LOCK_MODE, opened
+    by name in the inbox's pinned descriptor (pinned_inbox, which refuses
+    a linked inbox or read/, and under a shared mailbox one not its card
+    owner's, exit 1), so no other member can hold it or redirect it; an
+    entry someone else planted at its name is moved aside with words on
+    stderr first (open_wake_lock). D36 (2): on a shared mailbox (`share`)
+    anyone but the owner of the name's card, and any name nobody joined,
+    is refused before anything is made (refuse_other_listener), and the
+    owner's own inbox, when gone, is refused too: only tc join makes one
+    there. A private mailbox keeps its behavior: the inbox and its read/
+    are made when missing. The switch-over (private only): a lock still
+    held at the old place, mail/.<kind>-<name>.lock, by a listener started
+    before round 1b, exits 3 as a held lock does (old_wake_lock_held).
+
+    @interacts  shared: lstats the card (refuse_other_listener); private:
+                opens and flocks the old place for a moment
+                (old_wake_lock_held). Then opens mail/, the inbox and its
+                read/ (pinned_inbox, making the private inbox and read/
+                when missing), opens or makes the lock in the inbox
+                (open_wake_lock, moving a planted entry aside), closes the
+                folders, writes each move's line to stderr, and takes the
+                lock's flock without waiting; held already, one line to
+                stdout and exit 3 (already_listening).
+    @deps       refuse_other_listener, old_wake_lock_held, pinned_inbox,
+                open_wake_lock, already_listening, refuse; fcntl, os, sys;
+                NO_INBOX_LISTEN_WORDS, EXIT_REFUSED.
+    @complexity O(1): a handful of opens and one flock try.
+    @alloc      one open lock file, returned; the inbox's two descriptors
+                for the moment it is opened.
+    """
+    shared = share is not None
+    if shared:
+        refuse_other_listener(name, kind)
+    elif old_wake_lock_held(name, kind):
+        already_listening(name, kind)
+    with pinned_inbox(name, shared, make_inbox=not shared) as inbox:
+        if inbox.box.fd is None:
+            if inbox.box.problem is not None:  # the words a poll said for it: tc could not list, or look at, <inbox>
+                refuse(f"{inbox.box.problem}, so its {kind} lock cannot be made there; nothing made", EXIT_REFUSED)
+            refuse(NO_INBOX_LISTEN_WORDS.format(kind=kind, name=name), EXIT_REFUSED)
+        fd, said = open_wake_lock(inbox.box.fd, inbox.path, kind)
+    lock = open(fd, "rb", buffering=0)
+    try:
+        for line in said:
+            print(line, file=sys.stderr)
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        already_listening(name, kind)
+    except BaseException:
+        lock.close()
+        raise
+    return lock
+
+
 def cmd_wait(args):
     """`tc wait <name>`: hold the name's lock and poll until mail lands.
 
     Exit 0 on mail, EXIT_TIMEOUT at the deadline, EXIT_ALREADY_LISTENING
     when another wait holds the lock.
 
+    P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1) and D36 (2).
+    The lock is mail/to-<name>/.wait.lock, its owner's alone, taken before
+    the first poll (hold_wake_lock); on a shared mailbox only the owner of
+    the name's card may run this, and a name nobody joined is refused,
+    exit 1, nothing made. The lock file is closed on every way out (exit
+    0, 2, 3, a refusal, an exception): the `with` around the polls closes
+    it, and hold_wake_lock closes its own before any exit.
+
     @interacts  checks the name first (C0, exit 6, nothing written); caps
-                its own address space; makes mail/ (make_folder) and holds
-                mail/.wait-<name>.lock (flock) until it exits, opened
-                through open_by_name, which refuses a symlink or a FIFO
-                there (exit 1, D17, D19); reads ROOT/.shared once
-                (make_folder's mailbox_share); each poll opens mail/, the
-                inbox and its read/ once and lists the inbox in its own
+                its own address space; reads ROOT/.shared once
+                (mailbox_share); takes the lock (hold_wake_lock: on a
+                shared mailbox lstats the card and refuses anyone but its
+                owner, exit 1; on a private one tests the old place for a
+                moment and makes mail/, the inbox and read/ when missing;
+                opens or makes the lock in the inbox, moving a planted
+                entry aside with one line to stderr; held already, exit 3)
+                and holds its flock until it exits; each poll opens mail/,
+                the inbox and its read/ once and lists the inbox in its own
                 descriptor (unread, pinned_inbox; P3 fix round 1a, Claude
-                Opus 5.5, unreviewed: D35), and in a private mailbox makes
-                the inbox and read/ on the first poll; a linked inbox or
-                read/, a read/ it cannot look at, or under a shared mailbox
-                one not its card owner's, refuses there (exit 1,
-                refuse_bad_inbox), and so does one it cannot list (exit 1,
-                never a quiet timeout: inbox_messages, SHARED fix round 3);
-                prints one line. Under a shared mailbox it makes no inbox:
-                a name nobody joined polls as no mail (D20).
-    @deps       require_names, make_folder, open_by_name, unread,
-                keepalive_seconds; fcntl, os, resource.
+                Opus 5.5, unreviewed: D35); a linked inbox or read/, a
+                read/ it cannot look at, or under a shared mailbox one not
+                its card owner's, refuses (exit 1, refuse_bad_inbox), and
+                so does one it cannot list (exit 1, never a quiet timeout:
+                inbox_messages, SHARED fix round 3); prints one line.
+    @deps       require_names, mailbox_share, hold_wake_lock, unread,
+                keepalive_seconds; resource, sys, time.
     @complexity O(U + u log u) per poll over U names in the inbox and the
                 u of them that are messages (single digits): three folder
                 opens, one lstat for the card when shared, one listing and
                 one stat per message name; no .shared read per poll. One
                 poll every POLL_SECONDS until the timeout.
-    @alloc      one open lock file for its lifetime, and two descriptors
-                for each poll; flat at about 13 MB.
+    @alloc      one open lock file for its lifetime, closed on every way
+                out, and two descriptors for each poll; flat at about
+                13 MB.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     resource.setrlimit(resource.RLIMIT_AS, (WAIT_MEMORY_CAP_BYTES, WAIT_MEMORY_CAP_BYTES))
-    share = make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
-    lock = open(open_by_name(MAIL / f".wait-{args.name}.lock", os.O_WRONLY | os.O_TRUNC), "w")  # SHARED D17 (Claude Opus 5.5, unreviewed)
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        print(f"ALREADY LISTENING: another `tc wait {args.name}` is running. Not starting a second.")
-        sys.exit(EXIT_ALREADY_LISTENING)
-    timeout = args.timeout if args.timeout is not None else (
-        keepalive_seconds() if args.keepalive else DEFAULT_WAIT_SECONDS)
-    shared = share is not None  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): read once, not per poll
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        msgs = unread(args.name, shared)
-        if msgs:
-            print(f"MAIL: {len(msgs)} unread for {args.name}. Run: tc read {args.name}")
-            return
-        time.sleep(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
-    if args.keepalive:
-        print(f"KEEPALIVE: no mail for {args.name} in {timeout:g}s. This wake refreshed the cache. "
-              f"Re-arm: tc wait {args.name} --keepalive")
-    else:
-        print(f"TIMEOUT: no mail for {args.name} in {timeout:g}s. Re-arm: tc wait {args.name}")
-    sys.exit(EXIT_TIMEOUT)
+    share = mailbox_share()  # P3 fix round 1b (Claude Opus 5.5, unreviewed): read once, not per poll
+    with hold_wake_lock(args.name, "wait", share):  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35, D36; closed on every way out
+        timeout = args.timeout if args.timeout is not None else (
+            keepalive_seconds() if args.keepalive else DEFAULT_WAIT_SECONDS)
+        shared = share is not None  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): read once, not per poll
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            msgs = unread(args.name, shared)
+            if msgs:
+                print(f"MAIL: {len(msgs)} unread for {args.name}. Run: tc read {args.name}")
+                return
+            time.sleep(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+        if args.keepalive:
+            print(f"KEEPALIVE: no mail for {args.name} in {timeout:g}s. This wake refreshed the cache. "
+                  f"Re-arm: tc wait {args.name} --keepalive")
+        else:
+            print(f"TIMEOUT: no mail for {args.name} in {timeout:g}s. Re-arm: tc wait {args.name}")
+        sys.exit(EXIT_TIMEOUT)
 
 
 def cmd_status(args):
@@ -6799,7 +7129,19 @@ def session_counts():
 
 
 def _flock_holders():
-    """Map 'major:minor:inode' to the pid holding an flock on that file."""
+    """Map 'major:minor:inode' (_lock_key) to the pids holding an flock on that file, in /proc/locks order.
+
+    P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1) and (3). Every
+    holder of a file is kept, not only the last one read: a lock held
+    shared has several, and a listener is named only when its holder is
+    the name's owner (listeners). A waiter's line carries "->" before
+    FLOCK, so it is never read as a holder.
+
+    @interacts  reads /proc/locks. Writes nothing.
+    @deps       pathlib.
+    @complexity O(k) over k lines in /proc/locks (tens).
+    @alloc      one dict of short lists, returned.
+    """
     holders = {}
     try:
         lines = pathlib.Path("/proc/locks").read_text().splitlines()
@@ -6808,8 +7150,24 @@ def _flock_holders():
     for line in lines:
         f = line.split()
         if len(f) >= 6 and f[1] == "FLOCK":
-            holders[f[5]] = int(f[4])
+            holders.setdefault(f[5], []).append(int(f[4]))
     return holders
+
+
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1) and (3), whose a
+# lock's holder is.
+def process_uid(pid):
+    """The user id that owns process `pid` (its /proc/<pid>), or None when tc cannot look at it: it ended, or /proc hides other users' processes.
+
+    @interacts  stats /proc/<pid>. Writes nothing.
+    @deps       os.
+    @complexity O(1).
+    @alloc      none.
+    """
+    try:
+        return os.stat(f"/proc/{pid}").st_uid
+    except OSError:
+        return None
 
 
 def _lock_key(st):
@@ -6827,8 +7185,8 @@ def _lock_key(st):
     return f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}"
 
 
-def listeners(kind="wait"):
-    """Each name that ever ran `tc <kind>`, with the pid holding its lock or None.
+def listeners(kind="wait", shared=None):
+    """Each name that ever ran `tc <kind>`, with the pid holding its lock or None, in name order.
 
     Reads /proc/locks instead of trying the lock, so probing never races a
     listener that is starting up. SHARED fix round 1 (Claude Opus 5.5,
@@ -6838,29 +7196,96 @@ def listeners(kind="wait"):
     (CLAUDE.md rule 6) must never follow it, so tc health, tc watch and
     the board report no listener from a link.
 
-    @interacts  reads /proc/locks; lists mail/ and lstats each lock file.
-                Writes nothing.
-    @deps       _flock_holders, _lock_key; os, stat; MAIL.
-    @complexity O(k + n) over k lines in /proc/locks (tens) and n lock
-                files of this kind (a few dozen).
-    @alloc      the holder map and one dict of names, returned.
+    P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1). A name's lock
+    is WAKE_LOCK_NAME in its own inbox: mail/ is opened once and each
+    mail/to-<name>/ by its name in it (pin_folder), and the lock is
+    lstat()ed by name in the inbox's descriptor, never by a path. It counts
+    only when it is a regular file the inbox's owner owns (a file another
+    member planted there is nobody's lock), and a holder is named only
+    when its process is that owner's, or one tc cannot look at
+    (process_uid None: /proc may hide it; only the owner can open a lock
+    at WAKE_LOCK_MODE). So no other member's pid is ever reported as a
+    name's listener. The output keeps its shape (name to pid or None), so
+    tc health, tc watch and the board (C6) read it unchanged. The
+    switch-over (OLD_WAKE_LOCK_NAME), on a private mailbox only (`shared`
+    False; None means look at ROOT/.shared here, and an unreadable one
+    counts as shared): a lock at the old place, mail/.<kind>-<name>.lock,
+    is still listed, and its holder is reported for a name whose new lock
+    nobody holds, so a listener started before round 1b stays named until
+    it re-arms. It can go once every session has re-armed (a later task).
+
+    @interacts  reads ROOT/.shared when `shared` is None (shared_group);
+                reads /proc/locks; opens and lists mail/, opens each inbox
+                by name and lstats its lock in it; stats /proc/<pid> of
+                each holder found; on a private mailbox lstats each old
+                lock in mail/ by name. Writes nothing.
+    @deps       shared_group, open_mail, pin_folder, unpin, _flock_holders,
+                _lock_key, process_uid; os, stat; MAIL, WAKE_LOCK_NAME,
+                OLD_WAKE_LOCK_NAME.
+    @complexity O(k + n log n) over k lines in /proc/locks (tens) and n
+                entries in mail/ (inboxes and locks, a few dozen): one
+                listing, one folder open and one lstat per inbox, one
+                /proc stat per holder, and a sort.
+    @alloc      the holder map, the names of mail/ and one dict of names,
+                returned; one inbox descriptor at a time.
     """
+    if shared is None:  # P3 fix round 1b (Claude Opus 5.5, unreviewed): the switch-over is private only
+        try:
+            shared = shared_group() is not None
+        except ValueError:
+            shared = True
     holders = _flock_holders()
     out = {}
-    if not MAIL.exists():
+    try:  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35, mail/ once, each inbox by name in it
+        mail_fd = open_mail()
+    except OSError:
+        mail_fd = None
+    if mail_fd is None:
         return out
-    prefix = f".{kind}-"
-    for lock in sorted(MAIL.glob(f"{prefix}*.lock")):
-        name = lock.name[len(prefix):-len(".lock")]
+    try:
         try:
-            st = os.lstat(lock)
+            names = sorted(os.listdir(mail_fd))
         except OSError:
-            out[name] = None
-            continue
-        if not stat.S_ISREG(st.st_mode):
-            continue  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): a planted link is nobody's lock
-        out[name] = holders.get(_lock_key(st))
-    return out
+            names = []
+        lock_name = WAKE_LOCK_NAME.format(kind=kind)
+        for entry in names:
+            if not entry.startswith("to-"):
+                continue
+            box = pin_folder(mail_fd, entry, MAIL / entry)
+            if box.fd is None:
+                continue
+            try:
+                st = os.stat(lock_name, dir_fd=box.fd, follow_symlinks=False)
+            except OSError as err:
+                st = None if isinstance(err, FileNotFoundError) else err
+            finally:
+                unpin(box)
+            if isinstance(st, OSError):
+                out[entry[len("to-"):]] = None
+                continue
+            if st is None or not stat.S_ISREG(st.st_mode) or st.st_uid != box.st.st_uid:
+                continue  # nothing there, a link or a FIFO, or a file another user planted: nobody's lock
+            owner = box.st.st_uid
+            out[entry[len("to-"):]] = next((pid for pid in holders.get(_lock_key(st), [])
+                                            if process_uid(pid) in (owner, None)), None)
+        if not shared:  # the switch-over (OLD_WAKE_LOCK_NAME): a listener from before round 1b, private only
+            lead, _, tail = OLD_WAKE_LOCK_NAME.format(kind=kind, name="\0").partition("\0")
+            for entry in names:
+                if not (entry.startswith(lead) and entry.endswith(tail)) or len(entry) <= len(lead) + len(tail):
+                    continue
+                name = entry[len(lead):-len(tail)]
+                try:
+                    st = os.stat(entry, dir_fd=mail_fd, follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                pid = next(iter(holders.get(_lock_key(st), [])), None)
+                if out.get(name) is None and (pid is not None or name not in out):
+                    out[name] = pid
+    finally:
+        os.close(mail_fd)
+    return dict(sorted(out.items()))
 
 
 def _age(seconds):
@@ -7036,7 +7461,13 @@ def health_snapshot(cards=True, gpu=True, branches=True):
     `unread` or `newest_mail_age_s` is null when tc could not see into
     that inbox or its read/ (mailbox_summary, the audit's LOW-2).
 
-    @interacts  reads /proc, mail/, status/, cards/ (only when `cards`)
+    P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1). `listeners`
+    and `watchers` come from each name's lock in its own inbox
+    (listeners), told once whether the mailbox is shared (an unreadable
+    .shared counts as shared), so the switch-over's old place is read on
+    a private mailbox only.
+
+    @interacts  reads /proc, mail/ and each inbox in it, status/, cards/ (only when `cards`)
                 and ROOT/.shared; lists outbox/ and mail/.origins/ (only
                 when `branches`); may run nvidia-smi (machine_stats, only
                 when `gpu`). Writes nothing.
@@ -7056,8 +7487,9 @@ def health_snapshot(cards=True, gpu=True, branches=True):
         group, problem = shared_group(), None
     except ValueError as err:
         group, problem = None, str(err)
+    shared = group is not None or problem is not None  # P3 fix round 1b (Claude Opus 5.5, unreviewed): unreadable counts as shared
     snap = {"time": now_iso(), "machine": machine_stats(gpu), "sessions": session_counts(),
-            "listeners": listeners("wait"), "watchers": listeners("watch"),
+            "listeners": listeners("wait", shared), "watchers": listeners("watch", shared),
             "mail": mailbox_summary()}
     if cards:  # SSH S3 (Claude Opus 5.5, unreviewed): D16, never for the gate
         snap["cards"] = cards_summary()
@@ -7171,62 +7603,69 @@ def _breaches(m, args, strikes):
 def cmd_watch(args):
     """`tc watch <name>`: heartbeat or alert that wakes the session <name>.
 
+    P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1) and D36 (2), as
+    tc wait. The lock is mail/to-<name>/.watch.lock, its owner's alone
+    (hold_wake_lock): on a shared mailbox only the owner of the name's
+    card may run this, and a name nobody joined is refused, exit 1,
+    nothing made; on a private one the inbox and its read/ are made when
+    missing, as a wait makes them. The lock file is closed on every way
+    out (exit 0, 3, 5, a refusal, an exception).
+
     @interacts  checks the name first (C0, exit 6, nothing written); caps
-                its own address space; reads ROOT/.shared and makes mail/
-                (make_folder) and holds mail/.watch-<name>.lock (flock)
-                until it exits, opened through open_by_name, which refuses
-                a symlink or a FIFO there (exit 1, D17, D19); reads /proc
-                and lstats each wait lock every poll (see machine_stats,
+                its own address space; reads ROOT/.shared once
+                (mailbox_share); takes the lock (hold_wake_lock, as tc
+                wait's) and holds its flock until it exits; reads /proc
+                and each name's wait lock every poll (see machine_stats,
                 listeners) and runs nvidia-smi; prints a HEARTBEAT or ALERT
                 line.
-    @deps       require_names, make_folder, open_by_name, machine_stats,
-                listeners, session_counts, _breaches; fcntl, os, resource.
-    @complexity O(k + n) per poll: k lines in /proc/locks and n wait lock
-                files (listeners), plus /proc/meminfo and one nvidia-smi
-                run where it exists (machine_stats); no cards. O(p) once per
-                heartbeat over p processes (session_counts). One poll every
-                args.poll seconds until the heartbeat.
-    @alloc      one open lock file for its lifetime; the peaks, a few floats.
+    @deps       require_names, mailbox_share, hold_wake_lock,
+                machine_stats, listeners, session_counts, _breaches;
+                resource, sys, time.
+    @complexity O(k + n log n) per poll: k lines in /proc/locks and n
+                entries in mail/ (listeners: one folder open and one lstat
+                per inbox), plus /proc/meminfo and one nvidia-smi run where
+                it exists (machine_stats); no cards and no .shared read per
+                poll. O(p) once per heartbeat over p processes
+                (session_counts). One poll every args.poll seconds until
+                the heartbeat.
+    @alloc      one open lock file for its lifetime, closed on every way
+                out; the peaks, a few floats.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     resource.setrlimit(resource.RLIMIT_AS, (WAIT_MEMORY_CAP_BYTES, WAIT_MEMORY_CAP_BYTES))
-    make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
-    lock = open(open_by_name(MAIL / f".watch-{args.name}.lock", os.O_WRONLY | os.O_TRUNC), "w")  # SHARED D17 (Claude Opus 5.5, unreviewed)
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        print(f"ALREADY WATCHING: another `tc watch {args.name}` is running. Not starting a second.")
-        sys.exit(EXIT_ALREADY_LISTENING)
-    tracked = [n for n in (args.names.split(",") if args.names else []) if n]
-    alive_at_start = {n for n, pid in listeners("wait").items() if n in tracked and pid}
-    peak_load, low_mem, peak_gpu, strikes = 0.0, 100.0, None, 0
-    deadline = time.monotonic() + args.heartbeat
-    while True:
-        m = machine_stats()
-        over = m["load1"] > args.load_ratio * m["cores"]
-        strikes = strikes + 1 if over else 0
-        peak_load = max(peak_load, m["load1"])
-        low_mem = min(low_mem, m["mem_avail_pct"])
-        for g in m["gpus"] or []:
-            peak_gpu = g["temp_c"] if peak_gpu is None else max(peak_gpu, g["temp_c"])
-        problems = _breaches(m, args, strikes)
-        now_alive = {n for n, pid in listeners("wait").items() if pid}
-        problems += [f"LISTENER DOWN: {n}" for n in sorted(alive_at_start - now_alive)]
-        if problems:
-            print(f"ALERT {now_iso()}: " + "; ".join(problems))
-            print(f"  now: load {m['load1']} / {m['cores']}, mem free {m['mem_avail_pct']}%, {_gpu_text(m['gpus'])}")
-            print(f"Re-arm after handling: tc watch {args.name}")
-            sys.exit(EXIT_ALERT)
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(min(args.poll, max(0.0, deadline - time.monotonic())))
-    s = session_counts()
-    gpu = "GPU none" if peak_gpu is None else f"GPU peak {peak_gpu}C"
-    up = sorted(n for n, pid in listeners("wait").items() if pid)
-    print(f"HEARTBEAT {now_iso()}: load {m['load1']} (peak {peak_load}) / {m['cores']}, "
-          f"mem free {m['mem_avail_pct']}% (low {low_mem}%), {gpu}, "
-          f"{s['claude']} Claude Code, {s['codex']} Codex, listening: {', '.join(up) or 'none'}")
-    print(f"Re-arm: tc watch {args.name}")
+    share = mailbox_share()  # P3 fix round 1b (Claude Opus 5.5, unreviewed): read once, not per poll
+    shared = share is not None
+    with hold_wake_lock(args.name, "watch", share):  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35, D36; closed on every way out
+        tracked = [n for n in (args.names.split(",") if args.names else []) if n]
+        alive_at_start = {n for n, pid in listeners("wait", shared).items() if n in tracked and pid}
+        peak_load, low_mem, peak_gpu, strikes = 0.0, 100.0, None, 0
+        deadline = time.monotonic() + args.heartbeat
+        while True:
+            m = machine_stats()
+            over = m["load1"] > args.load_ratio * m["cores"]
+            strikes = strikes + 1 if over else 0
+            peak_load = max(peak_load, m["load1"])
+            low_mem = min(low_mem, m["mem_avail_pct"])
+            for g in m["gpus"] or []:
+                peak_gpu = g["temp_c"] if peak_gpu is None else max(peak_gpu, g["temp_c"])
+            problems = _breaches(m, args, strikes)
+            now_alive = {n for n, pid in listeners("wait", shared).items() if pid}
+            problems += [f"LISTENER DOWN: {n}" for n in sorted(alive_at_start - now_alive)]
+            if problems:
+                print(f"ALERT {now_iso()}: " + "; ".join(problems))
+                print(f"  now: load {m['load1']} / {m['cores']}, mem free {m['mem_avail_pct']}%, {_gpu_text(m['gpus'])}")
+                print(f"Re-arm after handling: tc watch {args.name}")
+                sys.exit(EXIT_ALERT)
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(min(args.poll, max(0.0, deadline - time.monotonic())))
+        s = session_counts()
+        gpu = "GPU none" if peak_gpu is None else f"GPU peak {peak_gpu}C"
+        up = sorted(n for n, pid in listeners("wait", shared).items() if pid)
+        print(f"HEARTBEAT {now_iso()}: load {m['load1']} (peak {peak_load}) / {m['cores']}, "
+              f"mem free {m['mem_avail_pct']}% (low {low_mem}%), {gpu}, "
+              f"{s['claude']} Claude Code, {s['codex']} Codex, listening: {', '.join(up) or 'none'}")
+        print(f"Re-arm: tc watch {args.name}")
 
 
 # CARDS R6 (Claude Opus 5.5, unreviewed): the one parser class (D12).

@@ -253,9 +253,6 @@ TARGET_TEXT = "a file outside the mailbox; tc must not touch it\n"
 # How long a wait or watch may run. A refused one exits at once; this only
 # bounds a broken one, under the harness's DEFAULT_TC_TIMEOUT_SECONDS.
 LISTEN_SECONDS = "3"
-# Thresholds no real machine reaches, so a watch that does start can only
-# heartbeat, never alert.
-QUIET = ["--load-ratio", "100000", "--mem-min-pct", "0", "--gpu-max-c", "100000"]
 # The thread a codex card carries in these tests.
 THREAD = "t1"
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19.
@@ -532,6 +529,11 @@ HARD_LINK_WHY = ("a file with another name too (a hard link), which tc never cha
                  "every name")
 # A file mode init never leaves: owner read and write only.
 OWNER_FILE_MODE = 0o600
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1). The wait and
+# watch locks' names in their owner's own inbox, and their mode, the
+# owner's alone, written here rather than read from tc.
+WAKE_LOCK_NAMES = (".wait.lock", ".watch.lock")
+WAKE_LOCK_MODE = 0o600
 # The swap test's layout under the root's temp folder: ROOT's parent and
 # ROOT, and the two mirrors of them, one a link's target and one a real
 # folder put in place.
@@ -728,9 +730,11 @@ def tree(path, under=SHARED_FOLDER_NAMES):
 def shared_as(path, kind, gid):
     """The (kind, mode, gid) C4, D17 and D20 want for the `kind` entry at relative `path`, shared with `gid`.
 
-    A file directly in mail/ (mail/.seq, a lock, the ring marker):
-    SHARED_WRITABLE_FILE_MODE; any other file (a message, a card, a
-    status): SHARED_OWNED_FILE_MODE (D20). A folder: SHARED_TOP_FOLDER_MODE
+    A file directly in mail/ (mail/.seq, an inbox lock, the ring marker):
+    SHARED_WRITABLE_FILE_MODE; a wait or watch lock in an inbox:
+    WAKE_LOCK_MODE (D35, P3 fix round 1b, Claude Opus 5.5, unreviewed);
+    any other file (a message, a card, a status): SHARED_OWNED_FILE_MODE
+    (D20). A folder: SHARED_TOP_FOLDER_MODE
     (sticky, D17) when it is one of SHARED_FOLDER_NAMES itself,
     SHARED_INBOX_MODE for mail/to-<name> and its read/ (D20), else
     SHARED_FOLDER_MODE.
@@ -738,12 +742,14 @@ def shared_as(path, kind, gid):
     @interacts  none.
     @deps       SHARED_FOLDER_NAMES, SHARED_TOP_FOLDER_MODE, SHARED_INBOX_MODE,
                 SHARED_FOLDER_MODE, SHARED_WRITABLE_FILE_MODE,
-                SHARED_OWNED_FILE_MODE.
+                SHARED_OWNED_FILE_MODE, WAKE_LOCK_NAMES, WAKE_LOCK_MODE.
     @complexity O(1).
     @alloc      the split path and one tuple, returned.
     """
     parts = path.split("/")
     if kind != "folder":
+        if len(parts) == 3 and parts[0] == "mail" and parts[1].startswith("to-") and parts[2] in WAKE_LOCK_NAMES:
+            return (kind, WAKE_LOCK_MODE, gid)  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1)
         writable = len(parts) == 2 and parts[0] == "mail"
         return (kind, SHARED_WRITABLE_FILE_MODE if writable else SHARED_OWNED_FILE_MODE, gid)
     if path in SHARED_FOLDER_NAMES:
@@ -860,13 +866,16 @@ class SharedTest(UmaskTestCase):
         other user has to make one in a ROOT the first user owns. The
         inbox and its read/ then come from the first join (D20), the
         message from the first send, the status file from the first
-        status, and the wait lock from a wait that times out at once.
+        status, and the wait lock from a wait that times out at once (P3
+        fix round 1b, Claude Opus 5.5, unreviewed: b's own wait, before
+        the send, since D36 (2) refuses a wait on a name nobody joined, and
+        its lock is in b's inbox at WAKE_LOCK_MODE, D35 (1)).
         Must reject an init that makes no top folder (the second user's
         first command would need write access to ROOT), a later folder
         without setgid (0775), or a top folder left in the primary group
         (the supplementary run), and any file at 0644.
 
-        @interacts  per group: init, a join, a send, a status, a wait.
+        @interacts  per group: init, a join, a wait, a send, a status.
         @deps       _root.TcRoot.tc, groups_to_test, tree, shared_as.
         @complexity O(1) per group.
         @alloc      one TcRoot per group.
@@ -877,16 +886,16 @@ class SharedTest(UmaskTestCase):
                 self.assertEqual(code, 0, f"tc init exited {code}: {err}")
                 self.assertEqual(tree(root.path), {top: ("folder", SHARED_TOP_FOLDER_MODE, gid) for top in SHARED_FOLDER_NAMES},
                                  "init did not make the four top folders (D19)")
-                runs = [root.tc("join", "b", env={"CLAUDECODE": "1"}),
-                        root.tc("send", "--from", "a", "--to", "b", "hi"),
+                joined = root.tc("join", "b", env={"CLAUDECODE": "1"})
+                waited = root.tc("wait", "b", "--timeout", "0")
+                runs = [joined, root.tc("send", "--from", "a", "--to", "b", "hi"),
                         root.tc("status", "b", "busy")]
-                waited = root.tc("wait", "c", "--timeout", "0")
                 made = tree(root.path)
                 for run in runs:
                     self.assertEqual(run[0], 0, run[2])
                 self.assertEqual(waited[0], EXIT_TIMEOUT, waited[2])
                 self.assertEqual(sorted(made), ["cards", "cards/b.json", "mail", "mail/.box-b.lock",
-                                                "mail/.seq", "mail/.wait-c.lock", "mail/to-b",
+                                                "mail/.seq", "mail/to-b", "mail/to-b/.wait.lock",
                                                 "mail/to-b/000001-from-a.md", "mail/to-b/read", "outbox",
                                                 "status", "status/b.md"])
                 self.assertEqual(made, {p: shared_as(p, k, gid) for p, (k, m, g) in made.items()})
@@ -1002,25 +1011,26 @@ class NoPlantedLinksTest(UmaskTestCase):
                     "outbox/sent": (SHARED_FOLDER_MODE, gid)})
 
     def test_a_link_at_a_file_tc_opens_by_name_is_refused_and_its_target_unchanged(self):
-        """A symlink at a wait, watch or inbox lock, mail/.seq or status/x.md: exit 1, the words, the target as it was, no mail.
+        """A symlink at an inbox lock, mail/.seq or status/x.md: exit 1, the words, the target as it was, no mail.
 
         One fresh root per case. The mail/.seq case also runs with a
         dangling link, whose target must still not exist after. Showing
         every status with a link among them prints the rest, names the
         link and never prints its target. Must reject an open that follows
         the link (the target would be truncated or written, or made).
+        P3 fix round 1b (Claude Opus 5.5, unreviewed): the wait and watch
+        locks live in their owner's inbox since D35 (1), where a link at
+        a lock's name is moved aside, never followed (tests/test_wake_files.py,
+        WakeLockPlaceTest), so their two cases left this test.
 
         @interacts  per case: makes folders, a message file and a link by
                     hand, then one tc run.
         @deps       _root.TcRoot.tc, plant, landed.
-        @complexity O(1) per case, seven cases.
+        @complexity O(1) per case, five cases.
         @alloc      one TcRoot per case.
         """
         send = ["send", "--from", "a", "--to", "x", "hi"]
         cases = [
-            ("wait lock", "mail/.wait-x.lock", ["wait", "x", "--timeout", LISTEN_SECONDS], True),
-            ("watch lock", "mail/.watch-x.lock",
-             ["watch", "x", "--heartbeat", LISTEN_SECONDS, "--poll", "1", *QUIET], True),
             ("inbox lock, send", "mail/.box-x.lock", send, True),
             ("inbox lock, read", "mail/.box-x.lock", ["read", "x"], True),
             ("mail/.seq", "mail/.seq", send, True),
@@ -1255,26 +1265,27 @@ class RegularFilesOnlyTest(UmaskTestCase):
         self.assertEqual([p.name for p, why in unshown], ["000099-from-z.md"])
 
     def test_a_fifo_at_a_lock_seq_or_status_is_refused_within_2_s(self):
-        """A FIFO at the wait, watch or inbox lock, mail/.seq, status/x.md or a codex name's ring marker: exit 1 within FIFO_REFUSE_SECONDS, the words, the FIFO left, no mail.
+        """A FIFO at the inbox lock, mail/.seq, status/x.md or a codex name's ring marker: exit 1 within FIFO_REFUSE_SECONDS, the words, the FIFO left, no mail.
 
         One fresh root per case; the ring marker case joins x as codex
-        first. Must reject an open without O_NONBLOCK (the wait, watch,
-        inbox lock and status opens block forever), one without the
+        first. Must reject an open without O_NONBLOCK (the inbox lock and
+        status opens block forever), one without the
         S_ISREG check (mail/.seq opens, then the send fails with a
         traceback, not words), and a marker check that lets a FIFO
-        through (the send lands, then tries to write the FIFO).
+        through (the send lands, then tries to write the FIFO). P3 fix
+        round 1b (Claude Opus 5.5, unreviewed): a FIFO at a wait or watch
+        lock's name, in its owner's inbox since D35 (1), is moved aside
+        without blocking (tests/test_wake_files.py, WakeLockPlaceTest), so
+        those two cases left this test.
 
         @interacts  per case: one FIFO made by hand (after a codex join for
                     the marker), then one tc run.
         @deps       _root.TcRoot.tc, landed.
-        @complexity O(1) per case, six cases.
+        @complexity O(1) per case, four cases.
         @alloc      one TcRoot per case.
         """
         send = ["send", "--from", "a", "--to", "x", "hi"]
         cases = [
-            ("wait lock", "mail/.wait-x.lock", ["wait", "x", "--timeout", LISTEN_SECONDS]),
-            ("watch lock", "mail/.watch-x.lock",
-             ["watch", "x", "--heartbeat", LISTEN_SECONDS, "--poll", "1", *QUIET]),
             ("inbox lock", "mail/.box-x.lock", send),
             ("mail/.seq", "mail/.seq", send),
             ("status/x.md, post", "status/x.md", ["status", "x", "busy"]),
@@ -1300,14 +1311,18 @@ class RegularFilesOnlyTest(UmaskTestCase):
                 self.assertEqual(mail, [], f"{label}: mail landed")
 
     def test_a_linked_lock_is_never_reported_as_a_listener(self):
-        """In process: mail/.wait-b.lock a link to a's lock, which this process holds: listeners() names a with this pid, and never b.
+        """In process: mail/to-b/.wait.lock a link to a's lock, which this process holds: listeners() names a with this pid, and never b.
 
         Must reject a lock key read through the link (b would show a's
-        holder, while b's own tc wait is refused).
+        holder, while b's own tc wait is refused). P3 fix round 1b
+        (Claude Opus 5.5, unreviewed): D35 (1), the locks in their owners'
+        inboxes; and on this private mailbox the switch-over's old place
+        too, mail/.wait-c.lock a link to a's lock, which is never followed
+        either.
 
-        @interacts  loads tc in process; makes mail/, one lock file and one
-                    link by hand; holds an flock on the lock while
-                    listeners() reads /proc/locks.
+        @interacts  loads tc in process; makes mail/, two inboxes, one lock
+                    file and two links by hand; holds an flock on the lock
+                    while listeners() reads /proc/locks.
         @deps       load_tc; fcntl; tc.listeners.
         @complexity O(1).
         @alloc      one TcRoot, one module and one open file.
@@ -1315,10 +1330,12 @@ class RegularFilesOnlyTest(UmaskTestCase):
         with _root.TcRoot() as root:
             tc = load_tc(root)
             mail = root.path / "mail"
-            mail.mkdir()
-            lock = mail / ".wait-a.lock"
+            for name in ("a", "b"):
+                (mail / f"to-{name}").mkdir(parents=True)
+            lock = mail / "to-a" / ".wait.lock"
             lock.write_text("")
-            (mail / ".wait-b.lock").symlink_to(lock)
+            (mail / "to-b" / ".wait.lock").symlink_to(lock)
+            (mail / ".wait-c.lock").symlink_to(lock)
             with open(lock, "w") as held:
                 fcntl.flock(held, fcntl.LOCK_EX)
                 seen = tc.listeners("wait")

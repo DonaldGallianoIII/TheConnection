@@ -758,7 +758,7 @@ class MailboxTest(unittest.TestCase):
             self.assertTrue(any(line.startswith("TIMEOUT:") for line in lines(out)),
                             f"a wait with no mail printed no TIMEOUT: line{ran}")
 
-            lock = root.path / "mail" / f".wait-{D}.lock"
+            lock = root.path / "mail" / f"to-{D}" / ".wait.lock"  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35
             with root.listener(D, LISTENER_TIMEOUT_SECONDS) as first:
                 code, out, err, ran = run(root, "wait", D, "--timeout", str(WAIT_TIMEOUT_SECONDS))
                 self.assertEqual(code, EXIT_ALREADY_LISTENING,

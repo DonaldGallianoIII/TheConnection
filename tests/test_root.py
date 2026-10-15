@@ -237,7 +237,7 @@ class RootTest(unittest.TestCase):
     """
 
     def test_listener_holds_its_lock_at_yield_and_health_names_it(self):
-        """At yield the pid holds mail/.wait-b.lock, and tc health --json names it.
+        """At yield the pid holds mail/to-b/.wait.lock, and tc health --json names it.
 
         Must reject a harness that yields before the lock is held: the
         first line inside the context reads /proc/locks before anything
@@ -249,7 +249,7 @@ class RootTest(unittest.TestCase):
         @alloc      one TcRoot, removed on exit.
         """
         with _root.TcRoot() as root:
-            lock = root.path / "mail" / f".wait-{NAME}.lock"
+            lock = root.path / "mail" / f"to-{NAME}" / ".wait.lock"  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35
             with root.listener(NAME, LISTENER_TIMEOUT_SECONDS) as pid:
                 holders = held_by(lock)
                 self.assertIn(pid, holders,
@@ -270,7 +270,7 @@ class RootTest(unittest.TestCase):
         @alloc      one TcRoot, removed on exit.
         """
         with _root.TcRoot() as root:
-            lock = root.path / "mail" / f".wait-{NAME}.lock"
+            lock = root.path / "mail" / f"to-{NAME}" / ".wait.lock"  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35
             with root.listener(NAME, LISTENER_TIMEOUT_SECONDS) as pid:
                 self.assertTrue(in_proc(pid), f"pid {pid} not in /proc while its context is open")
             self.assertFalse(in_proc(pid),
@@ -764,7 +764,7 @@ class RootTest(unittest.TestCase):
 
         counted = types.SimpleNamespace(monotonic=time.monotonic, sleep=sleeps.append)
         with _root.TcRoot() as root:
-            lock = root.path / "mail" / f".wait-{NAME}.lock"
+            lock = root.path / "mail" / f"to-{NAME}" / ".wait.lock"  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35
             with mock.patch.object(_root, "time", counted), \
                     mock.patch.object(_root, "flock_holders", holders_once_up):
                 with root.listener(NAME, LISTENER_TIMEOUT_SECONDS) as pid:
