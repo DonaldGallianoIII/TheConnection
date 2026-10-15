@@ -37,8 +37,11 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             an inbox is there (D21), or to an inbox its card's owner does
             not own, is refused, exit 1 (D20). `init` reads the group
             database, makes a missing ROOT 0755 and refuses a ROOT its
-            group or anyone may write that is not sticky (D21, SHARED fix
-            round 2), makes the four when missing (D19), sets the group
+            group or anyone may write (D21, SHARED fix rounds 2 and 3),
+            and any folder from ROOT up to /, as given and by its real
+            path, that root or the user running init does not own, or
+            that its group or anyone may write without the sticky bit
+            (D23), makes the four when missing (D19), sets the group
             and mode of every folder and file under them that is not right
             yet, then writes .shared at 0644, owner-write only (D21),
             unless it already names the group; then its owner's rerun
@@ -87,9 +90,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             it grows with the history). Each watch poll O(k + n) plus one
             nvidia-smi run where it exists; it reads no cards. O(p) once per
             heartbeat. join O(1), or O(u) for a codex card's unread count;
-            card O(u) for its unread count; cards O(c). init O(f) over f
+            card O(u) for its unread count; cards O(c). init O(f + d) over f
             folders and files under the shared folders (hundreds to
-            thousands; read/ is the history). .shared is read once in main
+            thousands; read/ is the history) and d folders from ROOT up to
+            / (about ten, walked twice). .shared is read once in main
             (set_shared_umask), then once per step that depends on it
             (mailbox_share, and each make_folder call, once per call):
             log and cards 1 in all; peek, wait (never per poll), status,
@@ -268,6 +272,11 @@ ROOT_MODE = 0o755
 # The umask init makes ROOT under, so the missing parents come out
 # ROOT_MODE too, whatever umask the user logged in with.
 ROOT_UMASK = 0o022
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): D21 and D23, nobody
+# can swap ROOT. The superuser's user id. Init accepts a folder on the way
+# from ROOT to / only when it or the user running init owns it, as ssh's
+# StrictModes accepts an authorized_keys path.
+SUPERUSER_UID = 0
 # The folders a shared mailbox shares, by name under ROOT (C4). outbox/ is
 # the ssh route's (C3); init reaches it whenever it is there.
 SHARED_FOLDER_NAMES = ("mail", "status", "cards", "outbox")
@@ -347,6 +356,13 @@ BY_HAND_NAME = "by-hand-{k}-{name}"
 # tried. An honest mailbox never collides; 100 rides past a counter set
 # back over a long run of one sender's mail to one recipient.
 PUBLISH_MAX_TRIES = 100
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-3.
+# What os.link fails with on a filesystem that has no hard links (vfat,
+# exFAT, some FUSE mounts): EPERM from Linux's vfs_link, or "not
+# supported". The .tmp is the sender's own new file, so EPERM's usual
+# other cause (another user's file under fs.protected_hardlinks) does not
+# apply here.
+NO_HARD_LINK_ERRNOS = (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP)
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -902,6 +918,13 @@ def check_inbox(name, shared):
     control, and tc never guesses which owner is right. With no card
     there, nothing is compared.
 
+    SHARED fix round 3 (Claude Opus 5.5, unreviewed): an inbox or read/
+    lstat cannot reach for any reason but not being there (an inbox its
+    owner left without search for the group, say) is refused with words
+    naming it and, for read/, the inbox's owner, exit 1, never a
+    traceback, so another member's send, read, peek or wait for that name
+    says why it stopped.
+
     @interacts  lstats mail/to-<name>, its read/ and, when `shared` and the
                 inbox is there, cards/<name>.json; reads the user database
                 for the words; on a bad one, one line to stderr and exit 1.
@@ -916,6 +939,10 @@ def check_inbox(name, shared):
             st = os.lstat(path)
         except FileNotFoundError:
             break
+        except OSError as err:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): words, never a traceback
+            whose = f" {box} belongs to {user_name(found[0].st_uid)}." if found else ""
+            refuse(f"tc: could not look at {path} ({err.strerror}); nothing was read or written there.{whose}",
+                   EXIT_REFUSED)
         if stat.S_ISLNK(st.st_mode):
             refuse(f"tc: {path} is a symlink, not a real folder; tc never follows it, so nothing "
                    f"was read or written there", EXIT_REFUSED)
@@ -1055,6 +1082,90 @@ def settle_marker_mode(marker):
                f"run tc init again, or set it by hand", EXIT_REFUSED)
 
 
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): D21 and D23, nobody
+# can swap ROOT (the audit's MEDIUM-2 and LOW-1).
+def swap_words(path, st, is_root):
+    """Words when the folder or link at `path` (its lstat result `st`) would let a member swap ROOT, else None.
+
+    Safe: root (SUPERUSER_UID) or this user owns it, and neither its group
+    nor anyone else may write it. Above ROOT, a folder anyone may write is
+    safe when it is sticky (/tmp): there only an entry's owner may rename
+    the entry. ROOT itself (`is_root`) has no sticky exception (C4, the
+    audit's LOW-1): in a writable ROOT a member could make .shared or
+    mail/ before the first init. A link on the path as given is judged by
+    its owner alone: a link's own mode means nothing, and where it leads
+    is on the real path's walk. The words name the entry, its owner and
+    its mode.
+
+    @interacts  reads this process's user id and the user database.
+                Writes nothing.
+    @deps       user_name; os, stat; ROOT, SUPERUSER_UID.
+    @complexity O(1).
+    @alloc      one string or none, returned.
+    """
+    mode = stat.S_IMODE(st.st_mode)
+    owner = user_name(st.st_uid)
+    if st.st_uid not in (SUPERUSER_UID, os.geteuid()):
+        return (f"tc init: {path} belongs to {owner} (mode {mode:04o}), who is neither root nor you, so "
+                f"{owner} could put a ROOT of their own, with their own .shared, in place of {ROOT} and "
+                f"change the group. Keep the mailbox under folders only root or you own. Nothing changed.")
+    if stat.S_ISLNK(st.st_mode) or not mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return None
+    if is_root:
+        return (f"tc init: {ROOT} is {mode:04o}: its group or anyone may write it, so any member could "
+                f"rename .shared or mail/ in it, or make them before init, and change the group. Its owner, "
+                f"{owner}, runs chmod g-w,o-w {ROOT} first. Nothing changed.")
+    if mode & stat.S_ISVTX:
+        return None
+    return (f"tc init: {path}, on the way to {ROOT}, is {mode:04o} and owned by {owner}: its group or "
+            f"anyone may write it and it is not sticky, so any member could rename the entry in it that "
+            f"leads to {ROOT} and put their own, with their own .shared, in its place. Its owner, {owner}, "
+            f"runs chmod g-w,o-w {path} first, or the mailbox moves. Nothing changed.")
+
+
+def root_walk_problem():
+    """Words naming the first entry from ROOT up to / that would let a member swap ROOT (swap_words), or None.
+
+    C4's "Nobody can swap ROOT" (D21, D23); ssh's StrictModes test for
+    authorized_keys paths is the model. Two walks, each from ROOT up to
+    /: the path as given (made absolute, never normalized, so .. and each
+    link resolve as the kernel resolves them) and its real path
+    (os.path.realpath). So a link on the way is checked, and so is every
+    folder it leads through. Each entry is lstat()ed, never followed, and
+    looked at once. One that is not there yet is skipped: init makes it
+    at ROOT_MODE and walks again. One lstat cannot reach is refused with
+    words on search access.
+
+    @interacts  lstats each entry on both walks (os.path.realpath reads
+                the links); reads this process's user id and the user
+                database for the words. Writes nothing.
+    @deps       swap_words; os, pathlib; ROOT.
+    @complexity O(d) over d entries from ROOT up to / on the two walks
+                (about ten each).
+    @alloc      the two lists of paths and the set of those seen, freed on
+                return; one string or none, returned.
+    """
+    given = ROOT.absolute()
+    real = pathlib.Path(os.path.realpath(given))
+    seen = set()
+    for walk in ([given, *given.parents], [real, *real.parents]):
+        for at, path in enumerate(walk):
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                st = os.lstat(path)
+            except FileNotFoundError:
+                continue
+            except OSError as err:
+                return (f"tc init: cannot look at {path} ({err.strerror}); this user needs search (x) access "
+                        f"on every folder from / down to {ROOT}. Nothing changed.")
+            words = swap_words(path, st, at == 0)
+            if words is not None:
+                return words
+    return None
+
+
 # SHARED H1 (Claude Opus 5.5, unreviewed): tc init --shared (C4, D19, D20).
 def cmd_init(args):
     """`tc init --shared --group <g>`: share this mailbox with group g (C4).
@@ -1099,10 +1210,9 @@ def cmd_init(args):
     MEDIUM-2. A missing ROOT, and any missing folder above it, is made
     ROOT_MODE (0755) under ROOT_UMASK, before the shared umask is set, so
     init never makes ROOT group-writable. A ROOT its group or anyone may
-    write, without the sticky bit, is refused before anything changes
-    (exit 1): any member could rename .shared or mail/ in it. The words
-    tell its owner to run `chmod g-w,o-w <ROOT>` first. A sticky ROOT
-    passes, since there only an entry's owner may rename it. Entries already right are left
+    write is refused before anything changes (exit 1): any member could
+    rename .shared or mail/ in it. The words tell its owner to run
+    `chmod g-w,o-w <ROOT>` first. Entries already right are left
     alone (share_entry), so a rerun on a live mailbox is clean, and a top
     folder whose own change failed is still walked (shared_entries). The
     skipped lines print before anything else is said. When .shared
@@ -1110,13 +1220,29 @@ def cmd_init(args):
     words say the mailbox's real state: still private, still shared with
     the group .shared names, or .shared still unreadable.
 
+    SHARED fix round 3 (Claude Opus 5.5, unreviewed): D21, D23 and the
+    audit's MEDIUM-2 and LOW-1. Nobody can swap ROOT. After the .shared
+    checks and before anything is made, init walks every folder from ROOT
+    up to /, as given and by its real path (root_walk_problem), and
+    refuses, exit 1, nothing changed, with words naming the folder, its
+    owner and its mode, one that root or this user does not own, or that
+    its group or anyone may write without the sticky bit: a member could
+    rename ROOT, or a folder on the way, and put a ROOT with their own
+    .shared in its place. ROOT itself gets no sticky exception (a sticky
+    ROOT the group may write is refused too: a member could make .shared
+    or mail/ in it before the first init). Init walks again once ROOT is
+    made, so a ROOT another user made first is refused as well. So
+    another member's init on a ROOT the init user owns is refused at
+    ROOT, unless one of the .shared refusals above came first.
+
     @interacts  reads the group database and this process's groups;
                 reads ROOT/.shared (shared_group) and, unless it names g,
                 lstats it for its owner and reads the user database
-                (marker_other_owner); makes a missing ROOT and its missing
-                parents at ROOT_MODE under ROOT_UMASK, stats ROOT and
-                refuses one its group or anyone may write that is not
-                sticky (reading the user database for its owner); sets
+                (marker_other_owner); lstats every folder from ROOT up to
+                / on the path as given and its real path, and reads the
+                user database for the words (root_walk_problem), before
+                and after it makes a missing ROOT and its missing parents
+                at ROOT_MODE under ROOT_UMASK; sets
                 its umask (SHARED_UMASK); makes each missing top folder;
                 walks the four folders and opens, fstats and changes each
                 entry (shared_entries); when .shared names g, opens it and
@@ -1127,13 +1253,14 @@ def cmd_init(args):
                 rename fails. Prints one line, plus one stderr line per
                 skipped entry, first.
     @deps       shared_entries, shared_group, marker_other_owner,
-                settle_marker_mode, write_new_file, refuse, printable,
-                user_name; grp, os, stat, sys; SHARED_FOLDER_NAMES,
+                root_walk_problem, settle_marker_mode, write_new_file,
+                refuse, printable; grp, os, sys; SHARED_FOLDER_NAMES,
                 SHARED_MARKER_NAME, SHARED_MARKER_MODE, INIT_USER_WORDS,
                 SHARED_UMASK, ROOT_MODE, ROOT_UMASK.
-    @complexity O(f) over f folders and files under the four folders: the
-                inboxes and every read/ (hundreds to thousands, growing
-                with the history).
+    @complexity O(f + d) over f folders and files under the four folders:
+                the inboxes and every read/ (hundreds to thousands, growing
+                with the history), and d folders from ROOT up to / (about
+                ten, walked twice).
     @alloc      one folder's listing at a time (os.walk) and one skipped
                 line per entry it could not change, freed on exit; the
                 four top folders when missing and the .shared file, kept.
@@ -1158,20 +1285,20 @@ def cmd_init(args):
     if owner is not None and isinstance(current, str):
         refuse(f"tc init: may not change {marker}; the mailbox stays shared with group "
                f"{printable(current)}; {INIT_USER_WORDS.format(owner=owner)}. Nothing changed.", EXIT_REFUSED)
+    # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D21, D23, nobody can swap ROOT; walked before anything is made.
+    problem = root_walk_problem()
+    if problem is not None:
+        refuse(problem, EXIT_REFUSED)
     # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D21, ROOT is never made or left group-writable.
     os.umask(ROOT_UMASK)
     try:
         os.makedirs(ROOT, mode=ROOT_MODE, exist_ok=True)  # ROOT itself is not shared: no group
-        root_st = os.stat(ROOT)
     except OSError as err:
         refuse(f"tc init: cannot reach {ROOT} ({err.strerror}); this user needs search (x) access on "
                f"every folder from / down to it. Nothing changed.", EXIT_REFUSED)
-    root_mode = stat.S_IMODE(root_st.st_mode)
-    if root_mode & (stat.S_IWGRP | stat.S_IWOTH) and not root_mode & stat.S_ISVTX:
-        refuse(f"tc init: {ROOT} is {root_mode:04o}: its group or anyone may write it and it is not "
-               f"sticky, so any member could rename .shared or mail/ in it and change the group. Its "
-               f"owner, {user_name(root_st.st_uid)}, runs chmod g-w,o-w {ROOT} first. Nothing changed.",
-               EXIT_REFUSED)
+    problem = root_walk_problem()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): again, with ROOT there
+    if problem is not None:
+        refuse(problem, EXIT_REFUSED)
     os.umask(SHARED_UMASK)
     done, skipped = {"folder": 0, "file": 0}, []
     for top in (ROOT / name for name in SHARED_FOLDER_NAMES):
@@ -2496,7 +2623,11 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
     and tries again, up to PUBLISH_MAX_TRIES, then refuses, Delivery exit
     1, with words saying mail/.seq may have been set back. One code path,
     private or shared. A link that fails for any other reason refuses
-    the send with words, never a traceback, and leaves no .tmp.
+    the send with words, never a traceback, and leaves no .tmp. SHARED fix
+    round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-3. On a
+    filesystem without hard links (os.link fails with one of
+    NO_HARD_LINK_ERRNOS) the words say so: tc needs them so a message
+    never replaces another (D20). Delivery exit 1, nothing sent.
 
     SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-2.
     Every next_seq of the publish loop waits no later than one deadline,
@@ -2531,9 +2662,9 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
                 NNNNNN-from-<sender>.md there and removes the .tmp's name;
                 stats cards/<to>.json.
     @deps       mailbox_share, check_inbox, lock_deadline, next_seq, inbox,
-                now_iso, write_new_file, Delivery; os; CARDS, SEQ_WIDTH,
-                SHARED_OWNED_FILE_MODE, NEW_FILE_MODE, PUBLISH_MAX_TRIES,
-                EXIT_REFUSED.
+                now_iso, write_new_file, Delivery; os; ROOT, CARDS,
+                SEQ_WIDTH, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE,
+                PUBLISH_MAX_TRIES, NO_HARD_LINK_ERRNOS, EXIT_REFUSED.
     @complexity O(b) over b bytes of body, once per try: one try in an
                 honest mailbox, at most PUBLISH_MAX_TRIES when mail/.seq
                 was set back; plus waiting for mail/.seq until `deadline`
@@ -2581,6 +2712,11 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
             warnings.append(f"tc send: could not remove {tmp} ({err.strerror})")
         if failed is None:
             break
+        if failed.errno in NO_HARD_LINK_ERRNOS:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-3
+            return Delivery(EXIT_REFUSED, f"tc send: the filesystem under {ROOT} has no hard links "
+                                          f"({failed.strerror}), and tc needs them to publish a message without "
+                                          f"ever replacing another (D20); nothing sent. Put the mailbox (TC_ROOT) "
+                                          f"on a filesystem that has them, such as ext4.", warnings)
         if not isinstance(failed, FileExistsError):
             return Delivery(EXIT_REFUSED, f"tc send: could not publish {path} ({failed.strerror}); nothing sent",
                             warnings)

@@ -27,9 +27,13 @@ replace a message, unread or read, and a lock held by another process
 makes send, read, a codex join, tc card and a codex send fail within
 LOCK_WAIT_SECONDS, never hang. And round 3 (SHARED fix round 3, Claude
 Opus 5.5, unreviewed): a held lock exits 10 (busy, D23); tc read never
-replaces a read message with a file planted under its name; and one
-send's waits on mail/.seq share one deadline, however many numbers it
-skips.
+replaces a read message with a file planted under its name; one send's
+waits on mail/.seq share one deadline, however many numbers it skips;
+init refuses a ROOT the group may write, sticky or not, and any folder
+from ROOT up to /, as given and by its real path, that another user
+owns or the group may write without the sticky bit; a send on a
+filesystem without hard links says so; and an inbox a command cannot
+look into stops it with words, never a traceback.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -79,7 +83,12 @@ the owner's human QA (D4, qa/human/route-shared.md).
             3 tests write planted files into an inbox and its read/ by
             hand, and run a member's loop as a child (python3 -c
             SEQ_HOLDER, killed by the harness by its pid) that holds
-            mail/.seq on and off and plants empty files in read/.
+            mail/.seq on and off and plants empty files in read/. They
+            chmod the root's temp folder and folders they make in it,
+            and an inbox, and put each back; make links by hand; read the
+            user database; and load tc in process to run cmd_init with
+            os.lstat wrapped (or root_walk_problem replaced) and
+            deliver_local with os.link replaced.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
             importlib, io, json, os, pathlib, re, stat, subprocess, sys,
             time, unittest, unittest.mock); tests/_root.py.
@@ -99,6 +108,7 @@ import io
 import json
 import os
 import pathlib
+import pwd
 import re
 import stat
 import subprocess
@@ -261,10 +271,13 @@ ROOT_MODE = 0o755
 # user with a group of their own. Under it, a folder made without a umask
 # of tc's own comes out 0775.
 GROUP_WRITE_UMASK = 0o002
-# A ROOT its group may write: init refuses it. With the sticky bit, init
-# takes it (only an entry's owner may rename an entry there).
+# A ROOT its group may write: init refuses it. SHARED fix round 3 (Claude
+# Opus 5.5, unreviewed): with the sticky bit too (the audit's LOW-1: a
+# member could make .shared or mail/ in it first). A folder above ROOT at
+# the sticky mode is taken (only an entry's owner may rename it, as in
+# /tmp); at the plain one it is refused (D23).
 GROUP_WRITABLE_ROOT_MODE = 0o775
-STICKY_GROUP_WRITABLE_ROOT_MODE = 0o1775
+STICKY_WORLD_WRITABLE_MODE = 0o1777
 # What init tells ROOT's owner to run before it shares a writable ROOT.
 CHMOD_WORDS = "chmod g-w,o-w {root} first. Nothing changed."
 # An inbox its owner may read but not search: the running user then sees
@@ -292,6 +305,18 @@ TAKEN_TEXT = "planted by hand at the first by-hand name\n"
 # The board's message name (board/serve.py, MESSAGE_NAME), written out: a
 # name it matches is read as a number and a sender. A by-hand name never is.
 BOARD_MESSAGE_NAME = re.compile(r"^(\d+)-from-(.+)\.md$")
+# What init says for a folder on the way from ROOT to / that would let a
+# member swap ROOT (D23): one another user owns, and one its group may
+# write without the sticky bit.
+OWNED_ON_THE_WAY_WORDS = "tc init: {folder} belongs to {owner} (mode {mode:04o}), who is neither root nor you"
+WRITABLE_ON_THE_WAY_WORDS = ("tc init: {folder}, on the way to {root}, is {mode:04o} and owned by {owner}: its "
+                             "group or anyone may write it and it is not sticky")
+# What a send says on a filesystem without hard links (the audit's LOW-3).
+NO_HARD_LINKS_WORDS = ("tc send: the filesystem under {root} has no hard links ({why}), and tc needs them to "
+                       "publish a message without ever replacing another (D20); nothing sent.")
+# What tc says for an inbox's read/ it cannot look at (an inbox its owner
+# left without search).
+CANNOT_LOOK_WORDS = "tc: could not look at {path} ({why}); nothing was read or written there."
 # tc's PUBLISH_MAX_TRIES, written out: a send never tries more numbers, so
 # a member who plants this many names past the counter covers every try.
 PLANTED_NAMES = 100
@@ -1907,10 +1932,18 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
         a rerun that changes another user's .shared, and one that says
         nothing about a .shared the group may write.
 
+        SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23's walk
+        (root_walk_problem) takes a folder on the way from ROOT to / only
+        from root or the user running init, so a member's rerun reaches
+        .shared only when root owns ROOT and the folders above it, which
+        one user cannot make. The walk is replaced here (it has tests of
+        its own in RootAndClaimTest) so this test keeps to .shared.
+
         @interacts  one init; one chmod by hand; loads tc in process and
-                    runs cmd_init with os.geteuid replaced; lstats .shared.
+                    runs cmd_init with os.geteuid and root_walk_problem
+                    replaced; lstats .shared.
         @deps       _root.TcRoot.tc, primary_group, load_tc, run_init;
-                    unittest.mock; tc.user_name.
+                    unittest.mock; tc.user_name, tc.root_walk_problem.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
@@ -1921,7 +1954,8 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
             marker.chmod(PRE_D21_MARKER_MODE)
             tc = load_tc(root)
             owner = tc.user_name(os.getuid())
-            with mock.patch.object(os, "geteuid", return_value=os.getuid() + 1):
+            with mock.patch.object(os, "geteuid", return_value=os.getuid() + 1), \
+                    mock.patch.object(tc, "root_walk_problem", return_value=None):
                 code, out, err = run_init(tc, name)
             left = (stat.S_IMODE(os.lstat(marker).st_mode), marker.read_text())
         self.assertEqual(first[0], 0, first[2])
@@ -2016,8 +2050,9 @@ class NoLostMailNoHangTest(UmaskTestCase):
     MEDIUM-1 and LOW-2); a held lock exits 10 (D23).
 
     @interacts  see the module block.
-    @deps       _root.TcRoot, UmaskTestCase, primary_group, contents;
-                contextlib, fcntl, subprocess, sys, time; SEQ_HOLDER.
+    @deps       _root.TcRoot, UmaskTestCase, primary_group, contents,
+                load_tc; contextlib, errno, fcntl, subprocess, sys, time,
+                unittest.mock; SEQ_HOLDER.
     @complexity O(1) per test.
     @alloc      one TcRoot per case.
     """
@@ -2280,6 +2315,36 @@ class NoLostMailNoHangTest(UmaskTestCase):
         self.assertEqual(err, f"tc: {LOCK_HELD_WORDS.format(what=seq)}; try again\n")
         self.assertEqual(unread, ["000001-from-a.md"], "a refused send left a message or a .tmp")
 
+    # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-3.
+    def test_a_filesystem_without_hard_links_refuses_the_send_with_words(self):
+        """In process, os.link failing as it does on a filesystem without hard links (EPERM, then ENOTSUP, which is EOPNOTSUPP on Linux): deliver_local refuses, exit 1, with words saying the filesystem has no hard links and why tc needs them, and leaves no message and no .tmp.
+
+        A filesystem without hard links cannot be made here, so link(2)'s
+        answer on one is patched in. Must reject the generic `could not
+        publish` words, which do not say why every send on that mailbox
+        fails.
+
+        @interacts  per errno: loads tc in process and runs deliver_local
+                    with os.link replaced; lists the inbox.
+        @deps       _root.TcRoot, load_tc; errno, unittest.mock;
+                    tc.deliver_local; NO_HARD_LINKS_WORDS, EXIT_REFUSED.
+        @complexity O(1) per errno.
+        @alloc      one TcRoot and one module per errno.
+        """
+        for code in sorted({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP}):
+            with self.subTest(errno=errno.errorcode[code]), _root.TcRoot() as root:
+                tc = load_tc(root)
+
+                def link(src, dst, *args, **kwargs):
+                    raise OSError(code, os.strerror(code), str(dst))
+                with mock.patch.object(os, "link", link):
+                    got = tc.deliver_local(None, "a", "b", "hi")
+                box = root.path / "mail" / "to-b"
+                left = sorted(p.name for p in box.iterdir() if p.name != "read")
+                self.assertEqual(got.exit, EXIT_REFUSED, got.words)
+                self.assertIn(NO_HARD_LINKS_WORDS.format(root=root.path, why=os.strerror(code)), got.words)
+                self.assertEqual(left, [], "a refused send left a message or a .tmp")
+
 
 class RootAndClaimTest(UmaskTestCase):
     """D21's ROOT and the audit's LOW-1: init never makes or leaves ROOT group-writable, and of two joins of one name at once only one claims the inbox.
@@ -2287,11 +2352,16 @@ class RootAndClaimTest(UmaskTestCase):
     The audit's MEDIUM-2 and LOW-1 (audits/2026-10-14-2259-quick). One
     Linux user cannot run a second join, so the other joiner's mkdir is
     made by a patched os.mkdir, and its ownership is what a patched
-    os.lstat reports.
+    os.lstat reports. SHARED fix round 3 (Claude Opus 5.5, unreviewed):
+    D23 and the audit's MEDIUM-2 and LOW-1 (audits/2026-10-14-2358-quick),
+    nobody can swap ROOT: a sticky ROOT the group may write is refused
+    too, and init walks every folder from ROOT up to /, as given and by
+    its real path. A folder another user owns is what a patched os.lstat
+    reports.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, tree, load_tc,
-                run_init, owner_patched_lstat.
+                run_init, owner_patched_lstat; pwd.
     @complexity O(1) per test.
     @alloc      one TcRoot per test.
     """
@@ -2330,18 +2400,20 @@ class RootAndClaimTest(UmaskTestCase):
         self.assertEqual(mail, SHARED_TOP_FOLDER_MODE)
         self.assertEqual(marker, f"{name}\n")
 
-    def test_a_group_writable_root_is_refused_and_nothing_changes_unless_it_is_sticky(self):
-        """ROOT set to 0775 after a send: init exits 1, tells ROOT's owner to run chmod g-w,o-w on it, writes no .shared and changes no entry; set to 1775 (sticky), init exits 0.
+    def test_a_group_writable_root_is_refused_sticky_or_not_and_nothing_changes(self):
+        """ROOT set to 0775, then to 1777 (sticky), after a send: init exits 1 each time, tells ROOT's owner to run chmod g-w,o-w on it, writes no .shared, changes no entry and leaves ROOT's mode as it was.
 
         Must reject an init that shares a ROOT any member may write: a
         member could rename .shared or mail/ in it and put its own in
-        place (D21).
+        place (D21). SHARED fix round 3 (Claude Opus 5.5, unreviewed): the
+        audit's LOW-1, sticky or not: in a sticky ROOT a member could
+        still make .shared or mail/ before the first init (C4).
 
         @interacts  a send; ROOT chmodded by hand and put back; two inits;
-                    stats every entry under ROOT before and after.
+                    stats every entry under ROOT before and after each.
         @deps       _root.TcRoot.tc, primary_group, tree;
-                    GROUP_WRITABLE_ROOT_MODE,
-                    STICKY_GROUP_WRITABLE_ROOT_MODE, CHMOD_WORDS.
+                    GROUP_WRITABLE_ROOT_MODE, STICKY_WORLD_WRITABLE_MODE,
+                    CHMOD_WORDS.
         @complexity O(1).
         @alloc      one TcRoot.
         """
@@ -2349,24 +2421,141 @@ class RootAndClaimTest(UmaskTestCase):
         with _root.TcRoot() as root:
             root.tc("send", "--from", "a", "--to", "b", "hi")
             mode = stat.S_IMODE(os.lstat(root.path).st_mode)
+            seen = {}
             try:
-                root.path.chmod(GROUP_WRITABLE_ROOT_MODE)
+                for writable in (GROUP_WRITABLE_ROOT_MODE, STICKY_WORLD_WRITABLE_MODE):
+                    root.path.chmod(writable)
+                    before = tree(root.path, under=None)
+                    refused = root.tc("init", "--shared", "--group", name)
+                    seen[writable] = (refused, before, tree(root.path, under=None),
+                                      stat.S_IMODE(os.lstat(root.path).st_mode))
+            finally:
+                root.path.chmod(mode)
+        for writable, (refused, before, after, left) in seen.items():
+            with self.subTest(mode=f"{writable:04o}"):
+                self.assertEqual(refused[0], EXIT_REFUSED, refused[2])
+                self.assertIn(CHMOD_WORDS.format(root=root.path), refused[2])
+                self.assertEqual(after, before, "a refused init changed an entry")
+                self.assertNotIn(".shared", after)
+                self.assertEqual(left, writable, "a refused init changed ROOT's mode")
+
+    # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23 and the audit's MEDIUM-2, nobody can swap ROOT.
+    def test_a_root_under_a_group_writable_folder_is_refused_and_under_a_sticky_one_taken(self):
+        """The folder above ROOT (the harness's temp folder, which the test owns) set to 0775 after a send: init exits 1 naming that folder, its mode and its owner, and changes nothing; set to 1777 (sticky, as /tmp), init exits 0.
+
+        Must reject an init that checks ROOT alone: a member could rename
+        ROOT in a folder the group may write and put a ROOT of their own,
+        with their own .shared, in its place (D21, D23). And one that
+        refuses a sticky folder above ROOT, where only an entry's owner
+        may rename it.
+
+        @interacts  a send; the temp folder chmodded by hand and put back;
+                    two inits; stats every entry under ROOT before and
+                    after; reads the user database.
+        @deps       _root.TcRoot.tc, primary_group, tree; pwd;
+                    GROUP_WRITABLE_ROOT_MODE, STICKY_WORLD_WRITABLE_MODE,
+                    WRITABLE_ON_THE_WAY_WORDS.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        label, name, gid = primary_group()
+        owner = pwd.getpwuid(os.getuid()).pw_name
+        with _root.TcRoot() as root:
+            root.tc("send", "--from", "a", "--to", "b", "hi")
+            mode = stat.S_IMODE(os.lstat(root.base).st_mode)
+            try:
+                root.base.chmod(GROUP_WRITABLE_ROOT_MODE)
                 before = tree(root.path, under=None)
                 refused = root.tc("init", "--shared", "--group", name)
                 after = tree(root.path, under=None)
-                left = stat.S_IMODE(os.lstat(root.path).st_mode)
-                root.path.chmod(STICKY_GROUP_WRITABLE_ROOT_MODE)
-                sticky = root.tc("init", "--shared", "--group", name)
+                left = stat.S_IMODE(os.lstat(root.base).st_mode)
+                root.base.chmod(STICKY_WORLD_WRITABLE_MODE)
+                taken = root.tc("init", "--shared", "--group", name)
                 shared = (root.path / ".shared").exists()
             finally:
-                root.path.chmod(mode)
+                root.base.chmod(mode)
         self.assertEqual(refused[0], EXIT_REFUSED, refused[2])
-        self.assertIn(CHMOD_WORDS.format(root=root.path), refused[2])
+        self.assertIn(WRITABLE_ON_THE_WAY_WORDS.format(folder=root.base, root=root.path,
+                                                       mode=GROUP_WRITABLE_ROOT_MODE, owner=owner), refused[2])
         self.assertEqual(after, before, "a refused init changed an entry")
         self.assertNotIn(".shared", after)
-        self.assertEqual(left, GROUP_WRITABLE_ROOT_MODE, "a refused init changed ROOT's mode")
-        self.assertEqual(sticky[0], 0, sticky[2])
-        self.assertTrue(shared, "init refused a sticky ROOT")
+        self.assertEqual(left, GROUP_WRITABLE_ROOT_MODE, "a refused init changed the folder above ROOT")
+        self.assertEqual(taken[0], 0, taken[2])
+        self.assertTrue(shared, "init refused a ROOT under a sticky folder")
+
+    def test_a_folder_on_the_way_that_another_user_owns_is_refused_and_nothing_changes(self):
+        """In process, with os.lstat reporting the folder above ROOT, or ROOT itself, as another user's: init exits 1 naming it, that user and its mode, and changes nothing.
+
+        One Linux user cannot make a folder another user owns, so the
+        owner rule is shown by what tc's lstat reports
+        (owner_patched_lstat). ROOT owned by another user is also what a
+        member's own init meets on a ROOT the init user owns. Must reject
+        a walk that checks modes alone: the owner of a folder on the way
+        may rename what is in it whatever its mode, and put a ROOT with
+        their own .shared in place (D23).
+
+        @interacts  a send; per case, loads tc in process and runs cmd_init
+                    with os.lstat wrapped; stats every entry under ROOT
+                    before and after.
+        @deps       _root.TcRoot.tc, primary_group, load_tc, run_init,
+                    owner_patched_lstat, tree; unittest.mock;
+                    tc.user_name; OWNED_ON_THE_WAY_WORDS.
+        @complexity O(1) per case.
+        @alloc      one TcRoot and one module per case.
+        """
+        label, name, gid = primary_group()
+        for case in ("above ROOT", "ROOT"):
+            with self.subTest(case=case), _root.TcRoot() as root:
+                root.tc("send", "--from", "a", "--to", "b", "hi")
+                folder = root.base if case == "above ROOT" else root.path
+                mode = stat.S_IMODE(os.lstat(folder).st_mode)
+                tc = load_tc(root)
+                other = tc.user_name(os.getuid() + 1)
+                before = tree(root.path, under=None)
+                with mock.patch.object(os, "lstat", owner_patched_lstat(folder)):
+                    code, out, err = run_init(tc, name)
+                after = tree(root.path, under=None)
+                self.assertEqual(code, EXIT_REFUSED, err)
+                self.assertIn(OWNED_ON_THE_WAY_WORDS.format(folder=folder, owner=other, mode=mode), err)
+                self.assertEqual(after, before, "a refused init changed an entry")
+                self.assertNotIn(".shared", after)
+
+    def test_a_link_on_the_way_is_walked_as_given_and_by_its_real_path(self):
+        """In process, ROOT reached through a link: a group-writable folder only on the real path, or only on the path as given, makes init exit 1 naming that folder, with nothing made in the real ROOT.
+
+        Real path: TC_ROOT is safe/link, and link leads to team/root, with
+        team at 0775. As given: TC_ROOT is team/link, with team at 0775,
+        and link leads to safe/root. Must reject a walk of one path only:
+        either way a member could swap ROOT through the folder the other
+        walk never sees (D23: "a link on the way is checked too").
+
+        @interacts  per case, folders and one link made by hand under the
+                    root's temp folder, one folder chmodded to 0775; loads
+                    tc in process pointed at the link and runs cmd_init;
+                    lists the real ROOT.
+        @deps       _root.TcRoot, primary_group, load_tc, run_init; pwd;
+                    GROUP_WRITABLE_ROOT_MODE, WRITABLE_ON_THE_WAY_WORDS.
+        @complexity O(1) per case.
+        @alloc      one TcRoot and one module per case.
+        """
+        label, name, gid = primary_group()
+        owner = pwd.getpwuid(os.getuid()).pw_name
+        for case in ("real path", "as given"):
+            with self.subTest(case=case), _root.TcRoot() as root:
+                team, safe = root.base / "team", root.base / "safe"
+                team.mkdir()
+                safe.mkdir()
+                team.chmod(GROUP_WRITABLE_ROOT_MODE)
+                real, given = (team, safe) if case == "real path" else (safe, team)
+                (real / "root").mkdir()
+                (given / "link").symlink_to(real / "root")
+                tc = load_tc(root, given / "link")
+                code, out, err = run_init(tc, name)
+                made = sorted(p.name for p in (real / "root").iterdir())
+                self.assertEqual(code, EXIT_REFUSED, err)
+                self.assertIn(WRITABLE_ON_THE_WAY_WORDS.format(folder=team, root=given / "link",
+                                                               mode=GROUP_WRITABLE_ROOT_MODE, owner=owner), err)
+                self.assertEqual(made, [], "a refused init made something in the real ROOT")
 
     def test_of_two_joins_of_one_name_at_once_the_loser_is_refused_and_makes_nothing(self):
         """In process, shared: another joiner's mkdir of mail/to-x lands just before this join's (patched os.mkdir), and lstat reports it as that user's: claim_inbox exits 1 with the taken words and makes no read/ inside it.
@@ -2516,6 +2705,59 @@ class HealthSaysWhatItCannotSeeTest(UmaskTestCase):
         self.assertNotEqual(last, "mailbox private", "tc health called a shared mailbox private")
         self.assertTrue(last.startswith(GROUP_UNKNOWN_WORDS), last)
         self.assertIn("names no group", last)
+
+
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): the synthesis's note on check_inbox, and REC-1.
+class CommandsSayWhatTheyCannotSeeTest(UmaskTestCase):
+    """send, read, peek, wait and log never die with a traceback, or say 0 or `mailbox empty`, for an inbox they cannot see into.
+
+    audits/2026-10-14-2358-quick (the synthesis's coverage note on
+    check_inbox, and REC-1). One user stands in for a member by taking
+    access away from an inbox it owns. Skipped as root, who searches and
+    lists any folder.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, UmaskTestCase; errno, os.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per test.
+    """
+
+    def test_an_inbox_without_search_stops_send_read_peek_and_wait_with_words(self):
+        """mail/to-b readable without search, so its read/ cannot be looked at: a send to b, tc read b, tc peek b and tc wait b each exit 1 with words naming read/, never a traceback; nothing lands or moves, and mail/.seq is unchanged.
+
+        Must reject a check_inbox whose lstat of read/ catches only
+        FileNotFoundError: each of the four dies with PermissionError.
+
+        @interacts  one send; mail/to-b chmodded by hand and back; four tc
+                    runs; lists the inbox and reads mail/.seq.
+        @deps       _root.TcRoot.tc; errno, os; READ_NO_SEARCH_MODE,
+                    OWNER_FOLDER_MODE, ONE_POLL_SECONDS, REAL_TEXT,
+                    CANNOT_LOOK_WORDS, EXIT_REFUSED.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root searches any folder")
+        commands = (["send", "--from", "c", "--to", "b", "hi"], ["read", "b"], ["peek", "b"],
+                    ["wait", "b", "--timeout", ONE_POLL_SECONDS])
+        with _root.TcRoot() as root:
+            root.tc("send", "--from", "a", "--to", "b", REAL_TEXT)
+            box = root.path / "mail" / "to-b"
+            seq = (root.path / "mail" / ".seq").read_text()
+            box.chmod(READ_NO_SEARCH_MODE)
+            try:
+                runs = {argv[0]: root.tc(*argv) for argv in commands}
+            finally:
+                box.chmod(OWNER_FOLDER_MODE)
+            mail = sorted(str(p.relative_to(box)) for p in box.rglob("*.md"))
+            seq_after = (root.path / "mail" / ".seq").read_text()
+        for command, (code, out, err) in runs.items():
+            with self.subTest(command=command):
+                self.assertEqual(code, EXIT_REFUSED, err)
+                self.assertIn(CANNOT_LOOK_WORDS.format(path=box / "read", why=os.strerror(errno.EACCES)), err)
+                self.assertNotIn("Traceback", err)
+        self.assertEqual(mail, ["000001-from-a.md"], "a message landed or moved")
+        self.assertEqual(seq_after, seq, "a refused send took a number")
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1.
