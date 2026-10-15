@@ -12,7 +12,8 @@ Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
         changed, and step 32 added, in round 6 by the SHARED fixer,
         Claude Opus 5.5, 2026-10-15; the lead paragraph changed, and
         step 33 added, in round 7 by the SHARED fixer, Claude Opus 5.5,
-        2026-10-15
+        2026-10-15; the lead paragraph changed in round 8 by the SHARED
+        fixer, Claude Opus 5.5, 2026-10-15
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
@@ -30,11 +31,21 @@ wakes `tc wait` at most once (round 4). A member's init on the init
 user's ROOT is refused with words that name who ran init and charge no
 one, and a member who makes ROOT first stops the init user's init
 (round 5, D28). That refused init then fixes the member's own entries
-itself, through a no-follow open (round 6, D29). Every folder on the
-way to them is opened through the folder above it, never by its path,
-so a link another member swaps in for one of those entries, or for a
-folder on the way, never leads the walk out of `mail/`, `status/`,
-`cards/` or `outbox/` (round 7). The tests in
+itself, through a no-follow open (round 6, D29). Every folder from ROOT
+down is pinned by identity: init opens ROOT once, right after its walk,
+and goes on only when it is the folder the walk looked at (on a
+member's rerun, the init user's); then it opens each of the four, each
+folder below them and each entry by its name in the folder above it,
+never by its path, and changes an entry only when it is the one the
+walk found. So a link or another folder swapped in for ROOT, a folder
+above it, a folder on the way, or an entry, while init runs, never
+leads either walk out of the mailbox (rounds 7 and 8). ROOT's owner and
+every folder above it are judged by the walk, by path, before that (step
+31). A file with a second name (a hard link) is never changed, and a
+nest of folders too deep is named and left (round 8). The only command
+line tc prints is D23's `chmod g-w,o-w`, to the owner of ROOT or of a
+folder above it (steps 28 and 31); for an entry under the four it
+prints none. The tests in
 `tests/test_shared.py` prove the modes, the owners and the checks tc
 makes, but one user cannot prove another user's refusals. This script
 does, by hand.

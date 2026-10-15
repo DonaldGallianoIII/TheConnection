@@ -16,8 +16,11 @@ Status: unreviewed. Fix round 1 done (audit
         5.5). Fix round 6 done (audit `audits/2026-10-15-0300-quick`,
         brief `fixes/round-6.md`, the SHARED fixer, Claude Opus 5.5).
         Fix round 7 done (audit `audits/2026-10-15-0408-quick`, brief
-        `fixes/round-7.md`, the SHARED fixer, Claude Opus 5.5).
-Date:   2026-10-14; rounds 3 to 7 2026-10-15
+        `fixes/round-7.md`, the SHARED fixer, Claude Opus 5.5). Fix
+        round 8 done (audit `audits/2026-10-15-0840-quick`, brief
+        `fixes/round-8.md` and one test the coordinator added, the
+        SHARED fixer, Claude Opus 5.5).
+Date:   2026-10-14; rounds 3 to 8 2026-10-15
 Branch: Claude-Development-TheConnection-SHARED, from
         Claude-Development-TheConnection at c8708e5 (after P0, P1 and P2
         merged; the plan with D16, D17 and D18). Round 1 builds to the
@@ -30,7 +33,8 @@ Branch: Claude-Development-TheConnection-SHARED, from
         8bdf363 (C4's walk with no trust in the `.shared` owner, D28).
         Round 6 builds to 463074c (C4's "Nobody can swap ROOT" with
         D29, exit row 10, D20, D21, D23, D29). Round 7 builds to
-        ef3885c (C4 with D29; D20, D21, D29).
+        ef3885c (C4 with D29; D20, D21, D29). Round 8 builds to
+        5dce726 (C4 with D29; D20, D21, D23, D29).
 Where:  ~/TheConnection-lanes/shared
 
 ## Commits
@@ -67,7 +71,35 @@ Where:  ~/TheConnection-lanes/shared
 | Round 6 (c) | `576ca51` | Say how a member's rerun ends, fix two tags and the handoff's claims, and walk Ben's swap in the QA script |
 | Round 7 (a) | `a538fa8` | Init's walks pin every folder on the way, not just the last name, so a swapped link never leads them out of the mailbox |
 | Round 7 (b) | `04cae7b` | Out of tries, say only what the tries found about mail/.seq, and name both causes of the bound |
-| Round 7 (c) | the last commit of round 7 | Say the walk pins every folder on the way, in this handoff and the QA script, and walk a folder swapped on the way by hand |
+| Round 7 (c) | `dca0947` | Say the walk pins every folder on the way, in this handoff and the QA script, and walk a folder swapped on the way by hand |
+| Round 8 (a) | `db66ed7` | Walk init's folders with tc's own stack walk, capped at WALK_MAX_DEPTH, and never open a link |
+| Round 8 (b) | `930b0df` | Pin ROOT by identity after init's walk, so no name on the write path is resolved again, and never change a hard-linked file |
+| Round 8 (c) | the last commit of round 8 | Say what round 8 makes true in this handoff and the QA lead: every folder from ROOT down pinned, and D23's chmod the only command line |
+
+Round 7's subjects at (a) and (c) say the walk pins every folder on the
+way. At round 7 that held below the four only: ROOT and the four were
+still reached by path (Spotted item 11, the audit's LOW-6 of
+`audits/2026-10-15-0840-quick`). Round 8 makes it true from ROOT down.
+The subjects stay as committed.
+
+Round 8's three commits change `tc`, `tests/test_shared.py`,
+`qa/human/route-shared.md` and this file, nothing else. Commit (a)
+holds item 2 (MEDIUM-1, LOW-1, LOW-2), (b) item 1 (HIGH-1, LOW-3) and
+the coordinator's test, (c) item 3 (LOW-4 to LOW-7) and the rest of
+this file. Existing tests changed in (b): `owner_patched_fstat` joins
+`owner_patched_lstat`, since init now checks ROOT's owner on the open
+descriptor, and the three member tests that report ROOT as the init
+user's (`test_a_members_rerun_on_the_init_users_root_fixes_only_their_own_entries_through_the_fd`,
+`test_a_link_swapped_in_for_a_members_entry_leaves_its_target_untouched`,
+`test_a_folder_swapped_for_a_link_on_the_way_never_leads_a_members_rerun_outside`)
+patch `os.fstat` that way too; and
+`test_a_members_same_group_rerun_leaves_another_users_0664_shared_and_says_so`
+replaces the walk with a verdict that refuses nothing and carries
+ROOT's own lstat, since `root_walk_problem` no longer returns None. No
+assertion in an existing test changed. No file in `tests/` but
+`tests/test_shared.py` names `walk_pinned`, `walk_below`,
+`root_walk_problem`, `WalkProblem`, `pin_root` or `share_entry` (grep
+of `tests/`).
 
 Round 7's three commits change `tc`, `tests/test_shared.py`,
 `qa/human/route-shared.md` and this file, nothing else. Commit (a)
@@ -688,10 +720,15 @@ comment.
   and init's last refusal over skipped entries (`tc init: <n> skipped,
   each named above. The owner of each folder or file among them runs
   ...`; with no folder or file among them, round 5's `its owner fixes
-  each by hand.`). tc prints no `chgrp` or `chmod` line anywhere. (The
-  walk still reached each entry by a path, so `O_NOFOLLOW` guarded its
-  last name only; round 7 pins every folder on the way: see Round 7
-  below.)
+  each by hand.`). tc prints no `chgrp` or `chmod` line for an entry
+  under the four. The only command line tc prints anywhere is D23's
+  `chmod g-w,o-w <path>`, which the walk's refusal (`swap_words`) gives
+  the owner of ROOT, or of a folder above it, by name; the walk judges
+  those folders by path, and they are root's or the running user's
+  (round 8, the audit's LOW-4). (The walk still reached each entry by a
+  path, so `O_NOFOLLOW` guarded its last name only; round 7 pins every
+  folder below the four, and round 8 every folder from ROOT down: see
+  Rounds 7 and 8 below.)
 - Paths absolute (item 2, LOW-1, commit b). `ROOT` is made absolute
   once, where tc builds it, so every path tc prints names one folder
   from any working folder. The brief named `os.path.abspath`; the build
@@ -722,7 +759,7 @@ comment.
   her `read/`; ben's init says it skipped a link and fixes the message
   at its new name; ben's folder is untouched.
 
-**Round 7: every folder on the way pinned, and the words out of tries**
+**Round 7: every folder below the four pinned, and the words out of tries**
 (audit `audits/2026-10-15-0408-quick`, brief `fixes/round-7.md`, item
 numbers are the brief's; dev's plan at `ef3885c`: C4 with D29, D20,
 D21, D29). Every new block in `tc` carries a `SHARED fix round 7
@@ -788,9 +825,11 @@ D21, D29). Every new block in `tc` carries a `SHARED fix round 7
   names planted ahead of it, `.tmp` names among them.
 - Words (item 4, commit c). This file (assumptions 43, 47 and 48 to 52,
   and the rows below) and the lead paragraph of
-  `qa/human/route-shared.md` say the walk pins every folder on the way.
-  `fix_own_entries`' block says the same, made true in commit (a), and
-  names what it does not pin (ROOT and above). New QA step 33: ann
+  `qa/human/route-shared.md` said the walk pins every folder on the way.
+  That held below the four only; round 8 makes it true from ROOT down
+  (the audit's LOW-5 and LOW-6 of `audits/2026-10-15-0840-quick`).
+  `fix_own_entries`' block said the narrower truth, made true in commit
+  (a), and named what it did not pin (ROOT and above). New QA step 33: ann
   swaps her own `read/` for a link to a folder of ben's while ben's init
   runs, armed with a sleep in a second terminal. The brief named the
   parts ben (the swapper) and carol (whose init runs); the script's two
@@ -799,8 +838,96 @@ D21, D29). Every new block in `tc` carries a `SHARED fix round 7
   before or after the walk enters `read/`, and the step gives the words
   for both; the race inside the walk is the tests' job.
 
-**Tests.** `tests/test_shared.py`, 73 tests in eleven classes (70
-before round 7, 66 before round 6, 63 before round 5, 56
+**Round 8: every folder from ROOT down pinned by identity, and tc's own
+walk** (audit `audits/2026-10-15-0840-quick`, brief `fixes/round-8.md`;
+item numbers are the brief's and ids the synthesis's; dev's plan at
+`5dce726`: C4 with D29, D20, D21, D23, D29). The architect chose the
+synthesis's option A for HIGH-1 and for MEDIUM-1. Every new block in
+`tc` carries a `SHARED fix round 8 (Claude Opus 5.5, unreviewed)`
+comment.
+
+- tc's own walk (item 2, MEDIUM-1, LOW-1, LOW-2, commit a). `os.fwalk`
+  recursed one generator frame per folder level, so a nest about 1000
+  deep, which any member may make under the four, ended every init in a
+  `RecursionError` traceback before `.shared` was written. `walk_below`
+  replaces it: an explicit stack, one frame per folder from the top
+  down; `os.scandir` on each folder's descriptor; each name lstat()ed by
+  that name in that descriptor; each subfolder opened by its name in its
+  parent's descriptor with `FOLDER_FLAGS`, and entered only when fstat
+  finds the folder its lstat found. Only a name whose lstat found a
+  folder is opened as one, so a link is never opened, not even to
+  compare (LOW-2). The walk enters folders down to `WALK_MAX_DEPTH` (8)
+  deep, counting the top as one; a folder one deeper is named and not
+  entered: `tc init: skipped <path>: 9 folders deep, counting its top as
+  one, past the 8 the walk enters; tc looked at nothing under it`
+  (`TOO_DEEP_WHY`). A folder this user may list but not search is named
+  once and left: `... this user may list it but not search (x) it; tc
+  looked at nothing under it` (`NO_SEARCH_WHY`, LOW-1), where `os.fwalk`
+  raised `PermissionError`. A folder that changed by the time the walk
+  came to enter it is named as the walk passes it (`NOT_ENTERED_WHY`),
+  so `can_enter` and round 7's list of folders not yet entered go. Every
+  descriptor the walk opens is closed when it leaves that folder, and on
+  every way out, a refusal included (one `finally` over the stack).
+- ROOT pinned (item 1, HIGH-1, commit b). Round 7 opened each of the
+  four by its path under ROOT, and a member's walk judged ROOT and
+  nothing above it. Where the init user can rename ROOT (a mailbox in
+  their home, or under a sticky folder), they could swap ROOT for a link
+  after the walk passed it, and the member's own init then shared the
+  member's own folders and files elsewhere. Now, in both walks:
+  1. `root_walk_problem` always returns its `WalkProblem`, words None
+     when it found nothing to refuse, carrying `root`: the lstat of the
+     folder it judged at ROOT's place.
+  2. `pin_root` opens ROOT once by its path
+     (`O_RDONLY|O_DIRECTORY|O_NONBLOCK`, `ROOT_FLAGS`) and keeps it only
+     when fstat finds that folder (`st_dev` and `st_ino`) and, on a
+     member's rerun, the user who ran init as its owner. Else init
+     refuses and nothing changes: `tc init: <ROOT> changed after init's
+     walk looked at it: another folder or a link has its name now.
+     Nothing changed.` (`ROOT_CHANGED_WORDS`; on a member's rerun, after
+     the walk's words that name the init user).
+  3. `walk_pinned(root_fd)` lstats each of the four by its name in
+     ROOT's descriptor when the walk starts. At each top's turn it opens
+     the top by its name there with `FOLDER_FLAGS`, and keeps it only
+     when fstat finds the folder that first lstat found; else the top is
+     named as not entered.
+  4. Below each top, `walk_below` (item 2).
+  5. `share_entry` opens each entry by its name in its folder's
+     descriptor with `ENTRY_FLAGS` and changes it only when fstat finds
+     the entry the walk's lstat found (else `another entry had its name
+     by the time tc came to change it; tc changed nothing there`,
+     `CHANGED_WHY`), and never a regular file with another name that it
+     would change (`st_nlink` over 1): `a file with another name too (a
+     hard link), which tc never changes: the change would show at every
+     name` (`HARD_LINK_WHY`, LOW-3). One already right is left alone, in
+     silence.
+
+  Init's own run goes the same way: after its second walk `cmd_init`
+  pins ROOT, makes the four by their names in ROOT's descriptor, walks
+  them through `shared_entries(root_fd, gid)`, and writes, renames and
+  settles `.shared` by its name in ROOT's descriptor (`write_new_file`
+  gains `dir_fd`, and `settle_marker_mode` takes ROOT's descriptor). A
+  member's rerun pins ROOT in `refuse_walk` and walks through
+  `fix_own_entries(group, gid, root_fd)`. One walker signature, one
+  pinned path, and ROOT's descriptor closed on every way out. So once
+  the walk judged ROOT, no name on init's write path is resolved again,
+  and who may rename ROOT, or a folder above it, no longer reaches the
+  walk.
+- What is still judged by path. ROOT's owner and every folder from ROOT
+  up to `/` are judged by the walk, by path, before anything is opened
+  (C4, D21, D23), and ROOT is opened once by its path and checked
+  against that walk. Every other command still resolves ROOT by its
+  path (DEBT-1, under Not in this round). The only command line tc
+  prints is D23's `chmod g-w,o-w <path>`, to the owner of ROOT or of a
+  folder above it; tc prints no `chgrp` or `chmod` line for an entry
+  under the four.
+- Words (item 3, commit c). LOW-4: the round 6 bullet above. LOW-5: the
+  lead paragraph of `qa/human/route-shared.md`. LOW-6: round 7's heading
+  and Words bullet, the note under Commits, and Not in this round.
+  LOW-7: Spotted item 13. Spotted items 11 to 14 are marked closed, as
+  the code now stands.
+
+**Tests.** `tests/test_shared.py`, 78 tests in thirteen classes (73 in
+eleven before round 8, 70 before round 7, 66 before round 6, 63 before round 5, 56
 before round 4, 48 in ten before round 3, 39 in seven before round 2), each on
 `tests/_root.py`. Every class inherits `UmaskTestCase`, so each test
 runs under umask 022 and a tc that never sets its own writes 0644 and
@@ -811,8 +938,9 @@ fails. `SharedTest` (H1, 4), `NoPlantedLinksTest` (D17, 5),
 `SharedIsTheInitUsersAndDeliveryNeedsACardTest` (D21, 8),
 `NoLostMailNoHangTest` (rounds 2 to 7, 14), `RootAndClaimTest` (rounds 2
 to 7, 13), `HealthSaysWhatItCannotSeeTest` (round 2, 3),
-`CommandsSayWhatTheyCannotSeeTest` (rounds 3 and 4, 3) and
-`GroupsToTestTest` (1). Round 4 adds seven: the by-hand words for a
+`CommandsSayWhatTheyCannotSeeTest` (rounds 3 and 4, 3),
+`GroupsToTestTest` (1), `InitWalkTest` (round 8, 3) and
+`RootPinnedTest` (round 8, 2). Round 4 adds seven: the by-hand words for a
 plant in `read/`, a planted name of 250 bytes and of exactly the
 filesystem's limit woken at most once, a card that turns codex under a
 held lock, a send out of numbers, the walk's trust of the `.shared`
@@ -848,7 +976,34 @@ asserting that folder, the folder and the file in it keep their stat,
 the skip line, and the one file fixed; and a set-back `mail/.seq` with
 a `.tmp` planted at each of its numbers, whose words never say the
 counter was not behind. `owner_patched_lstat` now matches an lstat
-made by name in a folder's descriptor by the file it finds. The lock
+made by name in a folder's descriptor by the file it finds. Round 8
+adds five. `InitWalkTest`: a nest of WALK_MAX_DEPTH + 1 folders under
+`status/`, in both walks, named past the cap with the walk's usual last
+line and `.shared` written, and nothing under the named folder looked
+at; a top a member may list but not search, named; and an `os.open`
+spy (`open_spy`) over both walks, with links to a folder and a file
+planted in an inbox, its `read/` and `status/`, that finds no call
+naming a link that returned a descriptor or lacked `O_NOFOLLOW`.
+`RootPinnedTest`: the coordinator's swap test, one parametrized test
+of 42 subtests. Each builds a mailbox by hand at `home/mailbox` in the
+root's temp folder, and two mirrors of it outside, and runs init in
+process, in each walk, while one point on the write path is swapped:
+ROOT's parent, ROOT, each of the four, `mail/to-b/`, its `read/`, and
+the entry in it. A folder is swapped for a link to the same point in
+one mirror, and for the other mirror's own folder moved in; the entry
+for a link. ROOT and its parent are swapped as init opens ROOT and,
+again, while `mail/`'s walk runs; every other point just before the
+walk opens it, after its lstat. A wrapped `os.open` (`swap_on_open`)
+makes the swap, reading `/proc/self/fd` to see where each open is
+aimed. Each subtest asserts the far end of the swap keeps its mode,
+owner, group and times, every entry of it, and that init names what it
+refused or skipped (or, for ROOT and its parent while the walk runs,
+ends as on an untouched mailbox, with `.shared` in the ROOT it opened).
+The REC-4 case is in it: ROOT swapped for a link while `mail/`'s walk
+runs. And a hard-linked `status/b.md`, in both walks, skipped and named,
+its stat the same at both names. `as_member` runs a member's rerun with
+ROOT and `.shared` reported as the init user's, by `os.lstat` and, for
+ROOT's descriptor, `os.fstat` (`owner_patched_fstat`). The lock
 test runs its eight cases at once (round 3 added "codex
 send, mail/.seq"), each child under a
 timeout, so it costs about two waits and a broken tc fails it instead of
@@ -930,6 +1085,10 @@ Node 22). Each command's result line:
 | Round 7 (b) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 181 tests`, `OK` (and the architect's run after the restart) |
 | Round 7 (c) | `python3 -m unittest tests.test_shared -v` | `Ran 73 tests`, `OK` |
 | Round 7 (c) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 181 tests`, `OK` |
+| Round 8 (a) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 184 tests`, `OK` |
+| Round 8 (b) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 186 tests`, `OK` |
+| Round 8 (c) | `python3 -m unittest tests.test_shared -v` | `Ran 78 tests`, `OK` |
+| Round 8 (c) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 186 tests`, `OK` |
 | each | `node --test tests/*.test.mjs` | `# tests 8`, `# pass 8`, `# fail 0` |
 
 The base, `c8708e5`, ran 108 Python tests and 8 Node tests, all passing.
@@ -1138,6 +1297,31 @@ machine's numbers. Modes print in decimal: 16877 is a folder at 0755,
 
 Item 3 is words in two doc blocks, with no behavior to mutate.
 
+Round 8, on the code of the commit named, each run against its test.
+Method: each mutation made by hand with the Edit tool, the test run, the
+line put back the same way; then a grep for the mutated text (none
+left), the build, and the full suite before the commit. No sha256 was
+taken this round; the commit diffs hold only the intended hunks. The red
+line is the assertion line alone. `...` cuts a temp path or a time;
+`<uid>`, `<gid>` (the primary group) and `<gid2>` (the shared,
+supplementary group) stand for this machine's numbers. Modes print in
+decimal: 16832 is a folder at 0700, 18429 one at 3775.
+
+| Item | Mutation | Test | Red |
+|---|---|---|---|
+| 2 (a) | no depth cap (`if False:` for `if depth >= WALK_MAX_DEPTH:` in `walk_below`) | `test_a_nest_past_walk_max_depth_is_named_and_never_a_traceback` | `AssertionError: 0 != 1 :` (the init user's init exited 0 and named nothing); `AssertionError: 'tc i[857 chars]nit: fixed .../root/status/d[109 chars]d.\n' != 'tc i[857 chars]nit: skipped .../root/status[187 chars]d.\n'` (a member's rerun fixed the folder past the cap). The same two lines again on (b)'s code. |
+| 2 (a), evidence | `os.fwalk`'s shape: a name taken as a subfolder by `os.stat` (which follows a link) and opened without `O_NOFOLLOW` | `test_no_link_is_ever_opened_by_either_walk` | `AssertionError: Lists differ: [OpenSeen(path='linked-folder', dir_fd=5, [119 chars]rue)] != []` (both walks) |
+| 1 (b) | the four reached by path again, round 7's lstat and open of `ROOT/<name>` at each top's turn (`st = os.lstat(top); fd = os.open(top, FOLDER_FLAGS)`) | `test_a_swap_at_any_point_on_the_write_path_never_leads_either_walk_outside` | `AssertionError: {'.':[232 chars]': (18429, <uid>, <gid2>, ...)...} != {'.':[232 chars]': (16832, <uid>, <gid>, ...)...}` in 8 subtests: ROOT and its parent, each swapped for a link and for a real folder while `mail/`'s walk runs, in both walks (the far end's `status/` made 3775 in the shared group) |
+| 1 (b), evidence | `pin_root` keeps whatever it opens (`if True:` for its identity and owner check) | the same test | the same kind of line in the other 8 subtests on ROOT and its parent: those that swap as init opens ROOT |
+| 1 (b), evidence | no `st_nlink` check (`if False:` in `share_entry`) | `test_a_hard_linked_file_is_skipped_and_named_and_unchanged_at_both_names` | `AssertionError: 0 != 1 :` (the init user's init); `AssertionError: 'tc i[209 chars]nit: fixed .../root/status/b[107 chars]d.\n' != 'tc i[209 chars]nit: skipped .../root/status[181 chars]d.\n'` (a member's rerun) |
+
+Round 7's two swap tests
+(`test_a_folder_swapped_for_a_link_on_the_way_never_leads_a_members_rerun_outside`
+and `..._the_init_users_own_init_outside`) pass against the new walk, run
+by name: `Ran 3 tests`, `OK`, with round 6's
+`test_a_link_swapped_in_for_a_members_entry_leaves_its_target_untouched`.
+Item 3 is words, with no behavior to mutate.
+
 ## Assumptions
 
 1. **Sticky on the four and on every inbox.** D17 put it on `mail/`,
@@ -1337,8 +1521,10 @@ Item 3 is words in two doc blocks, with no behavior to mutate.
     moved"; the inode test keeps a real move from being called stuck.
 43. **Round 6: which entries a member's refused init opens.** Each
     entry under the four is lstat()ed first (since round 7 by its name
-    in its own folder's descriptor, never by a path, and every folder on
-    the way is entered through its parent's descriptor: assumption 48).
+    in its own folder's descriptor, never by a path: assumption 49).
+    Every folder below the four is entered through its parent's
+    descriptor, and since round 8 the four through ROOT's, which init
+    opened once and checked (assumption 57).
     A folder or regular file
     another user owns is passed over in silence: naming every other
     member's message would bury the member's own lines. Everything else
@@ -1391,7 +1577,9 @@ Item 3 is words in two doc blocks, with no behavior to mutate.
     the check found; `os.fwalk(top)` would open `top` by its path a
     second time, which a swap in between could change. Same function,
     same `follow_symlinks=False`; its paths are `.`-relative, and the
-    printed path is the top's joined with them.
+    printed path is the top's joined with them. (Superseded in round 8:
+    `os.fwalk` is gone, and `walk_below` walks from the top's checked
+    descriptor.)
 49. **Round 7: entries are lstat()ed by name in their folder's
     descriptor** (`os.lstat(name, dir_fd=...)`). The brief's "no
     `os.lstat(path)`" forbids a path below the top; one name in a
@@ -1412,7 +1600,10 @@ Item 3 is words in two doc blocks, with no behavior to mutate.
     it once, from its own open. A folder removed between its listing and
     its entry is named too ("or it was gone"): tc looked at nothing under
     it, which is the fact. The names come at the end of each top's walk,
-    not as each folder is passed.
+    not as each folder is passed. (Superseded in round 8: `walk_below`
+    opens each folder only to enter it, and names one that changed as it
+    passes it; `can_enter` is gone. A folder this user may not open at
+    that point still passes in silence: assumption 55.)
 51. **Round 7: a top that is not a folder is named, not changed.** Init
     used to give a regular file at `mail/` (or `status/`, `cards/`,
     `outbox/`) a file's mode. The brief opens the top with
@@ -1423,6 +1614,86 @@ Item 3 is words in two doc blocks, with no behavior to mutate.
     `.tmp` name a send finds taken was made by a member, or left by a
     send that died between making its `.tmp` and removing it; tc cannot
     tell which, so the words say what it found.
+53. **Round 8: `WALK_MAX_DEPTH` is 8, counting the top as one.** The
+    brief named the constant and the three-deep mailbox, not a value.
+    `outbox/to-<x>/sent` and `refused/` (C3, D25) are three deep too;
+    eight leaves room for folders made by hand and holds at most eight
+    descriptors open at once. A folder nine deep is listed in its
+    parent, which is within the cap, so `share_entry` changes it as any
+    entry, then the walk names it and looks at nothing under it.
+54. **Round 8: a readable but not searchable folder is found by its
+    first lstat failing.** Once a folder is open and listed, an lstat of
+    a name in it fails with `EACCES` only when this user may not search
+    the folder, so the first such failure names the folder
+    (`NO_SEARCH_WHY`) and the walk leaves it. No probe of `.` is made.
+    An empty folder of that kind passes in silence: nothing under it to
+    look at.
+55. **Round 8: a folder the walk may not open at its entry passes in
+    silence.** As round 7's `can_enter` did. `share_entry`'s
+    own open names it at its listing when the walk is init's own, or
+    the folder is the member's own; another user's is theirs. Any other
+    error at that open is named with its own words, and a folder gone,
+    or now a link or not a folder, with `NOT_ENTERED_WHY`.
+56. **Round 8: an lstat failure other than `ENOENT` or `EACCES` is
+    named.** Round 7 yielded such an entry with no lstat result, and a
+    member's rerun passed it over in silence. Now the walk yields its
+    error's words, so both walks name it. A name gone since the listing
+    is passed over, as before.
+57. **Round 8: the four are lstat()ed when the walk starts, all four.**
+    The brief's "kept only on samestat with its lstat in that
+    descriptor" left open when that lstat is taken. Taking all four at
+    the start, and opening each at its turn, is what makes a top
+    swapped while `mail/`'s walk runs a changed top, named and not
+    entered. Init makes the four before its walk starts, so no top is
+    made in between. A top gone by its turn is named (`NOT_ENTERED_WHY`,
+    "or it was gone"), where round 7 passed it in silence.
+58. **Round 8: `ROOT_FLAGS` has no `O_NOFOLLOW`, as the brief says.**
+    TC_ROOT may reach ROOT through a link, and the walk judged the folder
+    it leads to. `O_RDONLY` needs read access on ROOT, so a ROOT this
+    user may search but not read refuses: `could not open <ROOT>
+    (Permission denied). Nothing changed.` Init makes ROOT 0755, so this
+    arises only if ROOT's owner changed it. `O_PATH` would not need
+    read, but the brief named the flags.
+59. **Round 8: the folder the walk judged.** `root_walk_problem`'s
+    `root` is the lstat of the first folder either walk finds at ROOT's
+    own place: ROOT as given, or its real path when ROOT is reached
+    through a link. When a member's walk stops at ROOT as given and
+    ROOT as given is the init user's own link (`swap_words` judges a
+    link by its owner), the walk never lstats the folder it leads to; it
+    then lstats ROOT's real path once, and `pin_root` checks that this
+    folder's owner is the init user. Without that lstat such a member's
+    rerun would be refused as changed.
+60. **Round 8: `share_entry` checks each entry against the walk's
+    lstat.** The brief's part 5 says to open each entry by its name and
+    change only a folder or a file with one name. The coordinator's
+    test swaps `mail/to-b/` and its `read/` for another real folder just
+    after the walk's lstat of it, and `share_entry`'s open by name would
+    then change that folder's own group and mode. With the check
+    (`CHANGED_WHY`), no name is changed unless it is the entry the walk
+    looked at. The walk's entry for a name is now `(dir_fd, name,
+    found)`.
+61. **Round 8: a hard-linked file already right is left alone in
+    silence.** Only a file init would change is skipped and named
+    (`HARD_LINK_WHY`). It has no kind, so init's last line says its
+    owner fixes each by hand (removing the extra name). A message has
+    two names only between its `os.link` and its `.tmp`'s removal, so
+    an init that meets one then names it, and the next run clears it.
+62. **Round 8: init's own run uses the pinned path past the walk.** The
+    brief named the walk. Init also makes the four, and writes, renames
+    and settles `.shared`; by path, each of those would follow a ROOT or
+    a parent swapped while `mail/`'s walk runs, and the coordinator's
+    test asserts nothing outside changes then in the init user's own
+    init too. So each is done by name in ROOT's descriptor:
+    `os.mkdir(name, dir_fd=...)`, `write_new_file(..., dir_fd=...)`,
+    `os.rename(..., src_dir_fd=..., dst_dir_fd=...)`, and
+    `settle_marker_mode(marker, root_fd)`. The words still name the
+    paths. A top init could not make is named before the walk's skips
+    now (all four are made, then walked), where round 7 named it in its
+    top's turn.
+63. **Round 8: `root_walk_problem` always returns its verdict.** A
+    `WalkProblem` with words None means nothing to refuse; it carries
+    `root` either way. `swap_words` still returns None for a safe entry,
+    and `WalkProblem`'s third field defaults to None.
 
 ## Pauses
 
@@ -1525,7 +1796,11 @@ the architect's yes, and the one the second added (an unreadable
     read. `qa/human/route-shared.md`'s paragraph after step 23
     and the comment on `SHARED_WRITABLE_FILE_MODE` (item 9) were
     unchanged in round 4; round 5 changes both.
-11. **Spotted in round 7, not fixed: ROOT is not pinned (for the
+11. **Closed in round 8 (item 1, HIGH-1).** ROOT is opened once after
+    the walk and checked against the folder it judged (and, on a
+    member's rerun, its owner), and the four are opened by name in its
+    descriptor, as the fix below proposed. What follows is the round 7
+    text. **Spotted in round 7, not fixed: ROOT is not pinned (for the
     architect, HIGH by the synthesis's rule).** `walk_pinned` opens each
     of the four by its path under ROOT, as the brief says, so ROOT and
     every folder above it are resolved by name, once per top. In a
@@ -1542,7 +1817,10 @@ the architect's yes, and the one the second added (an unreadable
     descriptor against the walk's lstat of ROOT's real path. Not done:
     the brief starts the pin at the top folder, and the change is the
     architect's to make (C4's D29 lines, merge item 9).
-12. **Spotted in round 7, not fixed: a hard link is not a link.** A
+12. **Closed in round 8 (item 1, LOW-3), in both walks, not a member's
+    alone.** `share_entry` never changes a regular file with another
+    name that it would change (`HARD_LINK_WHY`). The round 7 text:
+    **Spotted in round 7, not fixed: a hard link is not a link.** A
     member who may read and write another member's file outside the
     mailbox may hard-link it into the mailbox (`fs.protected_hardlinks`
     allows that). fstat then finds the other member's own regular file,
@@ -1551,21 +1829,66 @@ the architect's yes, and the one the second added (an unreadable
     a regular file with more than one link (`st_nlink > 1`) in a
     member's own walk would close it. The precondition (write access to
     the file already) keeps it LOW.
-13. **Spotted in round 7, not fixed: `os.fwalk` opens before it
-    compares.** For a folder swapped for a link, `os.fwalk` opens the
-    name (following the link) and only then finds the fstat differs, so
-    tc opens, and never changes, what the link points at, for an
-    instant. A FIFO opens without blocking; a device node would be
-    opened and closed. LOW.
-14. **Spotted in round 7 (the synthesis's note), not fixed.** Round 6's
+13. **Closed in round 8 (item 2, LOW-2).** `os.fwalk` is gone, and
+    `walk_below` opens only a name whose lstat found a folder, with
+    `O_NOFOLLOW`. The round 7 text read narrower than the code (the
+    audit's LOW-7): `os.fwalk` opened the target of every link to a
+    folder under the four, on every init, in both walks; a folder
+    swapped for a link was one case of that. **Spotted in round 7, not fixed:
+    `os.fwalk` opens before it compares.** For a folder swapped for a
+    link, `os.fwalk` opens the name (following the link) and only then
+    finds the fstat differs, so tc opens, and never changes, what the
+    link points at, for an instant. A FIFO opens without blocking; a
+    device node would be opened and closed. LOW.
+14. **Closed in round 8 (item 3, LOW-4).** The round 6 bullet now says
+    tc prints no `chgrp` or `chmod` line for an entry under the four,
+    and that D23's `chmod g-w,o-w` advice to the owner of ROOT or a
+    folder above it is the only command line tc prints. The code is
+    unchanged. The round 7 text: **Spotted in round 7 (the synthesis's
+    note), not fixed.** Round 6's
     bullet above says "tc prints no `chgrp` or `chmod` line anywhere".
     D23's walk refusals (`swap_words`) still tell the owner of ROOT, or
     of a folder on the way to it, to run `chmod g-w,o-w <path>` first
     (also under round 2's ROOT bullet). Those name folders root or the
     running user owns, not entries under the four, so the round 5
     mechanism does not apply; the sentence reads wider than the code.
+15. **Spotted in round 8, not fixed: `.shared` is read by path before
+    the walk.** Init reads `.shared` (`shared_group`) and its owner
+    (`marker_other_owner`, and `root_walk_problem`'s `marker_owner`) by
+    their paths under ROOT, before the walk and before `pin_root`. So
+    the group a member's rerun fixes toward is checked against the
+    `.shared` that ROOT's path named then, which a swap of ROOT between
+    that read and the walk could make another folder's. Nothing outside
+    the mailbox follows from it: the pinned walk changes only the
+    member's own entries in the ROOT the walk judged, toward the group
+    the member asked for with `--group` and is in. The worst is a fix
+    toward a group the pinned ROOT's `.shared` does not name. LOW. A fix:
+    read `.shared` again by its name in ROOT's descriptor after
+    `pin_root`, and refuse when it does not name `--group`.
 
 ## Not in this round
+
+Round 8, as its brief says. DEBT-1 of `audits/2026-10-15-0840-quick`
+(every other command resolves ROOT by its path, and C4's "Nobody can
+swap ROOT" walk runs only inside init) stays a stated limit: init's
+write path is pinned from ROOT down; `send`, `read` and the rest under
+a swapped ROOT were not traced. LOW-8 and LOW-9 (dev's C4 D29 lines at
+`contracts.md:369` to `377`; dev `CLAUDE.md:342` and
+`00-index.md:7` to `10`) are the architect's at the merge. For C4's D29
+lines (the synthesis's merge item 9, option A), what the code now
+holds: ROOT is opened once after the walk and kept only when it is the
+folder the walk judged (and, on a member's rerun, the init user's);
+the four and every folder below them are opened by name in their
+parent's descriptor and kept only when fstat finds what lstat found;
+each entry is opened by name in its folder's descriptor and changed only
+when it is the entry the walk found and, for a regular file, has one
+name; a link, anything else, a folder past `WALK_MAX_DEPTH`, and a
+folder or entry found changed are skipped and named. ROOT's owner and
+the folders above it are judged by the walk, by path. REC-1 is moot
+(option A for MEDIUM-1). REC-3 (a known-bugs entry, "a no-follow open
+guards the last name only") is the architect's. REC-4 is done: the
+coordinator's swap test holds it (ROOT swapped for a link, or for
+another folder, while `mail/`'s walk runs, in both walks).
 
 Round 7, as its brief says. LOW-3 of `audits/2026-10-15-0408-quick`
 (`tc watch --names` says `LISTENER DOWN` for a `tc wait` that exited 0
@@ -1576,9 +1899,11 @@ file). LOW-4 to LOW-8 (dev's `CLAUDE.md:57`, `contracts.md` C2's
 more", and the comments in dev's `tests/test_board_feed.py:253` and
 `tests/test_board_leak.py:133`) and the synthesis's "Merge commit
 changes on dev" (items 1 to 9, among them taking SHARED's side of
-`tests/test_router.py`, and C4's D29 lines saying every folder on the
-way is pinned) are the architect's, at the merge. REC-2 is done: the
-two swap tests in commit (a).
+`tests/test_router.py`, and C4's D29 lines) are the architect's, at the
+merge. Round 7 handed over "every folder on the way is pinned" for
+those lines; at round 7 that held below the four only (the audit's
+LOW-6 of `audits/2026-10-15-0840-quick`), and round 8, above, gives the
+wording that holds now. REC-2 is done: the two swap tests in commit (a).
 
 Round 6, as its brief says. REC-1 of `audits/2026-10-15-0300-quick`
 (D28's follow-up writes a listener's exit reason into its wait lock, a
@@ -1736,3 +2061,19 @@ thread and to `ITIMER_REAL`) stays a stated limit (assumption 20).
   folder (assumption 51), a top swapped between its lstat and its open,
   a folder that is gone or will not open between its listing and its
   entry (assumption 50), and Spotted items 11 to 13.
+- Round 8: the QA lead paragraph as changed is not run, and no QA step
+  swaps ROOT: in the script's setup ROOT sits under root's `/srv`, where
+  only root may rename it, so HIGH-1 cannot be reached there. In the
+  tests every swap is made from a wrapped `os.open` inside tc's own
+  process, at the moments named (as init opens ROOT, while `mail/`'s
+  walk runs, just before the walk opens a point), not by another process
+  racing tc; the folders swapped and the links are this user's own, and
+  the init user is a patched `os.lstat` and `os.fstat`. The nest test is
+  WALK_MAX_DEPTH + 1 folders deep, not about 1000: round 7's
+  `RecursionError` was not reproduced here, and the readable but not
+  searchable top was not run against round 7's code (both are the
+  synthesis's reading of `os.fwalk`). Not tested: the lstat of ROOT's
+  real path when a member's walk stops at the init user's own link
+  (assumption 59), a ROOT this user may search but not read (assumption
+  58), an lstat that fails with an error other than `ENOENT` or `EACCES`
+  (assumption 56), and Spotted item 15.
