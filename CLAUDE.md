@@ -64,17 +64,18 @@ Two ideas carry the whole tool.
 - Every tunable is a module constant at the top of `tc` with a comment
   saying why (`DEFAULT_WAIT_SECONDS`, `WAIT_MEMORY_CAP_BYTES`,
   `CACHE_TTL_SECONDS`). The only other globals are `ROOT` and the
-  paths built from it (`MAIL`, `STATUS`, `SEQ_FILE`). tc fixes all four
-  at import, from `TC_ROOT`.
+  paths built from it (`MAIL`, `STATUS`, `SEQ_FILE`, `CARDS`). tc fixes
+  all five at import, from `TC_ROOT`.
 - `TC_ROOT` moves the whole mailbox. Every test and every hand run uses its
   own `TC_ROOT` in a temp folder.
 - Exit codes are the interface for the waking side. The one table is
   under "Exit codes" at the top of
   `docs/planning/connection-routes/contracts.md`. Read it there; this file
-  keeps no copy. One trap today: a usage error (a mistyped flag, a missing
-  argument) exits 2, the same code as a `tc wait` timeout. CARDS task R6
-  (D12) moves it to 9. Until then, on an exit 2, read stderr: a usage
-  error starts with `usage:`.
+  keeps no copy. A usage error (a mistyped flag, a missing argument)
+  exits 9 (D12, merged with CARDS), so it can never pass for a `tc wait`
+  timeout, which is 2. A session re-arms its listener only on 0 (after
+  reading the mail) or 2, starts none on 3, and on any other code stops
+  and tells its relay.
 - Tests run `tc` as a subprocess, or load it as a module without running
   `main()` (`tests/test_keepalive.py` shows how). A load reads `TC_ROOT`
   once, at import, from the test process's own environment. The harness
@@ -84,8 +85,8 @@ Two ideas carry the whole tool.
   be a live mailbox. The harness root is the only safe target: set
   `os.environ["TC_ROOT"]` to `str(root.path)` before the load, inside
   the `with`, and restore the old value after. Patching `ROOT`
-  after the load moves nothing: `MAIL`, `STATUS` and `SEQ_FILE` keep the
-  old paths. New tests build on the shared harness, `tests/_root.py`.
+  after the load moves nothing: `MAIL`, `STATUS`, `SEQ_FILE` and `CARDS`
+  keep the old paths. New tests build on the shared harness, `tests/_root.py`.
 - `tc` is one file that several lanes edit. Each lane adds its own functions
   and touches only the shared spots named in `00-index.md` section 4: the
   `ROUTES` table (planned, contract C2), the argparse block in `main()`, and
@@ -96,9 +97,9 @@ Two ideas carry the whole tool.
 The connection routes plan, run in lanes and waves
 (`docs/planning/connection-routes/00-index.md` section 4). Wave 0, GROUND
 (this file, `docs/known-bugs/` and `tests/_root.py`), merged into the dev
-branch at `a029bda`, and CORE at `f5f6923`. As of 2026-10-14, CARDS and
-BOARD (the rest of wave 1) run in their own worktrees. SHARED, SSH and
-DOCS come after them.
+branch at `a029bda`, CORE at `f5f6923` and CARDS at `4f35efc`. As of
+2026-10-14, BOARD (the rest of wave 1) is in its fix round. SHARED, SSH
+and DOCS come after it.
 
 ### Off limits
 
@@ -121,7 +122,7 @@ DOCS come after them.
 tc                                 the whole tool (python3, stdlib only)
 JOIN.md                            what you point a new session at
 board/                             look kit for a visual session board; demo.html shows every state
-tests/test_*.py                    unittest suites (health, keepalive, ...)
+tests/test_*.py                    unittest suites (mailbox, names, cards, router, codex route, usage, health, ...)
 tests/*.test.mjs                   node --test suites for the board look
 tests/_root.py                     shared harness: throwaway TC_ROOT, proven listener, fake ssh and codex
 qa/human/                          step-by-step scripts a person runs
@@ -129,6 +130,9 @@ docs/known-bugs/                   INDEX.md plus one detail file per entry. See 
 docs/planning/connection-routes/   the plan: 00-index, contracts, phases, decisions, handoffs/, pauses/
 mail/to-<name>/NNNNNN-from-X.md    unread messages (gitignored)
 mail/to-<name>/read/               read messages, kept as history
+mail/.box-<name>.lock              the inbox lock: send's count plus write, read's glob plus rename (D14)
+mail/.ring-pending-<name>          a failed codex ring; the next send rings again (D14)
+cards/<name>.json                  one address card per name: kind, account, route (gitignored)
 status/<name>.md                   each side's latest status (gitignored)
 ```
 
@@ -291,7 +295,9 @@ names.
 ## Status
 
 The tool runs today on one machine: send, read, peek, wait (with
-`--keepalive`), status, log, health and watch, plus the board look kit.
+`--keepalive`), status, log, health and watch; join, card and cards for
+address cards; a router in send with the `local` and `codex` routes;
+plus the board look kit.
 `tests/test_mailbox.py` (CORE, K1 to K8) tests send, read, peek, wait,
 log, status and the counter, each test proven by a hand mutation of
 `tc`.
@@ -302,6 +308,7 @@ rounds, the architect merged it into the dev branch,
 `Claude-Development-TheConnection`, at `a029bda`, with the merge
 approved for the owner as decision D8 allows. `89bdd2e` followed with two
 post-merge fixes, and the P0 phase review (D9) closed with a fix round at
-`ab7bd31`. CORE (P1) merged at `f5f6923`. As of 2026-10-14, CARDS and
-BOARD (wave 1) are in review or in build. Nothing else in the plan is
-built. `main` stays the owner's alone.
+`ab7bd31`. CORE (P1) merged at `f5f6923`, the K2 recorder fix at
+`62d8a6d`, and CARDS (P2) at `4f35efc`. As of 2026-10-14, BOARD (wave 1)
+is in its fix round. The `ssh` route, the shared mailbox and the docs
+are not built. `main` stays the owner's alone.
