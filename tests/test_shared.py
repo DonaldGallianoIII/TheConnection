@@ -1201,11 +1201,13 @@ class NobodyTouchesAnotherMembersMailTest(UmaskTestCase):
     def test_a_read_that_may_not_move_a_message_names_it_and_leaves_it_unread(self):
         """In process, with one rename refused (EPERM, as the sticky inbox refuses a non-owner): tc read moves the rest, names that one, exits 1.
 
-        Must reject a traceback on the refused rename (a member running tc
-        read on another member's inbox).
+        A second read, with only that one left, never says `no unread
+        mail`. Must reject a traceback on the refused rename (a member
+        running tc read on another member's inbox), and words that call
+        the stuck message gone.
 
-        @interacts  three sends; loads tc in process and runs cmd_read with
-                    Path.rename wrapped and stdout and stderr captured.
+        @interacts  three sends; loads tc in process and runs cmd_read twice
+                    with Path.rename wrapped and stdout and stderr captured.
         @deps       _root.TcRoot.tc, load_tc; argparse, contextlib, errno,
                     io, unittest.mock; tc.cmd_read.
         @complexity O(1).
@@ -1221,10 +1223,14 @@ class NobodyTouchesAnotherMembersMailTest(UmaskTestCase):
                 if path.name == "000002-from-c.md":
                     raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), str(path))
                 return real(path, target)
-            out, err = io.StringIO(), io.StringIO()
+            out, err, again = io.StringIO(), io.StringIO(), io.StringIO()
             with mock.patch.object(pathlib.Path, "rename", rename), contextlib.redirect_stdout(out), \
                     contextlib.redirect_stderr(err):
                 with self.assertRaises(SystemExit) as stop:
+                    tc.cmd_read(argparse.Namespace(name="b"))
+            with mock.patch.object(pathlib.Path, "rename", rename), contextlib.redirect_stdout(again), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
                     tc.cmd_read(argparse.Namespace(name="b"))
             box = root.path / "mail" / "to-b"
             unread = sorted(p.name for p in box.glob("*.md"))
@@ -1235,6 +1241,8 @@ class NobodyTouchesAnotherMembersMailTest(UmaskTestCase):
         self.assertEqual(unread, ["000002-from-c.md"])
         self.assertEqual(moved, ["000001-from-a.md", "000003-from-d.md"])
         self.assertIn("from a", out.getvalue())
+        self.assertNotIn("no unread mail", again.getvalue(),
+                         "a read that could move nothing said there is no unread mail")
 
 
 

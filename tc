@@ -1333,7 +1333,7 @@ def cmd_read(args):
                 stuck.append((p, err.strerror))
                 continue
             moved.append(p.parent / "read" / p.name)
-    if not moved:
+    if not moved and not stuck:  # mail it could not move is still unread
         print(f"no unread mail for {args.name}")
     unshown = show(moved)
     refuse_lines([f"tc read: {printable(p)} not shown and left in place ({why})" for p, why in skipped]
