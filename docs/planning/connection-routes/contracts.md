@@ -5,7 +5,8 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D21) the same day.
+        wave 2 rulings (D17 to D21) the same day, and D22 and D23 on
+        2026-10-15.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
 Date:   2026-10-14
@@ -30,6 +31,7 @@ pause; no lane reuses a number for a new meaning.
 | 7 | refused by the gate | `gate` | this plan (C3) |
 | 8 | message over `SEND_BODY_MAX_BYTES` | `send`, `gate` | this plan (C0) |
 | 9 | usage error: an unknown command, flag or missing argument; the usage text goes to stderr | every command (the parser) | this plan (D12) |
+| 10 | busy: another process held `mail/.seq` or an inbox lock past `LOCK_WAIT_SECONDS`; nothing written; try again. Never from `wait` or `watch`, so the re-arm rule below is unchanged. The ssh route and `flush` treat a far 10 like a dropped connection: the message stays queued (C3) | `send`, `read`, `card`, `join`, the codex route | this plan (D23) |
 
 Why 9 (D12): argparse exits 2 on a usage error, the same code as a `wait`
 timeout. A mistyped listener exits at once, its session reads 2 as a
@@ -256,6 +258,9 @@ subprocess.run(argv, input=body, text=True, capture_output=True,
   `outbox/NNNNNN-from-<sender>-to-<to>.md` (same seq counter, same header
   as a message), words to stderr `could not reach <target> (<reason>); kept
   in outbox: <path>. Run: tc flush`, exit 4.
+- **A far 10 is busy, not a refusal** (D23): the far tc could not get a
+  lock in time and wrote nothing. Treat it like exit 255: keep the
+  message in `outbox/`, exit 4, and `tc flush` retries it.
 - **Any other non-zero is the far `tc`'s answer** (6 bad name, 7 refused,
   8 too large): print its stderr, exit with its code, queue nothing. A
   refusal retried forever helps nobody.
@@ -330,6 +335,17 @@ For a separate Linux user per account on one machine.
   sets group `g` and mode `0664` on every file already under them
   (`mail/.seq` and the lock files included), and writes `ROOT/.shared`
   holding the group name.
+- **Nobody can swap ROOT** (D21, D23). Init makes a missing ROOT `0755`
+  and refuses a ROOT that its group or anyone may write. It then walks
+  every folder from ROOT up to `/` and refuses, with words naming the
+  folder, one owned by anyone but root or the user running init, or
+  writable by its group or anyone without the sticky bit: ssh's own test
+  for `authorized_keys` paths. Any of those would let a member rename
+  ROOT and put their own `.shared` in its place.
+- **A held lock costs a failed send, never a hang** (D20, D23). `mail/.seq`
+  and the inbox locks are group-writable, so a member can hold one. tc
+  waits at most `LOCK_WAIT_SECONDS` per command for them, then exits 10
+  with nothing written.
 - While `.shared` exists, `tc` sets `os.umask(0o002)` before it writes
   anything, so every file and lock it makes is group-writable, and the
   setgid folders give them group `g`. Any folder `tc` creates later
