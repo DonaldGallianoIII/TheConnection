@@ -22,7 +22,7 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   outbox/<user>/to-<name>/sent/, refused/  ssh messages the far tc took, or refused (+ .stderr note)
   outbox/<user>/.send-<key>.lock           that user's send lock for one ssh target, 0600 (D33)
   outbox/.origin-token                     this mailbox's random origin token (D25)
-  mail/.origins/<origin id>                an ssh message's origin id, filed once delivered (D25)
+  mail/.origins/<user>/<key-name>/<id>     an ssh message's origin id, filed as it lands, empty (D25, D33)
 
 @interacts  writes mail/, status/, cards/ and outbox/ under ROOT. Its one
             way off the machine is `ssh` (SSH S1, Claude Opus 5.5,
@@ -35,15 +35,16 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             owner and the one command that clears it, and `health`
             lists it, D33); `flush` sends that user's waiting outbox
             mail the same way, one ssh run per message (SSH S2).
-            Inbound, `gate` is the forced command one
-            far key runs (SSH S3, C3): it reads SSH_ORIGINAL_COMMAND,
-            delivers a send as from its --as name through the router
-            (never to an ssh card, D18), answers `health --json` without
-            cards or a GPU query, files each origin id it delivers in
-            mail/.origins/ (D25), and starts no shell and no program but
-            the codex ring. The waking side is
-            Claude Code's background Bash: `tc wait` or `tc watch` exiting is
-            what re-invokes the session that started it. `health` and `watch`
+            Inbound, `gate` is the forced command one far key runs (SSH
+            S3, C3): it reads SSH_ORIGINAL_COMMAND, delivers a send as
+            from its --as name through the router (never to an ssh card,
+            D18), answers `health --json` without cards or a GPU query,
+            files each origin id it delivers in
+            mail/.origins/<user>/<key-name>/ as soon as the message lands
+            (D25, D33), and starts no shell and no program but the codex
+            ring. The waking side is Claude Code's background Bash: `tc
+            wait` or `tc watch` exiting is what re-invokes the session
+            that started it. `health` and `watch`
             also read /proc (meminfo, locks, each process's comm and cmdline)
             and run `nvidia-smi` when it exists. They never signal or touch
             another process. `send` to a codex card runs `codex queue` (C2)
@@ -134,8 +135,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             D23); each ring marker write waits as long for the marker's
             flock, and then says so.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
-            grp, hashlib, json, pathlib, pwd, re, resource, shlex, shutil,
-            signal, stat, subprocess, time, datetime, os, sys); Linux only
+            grp, hashlib, json, pathlib, pwd, re, resource, secrets, shlex,
+            shutil, signal, stat, subprocess, time, datetime, os, sys); Linux only
             (flock, RLIMIT_AS, O_NOFOLLOW, O_NONBLOCK, /proc). nvidia-smi
             optional; the codex CLI for the codex route; the ssh client
             for the ssh route, with a POSIX login shell on the far side
@@ -190,12 +191,21 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             the branch, SSH fix round 1, D32); one origin token per
             mailbox and one send lock per user per ssh target, in that
             user's branch, made on first use and kept; one empty filing
-            per origin id delivered here, kept (SSH S3).
+            per origin id delivered here, kept (SSH S3), under
+            mail/.origins/<user>/<key-name>/, one folder per user and
+            per key name, made on first use and kept (SSH fix round 1,
+            D33).
             Nothing held in memory past one command. `wait` measured flat at
             13 MB RSS over 200k polls; it also hard-caps itself at
             WAIT_MEMORY_CAP_BYTES so a runaway dies alone. `wait` holds
             mail/.wait-<name>.lock for its lifetime; the kernel releases it
             when the process exits or is killed.
+@rng        SSH S1 and SSH fix round 1 (Claude Opus 5.5, unreviewed):
+            os.urandom(ORIGIN_TOKEN_BYTES) once per mailbox, for its
+            origin token (origin_token, D25); secrets.token_hex
+            (ORIGIN_NONCE_BYTES) once per ssh message published, for its
+            origin id's random part (origin_nonce, D33 part 4), never on
+            a retry. Nothing else draws randomness.
 """
 
 import argparse
@@ -212,6 +222,7 @@ import pathlib
 import pwd
 import re
 import resource
+import secrets
 import shlex
 import shutil
 import signal
@@ -553,11 +564,25 @@ NO_HARD_LINK_ERRNOS = (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP)
 # as unreachable and the message waits in the outbox. Ten seconds rides out
 # a slow network and keeps a dead one from holding a sender for long.
 SSH_CONNECT_SECONDS = 10
-# The whole ssh run: connect, the far tc's lock waits (its own
-# LOCK_WAIT_SECONDS) and its write. Past it ssh is killed and the message
-# waits in the outbox. The far side may have delivered it all the same,
-# which the origin id makes harmless (D25).
-SSH_SEND_SECONDS = 30
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 3, the audit's
+# MEDIUM-1. How many LOCK_WAIT_SECONDS bounds a far gate may wait out in
+# one send to a codex name: one for its inbox lock and mail/.seq together
+# (one deadline), and one for each of the two ring marker writes, before
+# and after the ring.
+FAR_LOCK_WAITS = 3
+# What the far side spends besides those: python's start, the far tc's
+# own reads and its write. A tc start is about 50 ms; ten seconds rides
+# out a loaded far machine.
+SSH_SEND_MARGIN_SECONDS = 10
+# The whole ssh run: connect, the far gate's lock waits, its codex ring
+# (a far codex name is rung before the gate answers) and the margin,
+# about 60 s. Derived, so a far ring that runs to its own bound still
+# answers before this side gives up. Past it ssh is killed and the message
+# waits in the outbox; the far side may have delivered it all the same,
+# which the origin id makes harmless (D25), and the far gate files that id
+# as soon as the message lands, before the ring (D33 part 3).
+SSH_SEND_SECONDS = (SSH_CONNECT_SECONDS + CODEX_RING_SECONDS + FAR_LOCK_WAITS * LOCK_WAIT_SECONDS
+                    + SSH_SEND_MARGIN_SECONDS)
 # ssh's own exit code when the connection, or ssh itself, failed: the far
 # tc never answered, so the message waits for tc flush.
 SSH_CONNECT_FAILED = 255
@@ -595,13 +620,28 @@ ORIGIN_TOKEN_PATTERN = re.compile(rf"[0-9a-f]{{{2 * ORIGIN_TOKEN_BYTES}}}")
 # The most of the token file tc reads: one line of hex; 4 KiB bounds a
 # hand-made one.
 ORIGIN_TOKEN_READ_MAX_BYTES = 4096
-# An origin id: <token>-<outbox number>-<sender>, checked against this
-# fixed pattern on the far side (C3). The token is hex and the number
-# digits, so the first two dashes split it, and the sender (C0) comes
-# last. 18 digits hold any number mail/.seq reaches in practice.
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 4, the audit's
+# HIGH-2. The random part every origin id gains, made once per message
+# (origin_nonce, from Python's secrets module), written into the outbox
+# file's header and read back by every retry of that file. A set-back,
+# wiped or copied mail/.seq can repeat an outbox number, and a copied
+# mailbox repeats the token too; 16 random bytes (32 hex digits, as the
+# token) never repeat in practice, so no message takes another's id.
+ORIGIN_NONCE_BYTES = 16
+# An origin id: <token>-<outbox number>-<random part>-<sender>, checked
+# against this fixed pattern on the far side (C3). The token and the
+# random part are hex and the number digits, so the first three dashes
+# split it, and the sender (C0) comes last. 18 digits hold any number
+# mail/.seq reaches in practice.
 ORIGIN_SEQ_MAX_DIGITS = 18
-ORIGIN_PATTERN = re.compile(rf"([0-9a-f]{{{2 * ORIGIN_TOKEN_BYTES}}})-([0-9]{{1,{ORIGIN_SEQ_MAX_DIGITS}}})-"
-                            rf"({NAME_PATTERN.pattern})")
+ORIGIN_PATTERN = re.compile(rf"(?P<token>[0-9a-f]{{{2 * ORIGIN_TOKEN_BYTES}}})-"
+                            rf"(?P<n>[0-9]{{1,{ORIGIN_SEQ_MAX_DIGITS}}})-"
+                            rf"(?P<nonce>[0-9a-f]{{{2 * ORIGIN_NONCE_BYTES}}})-(?P<sender>{NAME_PATTERN.pattern})")
+# The note that ends an outbox file's header line (publish_message): the
+# id its first try sends, so a retry from tc flush sends the same one
+# (D33 part 4). Read back by this pattern, at the header line's end.
+ORIGIN_HEADER_NOTE = "origin {origin}"
+ORIGIN_HEADER_PATTERN = re.compile(rf", origin ({ORIGIN_PATTERN.pattern})$")
 # The send lock: one per Linux user per ssh target, held by the one tc
 # that sends that user's queue for that target (a send, or tc flush), so a
 # newer message never goes ahead of an older one and no two sends of one
@@ -654,10 +694,16 @@ GATE_NO_FORWARD_WORDS = "tc gate: {name} is not a local name; the gate does not 
 GATE_HEADER_NOTE = "via ssh gate, key {key}"
 # The two words after the far tc's path that make the gate's health shape.
 GATE_HEALTH_WORDS = ["health", "--json"]
-# Where D25's origin ids are filed once their message is delivered:
-# mail/ORIGINS_NAME/<id>, one empty file each, owned by the Linux user
-# whose gate or send delivered it. Only such a file counts as filed, so
-# an id another member planted ahead of a message can never drop it.
+# Where D25's origin ids are filed once their message lands:
+# mail/ORIGINS_NAME/<user>/<key-name>/<id>, one empty file each (its
+# mtime holds the time), made by the Linux user whose gate or send
+# delivered it. SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part
+# 5, the audit's HIGH-3 and HIGH-4. <user> is that user's login and
+# <key-name> the name the message is delivered as (the gate's --as, a
+# plain tc send's --from), so one key's filings never answer for another
+# key, and no member can rename another's. Each level is that user's own
+# folder, SHARED_BRANCH_MODE under a shared mailbox, and a filing counts
+# only when every level is (open_branch).
 ORIGINS_NAME = ".origins"
 # C3's words for a message whose origin id is already filed: the far
 # sender's retry, after a crash or a timeout, delivers nothing twice.
@@ -2642,7 +2688,7 @@ def write_new_file(path, text, mode=NEW_FILE_MODE, dir_fd=None):
 
 # SSH task 0 (Claude Opus 5.5, unreviewed): D18, the one path that holds
 # the route and inbox-lock steps, which tc send and the gate (C3) share.
-def route_and_deliver(sender, to, body, header_note=None, *, forward=True):
+def route_and_deliver(sender, to, body, header_note=None, *, forward=True, on_landed=None):
     """Read `to`'s card and hand the message to the route it names (C2), under one lock deadline: the route's Delivery.
 
     The steps cmd_send held until SSH task 0, moved here unchanged so the
@@ -2671,12 +2717,19 @@ def route_and_deliver(sender, to, body, header_note=None, *, forward=True):
     caller that must act only after a delivery acts on exit 0 here, never
     in a finally.
 
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 3.
+    `on_landed`, when given, goes to the local and codex routes, which
+    call it once the message has landed in the inbox and before any ring,
+    and add the warnings it returns: the far gate files an origin id
+    there (deliver_once). The ssh route and any other get no such call.
+
     @interacts  reads cards/<to>.json (card_route) and refuses (exit 1,
                 nothing written) a card it cannot route; for a local
                 delivery holds mail/.box-<to>.lock shared (inbox_lock;
                 held past the deadline by another process, exit 10,
                 nothing written) and reads the card again; calls one
-                ROUTES function, which writes the message.
+                ROUTES function, which writes the message (and calls
+                `on_landed`, local and codex only).
     @deps       card_route, lock_deadline, inbox_lock, deliver_local,
                 deliver_codex, deliver_ssh, Delivery; fcntl;
                 EXIT_GATE_REFUSED, GATE_NO_FORWARD_WORDS.
@@ -2691,17 +2744,148 @@ def route_and_deliver(sender, to, body, header_note=None, *, forward=True):
         with inbox_lock(to, fcntl.LOCK_SH, deadline):
             card, deliver = card_route(to)
             if deliver is deliver_local:
-                return deliver_local(card, sender, to, body, header_note, deadline=deadline)
+                return deliver_local(card, sender, to, body, header_note, deadline=deadline, on_landed=on_landed)
     if deliver is deliver_ssh and not forward:  # SSH S3 (Claude Opus 5.5, unreviewed): D18, the gate never forwards
         return Delivery(EXIT_GATE_REFUSED, GATE_NO_FORWARD_WORDS.format(name=to), [])
-    if deliver is deliver_codex or deliver is deliver_ssh:  # SSH S1 (Claude Opus 5.5, unreviewed): ssh's too (DEBT-2)
+    if deliver is deliver_codex:  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 3, filed before the ring
+        return deliver(card, sender, to, body, header_note, deadline=deadline, on_landed=on_landed)
+    if deliver is deliver_ssh:  # SSH S1 (Claude Opus 5.5, unreviewed): ssh's too (DEBT-2)
         return deliver(card, sender, to, body, header_note, deadline=deadline)
     return deliver(card, sender, to, body, header_note)
 
 
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 5, the audit's
+# HIGH-3, HIGH-4 and MEDIUM-2. Every level of a member's filings is that
+# member's own folder, reached through open folders, never by a path.
+def open_branch(folder_fd, name, path, share, make, top_level):
+    """The descriptor of the folder `name` in the folder open at `folder_fd` (its path `path`, for the words), made as this user when it is missing and `make`: always this user's own real folder, and under a shared mailbox (`share`) in its group with no group or other write (branch_problem). Raises OSError, its words in strerror, or FileNotFoundError when it is missing and not `make`.
+
+    It is opened by its name in its parent's descriptor with FOLDER_FLAGS
+    (never through a link, only a folder) and judged by fstat on what was
+    opened, so no folder on the way is resolved by a path after its check
+    (known bug no-follow-open-guards-only-the-last-name). A new one is
+    made at NEW_BRANCH_FOLDER_MODE, so no member can write in it, then
+    given the mailbox's group and SHARED_BRANCH_MODE through the
+    descriptor; when that fails it is removed again, tc's own empty
+    folder, and the words say so. `top_level` is passed to branch_problem
+    for the words: the folder sits in a sticky folder, not in this user's
+    own branch.
+
+    @interacts  opens, and when missing and `make` makes, one folder by
+                its name in `folder_fd`; fstats it; sets its group and
+                mode when made under a shared mailbox; reads this
+                process's user id and the user database for the words.
+    @deps       branch_problem, printable; os, errno, contextlib;
+                FOLDER_FLAGS, NEW_BRANCH_FOLDER_MODE, SHARED_BRANCH_MODE.
+    @complexity O(1).
+    @alloc      one descriptor, returned (the caller closes it), or closed
+                before anything is raised.
+    """
+    def opened():
+        try:
+            return os.open(name, FOLDER_FLAGS, dir_fd=folder_fd)
+        except OSError as err:
+            if err.errno not in (errno.ELOOP, errno.ENOTDIR):
+                raise
+            raise OSError(err.errno, branch_problem(path, os.lstat(name, dir_fd=folder_fd), share,
+                                                    top_level)) from None
+
+    made = False
+    try:
+        fd = opened()
+    except FileNotFoundError:
+        if not make:
+            raise
+        try:
+            os.mkdir(name, NEW_BRANCH_FOLDER_MODE, dir_fd=folder_fd)
+            made = True
+        except FileExistsError:
+            pass  # made meanwhile: judged below like any other
+        fd = opened()
+    try:
+        if made and share is not None:
+            try:
+                os.fchown(fd, -1, share.gid)
+                os.fchmod(fd, SHARED_BRANCH_MODE)  # after fchown, which may clear setgid
+            except OSError as err:
+                os.close(fd)
+                fd = None
+                with contextlib.suppress(OSError):
+                    os.rmdir(name, dir_fd=folder_fd)  # tc's own folder, made empty just above
+                raise OSError(err.errno, f"could not give the new folder {path} group {printable(share.group)} "
+                                         f"({err.strerror}); removed it again") from None
+        problem = branch_problem(path, os.fstat(fd), share, top_level)
+        if problem is not None:
+            raise OSError(errno.EPERM, problem)
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        raise
+    return fd
+
+
+def origin_levels(scope):
+    """The names of the folders below mail/.origins/ that hold the filings of the key named `scope`, top down: this user's branch, then the key's name (D33 part 5).
+
+    @interacts  reads the user database (branch_user).
+    @deps       branch_user.
+    @complexity O(1).
+    @alloc      one short list, returned.
+    """
+    return [branch_user(), scope]
+
+
+def origin_folder(scope, make):
+    """mail/.origins/ and each folder origin_levels names below it, each opened by its name in the one above: (descriptors, path, share), the last descriptor and `path` the folder the key's filings sit in, `share` the mailbox's Share or None. The caller closes every descriptor. Raises OSError, its words in strerror.
+
+    mail/.origins/ itself is made when missing and `make` (make_folder_with,
+    raising: sticky under a shared mailbox, so each member makes a folder
+    of their own in it) and opened with FOLDER_FLAGS by its path, which
+    the init user's mail/ holds; a link or anything but a folder at its
+    name is refused with words. Each level below is this user's own
+    (open_branch), so no member's folder, renamed filing or planted link
+    is ever counted or written through.
+
+    @interacts  reads ROOT/.shared and the group database
+                (share_or_raise); makes mail/.origins/ when missing and
+                `make`; opens it and each level below (open_branch).
+    @deps       share_or_raise, make_folder_with, open_branch,
+                origin_levels; os, errno; MAIL, ORIGINS_NAME, FOLDER_FLAGS.
+    @complexity O(1): three folders.
+    @alloc      up to three descriptors, returned (or closed before
+                anything is raised).
+    """
+    share = share_or_raise()
+    top = MAIL / ORIGINS_NAME
+    if make:
+        try:
+            make_folder_with(top, share, raising=True)
+        except FileExistsError:
+            raise OSError(errno.ENOTDIR, f"{top} is not a folder, so tc wrote nothing there") from None
+    fds = []
+    try:
+        try:
+            fds.append(os.open(top, FOLDER_FLAGS))
+        except OSError as err:
+            if err.errno == errno.ELOOP:
+                raise OSError(err.errno, f"{top} is a symlink, which tc never follows") from None
+            if err.errno == errno.ENOTDIR:
+                raise OSError(err.errno, f"{top} is not a folder, so tc wrote nothing there") from None
+            raise
+        path = top
+        for depth, name in enumerate(origin_levels(scope)):
+            path = path / name
+            fds.append(open_branch(fds[-1], name, path, share, make, depth == 0))
+    except BaseException:
+        for fd in fds:
+            os.close(fd)
+        raise
+    return fds, path, share
+
+
 # SSH S3 (Claude Opus 5.5, unreviewed): D25, origin ids filed by the side that delivers.
-def origin_filed(origin):
-    """True when the origin id `origin` is filed here: a regular file at mail/.origins/<origin> that this Linux user owns.
+def origin_filed(origin, scope):
+    """True when the origin id `origin` is filed here for the key named `scope`: a regular file at mail/.origins/<user>/<scope>/<origin> that this Linux user owns, every folder on the way this user's own.
 
     A file another user owns at that name is not a filing this user made
     (a member could plant one ahead of a message to drop it), so it does
@@ -2709,48 +2893,83 @@ def origin_filed(origin):
     a loss. Anything lstat cannot reach counts as not filed, for the same
     reason.
 
-    @interacts  lstats one name. Writes nothing.
-    @deps       owned_by_me; os, stat; MAIL, ORIGINS_NAME.
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 5, the
+    audit's HIGH-3 and HIGH-4. Only this user's filings for this one key
+    count: another key's filing of the same id (a far machine that
+    learned the id) answers nothing here, and a filing counts only in
+    folders origin_folder finds this user's own, so a member who owns
+    mail/.origins/ can rename no filing of this user's into a future id.
+
+    @interacts  opens mail/.origins/ and the two folders below it
+                (origin_folder, never making one); lstats one name in the
+                last. Writes nothing.
+    @deps       origin_folder, owned_by_me; os, stat.
     @complexity O(1).
-    @alloc      one stat result, freed on return.
+    @alloc      up to three descriptors, closed before return; one stat
+                result, freed on return.
     """
     try:
-        st = os.lstat(MAIL / ORIGINS_NAME / origin)
+        fds, _, _ = origin_folder(scope, False)
     except OSError:
         return False
+    try:
+        st = os.lstat(origin, dir_fd=fds[-1])
+    except OSError:
+        return False
+    finally:
+        for fd in fds:
+            os.close(fd)
     return stat.S_ISREG(st.st_mode) and owned_by_me(st)
 
 
-def file_origin(origin):
-    """File the origin id `origin` as delivered: make mail/.origins/<origin> as this user. None when filed, else a warning in words.
+def file_origin(origin, scope):
+    """File the origin id `origin` as delivered for the key named `scope`: make mail/.origins/<user>/<scope>/<origin> as this user. None when filed, else a warning in words.
 
-    The folder is made through make_folder (sticky under a shared
-    mailbox); the file through write_new_file (never through a link,
-    never over a file), holding the time, at SHARED_OWNED_FILE_MODE under
-    a shared mailbox. One already there as this user's is a filing made
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 5 and the
+    audit's MEDIUM-2 and LOW-10. Every folder on the way is made or found
+    through origin_folder, which raises OSError with words and never
+    exits, inside this function's own try: the message has landed by the
+    time this runs, so anything at mail/.origins (a file, a link, a
+    folder another member made in this user's name) is a warning, never a
+    traceback or an exit that would read as a refusal to the far sender.
+    The filing is an empty file (its mtime holds the time), made with
+    NEW_FILE_FLAGS by its name in its folder's descriptor (never through
+    a link, never over a file), at SHARED_OWNED_FILE_MODE under a shared
+    mailbox. One already there as this user's is a filing made
     meanwhile, and that is fine; one another user made, or a failure, is
     a warning: a retry of that message would be delivered again.
 
-    @interacts  reads ROOT/.shared and makes mail/.origins/ (make_folder);
-                creates one file there (write_new_file), or lstats it.
-    @deps       make_folder, write_new_file, origin_filed, now_iso; MAIL,
-                ORIGINS_NAME, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE.
+    @interacts  reads ROOT/.shared; makes or opens mail/.origins/ and the
+                two folders below it (origin_folder); creates one empty
+                file in the last, or lstats it.
+    @deps       origin_folder, owned_by_me; os, stat; MAIL, ORIGINS_NAME,
+                NEW_FILE_FLAGS, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE.
     @complexity O(1).
-    @alloc      one file, kept: the filing; one string or none, returned.
+    @alloc      one empty file, kept: the filing; up to three descriptors,
+                closed before return; one string or none, returned.
     """
-    folder = MAIL / ORIGINS_NAME
-    share = make_folder(folder)
+    lost = "so a retry of this message would be delivered again"
+    try:
+        fds, folder, share = origin_folder(scope, True)
+    except OSError as err:
+        return f"origin {origin} could not be filed under {MAIL / ORIGINS_NAME} ({err.strerror}), {lost}"
     mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
     try:
-        write_new_file(folder / origin, f"{now_iso()}\n", mode)
+        os.close(os.open(origin, NEW_FILE_FLAGS, mode, dir_fd=fds[-1]))
     except FileExistsError:
-        if origin_filed(origin):
+        try:
+            st = os.lstat(origin, dir_fd=fds[-1])
+        except OSError:
+            st = None
+        if st is not None and stat.S_ISREG(st.st_mode) and owned_by_me(st):
             return None
         return (f"origin {origin} could not be filed: something another user made, or a link, has its name in "
-                f"{folder}, so a retry of this message would be delivered again")
+                f"{folder}, {lost}")
     except OSError as err:
-        return (f"origin {origin} could not be filed in {folder} ({err.strerror}), so a retry of this message "
-                f"would be delivered again")
+        return f"origin {origin} could not be filed in {folder} ({err.strerror}), {lost}"
+    finally:
+        for fd in fds:
+            os.close(fd)
     return None
 
 
@@ -2761,26 +2980,44 @@ def deliver_once(sender, to, body, header_note=None, *, origin=None, forward=Tru
     here (origin_filed), nothing is written and nothing rung: Delivery
     exit 0, ALREADY_DELIVERED_WORDS, so a far tc flush that sends a
     message again after a crash or a timeout delivers nothing twice.
-    Else the message goes through route_and_deliver and, only once that
-    returns exit 0, the id is filed (file_origin; a filing that fails is
-    a warning). Never in a finally: busy leaves route_and_deliver two
+    Else the message goes through route_and_deliver, and the id is filed
+    (file_origin; a filing that fails is a warning) only once the message
+    has landed. Never in a finally: busy leaves route_and_deliver two
     ways (D23), a sys.exit inside a lock wait, after which nothing here
     runs, and Delivery exit 10, which is not 0; neither files the id.
 
-    @interacts  lstats mail/.origins/<origin> (origin_filed); then see
-                route_and_deliver; on exit 0 with an origin, makes its
-                filing (file_origin).
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 3 and 5.
+    The id is filed for the key `sender` names (the gate's --as, a plain
+    tc send's --from: the name the message is delivered as), so one key's
+    filings never answer for another's. It is filed the moment the
+    message lands, before any ring: route_and_deliver hands `on_landed` to
+    the local and codex routes, which call it right after the publish,
+    so a far codex ring that runs to its bound can no longer leave a
+    delivered message unfiled while the sender's ssh gives up. A route
+    that never calls it (ssh, through a key with no forced command)
+    gets its filing after it returns exit 0, as before.
+
+    @interacts  opens mail/.origins/<user>/<sender>/ and lstats
+                <origin> there (origin_filed); then see route_and_deliver;
+                once the message lands, makes its filing (file_origin).
     @deps       origin_filed, route_and_deliver, file_origin, Delivery;
                 ALREADY_DELIVERED_WORDS.
     @complexity O(1) here, plus route_and_deliver's.
     @alloc      one Delivery, returned; one filing per delivered origin,
                 kept.
     """
-    if origin is not None and origin_filed(origin):
+    if origin is not None and origin_filed(origin, sender):
         return Delivery(0, ALREADY_DELIVERED_WORDS.format(origin=origin), [])
-    result = route_and_deliver(sender, to, body, header_note, forward=forward)
-    if result.exit == 0 and origin is not None:
-        problem = file_origin(origin)
+    filed = []
+
+    def landed():
+        filed.append(origin)
+        problem = file_origin(origin, sender)
+        return [] if problem is None else [problem]
+    result = route_and_deliver(sender, to, body, header_note, forward=forward,
+                               on_landed=landed if origin is not None else None)
+    if result.exit == 0 and origin is not None and not filed:
+        problem = file_origin(origin, sender)
         if problem is not None:
             result = Delivery(result.exit, result.words, result.warnings + [problem])
     return result
@@ -2795,8 +3032,9 @@ def origin_argument(text):
     @alloc      none.
     """
     found = ORIGIN_PATTERN.fullmatch(text)
-    if found is None or not valid_name(found.group(3)):
-        raise argparse.ArgumentTypeError(f'bad origin id "{printable(text)}": <32 hex digits>-<number>-<sender>')
+    if found is None or not valid_name(found.group("sender")):
+        raise argparse.ArgumentTypeError(f'bad origin id "{printable(text)}": <32 hex digits>-<number>-'
+                                         f'<32 hex digits>-<sender>')
     return text
 
 
@@ -3910,7 +4148,7 @@ def read_body(message):
     return raw.decode(sys.stdin.encoding, sys.stdin.errors)
 
 
-def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
+def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on_landed=None):
     """Route local: today's send. Seq under flock, write a new .tmp, link it into the inbox under a name nothing has.
 
     Warns `new inbox: nobody has joined as <to>` only when the inbox did
@@ -3998,6 +4236,12 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
     another's inbox. The message is made SHARED_OWNED_FILE_MODE (0640,
     item 2). O1's deliver plus warning stays for a private mailbox.
 
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 3.
+    `on_landed`, a keyword C2's route signature leaves out, is called
+    once the message is published, and the warnings it returns are this
+    Delivery's: the far gate files the origin id there, before a codex
+    ring (deliver_once). None calls nothing.
+
     @interacts  reads ROOT/.shared (mailbox_share); lstats mail/to-<to>,
                 its read/ and, when shared, cards/<to>.json (check_inbox,
                 then once more for the no-card refusal); takes the
@@ -4011,7 +4255,8 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
                 stats cards/<to>.json. Every name taken: Delivery exit 10.
                 SSH task 0 (Claude Opus 5.5, unreviewed): every try's
                 steps run in publish_message, with ("read",) as the
-                history it checks; nothing about them changed.
+                history it checks; nothing about them changed. Once
+                published, calls `on_landed` when given.
     @deps       mailbox_share, check_inbox, lock_deadline, next_seq, inbox,
                 publish_message, Delivery; os; CARDS,
                 SHARED_OWNED_FILE_MODE, NEW_FILE_MODE, EXIT_REFUSED.
@@ -4045,6 +4290,8 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
     if published.refusal is not None:
         return published.refusal
     warnings = published.warnings
+    if on_landed is not None:  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 3, before any ring
+        warnings += on_landed()
     joined = (CARDS / f"{to}.json").exists()  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13
     if not (box_existed or joined):
         warnings.append(f"new inbox: nobody has joined as {to}")
@@ -4081,6 +4328,10 @@ def publish_message(box, history, n, sender, to, body, header_note, mode, deadli
     published, no .tmp left. The header is `# #<n> from <sender> to <to>,
     <time>`, plus `, <header_note>` when one is given; the body follows
     a blank line, trailing whitespace cut, one newline at its end.
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 4.
+    `header_note` may be a function of the number a try takes, called
+    once per try, so the outbox's note can carry an origin id built from
+    the number the message lands at.
 
     Lifted unchanged from deliver_local's SHARED fix rounds 2 to 7 (D20,
     D23, DEBT-1, LOW-1 to LOW-3); their record is in deliver_local's
@@ -4117,7 +4368,8 @@ def publish_message(box, history, n, sender, to, body, header_note, mode, deadli
             taken, behind = kept, True
             continue  # a filed message has this name (in read/, tc read would rename over it)
         tmp = path.with_suffix(".tmp")
-        header = f"# #{n} from {sender} to {to}, {now_iso()}" + (f", {header_note}" if header_note else "")
+        note = header_note(n) if callable(header_note) else header_note  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 4
+        header = f"# #{n} from {sender} to {to}, {now_iso()}" + (f", {note}" if note else "")
         try:  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a planted link is refused
             write_new_file(tmp, f"{header}\n\n{body.rstrip()}\n", mode)
         except FileExistsError:  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): DEBT-1, a taken .tmp takes the next number
@@ -4316,7 +4568,7 @@ def ring_backoff(marker):
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14, a failed ring is never lost.
 # Phase fix round 1 (Claude Opus 5.5, unreviewed): D16, the marker before the
 # ring, and the backoff after a timeout.
-def deliver_codex(card, sender, to, body, header_note=None, *, deadline=None):
+def deliver_codex(card, sender, to, body, header_note=None, *, deadline=None, on_landed=None):
     """Route codex: deliver_local under the inbox lock, then ring the Codex thread when a wake is owed.
 
     A listener started inside Codex dies when its command returns (D3), so
@@ -4355,6 +4607,11 @@ def deliver_codex(card, sender, to, body, header_note=None, *, deadline=None):
     words, nothing sent and nothing rung, so no member can point the
     marker at a file another user's send would then replace or read. So
     is a FIFO or anything else that is not a regular file (D19).
+
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 3.
+    `on_landed` goes to deliver_local, which calls it once the message is
+    published, under the inbox lock, so the far gate's origin id is filed
+    before the ring runs.
 
     @interacts  holds mail/.box-<to>.lock while it lstats the marker,
                 counts mail/to-<to>/*.md (before and after), reads and
@@ -4402,7 +4659,7 @@ def deliver_codex(card, sender, to, body, header_note=None, *, deadline=None):
         waiting = unread_count(to)
         owed = ring_owed(marker)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, the state, not the file
         held = ring_backoff(marker) if owed else None
-        landed = deliver_local(card, sender, to, body, header_note, deadline=deadline)
+        landed = deliver_local(card, sender, to, body, header_note, deadline=deadline, on_landed=on_landed)
         count = unread_count(to)
         ring = landed.exit == 0 and held is None and (owed or not waiting)
         if ring:
@@ -4580,6 +4837,23 @@ def init_user_name():
     return "the owner of the mailbox"
 
 
+def clearer(path):
+    """Who may move the entry at `path` aside, in words: the owner of the sticky folder it sits in (outbox/ is the init user's; mail/.origins/ is its first filer's), named as the user who ran init when it is.
+
+    @interacts  lstats `path`'s folder (and ROOT/.shared, init_user_name);
+                reads the user database.
+    @deps       init_user_name, user_name; os.
+    @complexity O(1).
+    @alloc      one short string, returned.
+    """
+    init = init_user_name()
+    try:
+        owner = user_name(os.lstat(path.parent).st_uid)
+    except OSError:
+        owner = init
+    return f"The user who ran init ({init})" if owner == init else f"{owner}, who owns {path.parent},"
+
+
 def aside_path(path):
     """Where `path` goes when it is moved aside: SQUATTED_NAME in its own folder, k the first count from 1 that nothing holds there.
 
@@ -4600,21 +4874,22 @@ def branch_problem(path, st, share, top_level):
     Refused: a link, anything but a folder, a folder another user owns,
     and, under a shared mailbox (`share`), a folder in another group or
     one its group or anyone else may write. The words name the owner and
-    the one command that clears it: a `mv -T` aside (aside_path), run by
-    the user who ran init when `top_level` (the branch itself, which sits
-    in outbox/ or mail/.origins/, sticky folders only their owner and
-    the entry's may rename in), else by this user, in whose own branch it
-    sits. A folder of this user's own in the wrong group or mode is fixed
+    the one command that clears it: a `mv -T` aside (aside_path), run,
+    when `top_level` (the branch itself, in outbox/ or mail/.origins/,
+    sticky folders where only their owner and the entry's may rename),
+    by that folder's owner (clearer: for outbox/, the user who ran init),
+    else by this user, in whose own branch it sits. A folder of this
+    user's own in the wrong group or mode is fixed
     by this user's own tc init (OWN_FIX_WORDS). tc prints a `mv -T` line
     and no other: rename(2) moves the name itself, never what a link at it
     leads to, and -T never moves it into a folder that already has the
     new name.
 
     @interacts  reads this process's user id and the user database;
-                lstats names beside `path` (aside_path, init_user_name).
-                Writes nothing.
-    @deps       aside_path, init_user_name, user_name, group_name,
-                printable; os, stat; OWN_FIX_WORDS.
+                lstats names beside `path` and its folder (aside_path,
+                clearer). Writes nothing.
+    @deps       aside_path, clearer, user_name, group_name, printable; os,
+                stat; OWN_FIX_WORDS.
     @complexity O(1), plus aside_path's.
     @alloc      the words, returned.
     """
@@ -4629,7 +4904,7 @@ def branch_problem(path, st, share, top_level):
         what = None
     if what is not None:
         if top_level:
-            who = f"The user who ran init ({init_user_name()}) clears it with one command"
+            who = f"{clearer(path)} clears it with one command"
         else:
             who = "It sits in your own branch, so you clear it with one command"
         return (f"{path} {what}: a branch and every folder in it are their member's alone (D32, D33), so tc "
@@ -4698,14 +4973,15 @@ def squatted_branches():
     A name counts as a branch when the user database has a login of that
     name; names starting with a dot (the origin token, a folder moved
     aside) never do. `why` says what is there instead (a link, not a
-    folder, another user's folder); `fix` is the one command the user who
-    ran init runs, a `mv -T` aside.
+    folder, another user's folder); `fix` is the one command the owner of
+    the folder it sits in runs (clearer: for outbox/, the user who ran
+    init), a `mv -T` aside.
 
     @interacts  lists outbox/ and mail/.origins/, and lstats each entry
-                named for a login; reads the user database. Writes
-                nothing.
-    @deps       aside_path, init_user_name, user_name; os, pwd, stat;
-                ROOT, MAIL, OUTBOX_NAME, ORIGINS_NAME.
+                named for a login and its folder; reads the user
+                database. Writes nothing.
+    @deps       aside_path, clearer, user_name; os, pwd, stat; ROOT, MAIL,
+                OUTBOX_NAME, ORIGINS_NAME.
     @complexity O(e) over e entries in the two folders: one per member,
                 plus the token and anything moved aside.
     @alloc      one dict per squatted branch, returned.
@@ -4734,7 +5010,7 @@ def squatted_branches():
                 continue
             path = top / name
             found.append({"path": str(path), "why": f"{why}, not {name}'s own branch",
-                          "fix": f"{init_user_name()}, who ran init, runs: mv -T {path} {aside_path(path)}"})
+                          "fix": f"{clearer(path)} runs: mv -T {path} {aside_path(path)}"})
     return found
 
 
@@ -4990,6 +5266,9 @@ def origin_token():
                 SHARED_OWNED_FILE_MODE, NEW_FILE_MODE.
     @complexity O(1): one small file.
     @alloc      the token string, returned; the token file, kept.
+    @rng        os.urandom(ORIGIN_TOKEN_BYTES), only when no token file is
+                there yet: once per mailbox (SSH fix round 1, Claude Opus
+                5.5, unreviewed: the audit's LOW-16).
     """
     top = ROOT / OUTBOX_NAME
     share = make_folder(top)
@@ -5014,6 +5293,36 @@ def origin_token():
     if not ORIGIN_TOKEN_PATTERN.fullmatch(token):
         raise ValueError(f"the origin token {path} does not hold {2 * ORIGIN_TOKEN_BYTES} hex digits on one line")
     return token
+
+
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 4, the audit's
+# HIGH-2, an origin id unique to its message.
+def origin_nonce():
+    """A new random part for one message's origin id: ORIGIN_NONCE_BYTES from Python's secrets module, as hex.
+
+    The one place an origin id's randomness is drawn, so a test swaps
+    this function for a seeded source and every id it builds is known.
+    deliver_ssh calls it once per message it publishes; a retry (tc
+    flush) reads the id back from the message's header, never draws.
+
+    @interacts  none; draws from the operating system's random source.
+    @deps       secrets; ORIGIN_NONCE_BYTES.
+    @complexity O(1).
+    @alloc      one short string, returned.
+    @rng        secrets.token_hex(ORIGIN_NONCE_BYTES), once per call.
+    """
+    return secrets.token_hex(ORIGIN_NONCE_BYTES)
+
+
+def origin_id(token, n, nonce, sender):
+    """The origin id of message `n` from `sender`: <token>-<n>-<nonce>-<sender>, ORIGIN_PATTERN's shape (C3, D25, D33).
+
+    @interacts  none; string work only.
+    @deps       none.
+    @complexity O(1).
+    @alloc      one short string, returned.
+    """
+    return f"{token}-{n}-{nonce}-{sender}"
 
 
 def printable_lines(text):
@@ -5220,11 +5529,19 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
        holds older mail for the same target (queue_ahead), the message
        stays queued behind it without trying, exit 4, `<target> has <n>
        waiting in the outbox; queued behind them. Run: tc flush`.
-    7. Else one ssh run (ssh_run) with --origin <token>-<number>-<sender>
-       (D25), and the message is filed by the answer (file_outcome), all
-       under the send lock: sent/ and exit 0; kept, exit 4 (255, a
-       timeout, a far 10 busy, D23); refused/ with the far stderr beside
-       it and the far code. Then the lock is let go.
+    7. Else one ssh run (ssh_run) with --origin
+       <token>-<number>-<random part>-<sender> (D25), and the message is
+       filed by the answer (file_outcome), all under the send lock:
+       sent/ and exit 0; kept, exit 4 (255, a timeout, a far 10 busy,
+       D23); refused/ with the far stderr beside it and the far code.
+       Then the lock is let go.
+
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 4, the
+    audit's HIGH-2. The random part is drawn once per message
+    (origin_nonce), before the publish, and the whole id ends the outbox
+    file's header line (ORIGIN_HEADER_NOTE, built from the number the
+    publish lands at), so every retry from tc flush sends the same id,
+    and a number mail/.seq repeats never repeats an id.
 
     `deadline` is the command's lock_deadline (route_and_deliver), so
     mail/.seq and the send lock together wait at most LOCK_WAIT_SECONDS;
@@ -5246,9 +5563,10 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
                 removes its outbox name, writing the far stderr beside a
                 refused one (file_outcome).
     @deps       ssh_where, outbox_queue, claim_branch, origin_token,
-                lock_deadline, next_seq, publish_message, send_lock,
-                queue_ahead, ssh_run, file_outcome, outbox_text, Delivery;
-                CARDS, OUTBOX_SENT, OUTBOX_REFUSED, SHARED_OWNED_FILE_MODE,
+                origin_nonce, origin_id, lock_deadline, next_seq,
+                publish_message, send_lock, queue_ahead, ssh_run,
+                file_outcome, outbox_text, Delivery; CARDS, OUTBOX_SENT,
+                OUTBOX_REFUSED, ORIGIN_HEADER_NOTE, SHARED_OWNED_FILE_MODE,
                 NEW_FILE_MODE, EXIT_BAD_NAME, EXIT_REFUSED, EXIT_QUEUED.
     @complexity O(b) over b bytes of body per publish try (one in an
                 honest mailbox), plus queue_ahead's O(q + w log w) over
@@ -5259,6 +5577,8 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
                 outbox/<user>/to-<to>/, sent/ or refused/ (D25, D32); a
                 refusal's note, kept; one open lock file while the lock
                 is held.
+    @rng        one origin_nonce draw per call that gets past the card,
+                branch and token checks (D33 part 4).
     """
     where = ssh_where(card)
     if where.why is not None:
@@ -5278,9 +5598,14 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
                if isinstance(err, OSError) else str(err))
         return Delivery(EXIT_REFUSED, f"tc send: could not read or make the origin token ({why}); nothing sent", [])
     mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
+    nonce = origin_nonce()  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 4, once per message
+
+    def note(n):
+        origin = ORIGIN_HEADER_NOTE.format(origin=origin_id(token, n, nonce, sender))
+        return f"{header_note}, {origin}" if header_note else origin
     with send_lock(where.target, deadline) as (held, why):
         n = next_seq(deadline)  # under the lock when held, so no flush takes this file before this send does
-        published = publish_message(box, (OUTBOX_SENT, OUTBOX_REFUSED), n, sender, to, body, header_note, mode,
+        published = publish_message(box, (OUTBOX_SENT, OUTBOX_REFUSED), n, sender, to, body, note, mode,
                                     deadline)
         if published.refusal is not None:
             return published.refusal
@@ -5293,7 +5618,7 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
         if ahead:
             return Delivery(EXIT_QUEUED, f"{where.target} has {ahead} waiting in the outbox; queued behind them. "
                                          f"Run: tc flush", warnings)
-        outcome = ssh_run(where, sender, to, f"{token}-{published.n}-{sender}", outbox_text(body))
+        outcome = ssh_run(where, sender, to, origin_id(token, published.n, nonce, sender), outbox_text(body))
         code, words, filed = file_outcome(path, where, outcome)
     return Delivery(code, words, warnings + filed)
 
@@ -5308,23 +5633,32 @@ ROUTES = {
 
 
 # SSH S2 (Claude Opus 5.5, unreviewed): tc flush (C3, D22, D23).
-def outbox_body(path):
-    """The text an outbox message sends: what follows its header line and the blank line after it. Raises OSError or ValueError, with words.
+def outbox_message(path):
+    """The origin id and the text an outbox message sends: (id, body), the id that ends its header line and what follows that line and the blank line after it. Raises OSError or ValueError, with words.
 
     Read through read_regular_file (no link followed, a FIFO never
-    waited on, at most MESSAGE_READ_MAX_BYTES), so it is the same text
-    deliver_ssh put on ssh's stdin the first time (outbox_text).
+    waited on, at most MESSAGE_READ_MAX_BYTES), so the body is the same
+    text deliver_ssh put on ssh's stdin the first time (outbox_text).
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 4. The id is
+    the one deliver_ssh wrote at the end of the header line
+    (ORIGIN_HEADER_PATTERN), so a retry sends the id the first try sent;
+    a header with none is refused with words, since an id made up now
+    could deliver the message twice.
 
     @interacts  opens, fstats and reads one file.
-    @deps       read_regular_file; MESSAGE_READ_MAX_BYTES.
+    @deps       read_regular_file; MESSAGE_READ_MAX_BYTES,
+                ORIGIN_HEADER_PATTERN.
     @complexity O(b) over b bytes of the file.
-    @alloc      the file's text and the body, returned.
+    @alloc      the file's text, the id and the body, returned.
     """
     text = read_regular_file(path, MESSAGE_READ_MAX_BYTES)
-    _, blank, body = text.partition("\n\n")
+    header, blank, body = text.partition("\n\n")
     if not blank:
         raise ValueError("it has no header line and blank line, so it is not a message tc wrote")
-    return body
+    found = ORIGIN_HEADER_PATTERN.search(header)
+    if found is None:
+        raise ValueError("its header line ends with no origin id, so a send could deliver it twice")
+    return found.group(1), body
 
 
 def cmd_flush(args):
@@ -5334,14 +5668,16 @@ def cmd_flush(args):
     For each target, this user's send lock is taken (send_lock; another
     send or flush holding it past LOCK_WAIT_SECONDS leaves that target
     for the next flush), and then, until none is left, the oldest of this
-    user's files for that target is sent (ssh_run, with its origin id
-    built from the token, its number and its sender, D25) and filed by
-    the answer (file_outcome): sent/; refused/ with the far stderr beside
-    it, and on to the next; or, on 255, a timeout or a far 10 (D23), kept
-    and the target stopped, so its mail stays in order. The outbox is
-    listed again before each file, so a message a send queued while this
-    flush runs goes out with it, behind every older one, or is left
-    (exit 4). A file that cannot be read stops its target too, with words.
+    user's files for that target is sent (ssh_run, with the origin id its
+    header line ends with, D25, D33 part 4: the id its first try sent,
+    never one made up now) and filed by the answer (file_outcome): sent/;
+    refused/ with the far stderr beside it, and on to the next; or, on
+    255, a timeout or a far 10 (D23), kept and the target stopped, so its
+    mail stays in order. The outbox is listed again before each file, so
+    a message a send queued while this flush runs goes out with it,
+    behind every older one, or is left (exit 4). A file that cannot be
+    read, or whose header holds no origin id, stops its target too, with
+    words.
 
     D22: only files this user owns are sent (owned_by_me); for each
     target, a line counts the files waiting in other members' branches
@@ -5370,17 +5706,16 @@ def cmd_flush(args):
                 lists it (outbox_files) and reads each waiting name's card
                 (queue_route), again before each file; lists the other
                 members' branches once (other_branches, outbox_files);
-                reads or makes the origin token (refused, exit 1, nothing
-                sent, when it cannot); per target takes the send lock
-                (send_lock); per file reads it (outbox_body), runs ssh
-                once (ssh_run) and files it in sent/ or refused/
-                (file_outcome); reads the user database for other
-                members' names; prints.
+                per target takes the send lock (send_lock); per file
+                reads it and the origin id its header ends with
+                (outbox_message), runs ssh once (ssh_run) and files it in
+                sent/ or refused/ (file_outcome); reads the user database
+                for other members' names; prints.
     @deps       require_names, outbox_branch, outbox_queue, claim_branch,
                 outbox_files, other_branches, queue_route, owned_by_me,
-                origin_token, send_lock, outbox_body, ssh_run,
-                file_outcome, printable, user_name, refuse; os, sys;
-                SSH_SENT, SSH_KEPT, EXIT_QUEUED, EXIT_REFUSED.
+                send_lock, outbox_message, ssh_run, file_outcome,
+                printable, user_name, refuse; os, sys; SSH_SENT, SSH_KEPT,
+                EXIT_QUEUED, EXIT_REFUSED.
     @complexity O(w x (q + w log w)) over w of this user's files waiting
                 for the targets flushed and q to-<name>/ folders in this
                 user's branch, since the branch is listed again before
@@ -5419,13 +5754,6 @@ def cmd_flush(args):
     mine = [f for f in files if chosen(f) and owned_by_me(f.st)]
     theirs = [f for other in other_branches() for f in outbox_files(other)[0] if chosen(f)]
     stopped, said, targets = {}, set(), []
-    if mine:
-        try:
-            token = origin_token()
-        except (OSError, ValueError) as err:
-            why = (f"{err.strerror}" + (f" at {err.filename}" if err.filename else "")
-                   if isinstance(err, OSError) else str(err))
-            refuse(f"tc flush: could not read or make the origin token ({why}); nothing sent", EXIT_REFUSED)
     for f in mine:
         target = route(f.to).target
         if target is not None and target not in targets:
@@ -5448,7 +5776,7 @@ def cmd_flush(args):
                 said.add(f.path)
                 lead = f"#{f.n} to {printable(f.to)}"
                 try:
-                    body = outbox_body(f.path)
+                    origin, body = outbox_message(f.path)  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 4
                 except (OSError, ValueError) as err:
                     why = err.strerror if isinstance(err, OSError) and err.strerror else str(err)
                     print(f"tc flush: {lead}: could not read {printable(f.path)} ({why}); stopped for {target}, "
@@ -5457,7 +5785,7 @@ def cmd_flush(args):
                     stopped[target] = f"{lead}, ahead of it, could not be read"
                     break
                 where = route(f.to)
-                outcome = ssh_run(where, f.sender, f.to, f"{token}-{f.n}-{f.sender}", body)
+                outcome = ssh_run(where, f.sender, f.to, origin, body)
                 code, words, warnings = file_outcome(f.path, where, outcome)
                 print(f"{lead}: {words}" if outcome.kind == SSH_SENT else f"tc flush: {lead}: {words}",
                       file=sys.stdout if outcome.kind == SSH_SENT else sys.stderr)
@@ -5535,7 +5863,7 @@ def gate_command(text):
             return None
         origin = rest[6]
         found = ORIGIN_PATTERN.fullmatch(origin)
-        if found is None or not valid_name(found.group(3)):
+        if found is None or not valid_name(found.group("sender")):
             return None
     if not (valid_name(sender) and valid_name(to)):
         return None
@@ -5552,9 +5880,11 @@ def cmd_gate(args):
     route_and_deliver, with forward False), so a codex name is rung and
     the inbox lock taken as for any send (D16), and a name whose card
     says ssh is refused, exit 7, `tc gate: <name> is not a local name;
-    the gate does not forward` (D18). With --origin, an id already filed
-    is `already delivered`, exit 0, and the id is filed once its message
-    is delivered (D25). The size limit holds (exit 8, C0), and an empty
+    the gate does not forward` (D18). With --origin, an id this key
+    already filed is `already delivered`, exit 0, and the id is filed
+    for this key the moment its message lands, before any ring (D25; SSH
+    fix round 1, Claude Opus 5.5, unreviewed: D33 parts 3 and 5, under
+    mail/.origins/<user>/<as>/). The size limit holds (exit 8, C0), and an empty
     body is refused, exit 1. A health shape prints `tc health --json`'s
     snapshot without its `cards` key and without a GPU query (D16, D18),
     and without its `squatted` key (SSH fix round 1, Claude Opus 5.5,

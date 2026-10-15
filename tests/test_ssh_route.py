@@ -1,11 +1,14 @@
 """
 Tests for the ssh route (SSH S1, contract C3, decisions D13, D22, D23 and
-D25): `tc send` to an ssh card publishes the message in the outbox, runs
-ssh once with C3's argv and the body on stdin, and files the message by
-the far tc's answer: sent/ on 0, kept on 255, a timeout or a far 10,
-refused/ on any other code. A target with a queue gets no ssh run.
+D25, and D32 and D33 since fix round 1): `tc send` to an ssh card
+publishes the message in the sender's own outbox branch, runs ssh once
+with C3's argv, an origin id unique to the message and the body on
+stdin, and files the message by the far tc's answer: sent/ on 0, kept on
+255, a timeout or a far 10, refused/ on any other code. A target with a
+queue gets no ssh run.
 
-Model:  Claude Opus 5.5 (the SSH lane agent), 2026-10-15
+Model:  Claude Opus 5.5 (the SSH lane agent), 2026-10-15; changed in fix
+        round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15
 Status: unreviewed
 
 Real ssh never runs here (rule 5). Every test that sends puts
@@ -20,24 +23,31 @@ it watched is reachable.
             lock (outbox/<login>/.send-<key>.lock) themselves and read
             /proc/locks to see a child blocked on it. Some make folders,
             a link or a file by hand in outbox/ and rename them (SSH fix
-            round 1, Claude Opus 5.5, unreviewed: D32's branches). Four
-            tests load tc as a module (TC_ROOT set to the harness root
-            first, put back after) and work in process, under the root
-            only: one calls route_and_deliver with PATH set for that call
-            to a wrapper that runs the fake and then sleeps, and
-            SSH_SEND_SECONDS patched down; one calls it with deliver_ssh
-            swapped for a recorder and lock_deadline for a fixed value;
-            one plants a file in sent/ and calls file_away; one calls
-            route_and_deliver and health_snapshot with os.lstat patched so
-            this user's branch reads as another member's. One class shares
-            the mailbox with the user's own primary group (tc init
+            round 1, Claude Opus 5.5, unreviewed: D32's branches). One
+            test writes a loopback wrapper `ssh` in the root's temp
+            folder that runs the fake and then this branch's own `tc
+            gate` under a second TC_ROOT there, as a far machine would,
+            and writes mail/.seq by hand. Six tests load tc as a module
+            (TC_ROOT set to the harness root first, put back after) and
+            work in process, under the root only: one calls
+            route_and_deliver with PATH set for that call to a wrapper
+            that runs the fake and then sleeps, and SSH_SEND_SECONDS
+            patched down; one calls it with deliver_ssh swapped for a
+            recorder and lock_deadline for a fixed value; one plants a
+            file in sent/ and calls file_away; one calls route_and_deliver
+            and health_snapshot with os.lstat patched so this user's
+            branch reads as another member's; one calls route_and_deliver
+            and cmd_flush with origin_nonce swapped for a seeded source
+            (random.Random); one reads tc's timing constants. One class
+            shares the mailbox with the user's own primary group (tc init
             --shared), reads modes and groups, and asks POSIX's rules what
             another member may do there.
-@deps       python3 stdlib (fcntl, hashlib, json, os, pathlib, pwd, re,
-            shlex, stat, sys, unittest, unittest.mock); tests/_root.py;
-            load_tc, wait_until_blocked and FINISH_CEILING_SECONDS from
-            test_codex_route.py; UmaskTestCase, owner_patched_lstat and
-            primary_group from test_shared.py; ../tc.
+@deps       python3 stdlib (argparse, contextlib, fcntl, hashlib, io, json,
+            os, pathlib, pwd, random, re, shlex, stat, sys, unittest,
+            unittest.mock); tests/_root.py; load_tc, wait_until_blocked
+            and FINISH_CEILING_SECONDS from test_codex_route.py;
+            UmaskTestCase, owner_patched_lstat and primary_group from
+            test_shared.py; ../tc.
 @complexity O(1) per test: one to five tc runs and as many fake calls,
             each under a second. One test waits out tc's own lock bound
             (LOCK_WAIT_SECONDS, 3 s), and the timeout test
@@ -47,12 +57,16 @@ it watched is reachable.
             lock file while a test holds the send lock.
 """
 
+import argparse
+import contextlib
 import fcntl
 import hashlib
+import io
 import json
 import os
 import pathlib
 import pwd
+import random
 import re
 import shlex
 import stat
@@ -96,8 +110,21 @@ FAKE_CONNECT_STDERR = "ssh: connect to host h port 22: Connection refused\n"
 FAKE_BUSY_STDERR = "tc: another process is holding b's lock; try again\n"
 FAKE_REFUSED_STDERR = "tc gate: refused\n"
 # D25's origin id: 32 hex digits of the mailbox's token, the outbox number,
-# the sender.
+# 32 hex digits of the message's own random part (D33 part 4; SSH fix
+# round 1, Claude Opus 5.5, unreviewed), the sender. The outbox file's
+# header line ends with it.
 TOKEN_PATTERN = re.compile(r"[0-9a-f]{32}")
+HEADER_ORIGIN_PATTERN = re.compile(r", origin (\S+)$")
+ORIGIN_NONCE_HEX_DIGITS = 32
+# The seed of the source a test swaps in for tc's origin_nonce, so the id
+# it builds is known. Any fixed number does.
+NONCE_SEED = 25
+# The far gate's lock waits in one send to a codex name, counted here
+# (D33 part 3): its inbox lock and mail/.seq share one bound, and the ring
+# marker is written twice, each with a bound of its own.
+FAR_LOCK_WAITS = 3
+# The far mailbox name the loopback fake's gate delivers as (its --as).
+FAR_KEY = "home-a"
 # The send lock's name: the start of the target's sha256 in hex (tc's
 # SEND_LOCK_KEY_CHARS, written here), in the user's own outbox branch.
 SEND_LOCK_KEY_CHARS = 16
@@ -216,15 +243,27 @@ def token_of(root):
     return (root.path / "outbox" / ".origin-token").read_text().strip()
 
 
-def remote_command(root, n, sender, to, tc=DEFAULT_REMOTE_TC):
-    """The remote command C3 and D25 want for message `n` from `sender` to `to`, with a remote tc path that needs no quoting past a bare ~/.
+def origin_in(path):
+    """The origin id the outbox file at `path` ends its header line with (D33 part 4), or None when it holds none.
 
-    @interacts  reads the root's origin token.
-    @deps       token_of.
+    @interacts  reads one file.
+    @deps       re; HEADER_ORIGIN_PATTERN.
+    @complexity O(b) over b bytes of the file.
+    @alloc      the file's text, freed on return; one string, returned.
+    """
+    found = HEADER_ORIGIN_PATTERN.search(path.read_text().split("\n", 1)[0])
+    return found.group(1) if found else None
+
+
+def remote_command(path, sender, to, tc=DEFAULT_REMOTE_TC):
+    """The remote command C3, D25 and D33 want for the outbox file at `path` from `sender` to `to`, with the origin id its header holds and a remote tc path that needs no quoting past a bare ~/.
+
+    @interacts  reads one file (origin_in).
+    @deps       origin_in.
     @complexity O(1).
     @alloc      one string, returned.
     """
-    return f"{tc} send --from {sender} --to {to} --origin {token_of(root)}-{n}-{sender}"
+    return f"{tc} send --from {sender} --to {to} --origin {origin_in(path)}"
 
 
 def send_lock_path(root, target):
@@ -296,6 +335,34 @@ def may_make_in(folder, uid, gids):
     return may(folder, uid, gids, MAY_WRITE) and may(folder, uid, gids, MAY_SEARCH)
 
 
+def far_gate_ssh(root, folder, far, key=FAR_KEY):
+    """A loopback `ssh`: it runs the harness's fake at `folder` (the record, and its exit code: a non-zero one ends the call there), then hands the same stdin and the remote command, its last argument, to a real `tc gate --as <key>` under the far mailbox `far`, as sshd does with a forced command. The env for a call that should find it.
+
+    No real ssh runs (rule 5): the fake records every call and is asserted
+    called. The far side is this branch's own tc, under a TC_ROOT of its
+    own in the temp folder, so a test sees what a far gate answers.
+
+    @interacts  writes far-ssh-*/ssh (mode 0700) in the root's temp
+                folder; each call keeps its stdin in a file beside it.
+    @deps       shlex, os, sys; _root.TC; OWN_WRAPPER_MODE.
+    @complexity O(1).
+    @alloc      one folder, removed with the temp folder.
+    """
+    home = root.base / f"far-ssh-{len(list(root.base.glob('far-ssh-*')))}"
+    home.mkdir()
+    feed = shlex.quote(str(home / "stdin")) + ".$$"
+    wrapper = home / "ssh"
+    wrapper.write_text("#!/bin/sh\n"
+                       f"cat > {feed}\n"
+                       f'{shlex.quote(str(folder / "ssh"))} "$@" < {feed} || exit $?\n'
+                       "for last; do :; done\n"
+                       f'SSH_ORIGINAL_COMMAND="$last" TC_ROOT={shlex.quote(str(far))} exec '
+                       f"{shlex.quote(sys.executable)} {shlex.quote(str(_root.TC))} gate --as {shlex.quote(key)} "
+                       f"< {feed}\n")
+    wrapper.chmod(OWN_WRAPPER_MODE)
+    return {"PATH": f"{home}{os.pathsep}{root.env['PATH']}"}
+
+
 def assert_called(test, folder, calls):
     """The fake's calls, after asserting its record file exists (the harness's rule: never read a record that may not be there).
 
@@ -319,13 +386,15 @@ class SshRouteTest(unittest.TestCase):
     """
 
     def test_the_argv_is_c3s_and_the_body_goes_on_stdin(self):
-        """Fake ssh exiting 0: argv is exactly C3's, -T present, `--` right before the target, the body on stdin and on no argv word; exit 0; the message in sent/ with its origin id on argv.
+        """Fake ssh exiting 0: argv is exactly C3's, -T present, `--` right before the target, the body on stdin and on no argv word; exit 0; the message in sent/ with its origin id on argv, the id its header line ends with: the token, 1, 32 hex digits of its own, the sender.
 
         Must reject the body on the command line, and a send with no
-        --origin (D25).
+        --origin (D25), or with an id that has no random part of its own
+        (D33 part 4).
 
         @interacts  one tc card, one send, one fake call.
-        @deps       assert_called, remote_command, outbox, token_of.
+        @deps       assert_called, remote_command, origin_in, queue, outbox,
+                    token_of.
         @complexity O(1).
         @alloc      one TcRoot.
         """
@@ -335,10 +404,12 @@ class SshRouteTest(unittest.TestCase):
             root.tc("card", "b", "--ssh", TARGET)
             code, out, err = root.tc("send", "--from", "a", "--to", "b", body)
             seen = assert_called(self, folder, calls)
-            want = SSH_ARGV_HEAD + [TARGET, remote_command(root, 1, "a", "b")]
+            filed = queue(root, "b") / "sent" / "000001-from-a.md"
+            want = SSH_ARGV_HEAD + [TARGET, remote_command(filed, "a", "b")]
             token = token_of(root)
+            origin = origin_in(filed)
             sent, waiting = outbox(root, "b", "sent"), outbox(root, "b")
-            text = (queue(root, "b") / "sent" / "000001-from-a.md").read_text()
+            text = filed.read_text()
         self.assertEqual((code, err), (0, ""), err)
         self.assertEqual(out, SENT_WORDS.format(target=TARGET) + "\n")
         self.assertEqual(len(seen), 1)
@@ -347,6 +418,7 @@ class SshRouteTest(unittest.TestCase):
         self.assertEqual(seen[0]["stdin"], body + "\n")
         self.assertFalse(any("hello" in word for word in seen[0]["argv"]), "the body is on ssh's command line")
         self.assertTrue(TOKEN_PATTERN.fullmatch(token), token)
+        self.assertRegex(origin, rf"^{token}-1-[0-9a-f]{{{ORIGIN_NONCE_HEX_DIGITS}}}-a$")
         self.assertEqual((sent, waiting), (["000001-from-a.md"], []))
         self.assertTrue(text.startswith("# #1 from a to b, "), text)
         self.assertTrue(text.endswith(f"\n\n{body}\n"), text)
@@ -403,7 +475,8 @@ class SshRouteTest(unittest.TestCase):
         two words of it.
 
         @interacts  three hand-made cards, three sends, three fake calls.
-        @deps       write_card, ssh_card, assert_called, token_of; shlex.
+        @deps       write_card, ssh_card, assert_called, origin_in, queue;
+                    shlex.
         @complexity O(1).
         @alloc      one TcRoot.
         """
@@ -416,12 +489,12 @@ class SshRouteTest(unittest.TestCase):
                 code, out, err = root.tc("send", "--from", "a", "--to", to, "hi")
                 self.assertEqual(code, 0, err)
             seen = assert_called(self, folder, calls)
-            token = token_of(root)
+            ids = [origin_in(queue(root, to) / "sent" / f"00000{n}-from-a.md") for n, to in ((1, "b"), (2, "c"), (3, "d"))]
         remotes = [call["argv"][-1] for call in seen]
-        self.assertEqual(remotes[0], f"~/TheConnection/tc send --from a --to b --origin {token}-1-a")
-        self.assertEqual(remotes[1], f"~/'my dir/tc' send --from a --to c --origin {token}-2-a")
+        self.assertEqual(remotes[0], f"~/TheConnection/tc send --from a --to b --origin {ids[0]}")
+        self.assertEqual(remotes[1], f"~/'my dir/tc' send --from a --to c --origin {ids[1]}")
         words = shlex.split(remotes[2])
-        self.assertEqual(words, ["/opt/it's/tc", "send", "--from", "a", "--to", "d", "--origin", f"{token}-3-a"])
+        self.assertEqual(words, ["/opt/it's/tc", "send", "--from", "a", "--to", "d", "--origin", ids[2]])
 
     def test_a_hand_made_card_with_a_tilde_user_path_or_a_dash_target_exits_6_and_ssh_never_runs(self):
         """A card whose tc is `~bob/tc` or `~`, or whose target is `-oProxyCommand=x`: exit 6, nothing written to the outbox, the fake never called (D13); then a good card reaches it.
@@ -761,6 +834,108 @@ class SshRouteTest(unittest.TestCase):
         self.assertEqual(kwargs, {"deadline": 12345.0})
 
 
+class OriginIdTest(unittest.TestCase):
+    """SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 3 and 4. Each origin id carries a random part of its own, drawn once and read back by every retry, and the ssh run outlasts a far gate's worst case.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, load_tc, far_gate_ssh.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per test.
+    """
+
+    def test_after_mail_seq_is_set_back_a_message_to_a_second_far_name_is_delivered(self):
+        """b and c both on one far user, through the loopback fake's real far gate: #1 to b lands; mail/.seq is set back to 0; the next send, to c, takes #1 again, and is delivered, never answered `already delivered`. Both ids carry 1, and differ.
+
+        The audit's HIGH-2. Must reject an id that is only the token, the
+        number and the sender: the far gate filed it for b, and c's
+        message would be dropped while this side files it in sent/.
+
+        @interacts  writes the loopback wrapper; two tc cards, two sends,
+                    one write of mail/.seq by hand; the far gate runs under
+                    a second TC_ROOT in the temp folder.
+        @deps       far_gate_ssh, assert_called; shlex.
+        @complexity O(1).
+        @alloc      one TcRoot and the far mailbox in its temp folder.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("ssh", 0)
+            far = root.base / "far"
+            far.mkdir()
+            env = far_gate_ssh(root, folder, far)
+            root.tc("card", "b", "--ssh", TARGET)
+            root.tc("card", "c", "--ssh", TARGET)
+            first = root.tc("send", "--from", "a", "--to", "b", "one", env=env)
+            (root.path / "mail" / ".seq").write_text("0")
+            second = root.tc("send", "--from", "a", "--to", "c", "two", env=env)
+            seen = assert_called(self, folder, calls)
+            ids = [shlex.split(call["argv"][-1])[-1] for call in seen]
+            landed = sorted(p.name for p in (far / "mail" / "to-c").glob("*.md"))
+        self.assertEqual(first[0], 0, first)
+        self.assertEqual(second[0], 0, second)
+        self.assertNotIn("already delivered", second[1])
+        self.assertEqual(landed, [f"000002-from-{FAR_KEY}.md"], "the second far name never got its message")
+        self.assertEqual([origin.split("-")[1] for origin in ids], ["1", "1"], "mail/.seq was not set back")
+        self.assertNotEqual(ids[0], ids[1])
+
+    def test_the_random_part_is_drawn_once_per_message_and_every_retry_reads_it_back(self):
+        """In process, origin_nonce swapped for a seeded source: a send that ssh cannot reach draws once, and its header ends with <token>-1-<seeded hex>-a; the flush that then sends it uses that same id and draws nothing.
+
+        @interacts  one tc card; loads tc and calls route_and_deliver, then
+                    cmd_flush, with PATH set to the fake's and origin_nonce
+                    swapped; reads the sent file's header.
+        @deps       load_tc, assert_called, origin_in, queue, token_of;
+                    random, argparse, contextlib, io, unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("ssh", [SSH_CONNECT_FAILED, 0], stderr=FAKE_CONNECT_STDERR)
+            root.tc("card", "b", "--ssh", TARGET)
+            tc = load_tc(root)
+            source, drawn = random.Random(NONCE_SEED), []
+
+            def seeded():
+                drawn.append(f"{source.getrandbits(4 * ORIGIN_NONCE_HEX_DIGITS):0{ORIGIN_NONCE_HEX_DIGITS}x}")
+                return drawn[-1]
+            flushed = None
+            with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}), \
+                    mock.patch.object(tc, "origin_nonce", seeded):
+                got = tc.route_and_deliver("a", "b", "hi")
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+                    try:
+                        tc.cmd_flush(argparse.Namespace(to=None))
+                    except SystemExit as stop:
+                        flushed = stop.code
+            seen = assert_called(self, folder, calls)
+            ids = [shlex.split(call["argv"][-1])[-1] for call in seen]
+            sent = queue(root, "b") / "sent" / "000001-from-a.md"
+            header = origin_in(sent) if sent.exists() else None
+            token = token_of(root)
+        nonce = f"{random.Random(NONCE_SEED).getrandbits(4 * ORIGIN_NONCE_HEX_DIGITS):0{ORIGIN_NONCE_HEX_DIGITS}x}"
+        want = f"{token}-1-{nonce}-a"
+        self.assertEqual(got.exit, EXIT_QUEUED, got)
+        self.assertIsNone(flushed, f"flush exited {flushed}: {err.getvalue()}")
+        self.assertEqual(drawn, [nonce], "the flush drew a random part of its own")
+        self.assertEqual(ids, [want, want])
+        self.assertEqual(header, want)
+
+    def test_ssh_send_seconds_outlasts_a_far_ring_connect_and_lock_waits(self):
+        """SSH_SEND_SECONDS is past SSH_CONNECT_SECONDS plus CODEX_RING_SECONDS plus the far gate's three lock waits (D33 part 3), read from tc's own constants; no clock.
+
+        The audit's MEDIUM-1. Must reject the pinned 30 s, no longer than
+        the far codex ring alone.
+
+        @interacts  loads tc.
+        @deps       load_tc; FAR_LOCK_WAITS.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            tc = load_tc(root)
+        far_worst = tc.SSH_CONNECT_SECONDS + tc.CODEX_RING_SECONDS + FAR_LOCK_WAITS * tc.LOCK_WAIT_SECONDS
+        self.assertGreater(tc.SSH_SEND_SECONDS, far_worst)
+
+
 class BranchTest(unittest.TestCase):
     """SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and D33 part 1. This user's outbox branch, outbox/<login>/, is refused when it is not this user's own real folder, with words naming its owner and the one command that clears it, and tc health lists it.
 
@@ -806,7 +981,7 @@ class BranchTest(unittest.TestCase):
         self.assertEqual(written, [], "a send wrote into a branch another member owns")
         self.assertTrue(not_called, "ssh ran for a send whose branch is not its sender's")
         self.assertEqual(squatted, [{"path": str(mine), "why": f"a folder {other} owns, not {login()}'s own branch",
-                                     "fix": f"{me}, who ran init, runs: {fix}"}])
+                                     "fix": f"The user who ran init ({me}) runs: {fix}"}])
         self.assertEqual(good[0], 0, good)
         self.assertEqual(reachable, 1)
 
