@@ -7,8 +7,10 @@ Status: unreviewed. Fix round 1 done (audit
         round 2 done (audit `audits/2026-10-14-2259-quick`, brief
         `fixes/round-2.md`, the SHARED fixer, Claude Opus 5.5). Fix
         round 3 done (audit `audits/2026-10-14-2358-quick`, brief
-        `fixes/round-3.md`, the SHARED fixer, Claude Opus 5.5).
-Date:   2026-10-14; round 3 2026-10-15
+        `fixes/round-3.md`, the SHARED fixer, Claude Opus 5.5). Fix
+        round 4 done (audit `audits/2026-10-15-0102-quick`, brief
+        `fixes/round-4.md`, the SHARED fixer, Claude Opus 5.5).
+Date:   2026-10-14; rounds 3 and 4 2026-10-15
 Branch: Claude-Development-TheConnection-SHARED, from
         Claude-Development-TheConnection at c8708e5 (after P0, P1 and P2
         merged; the plan with D16, D17 and D18). Round 1 builds to the
@@ -16,6 +18,8 @@ Branch: Claude-Development-TheConnection-SHARED, from
         The D21 round builds to b19cd9d (C4 items 3 and 6 with D21).
         Round 3 builds to 6f0691e (exit row 10, C4's "Nobody can swap
         ROOT" and "A held lock costs a failed send", D20, D21, D23).
+        Round 4 builds to 7211d3a (exit row 10 and C4's walk, both
+        amended by the architect for this round).
 Where:  ~/TheConnection-lanes/shared
 
 ## Commits
@@ -39,7 +43,24 @@ Where:  ~/TheConnection-lanes/shared
 | Round 2 (c) | `4e513cc` | Say what tc health cannot see, never a silent 0 or a traceback; true doc blocks, handoff and QA words |
 | Round 3 (a) | `5ad8fb0` | Keep both files when tc read meets a taken name, exit 10 on a held lock, and give one send one lock deadline |
 | Round 3 (b) | `89ce8af` | Init walks every folder from ROOT up to / and refuses a writable ROOT sticky or not; say why a send fails without hard links, and never trace back on an inbox tc cannot search |
-| Round 3 (c) | the commit that changes this file | Say when an inbox cannot be listed, read tc's lock bound in two tests, and bring the tags, the handoff and the QA script up to round 3 |
+| Round 3 (c) | `41c6019` | Say when an inbox cannot be listed, read tc's lock bound in two tests, and bring the tags, the handoff and the QA script up to round 3 |
+| Round 4 (a) | `9fdd561` | Move every planted inbox file tc read meets, and name neither file as the forgery |
+| Round 4 (b) | `7da32df` | Init's walk trusts the .shared owner and runs ROOT's rule on ROOT's real path; one bound per send in every path; log names a read/ it cannot see; out of numbers is busy |
+| Round 4 (c) | the commit that changes this file | Start K3's block ceiling before its spawns, fix QA steps 15, 30 and 31, and bring the tags and this handoff up to round 4 |
+
+Round 4's three commits change `tc`, `tests/test_shared.py`,
+`qa/human/route-shared.md` and this file, plus one change to CORE's
+`tests/test_mailbox.py` (K3 takes its block deadline before the spawn
+loop, item 7), as the brief allows. Commit (a) holds items 1 and 2,
+(b) items 3 to 6 and 9, (c) items 7, 8 and 10 and the words for the
+rest (the QA steps and this file). One existing test changed its
+assertions: `test_a_read_never_replaces_a_read_message_and_keeps_a_planted_one`
+reads the new by-hand words. One dropped a stand-in:
+`test_a_members_same_group_rerun_leaves_another_users_0664_shared_and_says_so`
+no longer replaces the walk, which now passes a member's rerun on the
+init user's ROOT. Before round 4 no test asserted the exit code of a
+send out of numbers: grep of `tests/` for `numbers in a row` finds only
+round 4's own `ALL_TAKEN_WORDS`.
 
 Round 3's three commits change `tc`, `tests/test_shared.py`,
 `qa/human/route-shared.md` and this file, plus one change each to
@@ -320,7 +341,9 @@ are the brief's). Every new block in `tc` carries a `SHARED fix round 3
   why the lstat and the rename may be two steps: only `tc read` moves
   mail into `read/`, under this lock, and under sticky no other member
   can replace or remove a file the reader moved, so a name found free
-  and then taken can only be the planter's own new file.
+  and then taken can only be the planter's own new file. (Round 4
+  replaced these words, which called the inbox file hand-written, and
+  cuts the by-hand name to fit: see Round 4 below.)
 - Exit 10 (item 3, D23, commit a). `EXIT_BUSY = 10`. `next_seq` and
   `inbox_lock` refuse with it, words unchanged, nothing written, so
   send, read, card, a codex join and the codex route all exit 10 on a
@@ -378,8 +401,85 @@ are the brief's). Every new block in `tc` carries a `SHARED fix round 3
   second less, so a send that asks for the lock alone fails there with
   `... under tc's own 3 s bound: it asked for the lock alone`.
 
-**Tests.** `tests/test_shared.py`, 56 tests in eleven classes (48 in
-ten before round 3, 39 in seven before round 2), each on
+**Round 4: every planted file moves, no verdict, the walk trusts the
+init user** (audit `audits/2026-10-15-0102-quick`, brief
+`fixes/round-4.md`, item numbers are the brief's). Every new block in
+`tc` carries a `SHARED fix round 4 (Claude Opus 5.5, unreviewed)`
+comment.
+
+- Every planted inbox file moves (item 1, HIGH-1, commit a). A name of
+  246 bytes or more could not take the `by-hand-<k>-` prefix: the rename
+  failed with "File name too long", the file stayed, and every re-armed
+  `tc wait` exited 0 at once, a wake loop a member could start (D20).
+  `by_hand_name(k, name, limit)` now cuts the name's stem from the end,
+  one character at a time, so the whole by-hand name fits read/'s
+  `os.pathconf(read, "PC_NAME_MAX")` (255 on ext4), and keeps the `.md`
+  (the synthesis's option A). `by_hand_target` takes a name as free only
+  when `os.lstat` raises `FileNotFoundError`; any other error is raised,
+  and `cmd_read` files that message as not moved, never a traceback and
+  never a guess. A planted name wakes `tc wait` at most once.
+- No verdict (item 2, MEDIUM-1, commit a). A member may plant in the
+  3770 `read/` as easily as in the inbox, so tc cannot tell which of
+  two files of one name it wrote. The note, printed just before the
+  moved file, now reads `tc read: two files had the name <name>, one in
+  read/ and one in the inbox. tc never reuses a number, so one of them
+  was not written by tc. Both are kept: <ROOT>/mail/to-<x>/read/<name>,
+  unchanged, and <ROOT>/mail/to-<x>/read/by-hand-<k>-<name>, from the
+  inbox, shown below:`. Under a shared mailbox each path is followed by
+  ` (owned by <login>)` (`owner_words`, lstat at print time), a plain
+  fact with no verdict (option A). The words are the same whichever file
+  was planted.
+- The walk trusts the init user (item 3, LOW-1, commit b; dev C4 as
+  amended at `7211d3a`). `root_walk_problem` lstats `ROOT/.shared` and,
+  when it is a regular file, passes its owner to `swap_words`, which
+  takes a folder that user owns as it takes root's and the running
+  user's. So a member's same-group rerun on the init user's ROOT passes
+  the walk and reaches D21's own checks, and the remedies tc prints for
+  a member's own entries (`run tc init again as their owner`, and
+  make_folder's `Its owner, <x>, can fix it with tc init`) are true
+  again. With no `.shared` (before the first init) only root and the
+  running user pass. When a third user owns a folder, the words say
+  `who is none of root, you and <x> (the owner of .shared)` and `Keep
+  the mailbox under folders only root, you or <x> own.`; with no
+  `.shared` they are unchanged.
+- ROOT's rule on ROOT's real path (item 4, LOW-2, commit b). The walk's
+  `seen` set is keyed by the path and whether it is ROOT, so when
+  TC_ROOT is a link to its own folder (`tc/here` to `.`) the real walk
+  still runs the ROOT rule on `tc`, which the given walk passed above
+  ROOT by the sticky exception. A sticky ROOT the group may write is
+  refused that way too.
+- One bound in every path (item 5, LOW-3, commit b). `cmd_send` takes
+  one `lock_deadline()` before it routes, for every send, and hands it
+  to `deliver_local` or to `deliver_codex`, which takes it as a new
+  optional keyword, as `deliver_local` does. A local send whose card
+  turned codex under its shared lock no longer waits a second bound in
+  `deliver_codex`. Any other route (the ssh lane's `deliver_ssh`) gets
+  C2's arguments alone, so C2's signature holds.
+- `tc log` and a `read/` it cannot see (item 6, LOW-4, commit b).
+  `cmd_log` lstats each inbox and its `read/` itself: one lstat cannot
+  reach for any reason but absence is named, `tc log: tc could not look
+  at <folder> (<why>); the mail in it is not shown`, the log exits 1, and
+  it never says `mailbox empty` then.
+- Out of numbers is busy (item 9, DEBT-3, commit b; dev exit row 10 as
+  amended at `7211d3a`). A send that finds `PUBLISH_MAX_TRIES` numbers
+  in a row taken exits 10, not 1, with the words unchanged: each try
+  moved `mail/.seq` on, so the next send starts past them, and the ssh
+  route must keep a far 10 queued (C3).
+- K3's block ceiling (item 7, LOW-6, commit c). `check_fifty_senders`
+  takes the block deadline before the spawn loop and hands it to
+  `wait_until_blocked` (a new `deadline` keyword), so the ceiling always
+  ends before any sender's own bound, which starts after its launch.
+  The comment's "never" is now true.
+- Words (items 8 and 10, commit c). QA step 31 makes ROOT with `mkdir
+  -m 0755` and says why; step 30 has the new words, the other order and
+  a long name; step 15 is a member's rerun that passes again.
+  `unread_count`'s block names its silent-0 callers (`cmd_join`,
+  `cmd_card`, `deliver_codex`) and says peek, read, wait and log now
+  name an inbox they cannot list. Pause 5 and "Not in this round" below
+  are brought up to date.
+
+**Tests.** `tests/test_shared.py`, 63 tests in eleven classes (56
+before round 4, 48 in ten before round 3, 39 in seven before round 2), each on
 `tests/_root.py`. Every class inherits `UmaskTestCase`, so each test
 runs under umask 022 and a tc that never sets its own writes 0644 and
 fails. `SharedTest` (H1, 4), `NoPlantedLinksTest` (D17, 5),
@@ -387,10 +487,16 @@ fails. `SharedTest` (H1, 4), `NoPlantedLinksTest` (D17, 5),
 `NobodyTouchesAnotherMembersMailTest` (D20, 8), `InitAndRefusalsTest`
 (init, make_folder and the refusals' words, 8),
 `SharedIsTheInitUsersAndDeliveryNeedsACardTest` (D21, 8),
-`NoLostMailNoHangTest` (rounds 2 and 3, 6), `RootAndClaimTest` (rounds 2
-and 3, 6), `HealthSaysWhatItCannotSeeTest` (round 2, 3),
-`CommandsSayWhatTheyCannotSeeTest` (round 3, 2) and `GroupsToTestTest`
-(1). The lock test runs its eight cases at once (round 3 added "codex
+`NoLostMailNoHangTest` (rounds 2 to 4, 10), `RootAndClaimTest` (rounds 2
+to 4, 8), `HealthSaysWhatItCannotSeeTest` (round 2, 3),
+`CommandsSayWhatTheyCannotSeeTest` (rounds 3 and 4, 3) and
+`GroupsToTestTest` (1). Round 4 adds seven: the by-hand words for a
+plant in `read/`, a planted name of 250 bytes and of exactly the
+filesystem's limit woken at most once, a card that turns codex under a
+held lock, a send out of numbers, the walk's trust of the `.shared`
+owner (with a patched `os.geteuid` for the member), a ROOT that links to
+its own folder, and `tc log` over a `read/` it cannot see. The lock
+test runs its eight cases at once (round 3 added "codex
 send, mail/.seq"), each child under a
 timeout, so it costs about two waits and a broken tc fails it instead of
 hanging the suite. Round 3's deadline test runs the member as a child
@@ -444,6 +550,13 @@ Node 22). Each command's result line:
 | Round 3 (c) | `python3 -m unittest tests.test_mailbox -v` | `Ran 8 tests`, `OK` |
 | Round 3 (c) | `python3 -m unittest tests.test_router -v` | `Ran 15 tests`, `OK` |
 | Round 3 (c) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 164 tests`, `OK` |
+| Round 4 (a) | `python3 -m unittest tests.test_shared` | `Ran 58 tests`, `OK` |
+| Round 4 (a) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 166 tests`, `OK` |
+| Round 4 (b) | `python3 -m unittest tests.test_shared` | `Ran 63 tests`, `OK` |
+| Round 4 (b) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 171 tests`, `OK` |
+| Round 4 (c) | `python3 -m unittest tests.test_shared -v` | `Ran 63 tests`, `OK` |
+| Round 4 (c) | `python3 -m unittest tests.test_mailbox -v` | `Ran 8 tests`, `OK` |
+| Round 4 (c) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 171 tests`, `OK` |
 | each | `node --test tests/*.test.mjs` | `# tests 8`, `# pass 8`, `# fail 0` |
 
 The base, `c8708e5`, ran 108 Python tests and 8 Node tests, all passing.
@@ -589,6 +702,22 @@ before. `...` cuts a temp path or a time.
 | 10 (c) | `cmd_log` drops the problem | `0 != 1 :` (log) |
 | 8 (c), evidence | a local send takes the inbox lock alone | `the send still waited 2 s on a lock the test held shared, under tc's own 3 s bound: it asked for the lock alone` |
 
+Round 4, on the code of the commit named, each run against its test.
+Method: each mutation made by hand with the editor, the test run, the
+line put back, and `sha256sum -c` against the hash taken before. `...`
+cuts a temp path; `<user>` is the running user's login, and `<user+1>`
+the login of the next user id on this machine.
+
+| Item | Mutation | Red |
+|---|---|---|
+| 1 (a) | `by_hand_name` returns the uncut name | `0 != 2 : a planted 250-byte name woke tc wait again after tc read: (0, 'MAIL: 1 unread for b. Run: tc read b\n', '')` (and the same for the 255-byte name) |
+| 2 (a) | round 3's words back in `cmd_read` | `'tc read: two files had the name 000001-from-a.md, one in read/ and one in the inbox. tc never reuses a number, so one of them was not written by tc. Both are kept: .../read/000001-from-a.md, unchanged, and .../read/by-hand-1-000001-from-a.md, from the inbox, shown below:' not found in 'tc read: a second 000001-from-...` (both orders, private and shared; shared adds ` (owned by <user>)` to each path) |
+| 3 (b) | the walk passes no `init_user` | `1 != 0 : tc init: .../root belongs to <user> (mode 0755), who is neither root nor you, ...` (the trust test's "shared" case, and the D21 member rerun test); the third-user case: `'tc init: ... belongs to <user+1> (mode 0700), who is none of root, you and <user> (the owner of .shared), ...' not found in ...` |
+| 4 (b) | `seen` keyed by the path alone | `0 != 1 :` |
+| 5 (b) | `cmd_send` calls `deliver_codex` without the deadline | `the send still waited 4 s after it began to wait: deliver_codex took a second bound of its own` |
+| 6 (b) | `cmd_log`'s lstat error not added to `unlisted` | `0 != 1 :` |
+| 9 (b) | the out-of-numbers refusal back to `EXIT_REFUSED` | `1 != 10 : tc send: 100 message numbers in a row were taken in .../root/mail/to-b, the last 000101-from-a.md ...` |
+
 ## Assumptions
 
 1. **Sticky on the four and on every inbox.** D17 put it on `mail/`,
@@ -703,16 +832,14 @@ before. `...` cuts a temp path or a time.
 29. **A deadline already past still takes a free lock** (one `LOCK_NB`
     try), so a send that used its time on held locks is refused only
     while one is held, never for being slow.
-30. **D23's owner rule refuses a member's init on a ROOT the init user
-    owns.** Init takes a folder from ROOT up to `/` only from root or the
-    running user, as the brief and C4 say. ben's same-group rerun on
-    ann's ROOT now stops at ROOT, so QA step 15 changed, and
+30. **The walk takes root, the running user and the owner of an
+    existing `.shared`** (round 4; round 3 took only the first two). The
+    architect made the call this assumption asked for, and amended C4 on
+    the dev branch (`7211d3a`): ben's same-group rerun on ann's ROOT
+    passes the walk again, QA step 15 says so, and
     `settle_marker_mode`'s line for another user's writable `.shared` is
-    reached only under a root-owned ROOT. The `.shared` refusals (QA
-    steps 7, 13 and 14) come first and keep their words. If members
-    should still rerun init, the rule would also take the owner of
-    `.shared` (the init user, whom D21 already trusts with the group):
-    the architect's call.
+    reached on an ordinary ROOT. The `.shared` refusals (QA steps 7, 13
+    and 14) still come first and keep their words.
 31. **Init walks twice**: before it makes anything (so a refusal changes
     nothing) and once ROOT is made (so a ROOT another user made first, in
     a sticky folder above, is refused).
@@ -722,6 +849,34 @@ before. `...` cuts a temp path or a time.
 33. **`inbox_messages` refuses only when the listing failed** (a problem
     and nothing else). An entry tc could not look at is still named by
     read and peek, which move or show the rest, as before.
+34. **Round 4: a by-hand name is cut by whole characters**, from the end
+    of the stem, and keeps its suffix (`os.path.splitext`, `.md` for
+    every name `tc read` moves). A name in UTF-8 never ends in half a
+    character, so a cut name can come out a byte or three under the
+    limit. The limit is read once per move, from `read/`.
+35. **A by-hand search error is a stuck message, not a free name.** Any
+    `os.lstat` error but `FileNotFoundError`, and any `os.pathconf`
+    error, leaves that message in the inbox with `not moved to read/
+    (<why>); left unread`, exit 1, as any failed rename does. With the
+    cut name the error no longer comes from the name's length, so no
+    member can cause it by naming a file.
+36. **The owners in the by-hand note are read after the lock is let go**,
+    at print time, by `lstat`, so nothing slow runs under the inbox lock.
+    A file's owner cannot change without root; a planter may still
+    remove their own file in between, and then that path shows no owner.
+37. **Only a regular `.shared` names a trusted owner.** A link or a FIFO
+    at that name is not a `.shared` tc reads (`shared_group` refuses
+    it), so it trusts nobody. Its owner's own init is refused before
+    the walk anyway when that owner is another user (D21).
+38. **Every send takes its deadline before it routes**, local or codex.
+    A codex send hands it to `deliver_codex`; before, `deliver_codex`
+    took one at its own start, a few microseconds later. Routes other
+    than `local` and `codex` get C2's four arguments, so the ssh lane's
+    `deliver_ssh` needs no new keyword unless it wants one (DEBT-2).
+39. **`cmd_read`'s own check of `read/<name>` stays `os.path.lexists`.**
+    It answers False on an error, but a `read/` tc cannot search refuses
+    the rename as well, so nothing is replaced; the brief named only
+    `by_hand_target`'s check.
 
 ## Pauses
 
@@ -769,7 +924,10 @@ the architect's yes, and the one the second added (an unreadable
    null when tc could not list the inbox or look at an entry in it
    (`newest_mail_age_s` is null the same way for `read/`). BOARD's
    `look.js` tests `n.unread > 0`, so a null shows no count rather than a
-   wrong one; whether the board should say "unknown" is BOARD's call. On
+   wrong one. Whether the board says "unknown" is no longer open: dev C5
+   (a null `unread` carries `unread_problem`, and the page says `unread
+   unknown`) and the P4 fix (P4FIX item 8, which builds `unread_problem`)
+   decide it (round 4, the audit's LOW-8). On
    a shared mailbox a user outside the group cannot list a 3770 inbox or
    read a 0640 card, so the board belongs to a group member.
    `health_snapshot()` itself has two keys more than at `c8708e5`:
@@ -801,22 +959,41 @@ the architect's yes, and the one the second added (an unreadable
 9. **Spotted in round 3, not fixed.** The comment on
    `SHARED_WRITABLE_FILE_MODE` in `tc` and the paragraph after step 23 of
    `route-shared.md` repeat "make a send fail or ring once more", which
-   item 7 above qualifies; neither was in the brief's list. A planted
-   file whose name is within ten bytes of the filesystem's limit (255)
-   cannot take the by-hand prefix: the rename fails with "File name too
-   long" and the file is named and left unread. `tests/test_router.py`'s
-   module block says two tests load tc; five do now (four before round
-   3).
+   item 7 above qualifies; neither was in the brief's list (nor in
+   round 4's). The long planted name this item named is fixed in round
+   4 (item 1). `tests/test_router.py`'s module block says two tests load
+   tc; five do now (four before round 3).
+10. **Spotted in round 4, not fixed.** The synthesis's side case for
+    HIGH-1 stands: a member who makes a folder at the exact by-hand name
+    `tc read` chose, between its lstat and its rename, fails that one
+    rename (EISDIR), and the message is named and left unread; the next
+    read finds the folder and takes the next count. It needs a race won
+    on each read. `qa/human/route-shared.md`'s paragraph after step 23
+    and the comment on `SHARED_WRITABLE_FILE_MODE` (item 9) are
+    unchanged.
 
 ## Not in this round
 
-As the brief says, not built here: DEBT-1 (one no-replace publish
-helper) and DEBT-2 (`outbox/sent/` and `outbox/refused/` sticky) are the
-SSH lane's, in its brief. DEBT-4 (the timer ties the locked paths to the
-main thread and to `ITIMER_REAL`) stays a stated limit (assumption 20).
-LOW-9 (dev files that still say a message is renamed) and LOW-10 (the
-board's blank count for a null `unread`) are on the dev branch, the
-architect's.
+Round 4, as its brief says. LOW-9 and LOW-10 of
+`audits/2026-10-15-0102-quick` (the exit lists in dev `JOIN.md` and
+`README.md`, which name no case for exit 10 and no `tc wait` exit 1 on
+an inbox tc cannot list) are the DOCS lane's. DEBT-1 and DEBT-2 are in
+the SSH brief: the sticky set for D25's outbox layout must cover each
+`outbox/to-<name>/` and its `sent/` and `refused/` (today
+`shared_folder_mode` gives them 2775, group-writable and not sticky,
+where any member could move another member's queued file, against
+D22), and the busy refusal leaves through `sys.exit` inside `next_seq`
+and `inbox_lock`, so D25's origin-id filing must come only after a
+delivery returns 0, and `route_and_deliver` (C3) must take one
+`lock_deadline` and hand it on, as `cmd_send` now does for both routes.
+REC-1 (assert the by-hand name against the board's own `MESSAGE_NAME`)
+is the architect's, after the merge. REC-2 (both machines need exit 10
+before ssh sends rely on flush) and REC-3 (the P4 fix copies
+`mail_problem` into `unread_problem` only when `unread` is null) were
+not in this brief.
+
+Earlier rounds: DEBT-4 (the timer ties the locked paths to the main
+thread and to `ITIMER_REAL`) stays a stated limit (assumption 20).
 
 ## Not verified
 
@@ -859,5 +1036,16 @@ architect's.
   tried; `os.link` was patched. The deadline test's member takes
   `mail/.seq` back as soon as it sees the counter move; were the send to
   win that race on every one of its `PUBLISH_MAX_TRIES` numbers, it
-  would refuse as taken, not busy, and the test would fail. It passed
-  in every run here; how often the send won a race was not measured.
+  would refuse as taken (since round 4 also exit 10, but with other
+  words), and the test would fail on the words. It passed in every run
+  here; how often the send won a race was not measured.
+- Round 4: QA steps 15, 30 and 31 as changed are not run; no second
+  Linux user. The member in the walk's trust test is a patched
+  `os.geteuid`, and the third user a patched `os.lstat`. The long-name
+  test ran on this machine's temp filesystem (limit 255); a filesystem
+  with another `PC_NAME_MAX`, or one that counts the limit in
+  characters, was not tried. The codex-turn test's card is written by
+  hand under the held lock, standing in for a codex join. Step 31's
+  `mkdir -m 0755` giving 2755 inside a setgid folder, and init's words
+  and exit codes under 2775 and 3775 there, were checked by hand here
+  as one user (the folder owned by this user, not root).

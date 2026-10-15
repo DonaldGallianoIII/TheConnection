@@ -2218,8 +2218,13 @@ def unread_count(name):
     regular files count (message_files), as `tc read` moves only those.
     SHARED fix round 2 (Claude Opus 5.5, unreviewed): an entry lstat
     cannot reach is not counted, and an inbox this user cannot list
-    holds 0 here (message_files), never a traceback; only
-    mailbox_summary reports such a count as unknown.
+    holds 0 here (message_files), never a traceback. SHARED fix round 4
+    (Claude Opus 5.5, unreviewed): the audit's LOW-7. So this count's own
+    callers get a silent 0 for such an inbox: cmd_join (the ring marker),
+    cmd_card (its refusal over unread mail) and deliver_codex (the ring
+    decision), as the handoff's pause 8 says. Peek, read and wait say
+    they could not list it (inbox_messages), log names it (cmd_log), and
+    mailbox_summary reports the count as unknown.
 
     @interacts  lstats mail/to-<name>; lists it and lstats each *.md
                 entry. Writes nothing.

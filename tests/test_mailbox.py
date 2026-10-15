@@ -144,7 +144,10 @@ SENDERS = 50
 # sender gives up LOCK_WAIT_SECONDS after it starts waiting (tc's bounded
 # wait, D20, D23), so the block ceiling sits that bound less
 # SENDERS_RELEASE_MARGIN_SECONDS (room for the release and 50 quick turns at
-# the counter), read from tc rather than copied so the two never drift. A
+# the counter), read from tc rather than copied so the two never drift.
+# SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-6. The
+# ceiling counts from just before the first spawn, and each sender's own
+# bound starts later, after its launch, so the ceiling always ends first. A
 # slow start then fails here, by count of senders blocked, never by a first
 # sender giving up and the test blaming tc for not waiting.
 SENDERS_RELEASE_MARGIN_SECONDS = 1
@@ -315,12 +318,16 @@ class MailboxTest(unittest.TestCase):
     @alloc      one TcRoot per test, two in K3.
     """
 
-    def wait_until_blocked(self, procs, seq, ceiling, what):
+    def wait_until_blocked(self, procs, seq, ceiling, what, deadline=None):
         """Return once every child in `procs` is blocked on the flock of `seq`.
 
         Fails the test if a child exits first (it finished while the lock
         was held, so it never waited for it), or if `ceiling` seconds pass
         first. Polls /proc/locks every LOCK_POLL_SECONDS; never a bare sleep.
+        SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's
+        LOW-6. `deadline`, a time.monotonic() value the caller took
+        `ceiling` seconds ahead (K3's fifty, before their first spawn),
+        counts the ceiling from then; None counts it from this call.
 
         @interacts  reads /proc/locks; reads a finished child's output.
         @deps       lock_waiters, said, time.
@@ -329,7 +336,8 @@ class MailboxTest(unittest.TestCase):
         @alloc      one set of pids per poll, freed as it goes.
         """
         pids = {proc.pid for proc in procs}
-        deadline = time.monotonic() + ceiling
+        if deadline is None:
+            deadline = time.monotonic() + ceiling
         while True:
             waiting = lock_waiters(seq) & pids
             if waiting == pids:
@@ -660,9 +668,11 @@ class MailboxTest(unittest.TestCase):
                      for i in range(1, SENDERS + 1)]
             with open(seq, "a+") as held:
                 fcntl.flock(held, fcntl.LOCK_EX)
+                # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-6, the block ceiling counts from before the first spawn.
+                deadline = time.monotonic() + SENDERS_BLOCK_CEILING_SECONDS
                 procs = [root.start(*args) for args in sends]
                 self.wait_until_blocked(procs, seq, SENDERS_BLOCK_CEILING_SECONDS,
-                                        f"{SENDERS} senders to {B}")
+                                        f"{SENDERS} senders to {B}", deadline=deadline)
                 fcntl.flock(held, fcntl.LOCK_UN)
             deadline = time.monotonic() + SENDERS_FINISH_CEILING_SECONDS
             numbers, failed = [], []

@@ -5,7 +5,8 @@ Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
         Opus 5.5; step 25's words and steps 27 to 29 added in round 2 by
         the SHARED fixer, Claude Opus 5.5; steps 30 and 31, and the words
         of steps 3, 15, 28 and 29, in round 3 by the SHARED fixer, Claude
-        Opus 5.5, 2026-10-15
+        Opus 5.5, 2026-10-15; steps 15, 30 and 31 changed in round 4 by
+        the SHARED fixer, Claude Opus 5.5, 2026-10-15
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
@@ -15,9 +16,12 @@ send to a name nobody joined is refused even when an inbox is there
 (D21). A planted link is never printed (D19). A member who sets
 `mail/.seq` back or holds a lock can make the other's command fail, never
 lose a message or hang it, and init never shares a ROOT the group may
-write (round 2). A file a member plants under a read message's name
-never replaces it, and init refuses a ROOT a member could swap through a
-folder above it (round 3, D20, D23). The tests in
+write (round 2). A file a member plants under a message's name, in the
+inbox or in read/, never replaces it, and init refuses a ROOT a member
+could swap through a folder above it (round 3, D20, D23). tc read calls
+neither of two such files forged, a planted name of any length wakes
+`tc wait` at most once, and a member's same-group init on the init
+user's ROOT works again (round 4). The tests in
 `tests/test_shared.py` prove the modes, the owners and the checks tc
 makes, but one user cannot prove another user's refusals. This script
 does, by hand.
@@ -130,14 +134,13 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
     - As ann: `chmod 644 /srv/tc-shared/.shared`, to put it back.
 15. As ann: `chmod g+w /srv/tc-shared/.shared`, as init left it before
     D21. As ben: `tc init --shared --group tcshare`.
-    - It exits 1 with one line, `tc init: /srv/tc-shared belongs to ann
-      (mode 0755), who is neither root nor you, so ann could put a ROOT of
-      their own, with their own .shared, in place of /srv/tc-shared and
-      change the group. Keep the mailbox under folders only root or you
-      own. Nothing changed.` Since D23 (round 3), init takes a folder from
-      ROOT up to `/` only from root or the user running it, so a member's
-      init on ann's ROOT stops there. Steps 7, 13 and 14 still get their
-      own words: those refusals come first.
+    - It exits 0 and says, on stderr, `tc init: /srv/tc-shared/.shared
+      is 0664; ask ann to rerun init to tighten it`. The walk from ROOT
+      up to `/` (D23) takes a folder only from root, the user running
+      init, or, since round 4, the owner of an existing `.shared`: ann,
+      whom D21 already trusts with the group. So ben's same-group init
+      passes `/srv/tc-shared` and fixes only what ben owns. Steps 7, 13
+      and 14 still get their own words: those refusals come first.
     - `ls -l /srv/tc-shared/.shared` still shows `-rw-rw-r--`, owner
       `ann`: ben's init leaves ann's file as it is.
     - As ann: `tc init --shared --group tcshare`. `ls -l` now shows
@@ -268,28 +271,56 @@ fail or ring once more, never read, lose or alter mail.
 
 ## Nothing planted replaces read mail, and nobody swaps ROOT (round 3)
 
-30. ben plants a file under the name of one of ann's read messages, and
-    ann's read keeps both (D20).
+30. ben plants a file under the name of one of ann's messages, in her
+    inbox or in her read/, and ann's read keeps both and calls neither
+    forged (D20, round 4). The group may make names in both folders.
     - As ann: `ls /srv/tc-shared/mail/to-ann/read/`. Call `R` the name of
       ann's own note from step 16, now read (step 23), for example
       `00000N-from-ann.md`. Run `cat /srv/tc-shared/mail/to-ann/read/R`
       and note what it prints.
     - As ben: `echo "not written by tc" > /srv/tc-shared/mail/to-ann/R`.
       It works: a member may put a new file in an inbox.
-    - As ann: `tc read ann`. It prints `tc read: a second R arrived after
-      the first was read. tc never reuses a number, so someone wrote this
-      one by hand. The first stays in read/, unchanged; this one is kept
-      as /srv/tc-shared/mail/to-ann/read/by-hand-1-R:`, then `not written
-      by tc`, and exits 0.
+    - As ann: `tc read ann`. It prints `tc read: two files had the name
+      R, one in read/ and one in the inbox. tc never reuses a number, so
+      one of them was not written by tc. Both are kept:
+      /srv/tc-shared/mail/to-ann/read/R (owned by ann), unchanged, and
+      /srv/tc-shared/mail/to-ann/read/by-hand-1-R (owned by ben), from
+      the inbox, shown below:`, then `not written by tc`, and exits 0.
     - `cat /srv/tc-shared/mail/to-ann/read/R` prints what it did before.
       `ls /srv/tc-shared/mail/to-ann/read/` shows both `R` and
       `by-hand-1-R`. `ls /srv/tc-shared/mail/to-ann` no longer shows `R`,
       so ann's `tc wait ann` never wakes for it again.
+    - The other order. As ann: `tc send --from ann --to ann "the real
+      one"`, and call `S` the file name it prints. Before ann reads, as
+      ben: `echo "planted first" > /srv/tc-shared/mail/to-ann/read/S`.
+      As ann: `tc read ann`. It prints the same words with `S`, now
+      `read/S (owned by ben)` and `read/by-hand-1-S (owned by ann)`,
+      then `the real one`, and exits 0. Neither line calls ann's own
+      message forged. `cat /srv/tc-shared/mail/to-ann/read/S` prints
+      `planted first`, and `cat
+      /srv/tc-shared/mail/to-ann/read/by-hand-1-S` prints ann's message.
+    - A long name. As ben: `n=$(python3 -c "print('x' * 247 + '.md')")`
+      (a 250-byte name), then `echo kept > /srv/tc-shared/mail/to-ann/read/$n`
+      and `echo planted > /srv/tc-shared/mail/to-ann/$n`. As ann: `tc
+      wait ann --timeout 5; echo $?` prints `MAIL: 1 unread for ann. Run:
+      tc read ann` and `0`. `tc read ann; echo $?` prints the same words
+      as above, then `planted`, and `0`. `ls
+      /srv/tc-shared/mail/to-ann/read/ | grep by-hand-1-x` shows one name
+      ending in `.md`, cut to fit the filesystem's 255-byte limit. `tc
+      wait ann --timeout 5; echo $?` then prints `TIMEOUT: no mail for
+      ann in 5s. Re-arm: tc wait ann` and `2`: the planted name woke it
+      once, never again.
 31. Init refuses a ROOT under a folder the group may write (D23).
     - As a user with sudo: `sudo mkdir /srv/team`, `sudo chgrp tcshare
       /srv/team`, `sudo chmod 2775 /srv/team`: a team folder every member
       may write.
-    - As ann: `mkdir /srv/team/tc`, then `TC_ROOT=/srv/team/tc tc init
+    - As ann: `mkdir -m 0755 /srv/team/tc`. The mode matters: a bare
+      `mkdir` under a umask of 002 (usual where each user has a group of
+      their own) makes ROOT 2775 inside the setgid `/srv/team`, and init
+      then refuses ROOT itself first, with step 28's words. With `-m
+      0755`, `ls -ld /srv/team/tc` shows `drwxr-sr-x` (2755, not
+      writable by the group).
+    - As ann: `TC_ROOT=/srv/team/tc tc init
       --shared --group tcshare`. It exits 1 with one line, `tc init:
       /srv/team, on the way to /srv/team/tc, is 2775 and owned by root:
       its group or anyone may write it and it is not sticky, so any
