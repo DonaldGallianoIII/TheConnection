@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D21) the same day, and D22 and D23 on
+        wave 2 rulings (D17 to D21) the same day, and D22 to D24 on
         2026-10-15.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
@@ -447,16 +447,37 @@ of `tc health` is not on the board's path.
 - `nodes`: every name with an inbox or a card. `state` is one of
   `listening` (a `tc wait` pid in `/proc/locks`), `writing` (sent within
   `WRITING_WINDOW_S` = 10), `doorbell` (route codex: no listener, and
-  that is right), `remote` (route ssh: `remote · not checked`), `down` or
-  `idle`.
+  that is right), `remote` (route ssh: `remote · not checked`), `down`,
+  `woken` (woken, not read), `working`, or `idle`.
 - `down`: `serve.py` keeps `last_listening_at[name]` in memory for the
   life of the process. A name seen listening within `DOWN_WINDOW_S` = 600
-  and not listening now is `down`. The lock file's time cannot be used: tc
-  opens it at the listener's start. After a server restart nothing is
-  `down` until it has been seen listening again; the doc block says so.
-- `idle`: a card or inbox, no listener, not codex or ssh, not down.
-- **When more than one holds** (D15), the first in this order wins:
-  `writing`, `down`, `listening`, `doorbell`, `remote`, `idle`. Writing
+  and not listening now, with no mail reaching its inbox since, is
+  `down`: the lock vanished and nothing woke it. The lock file's time
+  cannot be used: tc opens it at the listener's start. After a server
+  restart nothing is `down`, `woken` or `working` until it has been seen
+  listening again; the doc block says so.
+- **A listener that mail woke is not down** (D24). `tc wait` exits when
+  mail lands and a session re-arms only after its turn, so a name seen
+  listening within `DOWN_WINDOW_S`, not listening now, whose inbox got a
+  message no older than `POLL_SECONDS` before it was last seen listening,
+  was woken. It is:
+  - `working` when there is evidence it is alive after the wake: the
+    waking message has moved to `read/`, or its status file or a message
+    it sent is newer than when it was last seen listening. Working fades
+    to `idle` once `DOWN_WINDOW_S` has passed since it was last seen
+    listening. It also shows `working` during the first
+    `WOKEN_GRACE_S` = 120 after the wake, the time a session takes to
+    start its turn.
+  - `woken` (`woken · not read`) when `WOKEN_GRACE_S` has passed with no
+    such evidence: the doorbell rang and nobody answered. A warning, with
+    its own glyph and word, never color alone, and never `down`.
+  - The legend says the one case it cannot see: a session that crashes
+    after reading its mail looks `working` until the window ends.
+- `idle`: a card or inbox, no listener, not codex or ssh, not down,
+  woken or working.
+- **When more than one holds** (D15, D24), the first in this order wins:
+  `writing`, `down`, `woken`, `working`, `listening`, `doorbell`,
+  `remote`, `idle`. Writing
   comes first because nearly every session has a listener, and the
   moving activity is the point of the board. Writing lasts
   `WRITING_WINDOW_S`, so a node flashes `writing` and then shows its
