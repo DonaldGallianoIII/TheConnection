@@ -132,8 +132,8 @@ WAKE_CEILING_S = 2 * TC_POLL_S
 SIGN_OF_LIFE_S = 30
 # A status this long before the last sighting: written before the wake.
 OLD_STATUS_S = 100
-# A made-up reason in the shape SHARED's tc gives for an inbox it cannot
-# count (mailbox_summary's mail_problem).
+# A made-up reason in the shape tc gives for an inbox it cannot count
+# (mailbox_summary's mail_problem, on a shared mailbox).
 MAIL_PROBLEM = "made-up reason: cannot list this inbox"
 # A newest-mail age under 0: tc's mailbox_summary rounds now less a future mtime.
 NEGATIVE_AGE_S = -5
@@ -1627,9 +1627,10 @@ class HostileMailboxTest(unittest.TestCase):
     def test_an_uncounted_inbox_reads_unknown_with_tc_s_reason(self):
         """unread None with a mail_problem passes through as null with the reason; a counted inbox with one does not.
 
-        SHARED's tc gives `unread: None` and a `mail_problem` when it
-        cannot count an inbox, and a `mail_problem` with a true count when
-        it could not see only its read/. The reason rides in unread_problem
+        A tc that reads a shared mailbox gives `unread: None` and a
+        `mail_problem` when it cannot count an inbox, and a `mail_problem`
+        with a true count when it could not see only its read/; the board
+        takes either shape. The reason rides in unread_problem
         only beside a null unread; a number keeps its number and no reason.
         A negative newest-mail age reads 0. Must reject a feed that turns an
         unknown count into 0, drops the reason, or calls a counted inbox
@@ -1670,8 +1671,9 @@ class HostileMailboxTest(unittest.TestCase):
         Each outside folder holds a well-named message (from x and from w),
         and the linked message is from y; none makes a wire or a link. The
         message a to b, a regular file, is the control. Must reject a scan
-        that follows a linked folder or counts a link as a message, as
-        SHARED's tc does neither.
+        that follows a linked folder or counts a link as a message: on a
+        shared mailbox a group member could point the board at any folder
+        the board's user can read.
 
         @interacts  one message, two outside folders, a file and three links
                     in a fresh TcRoot; one feed().

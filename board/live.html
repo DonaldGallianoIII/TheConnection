@@ -49,9 +49,11 @@
  *             and one per root in the roots list, released when the list
  *             is rebuilt
  * @deps       look.js, theme.css; serve.py's /feed (C5, C6)
- * @complexity one poll: O(n + l + r) for patchBoard's key over n nodes,
- *             l links and r recent wires (tens each, but l grows as
- *             c(c-1)/2 native lines per shared account); a poll with news
+ * @complexity one poll: O(n log n + l + r) over n nodes, l links and r
+ *             recent wires (tens each, but l grows as c(c-1)/2 native
+ *             lines per shared account): patchBoard's key, O(n + l + r),
+ *             rootsList's sort of the nodes by name, O(n log n), pillText,
+ *             O(n), and the footer's seven cells; a poll with news
  *             adds O(n log n + l + r) for the layout and labels, and
  *             look.js routeAround's search per routed pair only when a box
  *             moved, else only for a pair new to the board

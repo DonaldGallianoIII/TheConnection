@@ -504,13 +504,16 @@ export function createRoots(doc, parent, onJump) {
  * native pair, a cycle's root or an inbox the board could not list, in
  * words), each in a dashed rule; only
  * the names may shorten, and the whole text is the badge's title. `h` is
- * the box's height (NODE_H, plus BADGE_H per badge line).
+ * the box's height (NODE_H, plus BADGE_H per badge line). `problem`, tc's
+ * reason for an unread count it could not take, goes on a second line of
+ * the box's hover title, `unread unknown: <reason>`, as text, never as
+ * markup: a group member chooses the file names in it.
  * @interacts  appends to canvas.view; remove() takes the node out again
  * @complexity O(1), plus O(b) over b badges  @alloc one node subtree
- * @returns {{ root, pos, setState(state, detail), setTitle(text), setNote(text), setBadges(list),
+ * @returns {{ root, pos, setState(state, detail), setTitle(text), setNote(text), setProblem(text), setBadges(list),
  *            setHeight(h), moveTo(pos), remove() }}
  */
-export function createNode(doc, canvas, { title, hue, pos, state, detail, note, levels, h, badges }) {
+export function createNode(doc, canvas, { title, hue, pos, state, detail, note, problem, levels, h, badges }) {
   const root = el(doc, 'div', 'tc-node');
   root.style.width = `${CONFIG.NODE_W}px`;
   root.style.setProperty('--tc-node-hue', hue || HUES[HUES.length - 1]);
@@ -534,6 +537,12 @@ export function createNode(doc, canvas, { title, hue, pos, state, detail, note, 
   body.append(t, sub, line, badgeBox);
   let detailText = '';
   let noteText = '';
+  let titleText = '';
+  let problemText = '';
+  // The hover title: the box's title, and tc's reason on a line under it.
+  const setHover = () => {
+    root.title = problemText ? `${titleText}\n${UNREAD_WORDS.unknown}: ${problemText}` : titleText;
+  };
   // The unread words lead the line, with a ` · ` before the note when
   // both are there; the line hides when it has neither.
   const fillLine = () => {
@@ -590,11 +599,16 @@ export function createNode(doc, canvas, { title, hue, pos, state, detail, note, 
       const cut = text.indexOf(' · ');
       tName.textContent = cut < 0 ? text : text.slice(0, cut);
       tRole.textContent = cut < 0 ? '' : text.slice(cut);
-      root.title = text;
+      titleText = text;
+      setHover();
     },
     setNote(text) {
       noteText = text || '';
       fillLine();
+    },
+    setProblem(text) {
+      problemText = text ? String(text) : '';
+      setHover();
     },
     moveTo(p) {
       node.pos = p;
@@ -607,6 +621,7 @@ export function createNode(doc, canvas, { title, hue, pos, state, detail, note, 
   node.setHeight(h);
   node.setTitle(title);
   node.setNote(note);
+  node.setProblem(problem);
   node.setBadges(badges);
   node.setState(state || 'idle', detail);
   return node;
@@ -764,6 +779,17 @@ export const INBOX_WORDS = Object.freeze({
 function unreadWords(n) {
   if (n.unread === null) return UNREAD_WORDS.unknown;
   return n.unread > 0 ? `${n.unread} ${UNREAD_WORDS.unread}` : '';
+}
+
+/**
+ * tc's reason a node's unread count is unknown (the feed's unread_problem,
+ * beside a null unread), or ''. Drawn only as text (createNode's hover
+ * title, the outline row): a group member chooses the file names in it.
+ * Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+ * @complexity O(1)  @alloc one short string
+ */
+function problemOf(n) {
+  return n.unread === null && n.unread_problem ? String(n.unread_problem) : '';
 }
 
 /**
@@ -1641,14 +1667,15 @@ function agoWords(ageS) {
  * whose row says the same); in it one row
  * per session of that tree, parent before children, each `depth` levels
  * under its root, with its name, its role words, its state's glyph and
- * word, its unread count (unreadWords), its note (as boardView's) and its badges'
+ * word, its unread count (unreadWords), its note (as boardView's), tc's
+ * reason an unread count is unknown (problemOf, drawn as text) and its badges'
  * words (badgesOf: a native pair, a cycle's root, an inbox the board could
  * not list), one line each. Then the
  * recent traffic: one line per pair, its newest message, `a → b · #18 · 2
  * m ago`, newest first.
  * @interacts  none; pure
  * @complexity O(n log n + l + r log r) over n nodes, l links and r recent wires  @alloc the returned model
- * @returns {{ groups: { root, heading: string | null, rows: { id, depth, role, state, glyph, word, unread, note, badges }[] }[],
+ * @returns {{ groups: { root, heading: string | null, rows: { id, depth, role, state, glyph, word, unread, note, problem, badges }[] }[],
  *            traffic: { from, to, seq, text }[] }}
  */
 export function outlineView(feed) {
@@ -1662,7 +1689,7 @@ export function outlineView(feed) {
       const state = STATES[n.state] ? n.state : 'idle';
       rows.push({
         id, depth, role: roleTitle(n).slice(String(id).length), state, glyph: STATES[state].glyph, word: STATES[state].word,
-        unread: unreadWords(n), note: noteFor(n, known), badges: badges[id].map((b) => b.text),
+        unread: unreadWords(n), note: noteFor(n, known), problem: problemOf(n), badges: badges[id].map((b) => b.text),
       });
       const children = kids.get(id) || [];
       for (let i = children.length - 1; i >= 0; i -= 1) stack.push([children[i], depth + 1]);
@@ -1688,7 +1715,8 @@ export function outlineView(feed) {
  * one view per node and per edge, keyed by id. Node: title (roleTitle), pos
  * and h (layoutLevels: the box's place and height), state, detail (unread
  * count, or `unread unknown`: unreadWords), note (`reports to N · not found`, else the status line, as `last
- * status: ...` on a down or woken node), `badges` (badgesOf: `native with b · not
+ * status: ...` on a down or woken node), problem (tc's reason an unread
+ * count is unknown, or '': problemOf), `badges` (badgesOf: `native with b · not
  * observed` on both boxes of a native pair, `reports to q · cycle` on a
  * cycle's root, `inbox unreadable` on a down node whose inbox the board
  * could not list), and `connector`: on a node with a parent in the layout,
@@ -1751,7 +1779,7 @@ export function boardView(feed, width, routes = null) {
     nodes[n.id] = {
       id: n.id, title: lay.titles[n.id], pos: lay.pos[n.id], h: lay.heights[n.id],
       state: STATES[n.state] ? n.state : 'idle', detail: unreadWords(n),
-      note: noteFor(n, known), badges: lay.badges[n.id], connector: null, head: null,
+      note: noteFor(n, known), problem: problemOf(n), badges: lay.badges[n.id], connector: null, head: null,
     };
     boxOf[n.id] = { x: lay.pos[n.id].x, y: lay.pos[n.id].y, w: C.NODE_W, h: lay.heights[n.id] };
   }
@@ -1853,7 +1881,7 @@ export function boardView(feed, width, routes = null) {
   return { nodes, edges, extent: lay.extent };
 }
 
-const NODE_FIELDS = ['title', 'state', 'detail', 'note', 'h'];
+const NODE_FIELDS = ['title', 'state', 'detail', 'note', 'problem', 'h'];
 const EDGE_FIELDS = ['kind', 'from', 'to', 'label', 'seq', 'words', 'arrow', 'flow', 'back', 'down'];
 
 /** True when two points sit at the same place. @complexity O(1)  @alloc none */
@@ -1929,7 +1957,10 @@ export function createRouteCache() {
  * flows (age_s at most FLOW_AGE_S). `at`, the machine and every other age
  * are left out, so two polls a few seconds apart with no news give one key.
  * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
- * @complexity O(n + l + r) over n nodes, l links and r wires  @alloc one string
+ * @complexity O(n + l + r) over n nodes, l links and r wires
+ * @alloc      n + l + r + 4 short-lived objects (a copy of each node, an
+ *             array per link and per wire, and the four arrays round them),
+ *             freed on return; the key string, returned
  */
 function drawnKey(feed, width) {
   const nodes = ((feed && feed.nodes) || []).map(({ last_mail_age_s: _age, ...rest }) => rest);
@@ -1965,10 +1996,13 @@ export function createBoard(kit) {
  * @interacts  calls board.kit and the handles it made; writes board.nodes,
  *             board.edges, board.view, board.routes and board.drawn
  * @complexity O(n + l + r) for drawnKey; when it changed, boardView's
- *             (its route searches only on a route key miss, and labels),
- *             plus O(c) kit calls for c changes
- * @alloc      the key string; when it changed, one full view (an object per
- *             node and edge, plus the layout's maps), kept as board.view
+ *             (a route search per routed pair on a route key miss, else
+ *             per pair new to the cache, and labels), plus O(c) kit calls
+ *             for c changes
+ * @alloc      drawnKey's: n + l + r + 4 short-lived objects and the key
+ *             string, kept as board.drawn; when it changed, one full view
+ *             (an object per node and edge, plus the layout's maps), kept
+ *             as board.view
  *             until the next one; one handle per added node or edge; each
  *             removed one is dropped from the maps after its remove()
  */
@@ -2117,7 +2151,8 @@ export function createKit(doc, canvas) {
   };
   const makeRow = () => {
     const row = { root: el(doc, 'div', 'tc-row'), title: el(doc, 'span', 'tc-row-title'), name: el(doc, 'span', 'tc-row-name'),
-      role: el(doc, 'span', 'tc-row-role'), state: el(doc, 'span', 'tc-row-state'), note: el(doc, 'span', 'tc-row-note'), badges: [] };
+      role: el(doc, 'span', 'tc-row-role'), state: el(doc, 'span', 'tc-row-state'), note: el(doc, 'span', 'tc-row-note'),
+      problem: el(doc, 'span', 'tc-row-problem'), badges: [] };
     row.title.append(row.name, row.role);
     return row;
   };
@@ -2132,10 +2167,14 @@ export function createKit(doc, canvas) {
     setText(row.state, `${r.glyph} ${r.word}${r.unread ? ` · ${r.unread}` : ''}`);
     setText(row.note, r.note);
     if (row.note.hidden !== !r.note) row.note.hidden = !r.note;
+    // Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    const problem = r.problem ? `${UNREAD_WORDS.unknown}: ${r.problem}` : '';
+    setText(row.problem, problem);
+    if (row.problem.hidden !== !problem) row.problem.hidden = !problem;
     while (row.badges.length < r.badges.length) row.badges.push(el(doc, 'span', 'tc-row-badge'));
     while (row.badges.length > r.badges.length) row.badges.pop().remove();
     r.badges.forEach((words, i) => setText(row.badges[i], words));
-    place(row.root, [row.title, row.state, row.note, ...row.badges]);
+    place(row.root, [row.title, row.state, row.note, row.problem, ...row.badges]);
   };
   return {
     createNode(v) {
@@ -2154,6 +2193,7 @@ export function createKit(doc, canvas) {
           node.setHeight(n.h);
           node.setTitle(n.title);
           node.setNote(n.note);
+          node.setProblem(n.problem);
           node.setBadges(n.badges);
           node.setState(n.state, n.detail);
           stem.setAttribute('d', n.connector ? roundedPath(n.connector.points, CONFIG.ROUTE_CLEAR) : '');

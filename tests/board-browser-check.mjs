@@ -31,7 +31,8 @@
  * last session, no list of roots (or a root link that does not bring its
  * tree into view: at a short viewport z's heading must start out of view,
  * and the click must scroll the page and bring it in), a request to any
- * host but 127.0.0.1 or one of the board's two faces not loaded from
+ * host but 127.0.0.1 (each one aborted before it leaves the page) or no
+ * request to 127.0.0.1 seen at all, one of the board's two faces not loaded from
  * serve.py (D26), a stale line out of view on a page scrolled down while
  * the feed fails, a root jump made while stale that stops its heading
  * anywhere but just under the stale line, an outline row, group heading or root button past the
@@ -867,22 +868,37 @@ async function staleInView(page) {
 }
 
 /**
- * Watch every request `page` makes, from before it loads (D26). Returns
- * asked(prefix): the row that says whether the page asked any host but
- * HOME_HOST, each off-host URL masked.
+ * Watch every request `page` makes, from before it loads (D26), and abort
+ * any to a host but HOME_HOST (page.route), so a regression is caught
+ * without the owner's address reaching anyone. The request event still
+ * fires for an aborted one, so it is still counted. Returns
+ * asked(prefix): the row that passes only when the page asked no other
+ * host and asked HOME_HOST at least once (a watch that saw nothing proves
+ * nothing), each off-host URL masked.
  * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; one helper for
- * every page by the P4 phase fixer, round 2. Status: unreviewed.
- * @complexity O(1) per request  @alloc one list of off-host URLs
+ * every page, the home count and the abort by the P4 phase fixer, round 2.
+ * Status: unreviewed.
+ * @complexity O(1) per request  @alloc one list of off-host URLs and two counts
  * @returns {Promise<(prefix: string) => [string, boolean, string]>}
  */
 async function watchHosts(page) {
   const offHost = [];
+  let home = 0;
+  let aborted = 0;
+  const elsewhere = (at) => WEB_SCHEMES.includes(at.protocol) && at.hostname !== HOME_HOST;
+  await page.route(elsewhere, (route) => {
+    aborted += 1;
+    return route.abort();
+  });
   page.on('request', (req) => {
     const at = new URL(req.url());
-    if (WEB_SCHEMES.includes(at.protocol) && at.hostname !== HOME_HOST) offHost.push(masked(req.url()));
+    if (elsewhere(at)) offHost.push(masked(req.url()));
+    else if (WEB_SCHEMES.includes(at.protocol)) home += 1;
   });
-  return (prefix) => [`${prefix}the page asked no host but ${HOME_HOST}`, offHost.length === 0,
-    offHost.length ? `asked: ${offHost.join(' | ')}` : ''];
+  return (prefix) => [`${prefix}the page asked no host but ${HOME_HOST} (${home} requests to it watched)`,
+    offHost.length === 0 && home > 0,
+    offHost.length ? `asked: ${offHost.join(' | ')} (aborted here: ${aborted})`
+      : (home ? '' : `no request to ${HOME_HOST} seen, so the watch proves nothing`)];
 }
 
 /**
@@ -999,9 +1015,9 @@ async function linesInFull(browser, url, feed, halt) {
  * screenshot, kept in memory, for the down wires' pixels; then the root
  * jump, the stale line on a page scrolled down and, last, the root jump
  * while stale), then grayscale
- * (saved). Each page is settled on signals (its faces loaded, the window
- * saying live, two animation frames), and every request it makes is
- * watched. `halt` is called after each await: it throws once a signal has
+ * (saved). Each page is settled on signals (a drawn node or row, its
+ * faces loaded, two animation frames), and every request it makes is
+ * watched, any to another host aborted (watchHosts). `halt` is called after each await: it throws once a signal has
  * begun cleanup, so a stopped run goes no further.
  * @complexity two page loads, plus one screenshot decoded in O(P) over its
  *             P pixels on the desktop
@@ -1023,15 +1039,15 @@ async function runView(browser, url, root, view, shots, halt) {
     const [base, hash] = url.split('#');
     await page.goto(`${base}${gray ? '?gray=1' : ''}#${hash}`);
     halt();
+    // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; the settle
+    // named by the P4 phase fixer, round 2. Status: unreviewed.
+    // Settled on signals, not a fixed sleep: a drawn node or row (the poller
+    // marks the window live and draws in one task, so a drawn node is a
+    // good answer drawn), then the faces loaded, then two animation frames
+    // for the layout and the resize observer's redraw to finish.
     await page.waitForSelector('.tc-node, .tc-row', { timeout: DRAWN_MS });
     halt();
     await page.evaluate(() => document.fonts.ready);
-    halt();
-    // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
-    // Settled on signals, not a fixed sleep: the window says a good answer
-    // was drawn (data-conn live), then two animation frames let the layout
-    // and the resize observer's redraw finish.
-    await page.waitForFunction(() => document.querySelector('.tc-win').dataset.conn === 'live', null, { timeout: DRAWN_MS });
     halt();
     await page.evaluate(() => new Promise((done) => { requestAnimationFrame(() => requestAnimationFrame(done)); }));
     halt();
@@ -1200,6 +1216,7 @@ exports.chromium = {
       async newPage() {
         return {
           on() {},
+          async route() {},
           async goto(url) {
             if (mode === 'hang') return new Promise(() => {});
             throw new Error('page.goto: net::ERR_CONNECTION_REFUSED at ' + url + '\\nCall log:\\n  - navigating to "' + url + '", waiting until "load"\\n');

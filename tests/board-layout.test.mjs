@@ -972,6 +972,28 @@ test('a node\'s state words have the second line to themselves, and its unread w
   assert.equal(cssRule('.tc-node-unread').includes('flex: none'), true, 'the unread words may shrink');
 });
 
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+// tc's reason an unread count is unknown, on the box's hover title and on
+// the outline row, as text: a group member chooses the file names in it.
+test('tc\'s reason for an unknown count shows in the box\'s hover title and on its outline row, as text', () => {
+  const reason = 'made-up <b>reason</b>: cannot list mail/to-b';
+  const feed = {
+    nodes: [fed('b', 'peer', 'none', 0, null, { unread: null, unread_problem: reason }), fed('c', 'peer', 'none', 0, null, { unread: 2 })],
+    links: [], wires: [],
+  };
+  const doc = createFakeDoc();
+  const canvas = createCanvas(doc, doc.createElement('div'));
+  const kit = createKit(doc, canvas);
+  const board = createBoard(kit);
+  patchBoard(board, feed, layoutWidth(DESK_W));
+  assert.equal(board.nodes.get('b').node.root.title, `b · peer\n${UNREAD_WORDS.unknown}: ${reason}`);
+  assert.equal(board.nodes.get('c').node.root.title, 'c · peer', 'a counted inbox carries a reason');
+  kit.drawOutline(outlineView(feed));
+  const lines = everyEl(canvas.outline).filter((e) => e.className === 'tc-row-problem');
+  assert.deepEqual(lines.map((e) => [e.textContent, e.hidden]), [[`${UNREAD_WORDS.unknown}: ${reason}`, false], ['', true]]);
+  assert.ok(lines.every((e) => e.children.length === 0), 'the reason was drawn as markup');
+});
+
 // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
 test('the legend names the quiet mail wire and says the thin line may be inferred; a title keeps its space; a stale board stops its dashes', () => {
   assert.ok(LEGEND_WORDS.graph.includes(`thick line: mail, none in the last ${CONFIG.FLOW_AGE_S} s`), LEGEND_WORDS.graph);

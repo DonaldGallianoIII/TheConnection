@@ -374,8 +374,8 @@ test('a reports_to cycle\'s root says whom it reports to, on a badge and in the 
 });
 
 // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
-// SHARED's tc gives a null unread, with a reason, for an inbox it cannot
-// count, and a reason beside a true count when it could not see only read/.
+// The feed gives a null unread, with tc's reason, for an inbox tc cannot
+// count, and a reason beside a true count when tc could not see only read/.
 test('a null unread reads unread unknown in words, on the box and the row; a count with a reason keeps its count', () => {
   const feed = {
     nodes: [
@@ -389,6 +389,11 @@ test('a null unread reads unread unknown in words, on the box and the row; a cou
   assert.equal(UNREAD_WORDS.unknown, 'unread unknown');
   const rows = Object.fromEntries(outlineView(feed).groups.flatMap((g) => g.rows).map((r) => [r.id, r.unread]));
   assert.deepEqual(rows, { b: UNREAD_WORDS.unknown, c: '2 unread', d: '' });
+  // Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+  // tc's reason rides beside the unknown count only.
+  assert.deepEqual([view.nodes.b.problem, view.nodes.c.problem, view.nodes.d.problem], ['made-up reason', '', '']);
+  const problems = Object.fromEntries(outlineView(feed).groups.flatMap((g) => g.rows).map((r) => [r.id, r.problem]));
+  assert.deepEqual(problems, { b: 'made-up reason', c: '', d: '' });
 });
 
 // A pasted token that ends in an ellipsis cannot ride in a header: fetch

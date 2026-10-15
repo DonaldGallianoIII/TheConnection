@@ -40,8 +40,9 @@
  * @deps       look.js, theme.css, demo-script.json
  * @complexity one step: O(n log n + l) in patchBoard over n = 8 nodes and
  *             l = 12 links; look.js routeAround's search per routed pair
- *             runs on the first step and on a width change only, since a
- *             step moves the flow and not the boxes; the script has s
+ *             runs on the first step and on a width change that wraps a
+ *             row differently only, since a step moves the flow and not
+ *             the boxes; the script has s
  *             steps (9 in the shipped file)
  * @alloc      one board, built on the first step; later steps patch its
  *             nodes and wires in place, so none is rebuilt, though each step
@@ -65,7 +66,8 @@ applyLook(document, look);
 if (query.get('gray') === '1') document.documentElement.style.filter = 'grayscale(1)';
 
 const demo = await (await fetch('demo-script.json')).json();
-// The same pill live.html shows: listeners by pid, and the box's own word for down.
+// The same pill live.html shows: listeners by pid, and the boxes' own words
+// for down and for woken (P4 phase fixer, round 2, 2026-10-15).
 const pill = pillText(demo);
 const app = document.getElementById('app');
 const win = createWindow(document, app, { file: demo.window.file, sub: demo.window.sub });

@@ -37,8 +37,8 @@ query. Cards never come from tc's health:
   nodes[].listener_pid     snap["listeners"][name]: the pid tc read from
                            /proc/locks, or None
   nodes[].unread           snap["mail"][name]["unread"]; 0 with no inbox;
-                           None when tc cannot count it (SHARED's tc, on an
-                           inbox it cannot see into)
+                           None when tc cannot count it (a tc that says
+                           so for an inbox it cannot see into)
   nodes[].unread_problem   snap["mail"][name]["mail_problem"], tc's reason,
                            when unread is None; else None
   nodes[].inbox_unreadable True when this board could not list the name's
@@ -527,7 +527,8 @@ def scan_messages(mail):
     so does a name whose inbox or read/ message_names could not list; the
     rest of the scan stands. Opens no file.
 
-    Never follows a link, as SHARED's tc reads a mailbox: a to-* entry or
+    Never follows a link, so a link a group member puts in a shared
+    mailbox points the board nowhere: a to-* entry or
     a read/ that is a link is not looked in, and only a regular file is a
     message (message_names). The inbox is listed before read/, and a file
     in read/ with the same recipient, number and sender as one in the inbox
@@ -1023,10 +1024,13 @@ class Board:
         tc's GPU_QUERY_TIMEOUT_SECONDS), scans every process and, on the
         merged tc, reads every card: none of which the feed uses.
 
-        A `tc read` that moves a message between mailbox_summary's glob
-        and its stat makes it raise FileNotFoundError. It is asked once
-        more, and finds the message in read/; a second miss raises, and that
-        poll answers 500.
+        The retry serves the dev branch's tc before SHARED merges: there a
+        `tc read` that moves a message between mailbox_summary's glob and
+        its stat makes it raise FileNotFoundError. It is asked once more,
+        and finds the message in read/; a second miss raises, and that poll
+        answers 500. SHARED's tc skips an entry that vanished before its
+        stat, so with it the retry never runs and costs nothing, and the
+        stand-in test of it says nothing about that tc.
 
         @interacts  see the module block: /proc/locks, the lock files, mail/
                     and status/ through tc; the load average and

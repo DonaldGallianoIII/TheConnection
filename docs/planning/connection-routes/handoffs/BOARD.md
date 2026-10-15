@@ -987,7 +987,10 @@ and this file.
 **For the architect.** C5's node shape gains `unread_problem`, and
 `unread` may be null (item 8); C6's allow list gains the six files under
 `fonts/` (item 6); C5 still shows the SourceFileLoader load, which
-load_tc no longer uses (item 10). contracts.md was not edited.
+load_tc no longer uses (item 10). contracts.md was not edited. All three
+are made on the dev branch at `0b629e8` (C5's null `unread` with
+`unread_problem`, C5's in-memory loader, C6's six `fonts/` files): no ask
+is left open here.
 
 **Not in this round** (the brief's list): LOW-1, LOW-23, LOW-24, LOW-31
 and LOW-32 are the architect's (CLAUDE.md, tc, the plan); LOW-30 is the
@@ -1017,3 +1020,232 @@ DEBT; DEBT-1 is now D25 and lands after the SSH lane.
 - `test_a_recent_sender_with_no_listener_is_writing_then_idle` still
   reads the wall clock after a send, the same shape as LOW-21 with a
   smaller window; it was not in the brief.
+
+## P4 phase fix, round 2
+
+Model:  Claude Opus 5.5 (the P4 phase fixer), 2026-10-15
+Status: unreviewed
+Brief:  audits/2026-10-15-0150-custom/fixes/round-2.md, from that audit's
+        synthesis (the ids below are its ids); D27 and D28 read on the dev
+        branch at `8bdf363`, read only
+Branch: Claude-Development-TheConnection-P4FIX, from `602b62a`, in
+        ~/TheConnection-lanes/p4fix
+
+| Part | Commit | Subject |
+|---|---|---|
+| (a) items 1, 3 | `95cc3c8` | Keep a killed listener down whatever mail lands later, and read the wake from what left the inbox (D28) |
+| (b) item 2 | `df304b3` | Guess a parent only from a clear majority of a node's mail, and never call a peer inferred (D27) |
+| (c) items 4, 5, 6 | `64d29a7` | Give a node's unread words their own place, stop a stale jump under the stale line, and call a header-breaking token damaged |
+| (d) items 7, 8 | `ed56f3f` | Route a new pair alone, count the router's work instead of timing it, and pin the wake walk's cost |
+| (e) items 9 to 12 | the commit that adds this section | Make the round's words and tags true, abort off-host requests in the browser check, and record the fonts' hashes |
+
+No amend, reset or rebase. Nothing pushed or merged. `tc`,
+`tests/_root.py`, `CLAUDE.md`, `README.md` and the plan files were not
+edited. Above this section only the round 1 section's "For the architect"
+paragraph changed (item 9, LOW-8).
+
+**What changed, item by item.**
+1. MEDIUM-1, D28, LOW-4. serve.py: the Board keeps `first_missing_at`,
+   the first poll that found no pid after a sighting, cleared on the next
+   sighting and pruned with last_listening_at. find_wake counts as the
+   wake only mail that landed from POLL_SECONDS before the last sighting
+   to POLL_SECONDS after that first poll, so a killed listener stays
+   `down` whatever mail lands later. wake_of looks for the wake while that
+   window is open and keeps what it found in `wakes` until the next
+   sighting; past the window it looks no more. A name whose inbox or
+   read/ the board cannot list (message_names now tells "no folder" from
+   "cannot list") reads `down`, and the feed's new node key
+   `inbox_unreadable` is true; the page shows `inbox unreadable` as a
+   badge line on a down node (INBOX_WORDS). Both legends name the two
+   cases C5 says the states cannot see.
+2. D27. serve.py parents_of: the partner holding at least
+   PARENT_MAJORITY (`fractions.Fraction(2, 3)`) of the node's messages,
+   sent and received, if it has HUB_MIN_PARTNERS; D15's guard and
+   drop_inferred_cycles stay. feed() builds the partner counts from the
+   per-pair `sent` counts it already kept. A peer's role_source is
+   `none` (NO_EDGE). look.js roleTitle never writes `inferred` on a peer.
+   Every fixture, test and QA line that read `peer · inferred` now reads
+   `peer` (role_source `none`).
+3. LOW-3. scan_messages keys a message by recipient, number and sender
+   and keeps the inbox copy; after_listening's read evidence is that a
+   waking message left the inbox (by its file name), wherever it went;
+   find_wake walks the candidates in file time order, so no number ends
+   it.
+4. LOW-5 (option A). createNode: the second line holds the state's glyph
+   and word alone; the unread words lead the third line in
+   `.tc-node-unread` (never shrinks), then the note (may shorten).
+5. LOW-1. theme.css: `--tc-stale-h` from the stale line's line height,
+   padding and border, `--tc-jump-gap` (the old 8 px), and a stale
+   window's jump targets keep both clear.
+6. LOW-11 (option B), LOW-10. tokenProblem: NUL, LF and CR are damage
+   (HEADER_REFUSED). FeedHandler's and send_error's docs say a request
+   http.server still holds as HTTP/0.9 (a one-word line, an unreadable
+   version, HTTP/2.0) gets no bytes at all.
+7. LOW-12, LOW-13, REC-12, REC-14. look.js: routes.runs is keyed by a
+   pair's two ends under a shared key of boxes, headings, extent and
+   tree runs; routeAround counts `edgeHits`. Answer to the brief's
+   question: one pair's route does not depend on another's (routeAround
+   keeps off boxes, ports, headings and `along`, and no routed run is in
+   `along`), so the cache is keyed per pair.
+8. LOW-14. The stopped name's candidates are its newest WAKE_CANDIDATES
+   (16) messages by number, kept in a heap as feed()'s loop over the
+   messages goes, only while its wake window is open; nothing sorts a
+   name's history. The code landed in (a), where D28 needed it; (d)
+   adds its test.
+9. LOW-6 (option A), LOW-7, LOW-8, LOW-9, LOW-15. Board.snapshot's doc
+   says the retry serves dev's tc before SHARED; "SHARED's tc" in
+   serve.py, test_board_feed.py and board-patch.test.mjs now says what
+   the code guards; the round 1 "For the architect" says the three
+   changes are on dev at `0b629e8`; board-layout.test.mjs's @complexity
+   covers the 20 peers (in (d), with the tests it describes); demo.html's
+   pill comment counts woken; drawnKey's and patchBoard's @alloc, and
+   live.html's per-poll @complexity (rootsList sorts), are true; serve.py's
+   module @alloc was made true in (a), with the code it describes.
+10. LOW-2 (option A). The browser check no longer waits on `data-conn`
+    live; the comment names the settle: a drawn node or row, the faces,
+    two frames.
+11. REC-5, REC-6. watchHosts, used by every page: page.route aborts any
+    request to a host but 127.0.0.1, and the row fails when the page
+    asked another host or when the watch saw no request to 127.0.0.1.
+12. REC-3, REC-4, REC-8. qa/human/board-live.md step 15 opens the URL
+    with a damaged token; a node's hover title and its outline row show
+    tc's reason beside `unread unknown` (problemOf, as text, through the
+    title property and textContent, never markup); the hashes below.
+
+**Where this round differs from its brief, and what it decided.**
+- The unread words lead the third line, beside the note, rather than a
+  fourth line of their own. A fourth line would make a box taller each
+  time its count went from 0 to 1 and back, moving every box under it
+  and setting off every route search; the box keeps the height the owner
+  approved. The state words do have their line to themselves.
+- `inbox unreadable` is a badge line (a dashed rule), not words on the
+  state line: `no listener · inbox unreadable` is 30 characters, past
+  the 25 the state line holds, and C5 wants the words whole.
+- The feed carries `inbox_unreadable` as a node key, so the page knows
+  when to say the words. C5 names the words and no key.
+- `inbox` counts read/ too: a waking message already read sits there, so
+  a read/ the board cannot list leaves it unable to tell, the same as
+  the inbox.
+- The wake's candidates are bounded (WAKE_CANDIDATES, 16). More than 16
+  hand-made files numbered above the waking message push it out, and the
+  name reads down. A waking message moved out of sight before the first
+  poll that saw its listener gone is never seen either. Both need
+  someone who can write the inbox.
+- The new size tokens sit on `.tc-backdrop`, beside `--tc-page-pad`, not
+  on `:root`: tests/board-theme.test.mjs (outside this lane's files)
+  takes every `:root` token for a color Daylight must restate.
+- The stale jump check uses a 300 px viewport of its own. At the 400 px
+  of the first jump check the desktop page could not scroll z's heading
+  to the top, so the check passed with the bug in. It now also fails
+  when the heading lands more than the gap under the line.
+- tokenProblem calls NUL, LF and CR damage wherever they sit. fetch
+  strips them (with spaces and tabs) from the ends of a header value
+  rather than refusing them, so a token with only a trailing %0A would
+  have worked; serve.py's tokens never hold one, so it reads as damage.
+
+**Mutations and their red lines.** Each applied by hand, seen red,
+restored; the assertion line only.
+- 1, no first-missing time (the wake window with no end):
+  `AssertionError: {'b': ('working', None, False), 'c': ('working', None,
+  False)} != {'b': ('working', None, False), 'c': ('down', None,
+  False)}`. A folder that cannot be listed read as empty:
+  `AssertionError: {'r': ('working', False), 'u1': ('down', False), 'u2':
+  ('working', False)} != {'r': ('working', False), 'u1': ('down', True),
+  'u2': ('down', True)}`. No inbox line in badgesOf: `+ d: [], - d: ['inbox
+  unreadable']`.
+- 2, the one-partner rule back: `AssertionError: {'a': ('peer', 'none', 0,
+  None), 'b': ('peer', 'n[42 chars]one)} != {'a': ('orchestrator',
+  'inferred', 0, None), 'b':[64 chars]'a')}`. A peer marked inferred:
+  `AssertionError: {'x': ('peer', 'inferred', 0, None), 'r1':
+  ('orchestrator[97 chars]r2')} != {'x': ('peer', 'none', 0, None), ...}`.
+  roleTitle writing it: `+ 'x · peer · inferred' - 'x · peer'`.
+- 3, the read/ copy winning the dedupe: `AssertionError: {'b': 'down', 'c':
+  'down'} != {'b': 'woken', 'c': 'woken'}`. The wake looked for afresh
+  each poll: `AssertionError: {'b': 'down', 'c': 'woken'} != {'b':
+  'working', 'c': 'woken'}`. The walk in number order: `AssertionError:
+  Tuples differ: ('down', 'down') != ('working', 'woken')`.
+- 4, the unread words back on the state line: `+ '△woken · not read ·
+  unread unknown' - '△woken · not read'`; in the browser, both looks:
+  `FAIL dark look: the state line and the unread words are whole (y1,
+  docs, y3): y1's state line "△woken · not read · unread unknown" is cut
+  or is not woken · not read; ...`.
+- 5, no stale scroll margin: `FAIL while stale, the root link for z stops
+  z's heading under the stale line, not behind it: ... after it z's
+  heading at 8 to 28, the stale line at 0 to 26, in a 300 px viewport at
+  scrollY 939` (and at 390 px, scrollY 778).
+- 6, no NUL, LF or CR check: `+ null - 'token damaged · copy the URL
+  serve.py printed again'`.
+- 7, the one key naming every drawn pair: `41 !== 21`. The edge flags not
+  kept: `no search looked up a grid edge it had already checked: the edge
+  flags keep nothing`. Runs never dropped: `the cache held 501 runs while
+  two pairs were drawn`.
+- 8, a stopped name's whole history as candidates: `AssertionError: Lists
+  differ: [('working', 49), ('working', 49), ('working', 0)] !=
+  [('working', 16), ('working', 16), ('working', 0)]`.
+- 11, the home count dropped: `FAIL the page asked no host but 127.0.0.1
+  (0 requests to it watched): no request to 127.0.0.1 seen, so the watch
+  proves nothing`, on all six pages. An off-host @import (a made-up name
+  under the reserved .invalid domain, which resolves nowhere) put in
+  theme.css: `FAIL the page asked no host but 127.0.0.1 (7 requests to it
+  watched): asked: http://off-host.invalid/x.css (aborted here: 1)`.
+
+**Measured.** The 20-peer first draw: 190 route searches and 112,031
+grid edges looked up again, 112 and 130 ms in two runs on this machine
+at load under 5 (the 10 s stopwatch is a backstop only); with the edge
+flags not kept (mutation 7) it took 162 ms and looked up none again. The property test now
+builds 39 cases with an inferred edge on a cycle (27 before).
+
+**Verify commands and their output**, in this worktree on the final
+code: `python3 -m py_compile tc board/serve.py && node --check
+board/look.js` clean; `node --test tests/*.test.mjs` 66 pass, 0 fail
+(59 before); `python3 -m unittest discover -s tests -p 'test_*.py'` 161
+OK (153 before), with the known `ResourceWarning` lines from
+`tests/test_health.py`; `NODE_PATH=<a Playwright install>/node_modules
+node tests/board-browser-check.mjs` (Playwright 1.63, Chromium 153)
+`result: PASS`, 51 rows, twice; `--self-test` `self-test: PASS`.
+`check_voice.py` and `check_american.py` clean on both QA scripts and
+this file.
+
+**The fonts, recorded (REC-8).** From the npm packages
+`@fontsource-variable/space-grotesk` 5.3.0 and
+`@fontsource-variable/jetbrains-mono` 5.3.0, each under the SIL Open
+Font License 1.1. `sha256sum board/fonts/*` on this branch, matching the
+round 1 brief's list:
+
+```
+79bfdab9ba467e26eea4122e6f2567e188dd8a09a8c730d501fc487c4ab99c6e  board/fonts/jetbrains-mono-latin-ext-wght-normal.woff2
+18be452724bfdc236c074ca94a249a7f41a86752c7d04ab258ce9ed5651f6a7e  board/fonts/jetbrains-mono-latin-wght-normal.woff2
+403581b69dac5cff4079205e01c6b467e56af449ecbd7247693ddb1baafa005b  board/fonts/jetbrains-mono-ofl.txt
+952dddb45d2f96f71cbf3b7f510b24379afc3c89ea02fcf89d377b45d62c0166  board/fonts/space-grotesk-latin-ext-wght-normal.woff2
+0640890476fc1198ab4de571fb658de443c4d85b66466ec09534a8737ab1ce9d  board/fonts/space-grotesk-latin-wght-normal.woff2
+18a4de52385f6b988782639d5d0cc1326e5a8c2de9a7f01d7b20d9aedcc60943  board/fonts/space-grotesk-ofl.txt
+```
+
+**For the architect.** C5's node shape gains `inbox_unreadable` (a
+boolean; the page owns the words) and role_source `none` (D27 names it).
+C5's cost line (LOW-17) still reads O(n + m + e); feed() is now
+O(k + m (log W + log K) + n + c^2), K = WAKE_CANDIDATES. contracts.md
+was not edited.
+
+**Not in this round** (the brief's list). DEBT-1 (the board reading D25's
+outbox) waits for the SSH lane. DEBT-2 (routing in slices), REC-7 (a
+Content-Security-Policy), REC-11 (handle_error's frame) and REC-13 (a
+second route key) stay open. LOW-16 and LOW-17 are on dev, the
+architect's. `tc wait` writing its exit reason into its lock file (D28's
+follow-up) is a later task that edits tc.
+
+**Not verified.**
+- D28 on a live board with a real session: the feed tests drive proven
+  listeners on a fake clock, and QA step 16's new lines are written, not
+  run by a person.
+- `inbox unreadable` from a real shared mailbox: tested with folders
+  closed by mode 000 as this user. On the dev branch's tc an unlistable
+  inbox counts 0 unread (pathlib's glob passes over the error); the
+  board's own listing is what sets the flag.
+- The stand-in feed's lines were measured in headless Chromium only, at
+  1280 x 900; the outline's tc reason line only through the fake
+  document.
+- The stale line's height assumes its words fit one line; on a screen
+  too narrow for `stale · last answer N s ago` the line wraps and a jump
+  lands partly under it.
+- A real phone, Safari and Firefox, as in round 1.
