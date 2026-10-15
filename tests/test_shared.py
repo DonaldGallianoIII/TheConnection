@@ -37,11 +37,16 @@ look into stops it with words, never a traceback. And round 4 (SHARED
 fix round 4, Claude Opus 5.5, unreviewed): tc read names neither file
 as the forgery when two share a name, whichever was planted, and a
 planted name up to the filesystem's name limit still moves, so tc wait
-wakes for it at most once; init's walk trusts the owner of an existing
-.shared and nobody else, and runs ROOT's rule on ROOT's real path
-whatever the given walk passed; a local send whose card turns codex
-under a held lock waits one bound; tc log says it could not look at a
-read/; and a send out of numbers exits 10.
+wakes for it at most once; init's walk runs ROOT's rule on ROOT's real
+path whatever the given walk passed; a local send whose card turns
+codex under a held lock waits one bound; tc log says it could not look
+at a read/; and a send out of numbers exits 10. And round 5 (SHARED fix
+round 5, Claude Opus 5.5, unreviewed): init's walk gives the owner of
+.shared no trust (D28), so a member who made ROOT first stops the init
+user's own init, naming that member, and a member's rerun on the init
+user's ROOT is refused with no charge and the chgrp and chmod lines for
+that member's own entries; a folder in the wrong group and an entry
+init skips get the same lines, which run as printed.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -104,12 +109,15 @@ the owner's human QA (D4, qa/human/route-shared.md).
             /proc/locks with its access, lock_waiters) and write a card
             by hand under it; make a folder with a link to itself and
             chmod it 1777; chmod an inbox to read without search and
-            back; and load tc in process to run cmd_init with os.geteuid
-            replaced (and os.lstat wrapped), resetting the umask between
-            cases.
+            back; and load tc in process to run cmd_init. The round 5
+            tests write .shared by hand, chmod a status file, run
+            cmd_init in process with os.geteuid replaced (and os.lstat
+            wrapped), and run the chgrp and chmod lines tc prints
+            through /bin/sh on entries this user owns under the root.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
-            importlib, io, json, os, pathlib, pwd, re, stat, subprocess,
-            sys, time, unittest, unittest.mock); tests/_root.py.
+            importlib, io, json, os, pathlib, pwd, re, shlex, stat,
+            subprocess, sys, time, unittest, unittest.mock);
+            tests/_root.py; /bin/sh for the printed fix lines.
 @complexity O(1) per test: a handful of tc runs over a root of a few dozen
             entries, once per group tested (one or two).
 @alloc      one TcRoot per test and group, removed when its context exits.
@@ -128,6 +136,7 @@ import os
 import pathlib
 import pwd
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -330,15 +339,9 @@ LONG_NAME_BYTES = 250
 MESSAGE_SUFFIX = ".md"
 # The text of a file planted straight into read/ under a message's name.
 IN_READ_TEXT = "planted by hand in read/ under the same name\n"
-# SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-1, dev
-# C4 amended. What init says for a folder on the way that a third user
-# owns, when an existing .shared's owner is trusted as well.
-OWNED_PAST_THE_INIT_USER_WORDS = ("tc init: {folder} belongs to {owner} (mode {mode:04o}), who is none of root, "
-                                  "you and {init_user} (the owner of .shared), so {owner} could put a ROOT of "
-                                  "their own, with their own .shared, in place of {root} and change the group. "
-                                  "Keep the mailbox under folders only root, you or {init_user} own.")
-# The audit's LOW-3: how long this test holds an inbox lock alone after a
-# send began to wait for it. Under LOCK_WAIT_SECONDS, so the send still
+# SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-3
+# (audits/2026-10-15-0102-quick). How long this test holds an inbox lock
+# alone after a send began to wait for it. Under LOCK_WAIT_SECONDS, so the send still
 # waits when the lock is let down to shared; over FLIP_SLACK_SECONDS, so a
 # second bound of its own would show.
 CARD_CHANGE_HOLD_SECONDS = 2
@@ -374,6 +377,23 @@ BOARD_MESSAGE_NAME = re.compile(r"^(\d+)-from-(.+)\.md$")
 OWNED_ON_THE_WAY_WORDS = "tc init: {folder} belongs to {owner} (mode {mode:04o}), who is neither root nor you"
 WRITABLE_ON_THE_WAY_WORDS = ("tc init: {folder}, on the way to {root}, is {mode:04o} and owned by {owner}: its "
                              "group or anyone may write it and it is not sticky")
+# SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28 and the audit's
+# MEDIUM-1 (audits/2026-10-15-0201-quick). What init says when ROOT and
+# its .shared belong to one other user: that user ran init, and no one
+# is charged with anything.
+RAN_INIT_WORDS = ("tc init: {root} and its .shared belong to {owner}, who ran init on this mailbox, so only "
+                  "{owner} runs init on it. A member fixes their own entries by hand. Nothing changed.")
+# What follows those words: no entry this user owns needs a fix, or the
+# lines for those that do.
+NO_FIX_WORDS = " No entry you own under it needs a fix."
+FIX_WORDS = " Run these for the entries you own under it that are not right yet:"
+# What init's last refusal says after the entries it skipped, before
+# their lines.
+SKIPPED_FIX_WORDS = ("tc init: {n} skipped, each named above; its owner fixes each by hand, a folder or a file "
+                     "with these lines:")
+# What make_folder says just before the lines for a folder in the wrong
+# group.
+WRONG_GROUP_FIX_WORDS = "Nothing written. Its owner, {owner}, fixes it by hand:"
 # What a send says on a filesystem without hard links (the audit's LOW-3).
 NO_HARD_LINKS_WORDS = ("tc send: the filesystem under {root} has no hard links ({why}), and tc needs them to "
                        "publish a message without ever replacing another (D20); nothing sent.")
@@ -1543,14 +1563,48 @@ def run_init(tc, group):
     return code, out.getvalue(), err.getvalue()
 
 
+# SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28, the lines a member runs by hand.
+def fix_lines_for(path, group, mode):
+    """The chgrp and chmod lines tc prints for the entry at `path`, group `group`, mode `mode`, written out here, each word shell-quoted.
+
+    @interacts  none; string work only.
+    @deps       shlex.
+    @complexity O(c) over c characters of the path.
+    @alloc      one string of two lines, returned.
+    """
+    where = shlex.quote(str(path))
+    return f"chgrp {shlex.quote(group)} {where}\nchmod {mode:04o} {where}"
+
+
+def run_lines(text):
+    """Run each line of `text` through /bin/sh, one process each: [(exit code, stderr)], in order.
+
+    For the chgrp and chmod lines tc prints, so a test shows they run as
+    printed. Only entries this user owns under a test root are named.
+    Each run is bounded by the harness's _root.DEFAULT_TC_TIMEOUT_SECONDS
+    (subprocess.run kills it past that).
+
+    @interacts  starts one /bin/sh per line and waits for it.
+    @deps       subprocess; _root.DEFAULT_TC_TIMEOUT_SECONDS.
+    @complexity O(n) over n lines (two per entry).
+    @alloc      one list of pairs, returned.
+    """
+    return [(ran.returncode, ran.stderr) for ran in
+            (subprocess.run(["/bin/sh", "-c", line], capture_output=True, text=True,
+                            timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS) for line in text.splitlines())]
+
+
 class InitAndRefusalsTest(UmaskTestCase):
     """make_folder never leaves a folder in the wrong group; init reruns cleanly, walks what it cannot change and says the real state; the refusals' words; health never raises.
 
     In-process init sets this process's umask; UmaskTestCase puts it back.
+    SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28, the refusals
+    for a folder in the wrong group and for entries init skipped end with
+    the chgrp and chmod lines their owner runs, run here as printed.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, user_groups,
-                load_tc, run_init.
+                load_tc, run_init, fix_lines_for, run_lines.
     @complexity O(1) per test.
     @alloc      one TcRoot per test.
     """
@@ -1585,14 +1639,21 @@ class InitAndRefusalsTest(UmaskTestCase):
         self.assertFalse(left, "make_folder left a folder it could not give the group")
 
     def test_a_shared_folder_in_the_wrong_group_is_refused_never_accepted(self):
-        """Shared with a supplementary group, status/ moved by hand to the primary group: tc status x busy exits 1 with words and writes nothing.
+        """Shared with a supplementary group, status/ moved by hand to the primary group: tc status x busy exits 1 with words and writes nothing; the chgrp and chmod lines it prints, run as printed, put status/ right, and the post then lands.
 
         Must reject a make_folder that accepts any folder that is there
-        (other members could not write in it). Needs a supplementary
-        group; skipped with a reason without one.
+        (other members could not write in it). SHARED fix round 5 (Claude
+        Opus 5.5, unreviewed): D28. The words end with the two lines its
+        owner runs by hand; must reject a rerun of init as the remedy (the
+        walk refuses a member's init on another user's ROOT) and lines
+        that do not fix it. Needs a supplementary group; skipped with a
+        reason without one.
 
-        @interacts  init; one chown by hand; one status post.
-        @deps       _root.TcRoot.tc, user_groups.
+        @interacts  init; one chown by hand; two status posts; the printed
+                    lines run through /bin/sh; lstats status/.
+        @deps       _root.TcRoot.tc, user_groups, fix_lines_for, run_lines;
+                    pwd; WRONG_GROUP_WORDS, WRONG_GROUP_FIX_WORDS,
+                    SHARED_TOP_FOLDER_MODE.
         @complexity O(1).
         @alloc      one TcRoot.
         """
@@ -1601,14 +1662,24 @@ class InitAndRefusalsTest(UmaskTestCase):
             self.skipTest("the running user has no named supplementary group, so no folder can be "
                           "put in a group other than the one shared")
         (_, primary, primary_gid), (_, name, gid) = found[0], found[1]
+        owner = pwd.getpwuid(os.getuid()).pw_name
         with _root.TcRoot() as root:
             root.tc("init", "--shared", "--group", name)
-            os.chown(root.path / "status", -1, primary_gid)
+            status = root.path / "status"
+            os.chown(status, -1, primary_gid)
             code, out, err = root.tc("status", "x", "busy")
-            wrote = os.path.lexists(root.path / "status" / "x.md")
+            wrote = os.path.lexists(status / "x.md")
+            lines = fix_lines_for(status, name, SHARED_TOP_FOLDER_MODE)
+            ran = run_lines(lines) if err.endswith(f"{lines}\n") else []
+            st = os.lstat(status)
+            again = root.tc("status", "x", "busy")
         self.assertEqual(code, EXIT_REFUSED, err)
         self.assertIn(WRONG_GROUP_WORDS.format(have=primary, want=name), err)
+        self.assertTrue(err.endswith(f"{WRONG_GROUP_FIX_WORDS.format(owner=owner)}\n{lines}\n"), err)
         self.assertFalse(wrote, "a status landed in a folder in the wrong group")
+        self.assertEqual(ran, [(0, ""), (0, "")], "the printed lines did not run as printed")
+        self.assertEqual((stat.S_IMODE(st.st_mode), st.st_gid), (SHARED_TOP_FOLDER_MODE, gid))
+        self.assertEqual(again[0], 0, again[2])
 
     def test_a_rerun_of_init_changes_nothing_already_right(self):
         """In process: init, then init again over the same root: the second run calls fchown and fchmod on nothing and exits 0.
@@ -1642,15 +1713,21 @@ class InitAndRefusalsTest(UmaskTestCase):
                          "a rerun changed entries already in the group at their mode")
 
     def test_init_walks_a_top_folder_whose_own_change_failed(self):
-        """In process, with share_entry refusing mail/ itself: init still gives the message under it 0640, names mail/, exits 1.
+        """In process, with share_entry refusing mail/ itself: init still gives the message under it 0640, names mail/, exits 1, and ends with the chgrp and chmod lines for mail/, which put it right when run as printed.
 
         Must reject a walk that skips everything under a top folder it
-        could not change, uncounted and unnamed (LOW-3).
+        could not change, uncounted and unnamed (LOW-3). SHARED fix round
+        5 (Claude Opus 5.5, unreviewed): D28. Must reject a rerun of init
+        as the remedy for a skipped entry (the walk refuses another
+        user's init on this ROOT), and lines that do not fix it.
 
         @interacts  a send; loads tc in process and runs cmd_init with
-                    share_entry wrapped to refuse mail/.
-        @deps       _root.TcRoot.tc, primary_group, load_tc, run_init;
-                    unittest.mock; tc.share_entry.
+                    share_entry wrapped to refuse mail/; the printed lines
+                    run through /bin/sh; lstats mail/.
+        @deps       _root.TcRoot.tc, primary_group, load_tc, run_init,
+                    fix_lines_for, run_lines; unittest.mock;
+                    tc.share_entry; SKIPPED_FIX_WORDS,
+                    SHARED_TOP_FOLDER_MODE.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
@@ -1659,18 +1736,25 @@ class InitAndRefusalsTest(UmaskTestCase):
             root.tc("send", "--from", "a", "--to", "b", "hi")
             tc = load_tc(root)
             real = tc.share_entry
+            mail = root.path / "mail"
 
             def share_entry(path, gid):
-                if path == root.path / "mail":
+                if path == mail:
                     return "folder", "Operation not permitted"
                 return real(path, gid)
             with mock.patch.object(tc, "share_entry", share_entry):
                 code, out, err = run_init(tc, name)
-            message = os.lstat(root.path / "mail" / "to-b" / "000001-from-a.md")
+            message = os.lstat(mail / "to-b" / "000001-from-a.md")
+            lines = fix_lines_for(mail, name, SHARED_TOP_FOLDER_MODE)
+            ran = run_lines(lines) if err.endswith(f"{lines}\n") else []
+            st = os.lstat(mail)
         self.assertEqual(code, EXIT_REFUSED, err)
-        self.assertIn(f"skipped {root.path / 'mail'}: Operation not permitted", err)
+        self.assertIn(f"skipped {mail}: Operation not permitted", err)
         self.assertEqual((stat.S_IMODE(message.st_mode), message.st_gid), (SHARED_OWNED_FILE_MODE, gid),
                          "init did not reach a message under the top folder it could not change")
+        self.assertTrue(err.endswith(f"{SKIPPED_FIX_WORDS.format(n=1)}\n{lines}\n"), err)
+        self.assertEqual(ran, [(0, ""), (0, "")], "the printed lines did not run as printed")
+        self.assertEqual((stat.S_IMODE(st.st_mode), st.st_gid), (SHARED_TOP_FOLDER_MODE, gid))
 
     def test_when_init_cannot_write_shared_its_words_match_the_state_and_come_after_the_skips(self):
         """ROOT made read-only: init over a shared root exits 0 (.shared already right); over a private one it says `stays private`, after the skip line; over one shared with another group it says so.
@@ -2003,16 +2087,21 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
         a rerun that changes another user's .shared, and one that says
         nothing about a .shared the group may write.
 
-        SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's
-        LOW-1, dev C4 amended. D23's walk (root_walk_problem) trusts the
-        owner of an existing .shared, so this member's rerun passes it on
-        a ROOT the init user owns, and the walk runs for real here (round
-        3 replaced it, when only root and the running user passed).
+        SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23's walk
+        (root_walk_problem) takes a folder on the way from ROOT to / only
+        from root or the user running init, so a member's rerun reaches
+        .shared only when root owns ROOT and the folders above it, which
+        one user cannot make. The walk is replaced here (it has tests of
+        its own in RootAndClaimTest) so this test keeps to .shared.
+        SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28 takes back
+        round 4's trust in the owner of .shared, which let the walk run
+        for real here, so the stand-in is back.
 
         @interacts  one init; one chmod by hand; loads tc in process and
-                    runs cmd_init with os.geteuid replaced; lstats .shared.
+                    runs cmd_init with os.geteuid and root_walk_problem
+                    replaced; lstats .shared.
         @deps       _root.TcRoot.tc, primary_group, load_tc, run_init;
-                    unittest.mock; tc.user_name.
+                    unittest.mock; tc.user_name, tc.root_walk_problem.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
@@ -2023,7 +2112,8 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
             marker.chmod(PRE_D21_MARKER_MODE)
             tc = load_tc(root)
             owner = tc.user_name(os.getuid())
-            with mock.patch.object(os, "geteuid", return_value=os.getuid() + 1):
+            with mock.patch.object(os, "geteuid", return_value=os.getuid() + 1), \
+                    mock.patch.object(tc, "root_walk_problem", return_value=None):
                 code, out, err = run_init(tc, name)
             left = (stat.S_IMODE(os.lstat(marker).st_mode), marker.read_text())
         self.assertEqual(first[0], 0, first[2])
@@ -2656,15 +2746,19 @@ class RootAndClaimTest(UmaskTestCase):
     too, and init walks every folder from ROOT up to /, as given and by
     its real path. A folder another user owns is what a patched os.lstat
     reports. SHARED fix round 4 (Claude Opus 5.5, unreviewed): the
-    audit's LOW-1 and LOW-2 (audits/2026-10-15-0102-quick): the walk
-    trusts an existing .shared's owner (a member is a patched os.geteuid),
-    and ROOT's rule runs on ROOT's real path even when the given walk
-    passed it above ROOT.
+    audit's LOW-2 (audits/2026-10-15-0102-quick): ROOT's rule runs on
+    ROOT's real path even when the given walk passed it above ROOT.
+    SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28 and the audit's
+    MEDIUM-1 (audits/2026-10-15-0201-quick): the owner of .shared gets no
+    trust, so a member who made ROOT first stops the init user's init,
+    and a member's rerun on the init user's ROOT is refused with no
+    charge and the lines for that member's own entries. The other user
+    is a patched os.geteuid, and an entry of theirs a patched os.lstat.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, tree, load_tc,
-                run_init, owner_patched_lstat; contextlib, pwd,
-                unittest.mock.
+                run_init, owner_patched_lstat, fix_lines_for, run_lines;
+                pwd, unittest.mock.
     @complexity O(1) per test.
     @alloc      one TcRoot per test.
     """
@@ -2792,9 +2886,10 @@ class RootAndClaimTest(UmaskTestCase):
         One Linux user cannot make a folder another user owns, so the
         owner rule is shown by what tc's lstat reports
         (owner_patched_lstat). ROOT owned by another user, with no .shared
-        yet, is also what a member's own init meets before the first init
-        (SHARED fix round 4: once .shared exists, its owner is trusted
-        too; test_the_walk_trusts_the_owner_of_an_existing_shared_and_nobody_else).
+        of theirs, is refused with these words; with their .shared in it,
+        the words name them as the one who ran init (SHARED fix round 5,
+        D28: test_a_member_who_made_root_first_stops_the_init_users_own_init
+        and test_a_members_rerun_on_the_init_users_root_is_refused_with_no_charge_and_their_fixes).
         Must reject
         a walk that checks modes alone: the owner of a folder on the way
         may rename what is in it whatever its mode, and put a ROOT with
@@ -2863,63 +2958,93 @@ class RootAndClaimTest(UmaskTestCase):
                                                                mode=GROUP_WRITABLE_ROOT_MODE, owner=owner), err)
                 self.assertEqual(made, [], "a refused init made something in the real ROOT")
 
-    # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-1, dev C4 amended.
-    def test_the_walk_trusts_the_owner_of_an_existing_shared_and_nobody_else(self):
-        """In process, with os.geteuid reporting another user (a member): on a root this user shared, so this user owns ROOT, the folder above it and .shared, the member's same-group init exits 0; on the same kind of ROOT with no .shared it is refused, naming ROOT and its owner; with .shared, a folder above ROOT that a third user owns (patched os.lstat) is refused, naming the owner of .shared as trusted too.
+    # SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28 and the audit's MEDIUM-1 (audits/2026-10-15-0201-quick).
+    def test_a_member_who_made_root_first_stops_the_init_users_own_init(self):
+        """In process: a member makes ROOT and, in it, a 0644 .shared naming the group, before anyone else (this user, by hand); the init user's first init (os.geteuid reporting another user) exits 1 with words naming the member as the one who ran init, with no charge, and makes nothing.
 
-        D21 already trusts the user who ran init with the group, so a
-        member's rerun reaches D21's own checks and fixes that member's
-        own entries, as tc's remedies say. Before the first init there is
-        no .shared to trust. One Linux user cannot be a member, so the
-        member is os.geteuid reporting this user's id plus two, and the
-        third user is what owner_patched_lstat reports (plus one). Must
-        reject a walk that trusts only root and the running user (the
-        member's rerun is refused at ROOT), and one that trusts ROOT's
-        owner without a .shared.
+        The bugs-reviewer's trace: round 4's walk trusted whoever owned
+        .shared, and whoever makes ROOT can make that .shared, so this
+        init passed and exited 0 on a mailbox whose group only the member
+        can change (D21). Must reject a walk that trusts the owner of
+        .shared (D28): the init then exits 0 and makes the four top
+        folders. One Linux user cannot be two, so the member is this
+        user, who owns ROOT and .shared, and the init user is os.geteuid
+        reporting this user's id plus one.
 
-        @interacts  per case: sets this process's umask to CHILD_UMASK
-                    (an in-process init sets its own); an init or a send;
-                    loads tc in process and runs cmd_init with os.geteuid
-                    replaced (and, in the third case, os.lstat wrapped);
-                    stats every entry under ROOT before and after.
-        @deps       _root.TcRoot.tc, primary_group, load_tc, run_init,
-                    owner_patched_lstat, tree; contextlib, os, stat,
-                    unittest.mock; tc.user_name; CHILD_UMASK,
-                    OWNED_ON_THE_WAY_WORDS, OWNED_PAST_THE_INIT_USER_WORDS.
-        @complexity O(1) per case, three cases.
-        @alloc      one TcRoot and one module per case.
+        @interacts  writes and chmods .shared by hand; loads tc in process
+                    and runs cmd_init with os.geteuid replaced; stats every
+                    entry under ROOT before and after.
+        @deps       _root.TcRoot, primary_group, load_tc, run_init, tree;
+                    unittest.mock; tc.user_name; SHARED_MARKER_MODE,
+                    RAN_INIT_WORDS, NO_FIX_WORDS.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
         """
         label, name, gid = primary_group()
-        member = os.getuid() + 2
-        for case in ("shared", "no .shared", "shared, a third user above"):
-            os.umask(CHILD_UMASK)  # an in-process init that ran sets tc's own; setUp's cleanup restores the old one
-            with self.subTest(case=case), _root.TcRoot() as root:
-                setup = root.tc("send", "--from", "a", "--to", "b", "hi") if case == "no .shared" else \
-                    root.tc("init", "--shared", "--group", name)
-                tc = load_tc(root)
-                before = tree(root.path, under=None)
-                patches = contextlib.ExitStack()
-                patches.enter_context(mock.patch.object(os, "geteuid", return_value=member))
-                if case.endswith("above"):
-                    patches.enter_context(mock.patch.object(os, "lstat", owner_patched_lstat(root.base)))
-                with patches:
-                    code, out, err = run_init(tc, name)
-                after = tree(root.path, under=None)
-                self.assertEqual(setup[0], 0, setup[2])
-                if case == "shared":
-                    self.assertEqual(code, 0, err)
-                    continue
-                self.assertEqual(code, EXIT_REFUSED, err)
-                self.assertEqual(after, before, "a refused init changed an entry")
-                if case == "no .shared":
-                    self.assertIn(OWNED_ON_THE_WAY_WORDS.format(
-                        folder=root.path, owner=tc.user_name(os.getuid()),
-                        mode=stat.S_IMODE(os.lstat(root.path).st_mode)), err)
-                    self.assertNotIn(".shared", after)
-                else:
-                    self.assertIn(OWNED_PAST_THE_INIT_USER_WORDS.format(
-                        folder=root.base, owner=tc.user_name(os.getuid() + 1), init_user=tc.user_name(os.getuid()),
-                        mode=stat.S_IMODE(os.lstat(root.base).st_mode), root=root.path), err)
+        with _root.TcRoot() as root:
+            marker = root.path / ".shared"
+            marker.write_text(f"{name}\n")
+            marker.chmod(SHARED_MARKER_MODE)
+            tc = load_tc(root)
+            member = tc.user_name(os.getuid())
+            before = tree(root.path, under=None)
+            with mock.patch.object(os, "geteuid", return_value=os.getuid() + 1):
+                code, out, err = run_init(tc, name)
+            after = tree(root.path, under=None)
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertEqual(err, f"{RAN_INIT_WORDS.format(root=root.path, owner=member)}{NO_FIX_WORDS}\n")
+        self.assertEqual(after, before, "the init user's init made something in the member's ROOT")
+
+    # SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28, C4 as amended at 8bdf363.
+    def test_a_members_rerun_on_the_init_users_root_is_refused_with_no_charge_and_their_fixes(self):
+        """In process: this user shares the root (the init user), b joins, a send, a status set to 0644 by hand; a member's same-group rerun (os.geteuid reporting another user, os.lstat reporting the status file as that member's) exits 1 with words naming the init user as the one who ran init, with no charge, then the chgrp and chmod lines for that status file alone, and changes nothing. The lines, run as printed, put the file right.
+
+        C4: a member's rerun on the init user's ROOT is refused with words
+        that name that user as the one who ran init and accuse no one, and
+        the member fixes their own entries by hand, with the lines tc
+        prints. Must reject round 4's walk (the rerun exits 0), round 3's
+        words (`could put a ROOT of their own`), and lines for an entry
+        the member does not own. The member is os.geteuid reporting this
+        user's id plus one; owner_patched_lstat reports the status file as
+        owned by that id.
+
+        @interacts  init, a join, a send, a status; one chmod by hand;
+                    loads tc in process and runs cmd_init with os.geteuid
+                    and os.lstat replaced; stats every entry under ROOT
+                    before and after; runs the printed lines through
+                    /bin/sh and lstats the status file.
+        @deps       _root.TcRoot.tc, primary_group, load_tc, run_init,
+                    owner_patched_lstat, tree, fix_lines_for, run_lines;
+                    unittest.mock; tc.user_name; PRIVATE_FILE_MODE,
+                    SHARED_OWNED_FILE_MODE, RAN_INIT_WORDS, FIX_WORDS.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        label, name, gid = primary_group()
+        with _root.TcRoot() as root:
+            setup = [root.tc("init", "--shared", "--group", name),
+                     root.tc("join", "b", env={"CLAUDECODE": "1"}),
+                     root.tc("send", "--from", "a", "--to", "b", "hi"),
+                     root.tc("status", "b", "busy")]
+            status = root.path / "status" / "b.md"
+            status.chmod(PRIVATE_FILE_MODE)  # the member's own entry, not right yet
+            tc = load_tc(root)
+            init_user = tc.user_name(os.getuid())
+            before = tree(root.path, under=None)
+            with mock.patch.object(os, "geteuid", return_value=os.getuid() + 1), \
+                    mock.patch.object(os, "lstat", owner_patched_lstat(status)):
+                code, out, err = run_init(tc, name)
+            after = tree(root.path, under=None)
+            lines = fix_lines_for(status, name, SHARED_OWNED_FILE_MODE)
+            ran = run_lines(lines) if err.endswith(f"{lines}\n") else []
+            st = os.lstat(status)
+        for run in setup:
+            self.assertEqual(run[0], 0, run[2])
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertEqual(err, f"{RAN_INIT_WORDS.format(root=root.path, owner=init_user)}{FIX_WORDS}\n{lines}\n")
+        self.assertEqual(after, before, "a refused rerun changed an entry")
+        self.assertEqual(ran, [(0, ""), (0, "")], "the printed lines did not run as printed")
+        self.assertEqual((stat.S_IMODE(st.st_mode), st.st_gid), (SHARED_OWNED_FILE_MODE, gid))
 
     # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-2.
     def test_a_root_that_links_to_its_own_folder_still_gets_the_root_rule(self):

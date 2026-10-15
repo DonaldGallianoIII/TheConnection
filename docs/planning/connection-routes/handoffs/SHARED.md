@@ -441,7 +441,8 @@ comment.
   running user pass. When a third user owns a folder, the words say
   `who is none of root, you and <x> (the owner of .shared)` and `Keep
   the mailbox under folders only root, you or <x> own.`; with no
-  `.shared` they are unchanged.
+  `.shared` they are unchanged. (Round 5 takes this trust back, D28:
+  see Round 5 below.)
 - ROOT's rule on ROOT's real path (item 4, LOW-2, commit b). The walk's
   `seen` set is keyed by the path and whether it is ROOT, so when
   TC_ROOT is a link to its own folder (`tc/here` to `.`) the real walk
@@ -477,6 +478,37 @@ comment.
   `cmd_card`, `deliver_codex`) and says peek, read, wait and log now
   name an inbox they cannot list. Pause 5 and "Not in this round" below
   are brought up to date.
+
+**Round 5: the strict walk again, and the LOWs** (audit
+`audits/2026-10-15-0201-quick`, brief `fixes/round-5.md`, item numbers
+are the brief's; dev's plan at `8bdf363`: C4's "Nobody can swap ROOT"
+as amended, exit row 10, D20, D21, D23, D28). Every new block in `tc`
+carries a `SHARED fix round 5 (Claude Opus 5.5, unreviewed)` comment.
+
+- The strict walk (item 1, MEDIUM-1, commit a; D28). Round 4's trust in
+  the owner of `.shared` is taken back: whoever makes ROOT can make the
+  `.shared` in it, so the trust certified itself, and a member who made
+  ROOT first passed the init user's own first init with exit 0. The
+  walk takes a folder only from root or the running user, as in round
+  3. `root_walk_problem` still lstats `ROOT/.shared`, for the words
+  only (`marker_owner`). When ROOT and its `.shared` belong to one other
+  user, `swap_words` names that user as the one who ran init and
+  charges no one: `tc init: <ROOT> and its .shared belong to <x>, who
+  ran init on this mailbox, so only <x> runs init on it. A member fixes
+  their own entries by hand. Nothing changed.` Any other owner keeps
+  round 3's words. The walk now returns a `WalkProblem` (words, and the
+  id of the user who ran init on that case), and `refuse_walk` adds,
+  after those words, the running user's own entries under the four
+  that are not right yet (`own_entry_fixes`, read only), each as two
+  lines, `chgrp <group> <path>` and `chmod <mode> <path>`
+  (`fix_lines`), or `No entry you own under it needs a fix.` The same
+  lines replace "run tc init again" in the two remedies the synthesis
+  named: init's last refusal over skipped entries (`tc init: <n>
+  skipped, each named above; its owner fixes each by hand, a folder or
+  a file with these lines:`, then two lines per skipped folder or file)
+  and `make_folder`'s refusal of a folder in the wrong group (`Its
+  owner, <x>, fixes it by hand:`, then the two lines). Each word is
+  shell-quoted, so a line runs as printed; the tests run them.
 
 **Tests.** `tests/test_shared.py`, 63 tests in eleven classes (56
 before round 4, 48 in ten before round 3, 39 in seven before round 2), each on
@@ -832,14 +864,16 @@ the login of the next user id on this machine.
 29. **A deadline already past still takes a free lock** (one `LOCK_NB`
     try), so a send that used its time on held locks is refused only
     while one is held, never for being slow.
-30. **The walk takes root, the running user and the owner of an
-    existing `.shared`** (round 4; round 3 took only the first two). The
-    architect made the call this assumption asked for, and amended C4 on
-    the dev branch (`7211d3a`): ben's same-group rerun on ann's ROOT
-    passes the walk again, QA step 15 says so, and
-    `settle_marker_mode`'s line for another user's writable `.shared` is
-    reached on an ordinary ROOT. The `.shared` refusals (QA steps 7, 13
-    and 14) still come first and keep their words.
+30. **The walk takes root and the running user only** (rounds 3 and 5;
+    round 4 also took the owner of an existing `.shared`, and D28 took
+    that back at `8bdf363`). Whoever makes ROOT can make the `.shared`
+    in it, so that trust certified itself. ben's same-group rerun on
+    ann's ROOT is refused, with words that name ann as the one who ran
+    init and charge no one, and the lines that fix ben's own entries (QA
+    step 15). `settle_marker_mode`'s line for another user's writable
+    `.shared` is reached only where root owns ROOT and every folder
+    above it. The `.shared` refusals (QA steps 7, 13 and 14) still come
+    first and keep their words.
 31. **Init walks twice**: before it makes anything (so a refusal changes
     nothing) and once ROOT is made (so a ROOT another user made first, in
     a sticky folder above, is refused).
@@ -864,10 +898,12 @@ the login of the next user id on this machine.
     at print time, by `lstat`, so nothing slow runs under the inbox lock.
     A file's owner cannot change without root; a planter may still
     remove their own file in between, and then that path shows no owner.
-37. **Only a regular `.shared` names a trusted owner.** A link or a FIFO
-    at that name is not a `.shared` tc reads (`shared_group` refuses
-    it), so it trusts nobody. Its owner's own init is refused before
-    the walk anyway when that owner is another user (D21).
+37. **Only a regular `.shared` names who ran init**, and since round 5
+    only in the walk's words, never as trust. A link or a FIFO at that
+    name is not a `.shared` tc reads (`shared_group` refuses it), so it
+    names nobody and the refusal keeps round 3's words. Its owner's own
+    init is refused before the walk anyway when that owner is another
+    user (D21).
 38. **Every send takes its deadline before it routes**, local or codex.
     A codex send hands it to `deliver_codex`; before, `deliver_codex`
     took one at its own start, a few microseconds later. Routes other
@@ -897,8 +933,11 @@ the architect's yes, and the one the second added (an unreadable
 `.shared` another user owns still walked first), in the third.
 
 1. **A rejoin keeps an inbox the joiner owns at whatever mode it has**
-   (2775 from before D20). Each owner reruns init to fix their own
-   entries; init cannot change another user's.
+   (2775 from before D20). Since round 5 (D28) a member's init on the
+   init user's ROOT is refused and prints the `chgrp` and `chmod` lines
+   for that member's own entries, the inbox among them; the member runs
+   them by hand. Init cannot change another user's entries, and its
+   refusal over skipped entries prints the same lines for their owners.
 2. **A sender may still change or remove a message that sender wrote**
    (0640 keeps owner write; sticky lets a file's owner delete). D20 is
    about another member's mail. `route-shared.md` says so.

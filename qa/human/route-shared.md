@@ -6,7 +6,9 @@ Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
         the SHARED fixer, Claude Opus 5.5; steps 30 and 31, and the words
         of steps 3, 15, 28 and 29, in round 3 by the SHARED fixer, Claude
         Opus 5.5, 2026-10-15; steps 15, 30 and 31 changed in round 4 by
-        the SHARED fixer, Claude Opus 5.5, 2026-10-15
+        the SHARED fixer, Claude Opus 5.5, 2026-10-15; steps 15 and 31
+        changed in round 5 by the SHARED fixer, Claude Opus 5.5,
+        2026-10-15
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
@@ -19,9 +21,11 @@ lose a message or hang it, and init never shares a ROOT the group may
 write (round 2). A file a member plants under a message's name, in the
 inbox or in read/, never replaces it, and init refuses a ROOT a member
 could swap through a folder above it (round 3, D20, D23). tc read calls
-neither of two such files forged, a planted name of any length wakes
-`tc wait` at most once, and a member's same-group init on the init
-user's ROOT works again (round 4). The tests in
+neither of two such files forged, and a planted name of any length
+wakes `tc wait` at most once (round 4). A member's init on the init
+user's ROOT is refused with words that name who ran init and charge no
+one, plus the lines that fix the member's own entries, and a member who
+makes ROOT first stops the init user's init (round 5, D28). The tests in
 `tests/test_shared.py` prove the modes, the owners and the checks tc
 makes, but one user cannot prove another user's refusals. This script
 does, by hand.
@@ -134,15 +138,25 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
     - As ann: `chmod 644 /srv/tc-shared/.shared`, to put it back.
 15. As ann: `chmod g+w /srv/tc-shared/.shared`, as init left it before
     D21. As ben: `tc init --shared --group tcshare`.
-    - It exits 0 and says, on stderr, `tc init: /srv/tc-shared/.shared
-      is 0664; ask ann to rerun init to tighten it`. The walk from ROOT
-      up to `/` (D23) takes a folder only from root, the user running
-      init, or, since round 4, the owner of an existing `.shared`: ann,
-      whom D21 already trusts with the group. So ben's same-group init
-      passes `/srv/tc-shared` and fixes only what ben owns. Steps 7, 13
-      and 14 still get their own words: those refusals come first.
+    - It exits 1 with one line, `tc init: /srv/tc-shared and its .shared
+      belong to ann, who ran init on this mailbox, so only ann runs init
+      on it. A member fixes their own entries by hand. Nothing changed.
+      No entry you own under it needs a fix.` The walk from ROOT up to
+      `/` (D23) takes a folder only from root or the user running init.
+      The owner of `.shared` gets no trust (round 5, D28): whoever makes
+      ROOT can make the `.shared` in it. The words name ann and charge
+      no one. Steps 7, 13 and 14 still get their own words: those
+      refusals come first.
     - `ls -l /srv/tc-shared/.shared` still shows `-rw-rw-r--`, owner
-      `ann`: ben's init leaves ann's file as it is.
+      `ann`: ben's init changes nothing.
+    - As ben: `chmod 0644 /srv/tc-shared/cards/ben.json`, so one entry
+      ben owns is not right. The same init again. It exits 1, and the
+      words now end `Nothing changed. Run these for the entries you own
+      under it that are not right yet:`, then two lines, `chgrp tcshare
+      /srv/tc-shared/cards/ben.json` and `chmod 0640
+      /srv/tc-shared/cards/ben.json`. As ben, run the two lines; each
+      works. The same init once more ends `No entry you own under it
+      needs a fix.`, exit 1.
     - As ann: `tc init --shared --group tcshare`. `ls -l` now shows
       `-rw-r--r--`.
 
@@ -331,6 +345,17 @@ fail or ring once more, never read, lose or alter mail.
     - As a user with sudo: `sudo chmod 3775 /srv/team` (sticky, as
       `/tmp`). As ann: the same init. It exits 0: in a sticky folder only
       an entry's owner may rename it.
+    - A member who gets there first (round 5, D28). As ben: `mkdir -m
+      0755 /srv/team/tc2`, then `TC_ROOT=/srv/team/tc2 tc init --shared
+      --group tcshare`. It exits 0: this mailbox is ben's. Run `ls -A
+      /srv/team/tc2` and note what it prints. As ann: the same init,
+      `TC_ROOT=/srv/team/tc2`. It exits 1 with one line, `tc init:
+      /srv/team/tc2 and its .shared belong to ben, who ran init on this
+      mailbox, so only ben runs init on it. A member fixes their own
+      entries by hand. Nothing changed. No entry you own under it needs a
+      fix.` `ls -A /srv/team/tc2` prints the same as before. Before round
+      5 this init exited 0 with the line of step 5, on a mailbox whose
+      group only ben can change.
 
 ## Afterward
 
