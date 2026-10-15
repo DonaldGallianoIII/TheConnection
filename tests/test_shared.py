@@ -46,7 +46,9 @@ round 5, Claude Opus 5.5, unreviewed): init's walk gives the owner of
 user's own init, naming that member, and a member's rerun on the init
 user's ROOT is refused with no charge and the chgrp and chmod lines for
 that member's own entries; a folder in the wrong group and an entry
-init skips get the same lines, which run as printed.
+init skips get the same lines, which run as printed; tc read names as
+not moved a file a hard link kept in the inbox, never as read; and a
+cut by-hand name made of dots keeps its .md.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -113,7 +115,10 @@ the owner's human QA (D4, qa/human/route-shared.md).
             tests write .shared by hand, chmod a status file, run
             cmd_init in process with os.geteuid replaced (and os.lstat
             wrapped), and run the chgrp and chmod lines tc prints
-            through /bin/sh on entries this user owns under the root.
+            through /bin/sh on entries this user owns under the root;
+            plant a name of dots and md in an inbox and its read/; and
+            run cmd_read in process with Path.rename replaced by a hard
+            link at its target.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
             importlib, io, json, os, pathlib, pwd, re, shlex, stat,
             subprocess, sys, time, unittest, unittest.mock);
@@ -337,6 +342,11 @@ BY_HAND_NAME = "by-hand-{k}-{name}"
 LONG_NAME_BYTES = 250
 # A message name's suffix, which a cut by-hand name keeps whole.
 MESSAGE_SUFFIX = ".md"
+# SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's LOW-2
+# (audits/2026-10-15-0201-quick). A name of dots and then this tail
+# ("." * 253 + "md" at a 255-byte limit) ends in .md, so tc takes it as
+# a message, but os.path.splitext gives it no suffix at all.
+DOTS_NAME_TAIL = "md"
 # The text of a file planted straight into read/ under a message's name.
 IN_READ_TEXT = "planted by hand in read/ under the same name\n"
 # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-3
@@ -394,6 +404,11 @@ SKIPPED_FIX_WORDS = ("tc init: {n} skipped, each named above; its owner fixes ea
 # What make_folder says just before the lines for a folder in the wrong
 # group.
 WRONG_GROUP_FIX_WORDS = "Nothing written. Its owner, {owner}, fixes it by hand:"
+# SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's LOW-1. What
+# tc read says for an inbox file still there after its rename: a hard link
+# made at the target first turns rename(2) into nothing.
+STILL_THERE_WORDS = ("tc read: {path} not moved to read/ (it is still in the inbox after the move to {target}: a "
+                     "hard link to it, made there just before, makes a move do nothing); left unread")
 # What a send says on a filesystem without hard links (the audit's LOW-3).
 NO_HARD_LINKS_WORDS = ("tc send: the filesystem under {root} has no hard links ({why}), and tc needs them to "
                        "publish a message without ever replacing another (D20); nothing sent.")
@@ -2236,13 +2251,16 @@ class NoLostMailNoHangTest(UmaskTestCase):
     in the inbox, and under a name up to the filesystem's limit
     (audits/2026-10-15-0102-quick, MEDIUM-1 and HIGH-1); holds an inbox
     lock while a card turns codex (LOW-3); and plants a name for every
-    number a send could take, which exits 10 (DEBT-3).
+    number a send could take, which exits 10 (DEBT-3). SHARED fix round 5
+    (Claude Opus 5.5, unreviewed): the member plants a name of dots and
+    `md` (LOW-2), and links an inbox file at the name tc read moves it
+    to, so the rename does nothing (LOW-1; audits/2026-10-15-0201-quick).
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, contents,
-                load_tc, landed, lock_waiters; contextlib, errno, fcntl,
-                json, os, pwd, subprocess, sys, time, unittest.mock;
-                SEQ_HOLDER.
+                load_tc, landed, lock_waiters; argparse, contextlib,
+                errno, fcntl, io, json, os, pathlib, pwd, subprocess, sys,
+                time, unittest.mock; SEQ_HOLDER.
     @complexity O(1) per test.
     @alloc      one TcRoot per case.
     """
@@ -2513,26 +2531,32 @@ class NoLostMailNoHangTest(UmaskTestCase):
 
     # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's HIGH-1, a wake at most once.
     def test_a_planted_name_at_the_length_limit_moves_and_wakes_tc_wait_at_most_once(self):
-        """Shared: a file planted in b's inbox and in read/ under one name, LONG_NAME_BYTES long, then (a fresh root) exactly read/'s limit (PC_NAME_MAX, .md included): tc wait b exits 0 for it, tc read b exits 0 and moves it to a by-hand name that fits the limit and keeps .md, the inbox is empty, and a second tc wait b times out (exit 2), never 0 at once.
+        """Shared: a file planted in b's inbox and in read/ under one name, LONG_NAME_BYTES long, then (a fresh root) exactly read/'s limit (PC_NAME_MAX, .md included), then (round 5) dots and `md` to the limit: tc wait b exits 0 for it, tc read b exits 0 and moves it to a by-hand name that fits the limit and keeps .md, the inbox is empty, and a second tc wait b times out (exit 2), never 0 at once.
 
         The audit's HIGH-1 (audits/2026-10-15-0102-quick). Must reject a
         by-hand name that takes the prefix whole: past the limit the
         rename fails, the file stays in the inbox, and every re-armed tc
         wait exits 0 at once, a paid wake loop a member can start (D20).
         A member plants these under a shared mailbox, so the test runs
-        shared; the move is one code path, shared or not.
+        shared; the move is one code path, shared or not. SHARED fix
+        round 5 (Claude Opus 5.5, unreviewed): the audit's LOW-2
+        (audits/2026-10-15-0201-quick). The dots case is `"." * 253 +
+        "md"` on a 255-byte limit; must reject a suffix from
+        os.path.splitext, which gives that name none, so the cut drops
+        the `md` and tc log never lists the moved file again.
 
         @interacts  per case: init, a join, two files written by hand, two
                     waits (the second runs ONE_POLL_SECONDS), one read;
                     reads read/'s name limit and lists the inbox and read/.
         @deps       _root.TcRoot.tc, primary_group; os; LONG_NAME_BYTES,
-                    MESSAGE_SUFFIX, BY_HAND_NAME, IN_READ_TEXT,
-                    PLANTED_TEXT, ONE_POLL_SECONDS, EXIT_TIMEOUT.
-        @complexity O(1) per case, two cases; about ONE_POLL_SECONDS of
+                    MESSAGE_SUFFIX, DOTS_NAME_TAIL, BY_HAND_NAME,
+                    IN_READ_TEXT, PLANTED_TEXT, ONE_POLL_SECONDS,
+                    EXIT_TIMEOUT.
+        @complexity O(1) per case, three cases; about ONE_POLL_SECONDS of
                     waiting each.
         @alloc      one TcRoot per case.
         """
-        for case in ("LONG_NAME_BYTES", "PC_NAME_MAX"):
+        for case in ("LONG_NAME_BYTES", "PC_NAME_MAX", "dots only"):
             with self.subTest(name=case), _root.TcRoot() as root:
                 runs = [root.tc("init", "--shared", "--group", primary_group()[1]),
                         root.tc("join", "b", env={"CLAUDECODE": "1"})]
@@ -2540,7 +2564,8 @@ class NoLostMailNoHangTest(UmaskTestCase):
                 read = box / "read"
                 limit = os.pathconf(read, "PC_NAME_MAX")
                 size = LONG_NAME_BYTES if case == "LONG_NAME_BYTES" else limit
-                name = "x" * (size - len(MESSAGE_SUFFIX)) + MESSAGE_SUFFIX
+                name = ("." * (size - len(DOTS_NAME_TAIL)) + DOTS_NAME_TAIL if case == "dots only"
+                        else "x" * (size - len(MESSAGE_SUFFIX)) + MESSAGE_SUFFIX)
                 (read / name).write_text(IN_READ_TEXT)
                 (box / name).write_text(PLANTED_TEXT)
                 first = root.tc("wait", "b", "--timeout", ONE_POLL_SECONDS)
@@ -2563,6 +2588,54 @@ class NoLostMailNoHangTest(UmaskTestCase):
                 self.assertTrue(kept[0].name.endswith(MESSAGE_SUFFIX), kept[0].name)
                 self.assertEqual(kept_text, PLANTED_TEXT)
                 self.assertEqual(in_read, IN_READ_TEXT, "tc read changed the file already in read/")
+
+    # SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's LOW-1 (audits/2026-10-15-0201-quick).
+    def test_a_rename_a_hard_link_turned_into_nothing_is_never_claimed_as_read(self):
+        """In process, Path.rename for one inbox file replaced by a hard link at its target, which is what rename(2) leaves when a member links the file there first: tc read exits 1, names that file as not moved with STILL_THERE_WORDS, never prints it, and moves and prints the other; the file stays in the inbox.
+
+        rename(2) between two names of one file does nothing and returns
+        0, and a member who owns an inbox file may link it at the name tc
+        read just found free (the group may make names in a 3770 read/).
+        One user cannot win that race on purpose, so the patched rename
+        links instead of moving. Must reject a read that counts the rename
+        as a move: it prints the file and exits 0 while the file stays, so
+        the next tc wait wakes for it at once.
+
+        @interacts  two sends; loads tc in process and runs cmd_read with
+                    Path.rename replaced and stdout and stderr captured;
+                    makes one hard link (the stand-in rename); lists the
+                    inbox.
+        @deps       _root.TcRoot.tc, load_tc; argparse, contextlib, io, os,
+                    pathlib, unittest.mock; tc.cmd_read; STILL_THERE_WORDS,
+                    EXIT_REFUSED.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            for sender in ("a", "c"):
+                root.tc("send", "--from", sender, "--to", "b", f"from {sender}")
+            box = root.path / "mail" / "to-b"
+            linked = box / "000001-from-a.md"
+            tc = load_tc(root)
+            real = pathlib.Path.rename
+
+            def rename(path, target):
+                if path == linked:
+                    os.link(path, target)  # the member's link at the target: rename(2) between the two names does nothing
+                    return pathlib.Path(target)
+                return real(path, target)
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(pathlib.Path, "rename", rename), contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as stop:
+                    tc.cmd_read(argparse.Namespace(name="b"))
+            unread = sorted(p.name for p in box.glob("*.md"))
+        self.assertEqual(stop.exception.code, EXIT_REFUSED)
+        self.assertEqual(err.getvalue(),
+                         STILL_THERE_WORDS.format(path=linked, target=box / "read" / linked.name) + "\n")
+        self.assertNotIn("from a", out.getvalue(), "tc read showed a file it did not move")
+        self.assertIn("from c", out.getvalue())
+        self.assertEqual(unread, ["000001-from-a.md"])
 
     # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-3, one bound in every path.
     def test_a_local_send_whose_card_turns_codex_under_a_held_lock_waits_one_bound(self):

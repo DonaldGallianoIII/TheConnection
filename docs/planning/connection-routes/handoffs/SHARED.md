@@ -509,6 +509,25 @@ carries a `SHARED fix round 5 (Claude Opus 5.5, unreviewed)` comment.
   and `make_folder`'s refusal of a folder in the wrong group (`Its
   owner, <x>, fixes it by hand:`, then the two lines). Each word is
   shell-quoted, so a line runs as printed; the tests run them.
+- A rename that did nothing (item 2, LOW-1, commit b). rename(2)
+  between two names of one file does nothing and returns 0. So a member
+  who hard-linked their own inbox file at the name `tc read` had just
+  found free, between that lstat and the rename, kept the file in the
+  inbox while the read showed it and exited 0, and the next `tc wait`
+  woke at once. After each rename `cmd_read` now lstats the old name
+  (`still_in_inbox`). Still there as the same file as the target
+  (`os.path.samestat`), or with the target gone, the file is filed as
+  not moved: `tc read: <path> not moved to read/ (it is still in the
+  inbox after the move to <target>: a hard link to it, made there just
+  before, makes a move do nothing); left unread`, exit 1, never shown
+  or claimed as read. Still there as another file means the move was
+  made and a new file took the name after it; the next read meets that
+  one. Each race a member wins costs one more wake, D20's floor.
+- `.md` on every cut name (item 3, LOW-2, commit b). `by_hand_name`
+  takes the suffix from the name's own `.md` ending (`MESSAGE_SUFFIX`),
+  not from `os.path.splitext`, which gives `"." * 253 + "md"` no suffix:
+  the cut then took the `md`, and `tc log` never listed the moved file
+  again.
 
 **Tests.** `tests/test_shared.py`, 63 tests in eleven classes (56
 before round 4, 48 in ten before round 3, 39 in seven before round 2), each on
@@ -884,8 +903,10 @@ the login of the next user id on this machine.
     and nothing else). An entry tc could not look at is still named by
     read and peek, which move or show the rest, as before.
 34. **Round 4: a by-hand name is cut by whole characters**, from the end
-    of the stem, and keeps its suffix (`os.path.splitext`, `.md` for
-    every name `tc read` moves). A name in UTF-8 never ends in half a
+    of the stem, and keeps its suffix: the name's own `.md` ending since
+    round 5 (`MESSAGE_SUFFIX`), which every name `tc read` moves has
+    (round 4 took `os.path.splitext`'s, which a name of dots and `md`
+    does not get). A name in UTF-8 never ends in half a
     character, so a cut name can come out a byte or three under the
     limit. The limit is read once per move, from `read/`.
 35. **A by-hand search error is a stuck message, not a free name.** Any
@@ -1007,7 +1028,10 @@ the architect's yes, and the one the second added (an unreadable
     `tc read` chose, between its lstat and its rename, fails that one
     rename (EISDIR), and the message is named and left unread; the next
     read finds the folder and takes the next count. It needs a race won
-    on each read. `qa/human/route-shared.md`'s paragraph after step 23
+    on each read. Round 5 (item 2) closes the silent sibling of this
+    race: a hard link made at the chosen name turns the rename into
+    nothing, and `tc read` now names that file as not moved, never as
+    read. `qa/human/route-shared.md`'s paragraph after step 23
     and the comment on `SHARED_WRITABLE_FILE_MODE` (item 9) are
     unchanged.
 
