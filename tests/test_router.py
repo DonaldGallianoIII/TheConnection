@@ -19,7 +19,7 @@ Status: unreviewed
             the send must refuse to write through.
 @deps       python3 stdlib (argparse, contextlib, fcntl, importlib, io,
             json, os, pathlib, subprocess, sys, unittest); tests/_root.py;
-            RELEASE_CEILING_SECONDS and wait_until_blocked from
+            FINISH_CEILING_SECONDS and wait_until_blocked from
             test_codex_route.py; ../tc.
 @complexity O(1) per test: one to six tc runs, each under a second. The
             size test pipes 1 MiB twice.
@@ -48,7 +48,7 @@ if str(HERE) not in sys.path:
 
 import _root  # noqa: E402  (needs the path line above)
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): one copy of the lock helpers.
-from test_codex_route import RELEASE_CEILING_SECONDS, wait_until_blocked  # noqa: E402
+from test_codex_route import FINISH_CEILING_SECONDS, wait_until_blocked  # noqa: E402
 
 # C0's limit and words, written here rather than read from tc.
 MAX_BYTES = 1048576
@@ -441,7 +441,7 @@ class RouterTest(unittest.TestCase):
                 proc = root.start("send", "--from", "a", "--to", "b", "hi")
                 wait_until_blocked(self, proc, lock)
                 while_held = sorted(p.name for p in box.glob("*.md"))
-            out, err = proc.communicate(timeout=RELEASE_CEILING_SECONDS)
+            out, err = proc.communicate(timeout=FINISH_CEILING_SECONDS)
             landed = sorted(p.name for p in box.glob("*.md"))
         self.assertEqual(while_held, [], "the send landed while the test held the inbox lock")
         self.assertEqual(proc.returncode, 0, err)

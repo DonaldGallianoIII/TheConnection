@@ -17,17 +17,16 @@ Status: unreviewed
             harness's temp folder, which the join must refuse to write
             through. One test holds the inbox lock itself and reads
             /proc/locks, to see that tc card counts and writes under it.
-@deps       python3 stdlib (argparse, collections.abc, contextlib, fcntl,
-            importlib, io, json, os, pathlib, subprocess, sys, unittest,
-            unittest.mock);
-            tests/_root.py; RELEASE_CEILING_SECONDS and wait_until_blocked
-            from test_codex_route.py; ../tc.
             Four tests (phase fix round 1, Claude Opus 5.5, unreviewed)
             write hand-made cards: control characters in fields and a file
             name, a card copied under another name, a card nested
             DEEP_NESTING deep, and a FIFO or a symlink at a card's name
             (each tc run then has CARD_READ_CEILING_SECONDS, so a read
             that blocks fails instead of hanging).
+@deps       python3 stdlib (argparse, collections.abc, contextlib, fcntl,
+            importlib, io, json, os, pathlib, subprocess, sys, unittest,
+            unittest.mock); tests/_root.py; FINISH_CEILING_SECONDS and
+            wait_until_blocked from test_codex_route.py; ../tc.
 @complexity O(1) per test: one to six tc runs, each under a second.
 @alloc      one TcRoot per test (or per case), removed when its context
             exits. Nothing is kept between tests.
@@ -56,7 +55,7 @@ if str(HERE) not in sys.path:
 
 import _root  # noqa: E402  (needs the path line above)
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): one copy of the lock helpers.
-from test_codex_route import RELEASE_CEILING_SECONDS, wait_until_blocked  # noqa: E402
+from test_codex_route import FINISH_CEILING_SECONDS, wait_until_blocked  # noqa: E402
 
 # C1's fields, in its order. Written here, not read from tc.
 CARD_FIELDS = ["version", "name", "kind", "account", "route", "session_id", "pid",
@@ -400,7 +399,7 @@ class CardsTest(unittest.TestCase):
                 proc = root.start("card", "x", "--ssh", "u@h")
                 wait_until_blocked(self, proc, lock)
                 while_held = card_of(root, "x")
-            out, err = proc.communicate(timeout=RELEASE_CEILING_SECONDS)
+            out, err = proc.communicate(timeout=FINISH_CEILING_SECONDS)
             written = card_of(root, "x")
         self.assertIsNone(while_held, "tc card wrote the card while the test held the inbox lock")
         self.assertEqual(proc.returncode, 0, err)
@@ -522,19 +521,49 @@ class CardsTest(unittest.TestCase):
                                                  pathlib.Path.replace)
         real_os_open = os.open
 
+        # Phase fix round 1 (Claude Opus 5.5, unreviewed): doc blocks on the four wrappers.
         def os_open(path, flags, *a, **k):
+            """Record the path and flags, then open as the real os.open does.
+
+            @interacts  appends to opens; opens `path` through the real call.
+            @deps       os, pathlib.
+            @complexity O(1).
+            @alloc      one list entry.
+            """
             opens.append((pathlib.Path(path), flags))
             return real_os_open(path, flags, *a, **k)
 
         def write_text(path, *a, **k):
+            """Record the path, then write as the real Path.write_text does.
+
+            @interacts  appends to writes; writes `path` through the real
+                        method.
+            @deps       pathlib.
+            @complexity O(n) over n characters written.
+            @alloc      one list entry.
+            """
             writes.append(pathlib.Path(path))
             return real_write(path, *a, **k)
 
         def rename(path, target):
+            """Record the move, then rename as the real Path.rename does.
+
+            @interacts  appends to moves; renames through the real method.
+            @deps       pathlib.
+            @complexity O(1).
+            @alloc      one list entry.
+            """
             moves.append((pathlib.Path(path), pathlib.Path(target)))
             return real_rename(path, target)
 
         def replace(path, target):
+            """Record the move, then replace as the real Path.replace does.
+
+            @interacts  appends to moves; replaces through the real method.
+            @deps       pathlib.
+            @complexity O(1).
+            @alloc      one list entry.
+            """
             moves.append((pathlib.Path(path), pathlib.Path(target)))
             return real_replace(path, target)
 

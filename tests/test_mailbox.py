@@ -92,6 +92,11 @@ MAIL_WAIT_TIMEOUT_SECONDS = 5
 # K4. The listener never times out on its own during the test; the harness
 # kills it when its context exits. Same value as tests/test_root.py.
 LISTENER_TIMEOUT_SECONDS = 30
+# K4. The exit codes it checks, from contracts.md's exit table: a wait that
+# timed out, and a second wait for a name already listening. Phase fix
+# round 1 (Claude Opus 5.5, unreviewed).
+EXIT_TIMEOUT = 2
+EXIT_ALREADY_LISTENING = 3
 
 # K3. The plan's numbers: the send has not finished after 1 s of the
 # harness holding the lock, and finishes within 1 s of the release.
@@ -661,14 +666,15 @@ class MailboxTest(unittest.TestCase):
                             f"a wait with mail waiting printed no MAIL: line{ran}")
 
             code, out, err, ran = run(root, "wait", C, "--timeout", str(WAIT_TIMEOUT_SECONDS))
-            self.assertEqual(code, 2, f"a wait with no mail did not exit 2{ran}")
+            self.assertEqual(code, EXIT_TIMEOUT, f"a wait with no mail did not exit {EXIT_TIMEOUT}{ran}")
             self.assertTrue(any(line.startswith("TIMEOUT:") for line in lines(out)),
                             f"a wait with no mail printed no TIMEOUT: line{ran}")
 
             lock = root.path / "mail" / f".wait-{D}.lock"
             with root.listener(D, LISTENER_TIMEOUT_SECONDS) as first:
                 code, out, err, ran = run(root, "wait", D, "--timeout", str(WAIT_TIMEOUT_SECONDS))
-                self.assertEqual(code, 3, f"a second wait for {D} did not exit 3{ran}")
+                self.assertEqual(code, EXIT_ALREADY_LISTENING,
+                                 f"a second wait for {D} did not exit {EXIT_ALREADY_LISTENING}{ran}")
                 self.assertIn("ALREADY LISTENING", out, ran)
                 holders = _root.flock_holders(lock)
                 self.assertIn(first, holders,

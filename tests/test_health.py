@@ -4,9 +4,12 @@ Tests for `tc health` and `tc watch` against a throwaway TC_ROOT.
 @interacts  runs ../tc as a subprocess; starts and kills its own `tc wait`
             listeners; touches only a tempdir. HealthCardsTest (CARDS R5,
             Claude Opus 5.5, unreviewed) runs tc through tests/_root.py
-            instead, so no identity variable of the session reaches it.
-@deps       python3 stdlib (unittest, subprocess, tempfile, json);
-            tests/_root.py for HealthCardsTest
+            instead, so no identity variable of the session reaches it; one
+            of its tests (phase fix round 1, Claude Opus 5.5, unreviewed)
+            makes two card files, an inbox and a lock file by hand, with
+            ESC in them.
+@deps       python3 stdlib (json, os, pathlib, subprocess, sys, tempfile,
+            time, unittest); tests/_root.py for HealthCardsTest
 @complexity O(1) per test; the slowest waits a few poll intervals (about 5 s)
 @alloc      one tempdir per test, removed in tearDown; every child process
             is killed in tearDown
@@ -23,12 +26,14 @@ import unittest
 
 TC = pathlib.Path(__file__).resolve().parent.parent / "tc"
 # CARDS R5 (Claude Opus 5.5, unreviewed): the harness, for HealthCardsTest.
+HERE = pathlib.Path(__file__).resolve().parent
 # Run as `python3 -m unittest tests.test_health` from the repo root, tests/
 # is not on sys.path; under discover it is. Add it once so both work.
-HERE = pathlib.Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
+
 import _root  # noqa: E402  (needs the path line above)
+
 SETTLE_TIMEOUT = 10
 SETTLE_STEP = 0.2
 # Thresholds no real machine reaches, so only the condition under test fires.

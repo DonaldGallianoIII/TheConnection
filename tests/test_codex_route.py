@@ -40,11 +40,11 @@ thread_id of any other shape never reaches codex's argv.
 @deps       python3 stdlib (datetime, fcntl, importlib, json, os, pathlib,
             shlex, signal, subprocess, sys, tempfile, time, unittest,
             unittest.mock); tests/_root.py; ../tc. test_router.py and
-            test_cards.py import RELEASE_CEILING_SECONDS and
+            test_cards.py import FINISH_CEILING_SECONDS and
             wait_until_blocked from here.
 @complexity O(1) per test: two to five tc runs and as many fake calls,
             each under a second. A blocked-child check polls /proc/locks
-            at most BLOCK_CEILING_SECONDS / POLL_SECONDS = 100 times, each
+            at most BLOCK_CEILING_SECONDS / LOCK_POLL_SECONDS = 100 times, each
             O(k) over k lines (tens). The slow-ring test runs about one
             second: its fake is killed, not waited out.
 @alloc      one TcRoot per test, removed when its context exits; one open
@@ -112,10 +112,17 @@ READ_CEILING_SECONDS = 1
 # fake to record its call. Python start-up plus tc's imports is well under
 # 1 s; the rest is room for a loaded machine. Failing here beats hanging.
 BLOCK_CEILING_SECONDS = 5
-# How long a child gets to finish once the test lets go of the lock.
-RELEASE_CEILING_SECONDS = 10
-# Gap between two reads of /proc/locks or of a fake's record.
-POLL_SECONDS = 0.05
+# How long a child gets to finish once the test lets go of the lock, or
+# once its fake is killed. A guard against a hang, not a measure, so it is
+# not test_mailbox.py's RELEASE_CEILING_SECONDS: that one is K3's 1 s pass
+# bound, from the plan.
+FINISH_CEILING_SECONDS = 10
+# Gap between two reads of /proc/locks: the name and value tests/_root.py
+# and test_mailbox.py give it. A fake's record and a pid's exit are polled
+# at the same gap.
+LOCK_POLL_SECONDS = 0.05
+# The exit code of a refusal with words (contracts.md's exit table).
+EXIT_REFUSED = 1
 # /proc/locks for a blocked waiter: "1: -> FLOCK ADVISORY WRITE <pid> <maj>:<min>:<inode> 0 EOF".
 # A holder's line has no "->", so these columns sit one to the right of it.
 WAITER_MARK = "->"
@@ -291,11 +298,11 @@ def wait_until_blocked(test, proc, path):
 
     Fails if the child exits first (it finished while the test held the
     lock, so it never waited for it) or BLOCK_CEILING_SECONDS pass first.
-    Polls /proc/locks every POLL_SECONDS; never a bare sleep.
+    Polls /proc/locks every LOCK_POLL_SECONDS; never a bare sleep.
 
     @interacts  reads /proc/locks; reads a finished child's stderr.
     @deps       lock_waiters, time.
-    @complexity at most BLOCK_CEILING_SECONDS / POLL_SECONDS = 100 polls,
+    @complexity at most BLOCK_CEILING_SECONDS / LOCK_POLL_SECONDS = 100 polls,
                 each O(k) over k lines in /proc/locks.
     @alloc      one set of pids per poll, freed as it goes.
     """
@@ -307,7 +314,7 @@ def wait_until_blocked(test, proc, path):
                       f"so it never waited for the lock")
         if time.monotonic() >= deadline:
             test.fail(f"tc was not blocked on {path.name} within {BLOCK_CEILING_SECONDS} s")
-        time.sleep(POLL_SECONDS)
+        time.sleep(LOCK_POLL_SECONDS)
 
 
 def wait_for_record(test, record, proc):
@@ -318,7 +325,7 @@ def wait_for_record(test, record, proc):
 
     @interacts  stats and reads `record`.
     @deps       json, time.
-    @complexity at most BLOCK_CEILING_SECONDS / POLL_SECONDS polls.
+    @complexity at most BLOCK_CEILING_SECONDS / LOCK_POLL_SECONDS polls.
     @alloc      one dict, returned.
     """
     deadline = time.monotonic() + BLOCK_CEILING_SECONDS
@@ -327,7 +334,7 @@ def wait_for_record(test, record, proc):
             test.fail(f"the send exited {proc.returncode} before the fake codex ran")
         if time.monotonic() >= deadline:
             test.fail(f"the fake codex did not run within {BLOCK_CEILING_SECONDS} s")
-        time.sleep(POLL_SECONDS)
+        time.sleep(LOCK_POLL_SECONDS)
     return json.loads(record.read_text().splitlines()[0])
 
 
@@ -338,7 +345,7 @@ def gone(pid):
 
     @interacts  reads /proc/<pid>/stat.
     @deps       pathlib, time.
-    @complexity at most BLOCK_CEILING_SECONDS / POLL_SECONDS reads.
+    @complexity at most BLOCK_CEILING_SECONDS / LOCK_POLL_SECONDS reads.
     @alloc      one string per read.
     """
     deadline = time.monotonic() + BLOCK_CEILING_SECONDS
@@ -351,7 +358,7 @@ def gone(pid):
             return True
         if time.monotonic() >= deadline:
             return False
-        time.sleep(POLL_SECONDS)
+        time.sleep(LOCK_POLL_SECONDS)
 
 
 def ring_argv(root, n, to, sender, thread=THREAD):
@@ -558,7 +565,7 @@ class CodexRouteTest(unittest.TestCase):
                 took = time.monotonic() - started
             finally:
                 kill_own_fake(ring["pid"], record)
-            sent_out, sent_err = proc.communicate(timeout=RELEASE_CEILING_SECONDS)
+            sent_out, sent_err = proc.communicate(timeout=FINISH_CEILING_SECONDS)
         self.assertEqual(ring["argv"][:4], ["queue", "--thread", THREAD, "--message"])
         self.assertLess(took, READ_CEILING_SECONDS,
                         f"tc read took {took:.1f} s while the ring ran: the ring held the inbox lock")
@@ -588,7 +595,7 @@ class CodexRouteTest(unittest.TestCase):
                 proc = root.start("send", "--from", "a", "--to", "c", "hi")
                 wait_until_blocked(self, proc, lock)
                 while_held = sorted(p.name for p in box.glob("*.md"))
-            out, err = proc.communicate(timeout=RELEASE_CEILING_SECONDS)
+            out, err = proc.communicate(timeout=FINISH_CEILING_SECONDS)
             landed = sorted(p.name for p in box.glob("*.md"))
             record = folder.parent / "calls.jsonl"
             self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
@@ -619,7 +626,7 @@ class CodexRouteTest(unittest.TestCase):
                 proc = root.start("read", "b")
                 wait_until_blocked(self, proc, lock)
                 while_held = sorted(p.name for p in box.glob("*.md"))
-            out, err = proc.communicate(timeout=RELEASE_CEILING_SECONDS)
+            out, err = proc.communicate(timeout=FINISH_CEILING_SECONDS)
             after = sorted(p.name for p in box.glob("*.md"))
         self.assertEqual(while_held, ["000001-from-a.md"], "the read moved mail while the test held the lock")
         self.assertEqual(proc.returncode, 0, err)
@@ -674,7 +681,7 @@ class CodexRouteTest(unittest.TestCase):
         with _root.TcRoot() as root:
             code, out, err = root.tc("join", "c", env={"CODEX_THREAD_ID": "-x"})
             after = sorted(str(p.relative_to(root.path)) for p in root.path.rglob("*"))
-        self.assertEqual(code, 1, f"exited {code}: {err}")
+        self.assertEqual(code, EXIT_REFUSED, f"exited {code}: {err}")
         self.assertIn('CODEX_THREAD_ID "-x" is not a thread id', err)
         self.assertEqual(after, [], f"a refused join wrote {after}")
 
@@ -816,21 +823,57 @@ class CodexRouteTest(unittest.TestCase):
             @alloc      none beyond the list entries.
             """
 
+            # Phase fix round 1 (Claude Opus 5.5, unreviewed): doc blocks on the stand-in's methods.
             def __init__(self, argv, **kwargs):
+                """Record how codex was started; nothing runs.
+
+                @interacts  appends to seen.
+                @deps       STAND_IN_PID.
+                @complexity O(1).
+                @alloc      one list entry.
+                """
                 seen.append((argv, kwargs))
                 self.args, self.pid, self.returncode = argv, STAND_IN_PID, None
 
             def __enter__(self):
+                """Return the stand-in, as Popen's `with` does.
+
+                @interacts  none.
+                @deps       none.
+                @complexity O(1).
+                @alloc      none.
+                """
                 return self
 
             def __exit__(self, *exc):
+                """Let any exception through, as Popen's `with` does.
+
+                @interacts  none.
+                @deps       none.
+                @complexity O(1).
+                @alloc      none.
+                """
                 return False
 
             def communicate(self, timeout=None):
+                """Record the timeout asked for, then time out.
+
+                @interacts  appends to waits.
+                @deps       subprocess.TimeoutExpired.
+                @complexity O(1).
+                @alloc      one list entry and the exception.
+                """
                 waits.append(timeout)
                 raise subprocess.TimeoutExpired(self.args, timeout)
 
             def wait(self, timeout=None):
+                """Answer as a process killed by SIGKILL would.
+
+                @interacts  sets returncode.
+                @deps       signal.
+                @complexity O(1).
+                @alloc      none.
+                """
                 self.returncode = -signal.SIGKILL
                 return self.returncode
 
@@ -923,17 +966,46 @@ class CodexRouteTest(unittest.TestCase):
             @alloc      none beyond the list entry.
             """
 
+            # Phase fix round 1 (Claude Opus 5.5, unreviewed): doc blocks on the stand-in's methods.
             def __init__(self, argv, **kwargs):
+                """Record the argv; codex has exited 0 already.
+
+                @interacts  appends to seen.
+                @deps       STAND_IN_PID.
+                @complexity O(1).
+                @alloc      one list entry.
+                """
                 seen.append(argv)
                 self.pid, self.returncode = STAND_IN_PID, 0
 
             def __enter__(self):
+                """Return the stand-in, as Popen's `with` does.
+
+                @interacts  none.
+                @deps       none.
+                @complexity O(1).
+                @alloc      none.
+                """
                 return self
 
             def __exit__(self, *exc):
+                """Let any exception through, as Popen's `with` does.
+
+                @interacts  none.
+                @deps       none.
+                @complexity O(1).
+                @alloc      none.
+                """
                 return False
 
             def communicate(self, timeout=None):
+                """Empty stdout and stderr, at once.
+
+                @interacts  none.
+                @deps       none.
+                @complexity O(1).
+                @alloc      two empty strings.
+                """
                 return "", ""
 
         with _root.TcRoot() as root:
@@ -1182,7 +1254,7 @@ class CodexRouteTest(unittest.TestCase):
         @deps       _root.TcRoot.tc, _root.TcRoot.start,
                     _root.flock_holders; subprocess, time.
         @complexity O(STALL_BODY_BYTES), plus at most BLOCK_CEILING_SECONDS
-                    / POLL_SECONDS polls.
+                    / LOCK_POLL_SECONDS polls.
         @alloc      one TcRoot, one background child, one message of
                     STALL_BODY_BYTES.
         """
@@ -1196,7 +1268,7 @@ class CodexRouteTest(unittest.TestCase):
                 if reader.poll() is not None or time.monotonic() >= deadline:
                     self.fail(f"tc read b neither moved its mail nor held {lock.name} "
                               f"within {BLOCK_CEILING_SECONDS} s")
-                time.sleep(POLL_SECONDS)
+                time.sleep(LOCK_POLL_SECONDS)
             try:
                 code, out, err = root.tc("send", "--from", "c", "--to", "b", "hi",
                                          timeout=STALLED_READ_SEND_CEILING_SECONDS)
