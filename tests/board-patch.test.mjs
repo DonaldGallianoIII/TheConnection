@@ -8,6 +8,8 @@
  * native line (one path with the native words in its title); a down
  * node's stale status; the tree's own connector in place of the
  * reports_to hint; an unread count tc could not take (`unread unknown`);
+ * the legend's two cases the states cannot see, and `inbox unreadable` on
+ * a down node whose inbox the board could not list (D28);
  * a token that cannot ride in a header; and the page's poll loop
  * (createPoller) on fake timers and a fake fetch that the test settles by
  * hand, so no real clock or network is read. Then the badge lines on a
@@ -26,8 +28,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  STATES, NOTE_WORDS, CONN_WORDS, LINK_WORDS, UNREAD_WORDS, boardView, diffBoard, createBoard, patchBoard, pillText, layoutLevels,
-  levelPort, createPoller, outlineView, tokenProblem, CONFIG,
+  STATES, NOTE_WORDS, CONN_WORDS, LINK_WORDS, UNREAD_WORDS, INBOX_WORDS, LEGEND_WORDS, boardView, diffBoard, createBoard,
+  patchBoard, pillText, layoutLevels, levelPort, createPoller, outlineView, tokenProblem, CONFIG,
 } from '../board/look.js';
 
 /**
@@ -131,6 +133,35 @@ test('a woken session warns in its own glyph and words and its wire is not the d
   const rows = Object.fromEntries(outlineView(feed).groups.flatMap((g) => g.rows).map((r) => [r.id, r]));
   assert.deepEqual([rows.b.glyph, rows.b.word], [STATES.woken.glyph, STATES.woken.word]);
   assert.deepEqual([rows.c.glyph, rows.c.word], [STATES.working.glyph, STATES.working.word]);
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+// C5 and D28: the legend names both cases the states cannot see, and a
+// down node whose inbox the board could not list says so in words.
+test('both legends name the two cases the states cannot see', () => {
+  for (const [view, words] of [['graph', LEGEND_WORDS.graph], ['outline', LEGEND_WORDS.outline]]) {
+    assert.match(words, /a crash after reading \(it looks working for up to 10 min\)/, `${view} legend: ${words}`);
+    assert.match(words, /with no board page open, when a listener went/, `${view} legend: ${words}`);
+    assert.ok(!words.includes('only a crash after reading'), `${view} legend still says a crash is the only case: ${words}`);
+  }
+});
+
+test('a down node whose inbox the board could not list says inbox unreadable on its box and its row, and no other node does', () => {
+  const feed = {
+    nodes: [
+      node('d', { state: 'down', inbox_unreadable: true, unread: null }), node('e', { state: 'down', inbox_unreadable: false }),
+      node('l', { listener_pid: 12, inbox_unreadable: true }),
+    ],
+    wires: [], links: [],
+  };
+  const view = boardView(feed);
+  const onBoxes = Object.fromEntries(Object.values(view.nodes).map((v) => [v.id, v.badges.map((b) => b.text)]));
+  assert.deepEqual(onBoxes, { d: [INBOX_WORDS.unreadable], e: [], l: [] });
+  assert.equal(INBOX_WORDS.unreadable, 'inbox unreadable');
+  assert.equal(view.nodes.d.h, CONFIG.NODE_H + CONFIG.BADGE_H, 'the box did not grow a line for its words');
+  assert.equal(view.nodes.d.state, 'down');
+  const rows = Object.fromEntries(outlineView(feed).groups.flatMap((g) => g.rows).map((r) => [r.id, r.badges]));
+  assert.deepEqual(rows, { d: [INBOX_WORDS.unreadable], e: [], l: [] });
 });
 
 test('patchBoard keeps what stays, drops what went, adds what came, and rebuilds nothing', () => {

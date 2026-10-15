@@ -3,7 +3,9 @@
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14; fix rounds by
         Claude Opus 5.5 (the BOARD fixer); the P4 phase fix (D24's states,
         long names, the fonts, the stale line) by Claude Opus 5.5 (the P4
-        phase fixer), 2026-10-15
+        phase fixer), 2026-10-15; its round 2 (D28's late mail, D27's
+        peers, an unreadable inbox, a damaged token, the jump under the
+        stale line) by Claude Opus 5.5 (the P4 phase fixer), 2026-10-15
 Status: unreviewed. Written, not yet run by a person.
 
 What this checks: `board/serve.py` serves the live board on 127.0.0.1 only,
@@ -227,6 +229,18 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       `✕ no listener` with a dashed border, and its wire is dotted. The
       dotted wire runs beside `c`'s thin tree line, never on it, so the
       gaps between its dots show.
+    - Now mail it: `./tc send --from a --to c "still there?"`. `c` still
+      reads `✕ no listener`, now and 2 minutes on, never `◔ working` or
+      `△ woken · not read`: the board saw the listener gone before the
+      mail came, so the mail woke nothing (D28). The pill still counts it
+      under `no listener`.
+    - Close `c`'s inbox to the board: `chmod 000 $TC_ROOT/mail/to-c`.
+      Within 3 s `c`'s box carries a dashed badge `inbox unreadable` under
+      `✕ no listener`: the board cannot tell what reached it. Open it
+      again with `chmod u+rwx $TC_ROOT/mail/to-c`; the badge goes.
+    - The legend says what the states cannot see: a crash after reading
+      (it looks working for up to 10 min), and, with no board page open,
+      when a listener went.
     - The tree's lines are thin and solid, with no words; the `native` line
       is dash-dot, with no words, and the badges on `far` and `r` say
       `native` in words. A quiet mail line is thicker than a tree line.

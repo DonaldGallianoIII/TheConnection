@@ -25,7 +25,7 @@ renamed, mail/.seq raised), and the feed reads only their names.
             module; each Board loads tc with TC_ROOT set to the test's root.
             Writes cards, status lines and message files in that root only.
 @deps       python3 stdlib (contextlib, fcntl, importlib, io, itertools,
-            json, marshal, os, pathlib, random, shlex, shutil, sys,
+            json, marshal, os, pathlib, random, shlex, shutil, stat, sys,
             threading, time, unittest, unittest.mock); tests/_root.py;
             board/serve.py; ../tc.
 @complexity O(1) per test: at most 52 message files, 9 names, two
@@ -40,7 +40,11 @@ renamed, mail/.seq raised), and the feed reads only their names.
             message in two folders, a card named with an escape sequence,
             and two copies of tc (one with a planted bytecode cache) in
             their own root's temp folder only, and swap tc's
-            mailbox_summary for a stand-in that fails.
+            mailbox_summary for a stand-in that fails. The wake tests
+            (D24, D28) close two folders to the board (mode 000, opened
+            again before the root goes), put hand-made files in read/ and
+            move one message out of the board's sight, each in its own
+            root.
 @alloc      one TcRoot per test, removed when its context exits; the feeds
             are plain dicts dropped at the end of each test.
 """
@@ -57,6 +61,7 @@ import pathlib
 import random
 import shlex
 import shutil
+import stat
 import sys
 import threading
 import time
@@ -157,6 +162,13 @@ OUTSIDER = "outsider-1"
 # The property cannot pass by never building the shape it guards: at least
 # this many cases must have an inferred edge on a cycle to take out.
 CYCLES_BROKEN_MIN = 20
+# Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+# Where tc's read puts a message when read/ already holds a file of its
+# name (a hand-made twin): read/by-hand-<k>-<name>, a name MESSAGE_NAME
+# does not match, so the board never sees the message arrive there.
+HAND_MOVED_PREFIX = "by-hand-1-"
+# A hand-made file's number, far above any tc gave in the test.
+PLANTED_SEQ = 900
 
 
 def load_serve():
@@ -316,6 +328,30 @@ def release_fifo(path):
     except OSError:
         return
     os.close(fd)
+
+
+# Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+def snapshot_for(listening, names):
+    """A stand-in for Board.snapshot: `listening` as the listeners, an inbox of 0 unread for each of `names`.
+
+    @interacts  none; the returned function reads `listening` each call.
+    @deps       none.
+    @complexity O(1) to build; O(n) per call over the n names.
+    @alloc      one function, returned; one small dict per call.
+    """
+    def stand_in():
+        """A snapshot in Board.snapshot's shape naming `listening` and an inbox for each name.
+
+        @interacts  reads `listening`.
+        @deps       none.
+        @complexity O(n) over the names.
+        @alloc      one small dict, returned.
+        """
+        return {"time": "2030-03-17T12:00:00-05:00",
+                "machine": {"load1": 0.0, "cores": 1, "mem_avail_pct": 50.0},
+                "listeners": dict(listening),
+                "mail": {name: {"unread": 0, "newest_mail_age_s": None} for name in names}}
+    return stand_in
 
 
 def every_path(root):
@@ -671,6 +707,119 @@ class FeedTest(unittest.TestCase):
         self.assertEqual({name: later[name]["state"] for name in names},
                          {"s1": "working", "s2": "working", "q": "woken", "d": "down"})
         self.assertEqual((later["s1"]["status"], later["q"]["status"]), ("parsing the logs", "before the wake"))
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    def test_mail_to_a_listener_the_board_saw_gone_is_no_wake(self):
+        """c's listener is killed with no mail and reads down; mail sent after the board saw it gone leaves it down (D28).
+
+        b and c listen, proven, and the board sees both. a mails b while b
+        still listens; then both listeners end. One poll later b reads
+        working (its mail landed inside its wake window, and the grace
+        runs) and c down. Then a mails c, and that mail lands past
+        POLL_SECONDS after the poll that first found c gone: c reads down
+        on the next poll and past WOKEN_GRACE_S, never working or woken.
+        b, past the grace with its mail unread, reads woken, and after `tc
+        read b` working: a real wake still holds. Each message's mtime is
+        set on the fake clock's line; nothing sleeps.
+
+        Must reject a wake with no upper bound (no first-missing time):
+        c's late mail would read as its wake, working and then woken.
+
+        @interacts  two proven listeners; two `tc send`, one `tc read`;
+                    five feed() calls on a fake clock.
+        @deps       _root.TcRoot, serve.Board, age_file, by_id.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            clock = FakeClock(FAKE_NOW)
+            board = serve.Board(root=root.path, clock=clock)
+            with root.listener("b", LISTENER_TIMEOUT_SECONDS) as pid_b:
+                with root.listener("c", LISTENER_TIMEOUT_SECONDS) as pid_c:
+                    seen = by_id(board.feed())
+                    code, out, err = root.tc("send", "--from", "a", "--to", "b", "task")
+                    self.assertEqual(code, 0, f"tc send exited {code}: {err}")
+            age_file(root.path / "mail" / "to-b" / "000001-from-a.md", FAKE_NOW + 1)
+            clock.now = FAKE_NOW + RECENT_SEND_S
+            gone = by_id(board.feed())
+            code, out, err = root.tc("send", "--from", "a", "--to", "c", "are you there")
+            self.assertEqual(code, 0, f"tc send exited {code}: {err}")
+            age_file(root.path / "mail" / "to-c" / "000002-from-a.md", clock.now + TC_POLL_S + 1)
+            clock.now += TC_POLL_S + 2
+            mailed = by_id(board.feed())
+            clock.now = FAKE_NOW + 1 + WOKEN_GRACE_S + 1
+            late = by_id(board.feed())
+            code, out, err = root.tc("read", "b")
+            self.assertEqual(code, 0, f"tc read b exited {code}: {err}")
+            read = by_id(board.feed())
+
+        def pair(nodes):
+            """{b, c: (state, listener_pid, inbox_unreadable)}.
+
+            @interacts  none.
+            @deps       none.
+            @complexity O(1).
+            @alloc      one dict, returned.
+            """
+            return {name: (nodes[name]["state"], nodes[name]["listener_pid"], nodes[name]["inbox_unreadable"])
+                    for name in ("b", "c")}
+
+        self.assertEqual(pair(seen), {"b": ("listening", pid_b, False), "c": ("listening", pid_c, False)})
+        self.assertEqual(pair(gone), {"b": ("working", None, False), "c": ("down", None, False)})
+        self.assertEqual(pair(mailed), {"b": ("working", None, False), "c": ("down", None, False)},
+                         "mail that reached c after the board saw it gone woke it")
+        self.assertEqual(pair(late), {"b": ("woken", None, False), "c": ("down", None, False)})
+        self.assertEqual(pair(read), {"b": ("working", None, False), "c": ("down", None, False)})
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    def test_an_inbox_the_board_cannot_list_reads_down_inbox_unreadable(self):
+        """u1's inbox and u2's read/ are closed to the board: each reads down, inbox_unreadable; r, open, reads working.
+
+        A stand-in snapshot names r, u1 and u2 listening, then none. Each
+        got a message in its inbox right after the sighting, so each was
+        woken. The board can list r's folders: working (the grace). It
+        cannot list u1's inbox (mode 000), nor u2's read/, where a read
+        waking message would be: it cannot tell, so each reads down with
+        inbox_unreadable true (C5, D28). Each folder gets its mode back
+        before the root is removed.
+
+        Must reject a board that takes a folder it cannot list for an
+        empty one: u1 would read down with the flag false, and u2 working.
+
+        @interacts  four message files and two folders closed, then opened
+                    again, in a fresh TcRoot; two feed() calls with
+                    Board.snapshot swapped for a stand-in.
+        @deps       _root.TcRoot, put_message, age_file, snapshot_for,
+                    serve.Board, unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root lists a mode 000 folder, so the check would prove nothing")
+        names = ("r", "u1", "u2")
+        listening = {}
+        with _root.TcRoot() as root:
+            clock = FakeClock(FAKE_NOW)
+            board = serve.Board(root=root.path, clock=clock)
+            for seq, name in enumerate(names, start=1):
+                age_file(put_message(root.path, seq, "boss", name, unread=True), FAKE_NOW + 1)
+            age_file(put_message(root.path, len(names) + 1, "boss", "u2"), FAKE_NOW - OLD_SEND_S)
+            closed = [root.path / "mail" / "to-u1", root.path / "mail" / "to-u2" / "read"]
+            modes = [stat.S_IMODE(folder.stat().st_mode) for folder in closed]
+            with mock.patch.object(board, "snapshot", snapshot_for(listening, names)):
+                listening.update(dict.fromkeys(names, STAND_IN_PID))
+                board.feed()
+                listening.clear()
+                clock.now = FAKE_NOW + RECENT_SEND_S
+                try:
+                    for folder in closed:
+                        folder.chmod(NO_ACCESS)
+                    nodes = by_id(board.feed())
+                finally:
+                    for folder, mode in zip(closed, modes):
+                        folder.chmod(mode)
+        self.assertEqual({name: (nodes[name]["state"], nodes[name]["inbox_unreadable"]) for name in names},
+                         {"r": ("working", False), "u1": ("down", True), "u2": ("down", True)})
 
     def test_a_message_from_the_future_is_not_writing(self):
         """A message whose mtime is an hour ahead of now gives its sender no age: not writing.
@@ -1452,6 +1601,129 @@ class HostileMailboxTest(unittest.TestCase):
         mailbox = [link for link in feed["links"] if link["kind"] == "mailbox"]
         self.assertEqual([link["sent"] for link in mailbox], [{"a": 1, "b": 0}])
         self.assertEqual(by_id(feed)["a"]["state"], "writing")
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    def test_a_hand_made_read_twin_cannot_hide_unread_mail(self):
+        """b's waking message sits unread beside an old read/ twin of its name; c's beside a read/ file of its number from x.
+
+        A stand-in snapshot names b and c listening, then none. Each got
+        one message right after the sighting, still unread in its inbox;
+        b's read/ also holds an old hand-made file of the same name, and
+        c's an old one with the same number from another sender. Past
+        WOKEN_GRACE_S both read woken: the unread message woke them and
+        nothing read it, whatever read/ holds. b's message counts once;
+        c's two files are two wires.
+
+        Must reject the read/ copy winning the dedupe: b's twin would stand
+        in for its mail, too old to be a wake, and b would read down.
+
+        @interacts  five message files in a fresh TcRoot; two feed() calls
+                    with Board.snapshot swapped for a stand-in.
+        @deps       _root.TcRoot, put_message, age_file, snapshot_for,
+                    serve.Board, unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        names = ("b", "c")
+        listening = {}
+        with _root.TcRoot() as root:
+            clock = FakeClock(FAKE_NOW)
+            board = serve.Board(root=root.path, clock=clock)
+            for seq, name in enumerate(names, start=1):
+                age_file(put_message(root.path, seq, "a", name, unread=True), FAKE_NOW + 1)
+            age_file(put_message(root.path, 1, "a", "b"), FAKE_NOW - OLD_SEND_S)
+            age_file(put_message(root.path, 2, "x", "c"), FAKE_NOW - OLD_SEND_S)
+            with mock.patch.object(board, "snapshot", snapshot_for(listening, names)):
+                listening.update(dict.fromkeys(names, STAND_IN_PID))
+                board.feed()
+                listening.clear()
+                clock.now = FAKE_NOW + 1 + WOKEN_GRACE_S + 1
+                feed = board.feed()
+        nodes = by_id(feed)
+        self.assertEqual({name: nodes[name]["state"] for name in names}, {"b": "woken", "c": "woken"},
+                         "a file in read/ hid or stood in for the unread mail that woke them")
+        self.assertEqual(sorted((w["from"], w["to"], w["seq"]) for w in feed["wires"]),
+                         [("a", "b", 1), ("a", "c", 2), ("x", "c", 2)])
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    def test_a_waking_message_moved_out_of_sight_is_still_read_evidence(self):
+        """b's waking message leaves the inbox for read/by-hand-1-<name> (tc's clash rename): b reads working, its control c woken.
+
+        A stand-in snapshot names b and c listening, then none. Each got a
+        message right after the sighting. The first poll that finds them
+        gone sees both in their inboxes. Then b's is moved where tc's read
+        puts a message whose name read/ already holds, a name the board
+        never matches; c's stays. Past WOKEN_GRACE_S, b reads working (the
+        message that woke it left the inbox) and c woken.
+
+        Must reject a wake looked for afresh each poll from the files in
+        sight: b's waking message is gone from sight, so b would read down.
+
+        @interacts  two message files, one renamed, in a fresh TcRoot; three
+                    feed() calls with Board.snapshot swapped for a stand-in.
+        @deps       _root.TcRoot, put_message, age_file, snapshot_for,
+                    serve.Board, unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        names = ("b", "c")
+        listening = {}
+        with _root.TcRoot() as root:
+            clock = FakeClock(FAKE_NOW)
+            board = serve.Board(root=root.path, clock=clock)
+            waking = {}
+            for seq, name in enumerate(names, start=1):
+                waking[name] = put_message(root.path, seq, "a", name, unread=True)
+                age_file(waking[name], FAKE_NOW + 1)
+            with mock.patch.object(board, "snapshot", snapshot_for(listening, names)):
+                listening.update(dict.fromkeys(names, STAND_IN_PID))
+                board.feed()
+                listening.clear()
+                clock.now = FAKE_NOW + RECENT_SEND_S
+                first = by_id(board.feed())
+                read = waking["b"].parent / serve.READ_FOLDER
+                read.mkdir()
+                waking["b"].rename(read / f"{HAND_MOVED_PREFIX}{waking['b'].name}")
+                clock.now = FAKE_NOW + 1 + WOKEN_GRACE_S + 1
+                later = by_id(board.feed())
+        self.assertEqual({name: first[name]["state"] for name in names}, {"b": "working", "c": "working"})
+        self.assertEqual({name: later[name]["state"] for name in names}, {"b": "working", "c": "woken"},
+                         "the waking message left b's inbox, yet b does not read as having read it")
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    def test_a_planted_old_file_with_a_high_number_does_not_end_the_wake_walk(self):
+        """b's read/ holds an old hand-made file numbered 900 beside the real message that woke it: b reads working, then woken.
+
+        A stand-in snapshot names b listening, then not. Its real waking
+        message (number 1) landed right after the sighting; the planted one
+        has a far higher number and an mtime long before. Inside the grace
+        b reads working, past it woken, never down.
+
+        Must reject a walk in number order that stops at the first old
+        file: the planted one comes first and b would read down.
+
+        @interacts  two message files in a fresh TcRoot; three feed() calls
+                    with Board.snapshot swapped for a stand-in.
+        @deps       _root.TcRoot, put_message, age_file, snapshot_for,
+                    serve.Board, unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        listening = {}
+        with _root.TcRoot() as root:
+            clock = FakeClock(FAKE_NOW)
+            board = serve.Board(root=root.path, clock=clock)
+            age_file(put_message(root.path, 1, "a", "b", unread=True), FAKE_NOW + 1)
+            age_file(put_message(root.path, PLANTED_SEQ, "x", "b"), FAKE_NOW - OLD_SEND_S)
+            with mock.patch.object(board, "snapshot", snapshot_for(listening, ("b",))):
+                listening["b"] = STAND_IN_PID
+                board.feed()
+                listening.clear()
+                clock.now = FAKE_NOW + RECENT_SEND_S
+                grace = by_id(board.feed())["b"]["state"]
+                clock.now = FAKE_NOW + 1 + WOKEN_GRACE_S + 1
+                late = by_id(board.feed())["b"]["state"]
+        self.assertEqual((grace, late), ("working", "woken"), "a planted old file with a high number hid b's wake")
 
     # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
     def test_the_board_runs_tc_from_its_source_and_writes_no_bytecode_cache(self):

@@ -12,8 +12,9 @@
  * other labels (placeLabels); the routing section states the one rule. A
  * dotted or dashed wire is drawn over every solid one, on a knockout in the
  * canvas's color, so no other stroke shows in its gaps (drawEdge). A
- * native pair's boxes and a reports_to cycle's root carry badge lines in
- * words (badgesOf). Each root's tree starts with a heading, rootsList and
+ * native pair's boxes, a reports_to cycle's root and a down node whose
+ * inbox the board could not list carry badge lines in words (badgesOf).
+ * Each root's tree starts with a heading, rootsList and
  * createRoots make the list of roots at the top of the page, and on a
  * phone createFit draws outlineView's outline instead of the graph.
  *
@@ -494,7 +495,8 @@ export function createRoots(doc, parent, onJump) {
  * the role words after it never do. A third line holds `note` (a status
  * line, or a reports_to that names nobody); empty, it is hidden. Under it,
  * one badge line per item of `badges` ({ lead, names, tail, text }: a
- * native pair or a cycle's root, in words), each in a dashed rule; only
+ * native pair, a cycle's root or an inbox the board could not list, in
+ * words), each in a dashed rule; only
  * the names may shorten, and the whole text is the badge's title. `h` is
  * the box's height (NODE_H, plus BADGE_H per badge line).
  * @interacts  appends to canvas.view; remove() takes the node out again
@@ -665,12 +667,19 @@ function nativeAllowed(p, q) {
  * sessions.
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  */
-// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
-// D24's two states in words, on both legends, with the one case they
-// cannot see.
-const WAKE_WORDS = `${STATES.working.glyph} ${STATES.working.word}: mail woke it and it is on its turn `
-  + `(only a crash after reading looks the same) · ${STATES.woken.glyph} ${STATES.woken.word}: `
-  + 'mail woke it and nothing has read it';
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+// unreviewed. The feed's DOWN_WINDOW_S (600) in minutes: a session that
+// crashed after reading its mail reads working this long after it was last
+// seen listening.
+const DOWN_WINDOW_MIN = 10;
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; the two cases by
+// the P4 phase fixer, round 2. Status: unreviewed.
+// D24's two states in words, on both legends, with the two cases they
+// cannot see (C5, D28).
+const WAKE_WORDS = `${STATES.working.glyph} ${STATES.working.word}: mail woke it and it is on its turn · `
+  + `${STATES.woken.glyph} ${STATES.woken.word}: mail woke it and nothing has read it · `
+  + `the board cannot see a crash after reading (it looks ${STATES.working.word} for up to ${DOWN_WINDOW_MIN} min) `
+  + 'or, with no board page open, when a listener went (mail that came meanwhile counts as a wake)';
 export const LEGEND_WORDS = Object.freeze({
   outline: 'outline: each session under the one it reports to, or that mail shows it works for · '
     + `traffic: newest first, arrow toward the reader · ${WAKE_WORDS}`,
@@ -710,6 +719,16 @@ export const NOTE_WORDS = Object.freeze({
 export const UNREAD_WORDS = Object.freeze({
   unread: 'unread',
   unknown: 'unread unknown',
+});
+
+/**
+ * Words for an inbox the board could not list (the feed's
+ * inbox_unreadable): beside `down`, the board cannot tell whether mail woke
+ * the session, so it says so (C5, D28).
+ * Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+ */
+export const INBOX_WORDS = Object.freeze({
+  unreadable: 'inbox unreadable',
 });
 
 /**
@@ -817,13 +836,16 @@ function treeOf(feed) {
 }
 
 /**
- * The badge lines each node's box carries, in words: `native with b · not
+ * The badge lines each node's box carries, in words: `inbox unreadable` on
+ * a down node whose inbox the board could not list (C5, D28: it cannot
+ * tell whether mail woke it), `native with b · not
  * observed` on both boxes of a native pair (C5's words, drawn whether or
  * not the pair also mails, never on account `unknown`, D15), and `reports
  * to q · cycle` on a reports_to cycle's root (its reports_to names a node,
  * yet the walk gave it no parent). Each badge is { lead, names, tail, text }:
  * on a box only the names may shorten.
- * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14; the inbox line by
+ * the P4 phase fixer, round 2, 2026-10-15. Status: unreviewed.
  * @interacts  none; pure
  * @complexity O(n + l + p log p) over n nodes, l links and p native partners
  *             of one node (its names are sorted)
@@ -847,6 +869,7 @@ function badgesOf(feed, known) {
   const out = nameMap();
   for (const n of known.values()) {
     const list = [];
+    if (n.state === 'down' && n.inbox_unreadable) list.push(badge(INBOX_WORDS.unreadable, '', ''));
     if (n.reports_to != null && n.reports_to !== n.id && known.has(n.reports_to) && n.parent == null) {
       list.push(badge(`${LINK_WORDS.reports_to} `, String(n.reports_to), ` · ${LINK_WORDS.cycle}`));
     }
@@ -1586,7 +1609,8 @@ function agoWords(ageS) {
  * per session of that tree, parent before children, each `depth` levels
  * under its root, with its name, its role words, its state's glyph and
  * word, its unread count (unreadWords), its note (as boardView's) and its badges'
- * words (badgesOf: a native pair, a cycle's root), one line each. Then the
+ * words (badgesOf: a native pair, a cycle's root, an inbox the board could
+ * not list), one line each. Then the
  * recent traffic: one line per pair, its newest message, `a → b · #18 · 2
  * m ago`, newest first.
  * @interacts  none; pure
@@ -1633,7 +1657,8 @@ export function outlineView(feed) {
  * count, or `unread unknown`: unreadWords), note (`reports to N · not found`, else the status line, as `last
  * status: ...` on a down or woken node), `badges` (badgesOf: `native with b · not
  * observed` on both boxes of a native pair, `reports to q · cycle` on a
- * cycle's root), and `connector`: on a node with a parent in the layout,
+ * cycle's root, `inbox unreadable` on a down node whose inbox the board
+ * could not list), and `connector`: on a node with a parent in the layout,
  * the hierarchy's own thin line from the parent's out port to this node's
  * in port (routeTree), with its words for a title and no label on the
  * board (the legend says what the thin line is); null on a root. It

@@ -507,7 +507,8 @@
 .tc-node-glyph { display: inline-block; width: 1.2em; }
 /* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * A badge line under a box's note: a native pair (`native with b · not
- * observed`) or a reports_to cycle's root (`reports to q · cycle`). Words
+ * observed`), a reports_to cycle's root (`reports to q · cycle`) or a down
+ * node whose inbox the board could not list (`inbox unreadable`). Words
  * in a dashed rule, so it reads as a mark of its own without color; only
  * the names may shorten, and the spaces round them stay, widened a little
  * as the role words' are. Its line height and rule make look.js BADGE_H. */

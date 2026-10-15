@@ -1,7 +1,8 @@
 """
 Leak tests for board/serve.py's feed: 1,000 feed() calls on one Board grow
 its RSS by less than FEED_LEAK_LIMIT_KB and leave no file open, and
-last_listening_at stays bounded when 1,000 names come and go.
+last_listening_at, and first_missing_at and wakes beside it, stay bounded
+when 1,000 names come and go.
 
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
@@ -187,10 +188,13 @@ class FeedLeakTest(unittest.TestCase):
         self.assertEqual(fds_after, fds, f"open fds went from {fds} to {fds_after}")
 
     def test_last_listening_at_is_pruned_past_the_down_window(self):
-        """1,000 names each listen once, 6 s apart: the map never holds more than one window's worth.
+        """1,000 names each listen once, 6 s apart: no map of the Board's ever holds more than one window's worth.
 
+        Each name is seen gone on the next call, so first_missing_at (D28)
+        takes it then; it and wakes are pruned with last_listening_at.
         Must reject a last_listening_at that grows without bound: unpruned,
-        it would hold all 1,000 names by the end.
+        it would hold all 1,000 names by the end; and so would
+        first_missing_at, left out of the prune.
 
         @interacts  1,000 feed() calls over an empty mailbox, with
                     Board.snapshot swapped for a stand-in.
@@ -217,7 +221,7 @@ class FeedLeakTest(unittest.TestCase):
                     "machine": {"load1": 0.0, "cores": 1, "mem_avail_pct": 50.0},
                     "listeners": dict(listening), "mail": {}}
 
-        biggest = 0
+        biggest = gone_most = 0
         with _root.TcRoot() as root:
             board = serve.Board(root=root.path, clock=lambda: clock["now"])
             with mock.patch.object(board, "snapshot", stand_in):
@@ -227,9 +231,14 @@ class FeedLeakTest(unittest.TestCase):
                     listening[f"n{i}"] = STAND_IN_PID
                     board.feed()
                     biggest = max(biggest, len(board.last_listening_at))
+                    # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+                    gone_most = max(gone_most, len(board.first_missing_at), len(board.wakes))
             held = dict(board.last_listening_at)
         self.assertLessEqual(biggest, PRUNED_MAP_MAX,
                              f"last_listening_at reached {biggest} names; one window holds {PRUNED_MAP_MAX}")
+        self.assertLessEqual(gone_most, PRUNED_MAP_MAX,
+                             f"first_missing_at or wakes reached {gone_most} names; one window holds {PRUNED_MAP_MAX}")
+        self.assertGreater(gone_most, 0, "no name was ever seen gone, so the bound proves nothing")
         oldest = clock["now"] - DOWN_WINDOW_S
         self.assertTrue(all(seen >= oldest for seen in held.values()),
                         f"names older than {DOWN_WINDOW_S} s are still held")

@@ -41,6 +41,10 @@ query. Cards never come from tc's health:
                            inbox it cannot see into)
   nodes[].unread_problem   snap["mail"][name]["mail_problem"], tc's reason,
                            when unread is None; else None
+  nodes[].inbox_unreadable True when this board could not list the name's
+                           mail/to-<name>/ or its read/ (a folder it may
+                           not open); the page says `inbox unreadable`
+                           beside `down`
   nodes[].last_mail_age_s  snap["mail"][name]["newest_mail_age_s"]: seconds
                            since the newest message in the name's inbox or
                            read/, so mail it received, never under 0 (a
@@ -64,19 +68,27 @@ query. Cards never come from tc's health:
 State, first match wins, in D15 and D24's order: `writing` (its newest sent
 message is at most WRITING_WINDOW_S old, listener or not); then, for a name
 with no pid now that this Board saw listening within DOWN_WINDOW_S, one of
-`down` (no mail reached its inbox since: the lock vanished and nothing woke
-it), `woken` (mail woke it, and WOKEN_GRACE_S has passed with no sign of
-life) or `working` (mail woke it, and the mail that woke it lies in read/,
-or its status file or its last sent message is newer than when it was last
-seen listening, or the wake is under WOKEN_GRACE_S old; after_listening);
-then `listening` (a pid holds the name's lock in /proc/locks), `doorbell`
-(route codex), `remote` (route ssh), `idle`. A message whose mtime is in
-the future has no age, so it never makes its sender writing. What was seen
-listening lives in this object's memory only: after a restart nothing is
-down, woken or working until it has been seen listening again. The one case
-these states cannot see: a session that crashes after reading its mail
-reads `working` until DOWN_WINDOW_S has passed since it was last seen
-listening.
+`down`, `woken` or `working` (after_listening). Mail woke it when a message
+landed in its inbox no earlier than tc's POLL_SECONDS before it was last
+seen listening and no later than POLL_SECONDS after the first poll that
+found no pid (D28): mail that lands after the board has seen the listener
+gone woke nothing. No such mail: `down`, the lock vanished and nothing woke
+it, whatever mail lands later. Woken: `working` when the message that woke
+it has left the inbox, or its status file or its last sent message is
+newer than when it was last seen listening, or the wake is under
+WOKEN_GRACE_S old; else `woken`. A name whose inbox (or its read/) this
+board cannot list reads `down` with inbox_unreadable set: the board cannot
+tell. Then `listening` (a pid holds the name's lock in /proc/locks),
+`doorbell` (route codex), `remote` (route ssh), `idle`. A message whose
+mtime is in the future has no age, so it never makes its sender writing.
+What was seen listening, when it was first seen gone and the wake found
+live in this object's memory only: after a restart nothing is down, woken
+or working until it has been seen listening again. Two cases these states
+cannot see (C5): a session that crashes after reading its mail reads
+`working` until DOWN_WINDOW_S has passed since it was last seen listening;
+and with no board page open nothing polls, so the board cannot tell when a
+listener went, and mail that landed before the first poll after it went
+counts as a wake.
 
 Roles and levels follow C5 step by step. Partners are the names a node has
 exchanged mail with, either way, itself excluded; a partner need not be a
@@ -106,7 +118,8 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             and never scans the process list. Reads cards/*.json and the
             head of status/<name>.md; lists mail/to-*/ and mail/to-*/read/
             and stats a few message files, and for a name that stopped
-            listening, its status file and the messages since its wake.
+            listening, its status file, its last sent message and, while
+            its wake window is open, its WAKE_CANDIDATES newest messages.
             Opens no message body. Writes nothing to the mailbox, and
             reads and writes no bytecode cache of tc's. main() binds one
             TCP socket on 127.0.0.1, prints the URL with the token once to
@@ -119,41 +132,52 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             and read only when fstat says regular, so a FIFO never blocks a
             poll and a symlink never redirects one; mail folders are listed
             the same way, never through a link.
-@deps       python3 stdlib (argparse, collections, heapq, hmac, http.server,
-            io, json, os, pathlib, re, secrets, signal, stat, sys,
-            threading, time, types, urllib.parse); ../tc; Linux (/proc:
-            /proc/locks through tc, the load average and /proc/meminfo
-            read here).
-@complexity feed(), per poll: O(k + m log m + n + c^2). The snapshot:
-            tc.listeners is O(k + n), k lines in /proc/locks (tens) and n
-            names (single digits to tens); tc.mailbox_summary is O(n + m),
-            since it stats every message file, m of them (about 800 after
-            two weeks of heavy use, and only growing, since read/ is kept).
-            Here: every inbox listed again and each of the m names matched
-            once (no body read); the last WIRE_HISTORY picked in
-            O(m log W), W = 50; W + n + l more stats for l linked pairs (at
-            most n^2/2, tens in practice); each card read once, c cards;
-            levels in O(n + e), e parent edges (at most n); c(c-1)/2
-            native links over the claude cards on one named account; and
-            for each of s names that stopped listening within
-            DOWN_WINDOW_S, a sort of its messages (m log m at worst, all
-            of them together) and a stat of the few since its wake, its
-            status file and its last sent message. In
-            all about m + W + n + l + 3s stats per poll, and no child
+@deps       python3 stdlib (argparse, collections, errno, heapq, hmac,
+            http.server, io, json, os, pathlib, re, secrets, signal, stat,
+            sys, threading, time, types, urllib.parse); ../tc; Linux
+            (/proc: /proc/locks through tc, the load average and
+            /proc/meminfo read here).
+@complexity feed(), per poll: O(k + m (log W + log K) + n + c^2). The
+            snapshot: tc.listeners is O(k + n), k lines in /proc/locks
+            (tens) and n names (single digits to tens);
+            tc.mailbox_summary is O(n + m), since it stats every message
+            file, m of them (about 800 after two weeks of heavy use, and
+            only growing, since read/ is kept). Here: every inbox listed
+            again and each of the m names matched twice (no body read);
+            the last WIRE_HISTORY picked in O(m log W), W = 50; W + n + l
+            more stats for l linked pairs (at most n^2/2, tens in
+            practice); each card read once, c cards; levels in O(n + e), e
+            parent edges (at most n); c(c-1)/2 native links over the
+            claude cards on one named account; and for each of s names
+            that stopped listening within DOWN_WINDOW_S, its newest
+            K = WAKE_CANDIDATES messages kept in a heap as the scan goes
+            (O(log K) per message to such a name), stats of those K while
+            its wake window is open (a poll or two per stop), and of its
+            status file and its last sent message. In all about
+            m + W + n + l + s(K + 2) stats per poll at most, and no child
             process. One
             request: O(1) to route, plus one feed() or one read of a board
             file (tens of KB).
 @alloc      per feed(): tc.mailbox_summary builds m path and stat objects; here
-            one Message per message file, each message listed once more
-            under its recipient, and for each message a short-lived sorted
-            pair (a list and two tuples) and a default count dict, which
-            is kept only for a pair's first message as the per-pair
-            counts; then the returned dict (n nodes, at most W wires,
-            l + n + c(c-1)/2 links); all freed when the caller drops them.
+            one Message per message file, each one's dedupe key and dict
+            slot, the name list of each folder (message_names), and for
+            each message a short-lived sorted pair (a list and two tuples),
+            a default count dict and two default partner sets, each kept
+            only the first time (a pair's counts, a name's partners); for
+            each name that stopped
+            listening, a heap of at most K Messages while its wake window
+            is open and the set of its inbox's file names; then the
+            returned dict (n nodes, at most W wires, l + n + c(c-1)/2
+            links); all freed when the caller drops them.
             Held across calls: the
-            loaded tc module and last_listening_at, one float per name
-            seen listening, pruned past DOWN_WINDOW_S on every feed(), and
-            the names of cards found nested too deep, one each. The server
+            loaded tc module; last_listening_at, one float per name seen
+            listening, pruned past DOWN_WINDOW_S on every feed();
+            first_missing_at, one float per name seen listening and not
+            listening now, and wakes, one small dict per such name with
+            the file names of the messages that woke it (one or two,
+            WAKE_CANDIDATES at most), both cleared on the name's next
+            sighting and pruned with last_listening_at; and the names of
+            cards found nested too deep, one each. The server
             holds one Board, the token, a lock and MAX_CONNECTIONS slots;
             one short-lived thread per request, at most MAX_CONNECTIONS at
             once, each ended by REQUEST_DEADLINE_S.
@@ -161,6 +185,7 @@ partner is a lower relay is drawn as that relay's `worker`, marked
 
 import argparse
 import collections
+import errno
 import heapq
 import hmac
 import http.server
@@ -196,6 +221,21 @@ DOWN_WINDOW_S = 600
 # turn. Past it with no sign, it reads woken, not read: the doorbell rang
 # and nobody answered.
 WOKEN_GRACE_S = 120
+# Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+# unreviewed. A stopped name's newest this many messages, by number, are the
+# candidates for its wake (D24, D28). A wake is the mail that lands within
+# one of tc wait's polls of the board's last sighting: a message or two.
+# They are kept as the scan walks the mail, never by sorting a name's whole
+# history, and read in file time order, so a hand-made file with a high
+# number and an old time takes one place and ends nothing. A burst past
+# this many in that window still dates the wake inside it.
+WAKE_CANDIDATES = 16
+# What message_names makes of a folder it cannot open: no folder (ENOENT),
+# a link (ELOOP under O_NOFOLLOW) or a file where a folder should be
+# (ENOTDIR) holds no messages, as the scan has always read them. Any other
+# error (EACCES, EIO) is a folder the board cannot list (C5: the name reads
+# down, `inbox unreadable`).
+NO_FOLDER_ERRNOS = (errno.ENOENT, errno.ELOOP, errno.ENOTDIR)
 # Characters of a status line on a node (C5): one line on a node box. The
 # whole status stays in status/<name>.md.
 STATUS_PREVIEW_CHARS = 80
@@ -463,32 +503,36 @@ def card_text(card, key):
 
 
 def scan_messages(mail):
-    """Every message under `mail`, from file names only: [Message].
+    """Every message under `mail`, from file names only: ([Message], {names whose inbox could not be listed}).
 
     Looks in each mail/to-<name>/ and its read/. A name that does not match
     MESSAGE_NAME (a .tmp being written, a lock, anything else) is skipped.
-    A to-* entry whose stat fails (a link that loops, a folder the user
-    cannot search, a dead mount) is skipped on its own; the rest of the
-    scan stands. Opens no file.
+    A to-* entry whose stat fails (a folder the user cannot search, a dead
+    mount) is skipped on its own and its name goes in the second set, and
+    so does a name whose inbox or read/ message_names could not list; the
+    rest of the scan stands. Opens no file.
 
     Never follows a link, as SHARED's tc reads a mailbox: a to-* entry or
     a read/ that is a link is not looked in, and only a regular file is a
-    message (message_names). A message seen in both the inbox and read/ in
-    one scan (a `tc read` moved it between the two listings) counts once,
-    by recipient and number, as its read/ copy.
+    message (message_names). The inbox is listed before read/, and a file
+    in read/ with the same recipient, number and sender as one in the inbox
+    (a `tc read` moved it between the two listings, or a hand-made twin)
+    counts once, as the inbox copy: a file put in read/ cannot hide or
+    stand in for unread mail. Two files with one number and two senders are
+    two messages.
 
     @interacts  lists `mail`, each to-*/ folder and each to-*/read/.
     @deps       os, re; message_names.
     @complexity O(b + m) over b inbox folders and m file names in them.
-    @alloc      one Message per message file, in a dict by recipient and
-                number, returned as a list.
+    @alloc      one Message per message file, in a dict by recipient,
+                number and sender, returned as a list; one set of names.
     """
     try:
         with os.scandir(mail) as listing:
             entries = list(listing)
     except OSError:
-        return []
-    boxes = []
+        return [], set()
+    boxes, unreadable = [], set()
     for entry in entries:
         if not entry.name.startswith(INBOX_PREFIX):
             continue
@@ -496,28 +540,35 @@ def scan_messages(mail):
             if entry.is_dir(follow_symlinks=False):
                 boxes.append(entry)
         except OSError:
-            continue
+            unreadable.add(entry.name[len(INBOX_PREFIX):])
     found = {}
     for box in boxes:
         to = box.name[len(INBOX_PREFIX):]
         if not to:
             continue
         for folder, read in ((box.path, False), (os.path.join(box.path, READ_FOLDER), True)):
-            for name in message_names(folder):
+            names = message_names(folder)
+            if names is None:
+                unreadable.add(to)
+                continue
+            for name in names:
                 match = MESSAGE_NAME.match(name)
                 msg = Message(int(match.group(1)), match.group(2), to, os.path.join(folder, name), read)
-                found[(to, msg.seq)] = msg
-    return list(found.values())
+                found.setdefault((to, msg.seq, msg.sender), msg)
+    return list(found.values()), unreadable
 
 
 # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
 def message_names(folder):
-    """The names of the regular files in `folder` that match MESSAGE_NAME; [] for a link or no folder.
+    """The names of the regular files in `folder` that match MESSAGE_NAME: [] for a link or no folder, None for one it cannot list.
 
     The folder is opened with O_NOFOLLOW and O_DIRECTORY and listed through
     that descriptor, so a folder that is a link, even one swapped in after
     the caller looked, is never listed, and an entry counts only when it is
-    a regular file itself, never a link to one.
+    a regular file itself, never a link to one. An open that fails with one
+    of NO_FOLDER_ERRNOS is no folder: []. Any other failure, to open or to
+    list (a folder another user left closed to this one), is None: the
+    board cannot tell what the folder holds.
 
     @interacts  opens, lists and closes one folder.
     @deps       os, re.
@@ -526,14 +577,14 @@ def message_names(folder):
     """
     try:
         fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    except OSError:
-        return []
+    except OSError as error:
+        return [] if error.errno in NO_FOLDER_ERRNOS else None
     try:
         with os.scandir(fd) as entries:
             return [entry.name for entry in entries
                     if MESSAGE_NAME.match(entry.name) and entry.is_file(follow_symlinks=False)]
     except OSError:
-        return []
+        return None
     finally:
         os.close(fd)
 
@@ -598,49 +649,77 @@ def file_time(path):
         return None
 
 
-# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
-def after_listening(seen, now, slack, received, sent, status_path):
-    """D24: DOWN, WOKEN or WORKING for a name seen listening at `seen` and not listening now.
+# Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+def find_wake(candidates, since, until):
+    """D24 and D28: (the earliest mtime, the file names) of the candidates that landed from `since` to `until`; (None, empty) for none.
 
     `tc wait` exits when mail lands, and a session re-arms only after its
     turn, so a lock that went away is not always a listener lost. The name
-    was woken when a message reached its inbox no earlier than `slack`
-    before `seen` (tc's POLL_SECONDS: a wait sees new mail up to one of its
-    polls late, and the board may see its pid in that time). Not woken:
-    DOWN, the lock vanished and nothing woke it. Woken, it is WORKING when
-    it shows life after `seen` (a message that woke it now lies in read/,
-    or its status file or the message it sent last is newer than `seen`),
-    or while the wake (the first such message's mtime) is at most
-    WOKEN_GRACE_S old; else WOKEN.
+    was woken by a message that reached its inbox no earlier than `since`
+    (tc's POLL_SECONDS before the board last saw it listening: a wait sees
+    new mail up to one of its polls late, and the board may see its pid in
+    that time) and no later than `until` (POLL_SECONDS after the first poll
+    that found no pid): mail that lands after the board has seen the
+    listener gone woke nothing (D28).
 
-    `received` is the name's messages, highest seq first. tc numbers
-    messages in the order it writes them, so the walk stops at the first one
-    older than the wake could be. A message gone between the scan and its
-    stat (a read moved it) is skipped for this poll.
+    `candidates` is the name's newest messages by number (WAKE_CANDIDATES
+    at most). Each is lstatted, and the walk runs in file time order,
+    newest first: a message past `until` is passed over, and the first one
+    before `since` ends the walk, since every one after it in that order is
+    older still. A number decides nothing here, so a hand-made file with a
+    high number and an old time cannot end the walk early. A message gone
+    between the scan and its lstat (a read moved it) is skipped this poll.
 
-    @interacts  lstats each message the name got since `seen` less
-                `slack`, plus one older, its status file and the message it
-                sent last; opens none.
-    @deps       file_time.
-    @complexity O(w) over w messages since the wake (one or two), plus two
-                stats.
-    @alloc      none.
+    @interacts  lstats each candidate; opens none.
+    @deps       os; file_time.
+    @complexity O(K log K) over the K <= WAKE_CANDIDATES candidates, plus K
+                lstats.
+    @alloc      one list of K (time, message) pairs and the returned set of
+                names.
     """
-    since = seen - slack
-    wake = None
-    read_since = False
-    for msg in received:
+    timed = []
+    for msg in candidates:
         when = file_time(msg.path)
-        if when is None:
+        if when is not None:
+            timed.append((when, msg))
+    timed.sort(key=lambda pair: pair[0], reverse=True)
+    wake, names = None, set()
+    for when, msg in timed:
+        if when > until:
             continue
         if when < since:
             break
-        wake = when if wake is None else min(wake, when)
-        read_since = read_since or msg.read
+        wake = when
+        names.add(os.path.basename(msg.path))
+    return wake, names
+
+
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; the evidence by
+# the P4 phase fixer, round 2. Status: unreviewed.
+def after_listening(seen, now, wake, waking, inbox, sent, status_path):
+    """D24: DOWN, WOKEN or WORKING for a name seen listening at `seen` and not listening now.
+
+    `wake` is the mtime of the earliest message that woke it, or None, and
+    `waking` those messages' file names (find_wake, kept by the Board).
+    Not woken: DOWN, the lock vanished and nothing woke it. Woken, it is
+    WORKING when it shows life after `seen` (a message that woke it has
+    left the inbox: `inbox` is the file names in mail/to-<name>/ now, so
+    where the message went, read/ under its own name or another, does not
+    matter; or its status file or the message it sent last is newer than
+    `seen`), or while the wake is at most WOKEN_GRACE_S old; else WOKEN.
+
+    @interacts  lstats its status file and the message it sent last; opens
+                none.
+    @deps       file_time.
+    @complexity O(w) over the w <= WAKE_CANDIDATES waking names (one or
+                two), plus two lstats.
+    @alloc      none.
+    """
     if wake is None:
         return DOWN
+    left = any(name not in inbox for name in waking)
     stamps = (file_time(status_path), file_time(sent.path) if sent else None)
-    if read_since or any(at is not None and at > seen for at in stamps) or now - wake <= WOKEN_GRACE_S:
+    if left or any(at is not None and at > seen for at in stamps) or now - wake <= WOKEN_GRACE_S:
         return WORKING
     return WOKEN
 
@@ -823,7 +902,7 @@ def levels_of(names, parents):
 
 
 class Board:
-    """The feed's state across polls: the loaded tc and who was seen listening.
+    """The feed's state across polls: the loaded tc, who was seen listening, when each was first seen gone, and what woke it.
 
     `clock` returns seconds since the epoch, as time.time does; tests pass a
     fake one so windows can be crossed without waiting. feed() is not safe
@@ -832,8 +911,9 @@ class Board:
     @interacts  see the module block.
     @deps       load_tc and the module's helpers.
     @complexity O(1) to build, plus one load of tc.
-    @alloc      the tc module, last_listening_at and nested_cards, held for
-                the object's life.
+    @alloc      the tc module, last_listening_at, first_missing_at, wakes
+                and nested_cards, held for the object's life (the module
+                block bounds each).
     """
 
     def __init__(self, root=None, clock=time.time):
@@ -842,12 +922,47 @@ class Board:
         @interacts  load_tc(root).
         @deps       load_tc.
         @complexity O(1).
-        @alloc      the tc module, one empty dict and one empty set.
+        @alloc      the tc module, three empty dicts and one empty set.
         """
         self.tc = load_tc(root)
         self.clock = clock
         self.last_listening_at = {}
+        # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15.
+        # Status: unreviewed. D28: the first poll that found no pid for a
+        # name seen listening, and the wake found for it, until its next
+        # sighting.
+        self.first_missing_at = {}
+        self.wakes = {}
         self.nested_cards = set()
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    def wake_of(self, name, now, candidates):
+        """The wake kept for `name`, a stopped listener: {"at", "names", "settled"} (D24, D28).
+
+        While the wake window is open (until POLL_SECONDS past the first
+        poll that found no pid), each poll looks for the wake in
+        `candidates` (find_wake) and adds what it finds to what earlier
+        polls found, so a waking message that a read later moves out of the
+        board's sight (a name MESSAGE_NAME does not match) stays known. The
+        first poll past the window looks once more and settles it: no mail
+        that lands later can be a wake, so later polls look for none.
+
+        @interacts  updates wakes[name]; lstats the candidates (find_wake).
+        @deps       find_wake; tc.POLL_SECONDS.
+        @complexity find_wake's while the window is open, else O(1).
+        @alloc      one small dict per stopped name, held until its next
+                    sighting or the prune.
+        """
+        wake = self.wakes.setdefault(name, {"at": None, "names": set(), "settled": False})
+        if wake["settled"]:
+            return wake
+        until = self.first_missing_at[name] + self.tc.POLL_SECONDS
+        at, names = find_wake(candidates, self.last_listening_at[name] - self.tc.POLL_SECONDS, until)
+        if at is not None:
+            wake["at"] = at if wake["at"] is None else min(wake["at"], at)
+            wake["names"] |= names
+        wake["settled"] = now > until
+        return wake
 
     # Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
     def note_nested(self, file_name):
@@ -906,18 +1021,23 @@ class Board:
     def feed(self):
         """One C5 feed object for the mailbox as it is now.
 
-        @interacts  see the module block; updates last_listening_at and,
-                    through note_nested, nested_cards.
+        @interacts  see the module block; updates last_listening_at,
+                    first_missing_at, wakes and, through note_nested,
+                    nested_cards.
         @deps       snapshot, read_cards, scan_messages, status_preview,
-                    file_age, after_listening, hierarchy, note_nested;
-                    tc.POLL_SECONDS.
-        @complexity O(k + m log m + n + c^2) per poll; the module block
-                    names each term.
+                    file_age, wake_of, after_listening, hierarchy,
+                    note_nested; heapq, os; tc.POLL_SECONDS.
+        @complexity O(k + m (log W + log K) + n + c^2) per poll; the module
+                    block names each term.
         @alloc      the per-poll objects the module block lists (a Message,
                     a sorted pair and a default count dict per message
-                    among them), and the returned dict; last_listening_at
-                    gains one float per name listening now and drops each
-                    past DOWN_WINDOW_S.
+                    among them, and a heap and an inbox name set per name
+                    that stopped listening), and the returned dict;
+                    last_listening_at gains one float per name listening
+                    now, first_missing_at one per name that stopped, wakes
+                    one small dict per stopped name; a sighting drops a
+                    name from the last two, and the prune past
+                    DOWN_WINDOW_S from all three.
         """
         now = self.clock()
         snap = self.snapshot()
@@ -925,20 +1045,41 @@ class Board:
         for name, pid in pids.items():
             if pid:
                 self.last_listening_at[name] = now
+                self.first_missing_at.pop(name, None)
+                self.wakes.pop(name, None)
         for name, seen in list(self.last_listening_at.items()):
             if now - seen > DOWN_WINDOW_S:
                 del self.last_listening_at[name]
+                self.first_missing_at.pop(name, None)
+                self.wakes.pop(name, None)
+            elif not pids.get(name):
+                # D28: the first poll that finds no pid after a sighting.
+                self.first_missing_at.setdefault(name, now)
 
         cards = read_cards(self.tc.ROOT / CARDS_FOLDER, self.note_nested)
         mail = snap["mail"]
         names = set(mail) | set(cards)
-        messages = scan_messages(self.tc.MAIL)
+        messages, unreadable = scan_messages(self.tc.MAIL)
 
-        partners, sent, newest_pair, newest_sent, received = {}, {}, {}, {}, {}
+        # Every stopped name's inbox file names (where its waking mail went
+        # is evidence it was read), and, while its wake window is open, its
+        # newest WAKE_CANDIDATES messages by number, kept as the walk goes.
+        inbox = {name: set() for name in self.first_missing_at}
+        candidates = {name: [] for name in self.first_missing_at
+                      if not self.wakes.get(name, {}).get("settled")}
+        partners, sent, newest_pair, newest_sent = {}, {}, {}, {}
         for msg in messages:
             if msg.sender not in newest_sent or msg.seq > newest_sent[msg.sender].seq:
                 newest_sent[msg.sender] = msg
-            received.setdefault(msg.to, []).append(msg)
+            if msg.to in inbox:
+                if not msg.read:
+                    inbox[msg.to].add(os.path.basename(msg.path))
+                heap = candidates.get(msg.to)
+                if heap is not None:
+                    if len(heap) < WAKE_CANDIDATES:
+                        heapq.heappush(heap, msg)
+                    else:
+                        heapq.heappushpop(heap, msg)
             if msg.sender == msg.to:
                 continue
             partners.setdefault(msg.sender, set()).add(msg.to)
@@ -966,9 +1107,14 @@ class Board:
             if sent_age is not None and sent_age <= WRITING_WINDOW_S:
                 state = WRITING
             elif not pid and name in self.last_listening_at:
-                got = sorted(received.get(name, ()), key=lambda msg: msg.seq, reverse=True)
-                state = after_listening(self.last_listening_at[name], now, self.tc.POLL_SECONDS, got, mine,
-                                        self.tc.STATUS / f"{name}{STATUS_SUFFIX}")
+                if name in unreadable:
+                    # C5, D28: the board cannot list the inbox, so it cannot tell.
+                    state = DOWN
+                else:
+                    wake = self.wake_of(name, now, candidates.get(name, ()))
+                    state = after_listening(self.last_listening_at[name], now, wake["at"], wake["names"],
+                                            inbox.get(name, set()), mine,
+                                            self.tc.STATUS / f"{name}{STATUS_SUFFIX}")
             elif pid:
                 state = LISTENING
             elif route == ROUTE_CODEX:
@@ -985,6 +1131,7 @@ class Board:
                 "route": route, "state": state, "listener_pid": pid,
                 # An inbox tc cannot count stays unknown, never 0, with tc's reason.
                 "unread": unread, "unread_problem": box.get("mail_problem") if box and unread is None else None,
+                "inbox_unreadable": name in unreadable,
                 "last_mail_age_s": None if newest is None else max(0, newest),
                 "status": status_preview(self.tc.STATUS, name),
                 "role": role, "role_source": role_source,
@@ -1310,8 +1457,9 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
 class BoardServer(http.server.ThreadingHTTPServer):
     """The board's HTTP server: bound to BIND_HOST, holding one Board and the token.
 
-    Board.feed() keeps state across calls (last_listening_at), so requests
-    take `feed_lock` around it. Request threads are daemon threads, so a
+    Board.feed() keeps state across calls (last_listening_at,
+    first_missing_at, wakes), so requests take `feed_lock` around it.
+    Request threads are daemon threads, so a
     stalled one never keeps the process alive. At most `max_connections`
     (MAX_CONNECTIONS) are served at once, each holding one of `slots`; one
     past that is closed at once, and each ends by REQUEST_DEADLINE_S.
