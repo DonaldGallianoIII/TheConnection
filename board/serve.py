@@ -119,8 +119,11 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             (globs and stats mail/ and status/ under tc's ROOT); reads the
             load average and /proc/meminfo itself. Never runs nvidia-smi
             and never scans the process list. Reads cards/*.json and the
-            head of status/<name>.md; lists mail/to-*/ and mail/to-*/read/
-            and stats a few message files, and for a name that stopped
+            head of status/<name>.md; lists mail/to-*/ and mail/to-*/read/,
+            each opened by its name in the folder above (mail/ once, by
+            its path) and listed in its own descriptor (P3 fix round 1a,
+            Claude Opus 5.5, unreviewed: D35), and stats a few message
+            files by path, and for a name that stopped
             listening, its status file, its last sent message and, while
             its wake window is open, its WAKE_CANDIDATES newest messages.
             Opens no message body. Writes nothing to the mailbox, and
@@ -241,6 +244,19 @@ WAKE_CANDIDATES = 16
 # error (EACCES, EIO) is a folder the board cannot list (C5: the name reads
 # down, `inbox unreadable`).
 NO_FOLDER_ERRNOS = (errno.ENOENT, errno.ELOOP, errno.ENOTDIR)
+# Model: Claude Opus 5.5 (the P3 fixer, round 1a), 2026-10-15. Status:
+# unreviewed. D35, one pinned handle (the audit's HIGH-1 and its Coverage
+# note on this scan, audits/2026-10-15-1409-full). How the scan opens
+# mail/ itself, by its path: read only, only a folder. A link there is
+# followed, as the scan always did: only the init user can swap mail/
+# (D34).
+MAIL_FLAGS = os.O_RDONLY | os.O_DIRECTORY
+# How it opens each inbox, by its name in mail/'s descriptor, and each
+# read/, by its name in its inbox's: read only, only a folder, never
+# through a link. A member who owns an inbox may swap it for a link after
+# the scan looked; the read/ the scan lists is then still the one in the
+# folder it opened.
+FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # Characters of a status line on a node (C5): one line on a node box. The
 # whole status stays in status/<name>.md.
 STATUS_PREVIEW_CHARS = 80
@@ -522,10 +538,11 @@ def scan_messages(mail):
 
     Looks in each mail/to-<name>/ and its read/. A name that does not match
     MESSAGE_NAME (a .tmp being written, a lock, anything else) is skipped.
-    A to-* entry whose stat fails (a folder the user cannot search, a dead
-    mount) is skipped on its own and its name goes in the second set, and
-    so does a name whose inbox or read/ message_names could not list; the
-    rest of the scan stands. Opens no file.
+    A to-* entry or read/ the board cannot open (a folder the user may not
+    read or search, a dead mount) is skipped on its own and its name goes
+    in the second set, and so does a name whose inbox or read/
+    message_names could not list; the rest of the scan stands. Opens no
+    file, only folders.
 
     Never follows a link, so a link a group member puts in a shared
     mailbox points the board nowhere: a to-* entry or
@@ -537,72 +554,118 @@ def scan_messages(mail):
     stand in for unread mail. Two files with one number and two senders are
     two messages.
 
-    @interacts  lists `mail`, each to-*/ folder and each to-*/read/.
-    @deps       os, re; message_names.
-    @complexity O(b + m) over b inbox folders and m file names in them.
+    Model: Claude Opus 5.5 (the P3 fixer, round 1a), 2026-10-15. Status:
+    unreviewed. D35, one pinned handle per inbox (the audit's HIGH-1 and
+    its Coverage note on this scan). mail/ is opened once, each inbox by
+    its name in mail/'s descriptor and its read/ by its name in the
+    inbox's (open_folder), and each is listed in its own descriptor
+    (message_names), never by a path. So an inbox's owner who swaps it for
+    a link or another folder after the scan opened it leads the scan
+    nowhere: the read/ listed is the one in the folder opened. A Message's
+    path still names the file by its path, for the ages feed() reads
+    after.
+
+    @interacts  opens and lists `mail`; opens each to-*/ folder by name in
+                it and each to-*/read/ by name in its inbox, lists each,
+                and closes every descriptor.
+    @deps       os, re; open_folder, message_names; MAIL_FLAGS,
+                INBOX_PREFIX, READ_FOLDER, MESSAGE_NAME, Message.
+    @complexity O(b log b + m) over b inbox folders (sorted) and m file
+                names in them.
     @alloc      one Message per message file, in a dict by recipient,
-                number and sender, returned as a list; one set of names.
+                number and sender, returned as a list; one set of names;
+                at most three descriptors at once, closed before return.
     """
     try:
-        with os.scandir(mail) as listing:
-            entries = list(listing)
+        mail_fd = os.open(mail, MAIL_FLAGS)
     except OSError:
         return [], set()
-    boxes, unreadable = [], set()
-    for entry in entries:
-        if not entry.name.startswith(INBOX_PREFIX):
-            continue
+    found, unreadable = {}, set()
+    try:
         try:
-            if entry.is_dir(follow_symlinks=False):
-                boxes.append(entry)
+            entries = sorted(name for name in os.listdir(mail_fd) if name.startswith(INBOX_PREFIX))
         except OSError:
-            unreadable.add(entry.name[len(INBOX_PREFIX):])
-    found = {}
-    for box in boxes:
-        to = box.name[len(INBOX_PREFIX):]
-        if not to:
-            continue
-        for folder, read in ((box.path, False), (os.path.join(box.path, READ_FOLDER), True)):
-            names = message_names(folder)
-            if names is None:
-                unreadable.add(to)
+            return [], set()
+        for entry in entries:
+            to = entry[len(INBOX_PREFIX):]
+            if not to:
                 continue
-            for name in names:
-                match = MESSAGE_NAME.match(name)
-                msg = Message(int(match.group(1)), match.group(2), to, os.path.join(folder, name), read)
-                found.setdefault((to, msg.seq, msg.sender), msg)
+            try:
+                box_fd = open_folder(mail_fd, entry)
+            except OSError:
+                unreadable.add(to)  # a folder this board cannot open (C5: down, `inbox unreadable`)
+                continue
+            if box_fd is None:
+                continue
+            try:
+                folders = [(box_fd, os.path.join(mail, entry), False)]
+                try:
+                    read_fd = open_folder(box_fd, READ_FOLDER)
+                except OSError:
+                    read_fd = None
+                    unreadable.add(to)
+                if read_fd is not None:
+                    folders.append((read_fd, os.path.join(mail, entry, READ_FOLDER), True))
+                try:
+                    for folder_fd, folder, read in folders:
+                        names = message_names(folder_fd)
+                        if names is None:
+                            unreadable.add(to)
+                            continue
+                        for name in names:
+                            match = MESSAGE_NAME.match(name)
+                            msg = Message(int(match.group(1)), match.group(2), to, os.path.join(folder, name), read)
+                            found.setdefault((to, msg.seq, msg.sender), msg)
+                finally:
+                    if read_fd is not None:
+                        os.close(read_fd)
+            finally:
+                os.close(box_fd)
+    finally:
+        os.close(mail_fd)
     return list(found.values()), unreadable
 
 
+# Model: Claude Opus 5.5 (the P3 fixer, round 1a), 2026-10-15. Status: unreviewed.
+def open_folder(folder_fd, name):
+    """The descriptor of the folder `name` in the folder open at `folder_fd`, opened by its name and never through a link (FOLDER_FLAGS); None for a link, nothing or not a folder (NO_FOLDER_ERRNOS). Raises OSError for a folder it cannot open: the board cannot tell what it holds.
+
+    @interacts  opens one folder by its name in `folder_fd`.
+    @deps       os; FOLDER_FLAGS, NO_FOLDER_ERRNOS.
+    @complexity O(1).
+    @alloc      one descriptor, returned (the caller closes it), or none.
+    """
+    try:
+        return os.open(name, FOLDER_FLAGS, dir_fd=folder_fd)
+    except OSError as error:
+        if error.errno in NO_FOLDER_ERRNOS:
+            return None
+        raise
+
+
 # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
-def message_names(folder):
-    """The names of the regular files in `folder` that match MESSAGE_NAME: [] for a link or no folder, None for one it cannot list.
+def message_names(folder_fd):
+    """The names of the regular files in the folder open at `folder_fd` that match MESSAGE_NAME; None when it cannot be listed.
 
-    The folder is opened with O_NOFOLLOW and O_DIRECTORY and listed through
-    that descriptor, so a folder that is a link, even one swapped in after
-    the caller looked, is never listed, and an entry counts only when it is
-    a regular file itself, never a link to one. An open that fails with one
-    of NO_FOLDER_ERRNOS is no folder: []. Any other failure, to open or to
-    list (a folder another user left closed to this one), is None: the
-    board cannot tell what the folder holds.
+    Listed through the descriptor, so the folder listed is the one opened
+    (open_folder), never one a link at its name leads to, and an entry
+    counts only when it is a regular file itself, never a link to one. A
+    failure to list (a folder another user left closed to this one) is
+    None: the board cannot tell what the folder holds. P3 fix round 1a
+    (Claude Opus 5.5, unreviewed): D35. It takes the open descriptor, not
+    a path: the caller opens each folder by its name in the one above.
 
-    @interacts  opens, lists and closes one folder.
-    @deps       os, re.
+    @interacts  lists one open folder; never closes it.
+    @deps       os, re; MESSAGE_NAME.
     @complexity O(f) over f entries in the folder.
     @alloc      one list of names, returned.
     """
     try:
-        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    except OSError as error:
-        return [] if error.errno in NO_FOLDER_ERRNOS else None
-    try:
-        with os.scandir(fd) as entries:
+        with os.scandir(folder_fd) as entries:
             return [entry.name for entry in entries
                     if MESSAGE_NAME.match(entry.name) and entry.is_file(follow_symlinks=False)]
     except OSError:
         return None
-    finally:
-        os.close(fd)
 
 
 def status_preview(folder, name):
