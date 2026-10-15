@@ -109,6 +109,19 @@ FAKE_EXE_MODE = 0o755
 # terminal), legal on Linux, illegal under C0.
 ESCAPE_CARD_NAME = "deep\x1b[2J.json"
 # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+# C5 and D24's numbers, written here rather than read from serve.py: down's
+# window, the grace a woken listener reads working in, and tc's poll.
+DOWN_WINDOW_S = 600
+WOKEN_GRACE_S = 120
+TC_POLL_S = 5
+# tc wait sees new mail at its next poll, TC_POLL_S at most; a woken
+# listener lets go of its lock within this long of the send.
+WAKE_CEILING_S = 2 * TC_POLL_S
+# A status written, or a message sent, this long after the last sighting:
+# a sign of life after the wake, and past the writing window.
+SIGN_OF_LIFE_S = 30
+# A status this long before the last sighting: written before the wake.
+OLD_STATUS_S = 100
 # The seeded property test over the feed's roles and levels: a fixed seed,
 # so a failure replays; a few hundred cases, so it runs in well under a
 # second with no disk. Names are single letters, so the order-reversing
@@ -195,22 +208,23 @@ def write_card(root, name, kind="claude", account="work", route="local",
     (folder / f"{name}.json").write_text(json.dumps(card), encoding="utf-8")
 
 
-def put_message(root, seq, sender, to):
+def put_message(root, seq, sender, to, unread=False):
     """Write one read message the way tc lays one out, without tc's router; return its path.
 
-    The file is mail/to-<to>/read/NNNNNN-from-<sender>.md, written to a
-    .tmp sibling and renamed, and mail/.seq is raised to `seq` under its
-    flock, as tc's send does. For mail to or from any name, including one
-    whose card would route a real send elsewhere.
+    The file is mail/to-<to>/read/NNNNNN-from-<sender>.md (or, with
+    `unread`, mail/to-<to>/NNNNNN-from-<sender>.md, still in the inbox),
+    written to a .tmp sibling and renamed, and mail/.seq is raised to `seq`
+    under its flock, as tc's send does. For mail to or from any name,
+    including one whose card would route a real send elsewhere.
 
     @interacts  writes one message file and mail/.seq, making
-                mail/to-<to>/read/ if needed.
+                mail/to-<to>/read/ (or mail/to-<to>/) if needed.
     @deps       fcntl, pathlib.
     @complexity O(1).
     @alloc      the returned path.
     """
     mail = pathlib.Path(root) / "mail"
-    folder = mail / f"to-{to}" / "read"
+    folder = mail / f"to-{to}" if unread else mail / f"to-{to}" / "read"
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{seq:06d}-from-{sender}.md"
     tmp = path.with_suffix(".tmp")
@@ -513,6 +527,134 @@ class FeedTest(unittest.TestCase):
         })
         self.assertEqual((third["w1"], third["w2"], third["l1"]),
                          (("listening", STAND_IN_PID), ("down", None), ("listening", STAND_IN_PID)))
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def test_a_real_wake_reads_working_then_woken_and_never_down(self):
+        """b and c listen; a mails b, b's wait exits; c is killed with no mail (D24).
+
+        One poll after the wake b reads working (the grace), past
+        WOKEN_GRACE_S with nothing read it reads woken, and after `tc read
+        b` working again: never down. c, a listener lost with no mail,
+        reads down: the control, so the test cannot pass by never saying
+        down. Past DOWN_WINDOW_S both fade to idle. b's listener output
+        says MAIL:, so its wait ended on the mail, not on a kill. The
+        message's mtime is set on the fake clock's own line, so no wall
+        clock decides a state.
+
+        Must reject C5's old `down` for every name seen listening and not
+        listening now: b would read down one poll after its wake.
+
+        @interacts  two proven listeners; one `tc send`, one `tc read`;
+                    five feed() calls on a fake clock; reads /proc/locks
+                    until b's wait lets go.
+        @deps       _root.TcRoot, _root.flock_holders, serve.Board,
+                    age_file.
+        @complexity O(1), plus up to WAKE_CEILING_S for b's wait to see
+                    its mail.
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            clock = FakeClock(FAKE_NOW)
+            board = serve.Board(root=root.path, clock=clock)
+            with root.listener("b", LISTENER_TIMEOUT_SECONDS) as pid_b:
+                with root.listener("c", LISTENER_TIMEOUT_SECONDS) as pid_c:
+                    seen = by_id(board.feed())
+                    code, out, err = root.tc("send", "--from", "a", "--to", "b", "task")
+                    self.assertEqual(code, 0, f"tc send exited {code}: {err}")
+                    lock = root.path / "mail" / ".wait-b.lock"
+                    end = time.monotonic() + WAKE_CEILING_S
+                    while pid_b in _root.flock_holders(lock) and time.monotonic() < end:
+                        time.sleep(_root.LOCK_POLL_SECONDS)
+                    self.assertNotIn(pid_b, _root.flock_holders(lock), f"b's wait never saw its mail in {WAKE_CEILING_S} s")
+                    age_file(root.path / "mail" / "to-b" / "000001-from-a.md", FAKE_NOW + 1)
+                said = "".join(p.read_text() for p in root.base.glob("listener-b-*.out"))
+                clock.now = FAKE_NOW + 1 + RECENT_SEND_S
+                grace = by_id(board.feed())
+                clock.now = FAKE_NOW + 1 + WOKEN_GRACE_S + 1
+                late = by_id(board.feed())
+                code, out, err = root.tc("read", "b")
+                self.assertEqual(code, 0, f"tc read b exited {code}: {err}")
+                read = by_id(board.feed())
+                clock.now = FAKE_NOW + DOWN_WINDOW_S + 1
+                faded = by_id(board.feed())
+
+        def pair(nodes):
+            """{b, c: (state, listener_pid)}.
+
+            @interacts  none.
+            @deps       none.
+            @complexity O(1).
+            @alloc      one dict, returned.
+            """
+            return {name: (nodes[name]["state"], nodes[name]["listener_pid"]) for name in ("b", "c")}
+
+        self.assertIn("MAIL:", said, f"b's wait did not end on its mail: {said!r}")
+        self.assertEqual(pair(seen), {"b": ("listening", pid_b), "c": ("listening", pid_c)})
+        self.assertEqual(pair(grace), {"b": ("working", None), "c": ("down", None)})
+        self.assertEqual(pair(late), {"b": ("woken", None), "c": ("down", None)})
+        self.assertEqual(pair(read), {"b": ("working", None), "c": ("down", None)})
+        self.assertEqual(pair(faded), {"b": ("idle", None), "c": ("idle", None)})
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def test_a_sign_of_life_after_a_wake_reads_working(self):
+        """Past the grace, a woken name reads working on a fresh status or a send, woken on neither (D24).
+
+        A stand-in snapshot names s1, s2, q and d listening, then none. s1,
+        s2 and q each got a message after the sighting, still unread. s1
+        then wrote its status and s2 sent a message, both SIGN_OF_LIFE_S
+        after the sighting; q's status is from before it. Past
+        WOKEN_GRACE_S: s1 and s2 working, q woken, d (no mail) down. s1's
+        status shows as it is; q's reads as its last status.
+
+        Must reject a woken state that ignores a status or a send, and a
+        status from before the wake taken as a sign of life.
+
+        @interacts  four cards' worth of mail and two status files in a
+                    fresh TcRoot; two feed() calls with Board.snapshot
+                    swapped for a stand-in.
+        @deps       _root.TcRoot, put_message, age_file, serve.Board,
+                    unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        names = ("s1", "s2", "q", "d")
+        listening = {}
+
+        def stand_in():
+            """A snapshot in Board.snapshot's shape naming `listening` and an inbox for each name.
+
+            @interacts  reads `listening`.
+            @deps       none.
+            @complexity O(n) over the four names.
+            @alloc      one small dict, returned.
+            """
+            return {"time": "2030-03-17T12:00:00-05:00",
+                    "machine": {"load1": 0.0, "cores": 1, "mem_avail_pct": 50.0},
+                    "listeners": dict(listening),
+                    "mail": {name: {"unread": 0, "newest_mail_age_s": None} for name in names}}
+
+        with _root.TcRoot() as root:
+            clock = FakeClock(FAKE_NOW)
+            board = serve.Board(root=root.path, clock=clock)
+            status = root.path / "status"
+            status.mkdir()
+            with mock.patch.object(board, "snapshot", stand_in):
+                listening.update(dict.fromkeys(names, STAND_IN_PID))
+                board.feed()
+                listening.clear()
+                for seq, name in enumerate(("s1", "s2", "q"), start=1):
+                    age_file(put_message(root.path, seq, "boss", name, unread=True), FAKE_NOW + 1)
+                for name, text, at in (("s1", "parsing the logs", FAKE_NOW + SIGN_OF_LIFE_S),
+                                       ("q", "before the wake", FAKE_NOW - OLD_STATUS_S)):
+                    (status / f"{name}.md").write_text(f"## {name} status, 2030-03-17T12:00:00-05:00\n\n{text}\n")
+                    age_file(status / f"{name}.md", at)
+                age_file(put_message(root.path, 4, "s2", "boss"), FAKE_NOW + SIGN_OF_LIFE_S)
+                clock.now = FAKE_NOW + 1 + WOKEN_GRACE_S + 1
+                later = by_id(board.feed())
+
+        self.assertEqual({name: later[name]["state"] for name in names},
+                         {"s1": "working", "s2": "working", "q": "woken", "d": "down"})
+        self.assertEqual((later["s1"]["status"], later["q"]["status"]), ("parsing the logs", "before the wake"))
 
     def test_a_message_from_the_future_is_not_writing(self):
         """A message whose mtime is an hour ahead of now gives its sender no age: not writing.

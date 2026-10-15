@@ -199,6 +199,12 @@ export const STATES = Object.freeze({
   writing: { glyph: '✎', word: 'writing' },
   idle: { glyph: '○', word: 'idle' },
   down: { glyph: '✕', word: 'no listener' },
+  // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+  // D24: a listener that mail woke, since tc wait exits on mail. working:
+  // it shows life after the wake, or the wake is under two minutes old;
+  // calm. woken: no sign of life past that; a warning, never down.
+  woken: { glyph: '△', word: 'woken · not read' },
+  working: { glyph: '◔', word: 'working' },
   // Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
   // C5's two new states: a codex name is reached by its doorbell, with no
   // listener on purpose; an ssh name lives on another machine (O8).
@@ -648,12 +654,19 @@ function nativeAllowed(p, q) {
  * sessions.
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  */
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// D24's two states in words, on both legends, with the one case they
+// cannot see.
+const WAKE_WORDS = `${STATES.working.glyph} ${STATES.working.word}: mail woke it and it is on its turn `
+  + `(only a crash after reading looks the same) · ${STATES.woken.glyph} ${STATES.woken.word}: `
+  + 'mail woke it and nothing has read it';
 export const LEGEND_WORDS = Object.freeze({
   outline: 'outline: each session under the one it reports to, or that mail shows it works for · '
-    + 'traffic: newest first, arrow toward the reader',
+    + `traffic: newest first, arrow toward the reader · ${WAKE_WORDS}`,
   graph: 'thin line: reports to, or inferred from mail · '
     + `thick line: mail, none in the last ${CONFIG.FLOW_AGE_S} s · `
-    + 'dashes, arrow and words: mail now, arrow at the reader · long dash: native, not observed · dotted: no listener',
+    + 'dashes, arrow and words: mail now, arrow at the reader · long dash: native, not observed · dotted: no listener · '
+    + WAKE_WORDS,
   empty: 'no sessions yet · send a message or start a listener',
 });
 
@@ -668,8 +681,9 @@ export const TREE_WORDS = Object.freeze({
 });
 
 /**
- * Words on a node's third line. A down node's status was written while it
- * listened, so it reads as the last thing it said, never as its state now.
+ * Words on a node's third line. A down or woken node's status was written
+ * before it stopped listening, so it reads as the last thing it said,
+ * never as its state now.
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  */
 export const NOTE_WORDS = Object.freeze({
@@ -1391,35 +1405,42 @@ function upperFirst(p, q, pos) {
 }
 
 /**
- * The pill's words and state for a feed: `live · N listening`, or
- * `N listening · M no listener` while a node is down, in the same words its
- * box shows (STATES.down). Listeners are counted by listener_pid (a pid tc
- * read from /proc/locks), never by state: under D15 a listener that just
- * sent reads writing and is still listening.
+ * The pill's words and state for a feed: `live · N listening`, or, while a
+ * node is down or woken, `N listening · M no listener · K woken · not
+ * read` (each part only when it counts one or more), in the same words the
+ * boxes show (STATES.down, STATES.woken), and the state turns to warn. A
+ * working node raises nothing (D24: it is on its turn). Listeners are
+ * counted by listener_pid (a pid tc read from /proc/locks), never by
+ * state: under D15 a listener that just sent reads writing and is still
+ * listening.
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @interacts  none; pure
- * @complexity O(n) over n feed nodes  @alloc one object
+ * @complexity O(n) over n feed nodes  @alloc one object and a short list
  * @returns {{ text, state, listening }}  state: 'up' | 'warn', for createWindow's setConn
  */
 export function pillText(feed) {
   const nodes = (feed && feed.nodes) || [];
   const listening = nodes.filter((n) => n.listener_pid).length;
-  const down = nodes.filter((n) => n.state === 'down').length;
-  return down
-    ? { text: `${listening} listening · ${down} ${STATES.down.word}`, state: 'warn', listening }
+  const warnings = ['down', 'woken']
+    .map((state) => [nodes.filter((n) => n.state === state).length, STATES[state].word])
+    .filter(([count]) => count > 0)
+    .map(([count, word]) => `${count} ${word}`);
+  return warnings.length
+    ? { text: [`${listening} listening`, ...warnings].join(' · '), state: 'warn', listening }
     : { text: `live · ${listening} listening`, state: 'up', listening };
 }
 
 /**
  * A node's third line: a reports_to that names no node, else its status. A
- * down node's status is stale, so it reads `last status: ...` and never
- * passes for the node's state now.
+ * down or woken node's status is stale (it was written before the node
+ * stopped listening), so it reads `last status: ...` and never passes for
+ * the node's state now.
  * @complexity O(1)  @alloc one string
  */
 function noteFor(n, known) {
   if (n.reports_to && !known.has(n.reports_to)) return `${LINK_WORDS.reports_to} ${n.reports_to} · ${LINK_WORDS.notFound}`;
   if (!n.status) return '';
-  return n.state === 'down' ? `${NOTE_WORDS.lastStatus} ${n.status}` : n.status;
+  return n.state === 'down' || n.state === 'woken' ? `${NOTE_WORDS.lastStatus} ${n.status}` : n.status;
 }
 
 // ---------- roots, headings and the phone's outline ----------
@@ -1545,7 +1566,7 @@ export function outlineView(feed) {
  * one view per node and per edge, keyed by id. Node: title (roleTitle), pos
  * and h (layoutLevels: the box's place and height), state, detail (unread
  * count), note (`reports to N · not found`, else the status line, as `last
- * status: ...` on a down node), `badges` (badgesOf: `native with b · not
+ * status: ...` on a down or woken node), `badges` (badgesOf: `native with b · not
  * observed` on both boxes of a native pair, `reports to q · cycle` on a
  * cycle's root), and `connector`: on a node with a parent in the layout,
  * the hierarchy's own thin line from the parent's out port to this node's
@@ -1567,7 +1588,8 @@ export function outlineView(feed) {
  *   connectors and the tree wires where it can be. It flows, with dashes,
  *   an arrow at the reader and the label `from → to · #seq`, when its
  *   pair's newest wire is at most FLOW_AGE_S old; quiet, it is a solid line
- *   with no label. It is down when either end is down.
+ *   with no label. It is down when either end is down; a woken end (D24)
+ *   never makes it down: the mail that woke it is drawn as any mail is.
  * - a native link with no mailbox link on its pair: the same runs, long
  *   dashed, no label; its words, `native · not observed`, are in its
  *   title, on both boxes' badges and in the legend. On a pair with mail

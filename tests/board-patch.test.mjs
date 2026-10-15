@@ -87,19 +87,48 @@ const FEED_B = {
   links: [mailbox('a', 'b'), mailbox('a', 'd')],
 };
 
-test('the two new states have a glyph and a word, distinct from the other four', () => {
-  for (const name of ['doorbell', 'remote']) {
+test('C5\'s states each have a glyph and a word of their own, D24\'s working and woken too', () => {
+  for (const name of ['doorbell', 'remote', 'working', 'woken']) {
     assert.ok(STATES[name], `no state ${name}`);
     assert.ok(STATES[name].glyph && STATES[name].word, `${name} needs a glyph and a word`);
   }
   assert.equal(STATES.doorbell.glyph, '◎');
   assert.equal(STATES.remote.glyph, '⇄');
   assert.equal(STATES.remote.word, 'remote · not checked');
+  assert.equal(STATES.woken.word, 'woken · not read');
   const glyphs = Object.values(STATES).map((s) => s.glyph);
   const words = Object.values(STATES).map((s) => s.word);
-  assert.equal(Object.keys(STATES).length, 6);
+  assert.equal(Object.keys(STATES).length, 8);
   assert.equal(new Set(glyphs).size, glyphs.length, `glyphs repeat: ${glyphs}`);
   assert.equal(new Set(words).size, words.length, `words repeat: ${words}`);
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// D24: a session that mail woke is working (calm) or woken (a warning), and
+// neither is down: its wire stays a mail wire, never the dotted dead one.
+test('a woken session warns in its own glyph and words and its wire is not the dotted dead wire; a working one is calm', () => {
+  const feed = {
+    nodes: [
+      node('a', { listener_pid: 11 }), node('b', { state: 'woken', status: 'parsing the logs' }),
+      node('c', { state: 'working', status: 'reading the diff' }),
+    ],
+    wires: [{ from: 'a', to: 'b', seq: 4, age_s: 0 }],
+    links: [mailbox('a', 'b'), mailbox('a', 'c')],
+  };
+  const pill = pillText(feed);
+  assert.deepEqual([pill.state, pill.text], ['warn', `1 listening · 1 ${STATES.woken.word}`]);
+  assert.ok(!pill.text.includes(STATES.down.word), `the pill calls a woken session down: ${pill.text}`);
+  assert.deepEqual(pillText({ nodes: [node('a', { listener_pid: 11 }), node('c', { state: 'working' })] }),
+    { text: 'live · 1 listening', state: 'up', listening: 1 }, 'a working session raised the pill');
+  const view = boardView(feed);
+  assert.equal(view.edges['mailbox:a>b'].down, false, 'the wire to a woken session is drawn as the dead wire');
+  assert.equal(view.edges['mailbox:a>b'].flow, true, 'the mail that woke b does not flow to it');
+  assert.equal(view.edges['mailbox:a>c'].down, false);
+  assert.deepEqual([view.nodes.b.state, view.nodes.b.note], ['woken', `${NOTE_WORDS.lastStatus} parsing the logs`]);
+  assert.deepEqual([view.nodes.c.state, view.nodes.c.note], ['working', 'reading the diff']);
+  const rows = Object.fromEntries(outlineView(feed).groups.flatMap((g) => g.rows).map((r) => [r.id, r]));
+  assert.deepEqual([rows.b.glyph, rows.b.word], [STATES.woken.glyph, STATES.woken.word]);
+  assert.deepEqual([rows.c.glyph, rows.c.word], [STATES.working.glyph, STATES.working.word]);
 });
 
 test('patchBoard keeps what stays, drops what went, adds what came, and rebuilds nothing', () => {

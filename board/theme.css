@@ -410,6 +410,7 @@
 .tc-row-badge { flex: 1 0 100%; font-size: 11px; color: var(--tc-muted); overflow-wrap: anywhere; word-spacing: .2em; }
 .tc-row[data-state="writing"] .tc-row-state { color: var(--tc-cyan); font-weight: 600; }
 .tc-row[data-state="down"] .tc-row-state { color: var(--tc-red); font-weight: 600; }
+.tc-row[data-state="woken"] .tc-row-state { color: var(--tc-amber); font-weight: 700; }
 .tc-traffic-line { font-family: var(--tc-mono); font-size: 11px; color: var(--tc-text); padding: 2px 0; overflow-wrap: anywhere; }
 .tc-wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
 /* A wire's words are its title, shown on hover: the line itself
@@ -479,6 +480,14 @@
 .tc-node[data-state="doorbell"] .tc-node-sub { color: var(--tc-muted); font-weight: 600; }
 .tc-node[data-state="remote"] { border-style: dotted; border-width: 2px; }
 .tc-node[data-state="remote"] .tc-node-sub { color: var(--tc-muted); }
+/* Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status:
+ * unreviewed. D24's two states, told apart by glyph and word first.
+ * working is calm, drawn as listening is. woken is a warning: a heavier
+ * solid border and bold words, never down's dashed border, and its wire
+ * stays a mail wire, never the dotted one. */
+.tc-node[data-state="working"] .tc-node-sub { color: var(--tc-muted); }
+.tc-node[data-state="woken"] { border-color: var(--tc-amber); border-width: 3px; }
+.tc-node[data-state="woken"] .tc-node-sub { color: var(--tc-amber); font-weight: 700; }
 .tc-node.sel { box-shadow: 0 0 0 2px var(--tc-cyan), var(--tc-shadow-sel); }
 
 /* Ports: shape carries direction. In = hollow ring, out = filled dot. */

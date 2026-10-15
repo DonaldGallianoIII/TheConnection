@@ -14,10 +14,10 @@
  * share another and do not, so the board draws both kinds of native pair.
  * The mail is sent with this tree's tc. Six listeners start with
  * `tc wait --timeout`, each proven by `tc health`; then `d`'s and `e2`'s
- * are seen by the feed and stopped by their pids, so both are down
- * workers: `d` is b's only child on its side, and `e2` sits in a's wrapped
- * row, so its wire shares a stretch with a's quiet wire to `b` and its
- * flowing one to `e3`. It starts
+ * are seen by the feed and stopped by their pids with no new mail, so both
+ * are down workers, not woken ones (D24): `d` is b's only child on its
+ * side, and `e2` sits in a's wrapped row, so its wire shares a stretch
+ * with a's quiet wire to `b` and its flowing one to `e3`. It starts
  * board/serve.py on a port the OS picks, under its own time limit, opens
  * the board at 1280 x 900 and 390 x 844, and fails on any of: a console
  * error, sideways scroll, drawn text under 11 px, a session missing from the
@@ -70,8 +70,9 @@
  *             and one board/serve.py child and stops each by its own pid;
  *             asks serve.py's /feed twice with the token; starts one
  *             headless Chromium and closes it; sets file times on the
- *             mailbox's messages so the newest wires flow while the page is
- *             open; takes one more screenshot per desktop page, kept in
+ *             mailbox's messages, once before the down workers are made
+ *             and again before each page, so the newest wires flow while
+ *             the page is open and no down worker reads woken; takes one more screenshot per desktop page, kept in
  *             memory, to read the down wires' pixels; listens for SIGTERM
  *             and SIGINT. --self-test writes a
  *             fake playwright module to a temp folder, runs this file as a
@@ -125,8 +126,10 @@ const MAIL = [
   ['z', 'y3'], ['z', 'a'], ['a', 'z'], ['a', 'e1'], ['a', 'e2'], ['a', 'e3'], ['p1', 'p2'], ['p2', 'p1'], ['b', 'd'],
 ];
 // Messages from this seq on are made fresh before each page opens, so their
-// wires flow (the feed's 10 s writing window) and carry labels: seven pairs,
-// among them a wire between the two trees and one between the peers.
+// wires flow (the feed's 10 s writing window) and carry labels: five pairs,
+// among them a wire between the two trees and one between the peers. A
+// message to a down worker stays old: mail that reached it after it was
+// last seen listening would read as a wake (D24), not a listener lost.
 const FRESH_FROM_SEQ = 10;
 // Every other message is set this old, past the writing window, so only
 // the fresh ones flow and only their senders read writing.
@@ -294,7 +297,8 @@ function buildMailbox() {
 
 /**
  * Set every message from FRESH_FROM_SEQ on to now, so its wire flows, and
- * every older one OLD_AGE_S back, so it does not.
+ * every older one OLD_AGE_S back, so it does not. Every message to a down
+ * worker is set old too, so it reads down and never woken (D24).
  * @complexity O(m) over m message files  @alloc one list of names
  */
 function freshen(root) {
@@ -302,9 +306,10 @@ function freshen(root) {
   const old = new Date(now.getTime() - OLD_AGE_S * MS_PER_S);
   const mail = join(root, 'mail');
   for (const box of readdirSync(mail).filter((d) => d.startsWith('to-'))) {
+    const toDown = DOWN.includes(box.slice('to-'.length));
     for (const where of [join(mail, box), join(mail, box, 'read')]) {
       for (const file of readdirSync(where).filter((f) => f.endsWith('.md'))) {
-        const when = Number(file.slice(0, file.indexOf('-'))) >= FRESH_FROM_SEQ ? now : old;
+        const when = !toDown && Number(file.slice(0, file.indexOf('-'))) >= FRESH_FROM_SEQ ? now : old;
         utimesSync(join(where, file), when, when);
       }
     }
@@ -842,6 +847,9 @@ async function check(chromium) {
     const url = await startServer(root, children);
     halt();
     say(`serve.py: ${url} (pid ${children.at(-1).pid}; it ends by itself ${process.env[SERVE_LIMIT_ENV] || SERVE_LIMIT_S} s after start)`);
+    // The mail was sent moments ago; aged now, none of it reads as waking
+    // a down worker after the feed saw it listening (D24).
+    freshen(root);
     const downPids = await makeDown(root, url, listenerOf);
     halt();
     say(`down workers: ${DOWN.join(', ')} (the feed saw their listeners; pids ${downPids.join(' ')} stopped; tc health shows none; `

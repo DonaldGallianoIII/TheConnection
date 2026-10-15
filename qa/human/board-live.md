@@ -118,14 +118,22 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
    - Within 3 s the same wire flows the other way, `a → b · #2`, with the
      arrow at `b`.
    - `a` reads `✎ writing` with a thicker border, for about 10 s.
-   - `b`'s listener in terminal 2 exits with `MAIL:`. If step 6 was less
-     than 10 s ago, `b` still reads `✎ writing` from its own send; that is
-     expected, not a failure. Within 3 s of those 10 s running out (at once,
-     if they already have), `b` reads `✕ no listener` with a dashed border,
-     its wire turns dotted, and the pill reads `1 listening · 1 no
-     listener`, the same words as the box.
-8. In terminal 2: `./tc read b`, then `./tc wait b` again.
-   - Within 3 s `b` reads `● listening` again and the pill goes back to
+   - `b`'s listener in terminal 2 exits with `MAIL:`, the way a session's
+     listener ends when mail wakes it. If step 6 was less than 10 s ago,
+     `b` still reads `✎ writing` from its own send; that is expected, not a
+     failure. After that, `b` reads `◔ working`: mail woke it, and it may be
+     on its turn (D24). It never reads `✕ no listener`, its wire stays a
+     mail wire (dashed while the message is new, then solid), never dotted,
+     and the pill reads `live · 1 listening`: only `c` holds a listener now.
+   - Read nothing for 2 minutes. `b` then reads `△ woken · not read` with
+     a heavier solid border: mail woke it and nothing has read it. The pill
+     reads `1 listening · 1 woken · not read`, the same words as the box.
+     The wire is still not dotted.
+8. In terminal 2: `./tc read b`.
+   - Within 3 s `b` reads `◔ working` again: the read is a sign of life.
+     The pill goes back to `live · 1 listening`.
+   Then, in terminal 2, `./tc wait b` again.
+   - Within 3 s `b` reads `● listening` and the pill reads
      `live · 2 listening`.
 9. Make `a` a relay. In terminal 4: `./tc send --from a --to c "second task"`,
    then in terminal 3 `./tc read c` and `./tc wait c` again, then in
@@ -197,10 +205,12 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     The page draws in grayscale. Check each of these reads without color:
     - Every state by its glyph and word: `● listening`, `✎ writing` (send a
       message from a name with no listener, such as `a`, and look within
-      10 s), `○ idle`, `✕ no listener`, `◎ doorbell`,
+      10 s), `○ idle`, `✕ no listener`, `◔ working` and
+      `△ woken · not read` (steps 7 and 8, again in gray), `◎ doorbell`,
       `⇄ remote · not checked`.
     - The second cue on each box: thick border for writing, dashed for no
-      listener, double for doorbell, dotted for remote.
+      listener, a heavier solid border for woken, double for doorbell,
+      dotted for remote. Working has none: it is calm.
     - Ports: the port on each box's top edge is a hollow ring (in), the one
       on its bottom edge a filled dot (out). Only the thin tree lines touch
       them; every other wire meets a box at its side.
@@ -284,9 +294,9 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       answer N s ago`, the pill reads the same with `is serve.py running?`,
       and no wire's dashes move: nothing looks live.
     - Restart the server with the same command and open the new URL it
-      prints (the token is new). Nothing reads `✕ no listener` until a
-      listener has been seen and then stops: a restart forgets who was
-      listening.
+      prints (the token is new). Nothing reads `✕ no listener`,
+      `◔ working` or `△ woken · not read` until a listener has been seen
+      and then stops: a restart forgets who was listening.
 23. A reports_to cycle. Write two cards that report to each other:
     ```
     echo '{"version": 1, "name": "p", "kind": "claude", "account": "lab", "route": "local", "reports_to": "q"}' > $TC_ROOT/cards/p.json
