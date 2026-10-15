@@ -1,10 +1,11 @@
 # SSH-1: the member who makes an outbox/to-<name>/ can still move the others' mail in it
 
-Model:  Claude Opus 5.5 (the SSH lane agent), 2026-10-15
+Model:  Claude Opus 5.5 (the SSH lane agent), 2026-10-15; the Pause line
+        and the Ruling filled in fix round 1 by the SSH fixer, Claude
+        Opus 5.5, 2026-10-15
 Status: unreviewed
-Pause:  open. Nothing built waits on it: the lane built lane note 2 as
-        written (each outbox/to-<name>/ and its sent/ and refused/
-        sticky, 3775), and this is what stays open after it.
+Pause:  settled by D32 and D33 (a2, for Donald, 2026-10-15), and built in
+        the SSH lane's fix round 1. The question below is kept as asked.
 
 ## The question
 
@@ -57,3 +58,23 @@ is narrow (a member who sends to the same far name first, and then
 moves files by hand), and nothing in tc moves another member's file.
 
 ## Ruling
+
+D32 (a2, for Donald, 2026-10-15) took neither option as written: each
+member gets a branch of their own at the top of the outbox,
+`outbox/<user>/to-<name>/` with `sent/` and `refused/`, every folder made
+and owned by that member, rather than a folder per sender inside each
+queue. D33 part 1 (the SSH lane review) added what makes it hold against
+every member: each branch and every folder in it is `2750` (no group
+write, so nobody plants anything in another's branch); tc refuses, exit
+1 and nothing written, a branch it finds owned by anyone else, a link or
+not a folder, with words naming the owner and the one `mv -T` the user
+who ran init runs to move it aside; and `tc health` lists such a
+squatted branch. D33 part 2 moved the send lock into the branch, at
+`0600`.
+
+Built in fix round 1 (the handoff's "Fix round 1" section has the
+commits): `claim_branch`, `squatted_branches`, `outbox_branch` and
+`outbox_queue` in `tc`; the proof is
+`tests/test_ssh_route.py`'s
+`SharedOutboxTest.test_another_member_can_move_rename_or_remove_nothing_in_a_branch_whoever_sent_first`,
+and `qa/human/route-shared.md` steps 36 and 39 are the two-user check.

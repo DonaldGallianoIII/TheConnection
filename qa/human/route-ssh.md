@@ -1,6 +1,9 @@
 # QA: the ssh route, the outbox, tc flush and tc gate, across two machines (C3)
 
-Model:  Claude Opus 5.5 (the SSH lane agent), 2026-10-15
+Model:  Claude Opus 5.5 (the SSH lane agent), 2026-10-15; the outbox
+        paths (D32), the origin id's shape (D33), the far warnings, and
+        the step numbers, steps 13, 16 and 18, and the undo changed in fix
+        round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15
 Status: unreviewed
 
 What this checks: mail crosses to a second machine and back, and a key
@@ -22,7 +25,7 @@ Every name here is made up. Use yours, and keep them out of the results:
 |---|---|
 | `homebox` | the machine you send from |
 | `farbox` | the other machine |
-| `you` | your Linux user on homebox |
+| `you` | your Linux user on homebox, and the name of your outbox branch there |
 | `qa` | your Linux user on farbox |
 | `farbox-tc` | an ssh alias on homebox for `qa` on farbox, with the QA key |
 | `homebox-tc` | an ssh alias on farbox for `you` on homebox (the way back) |
@@ -31,17 +34,22 @@ Every name here is made up. Use yours, and keep them out of the results:
 
 Before you start:
 
-- Both machines run this branch's `tc`. The far one needs `tc gate` and
-  `tc send --origin`: an older far tc answers `--origin` with a usage
-  error (exit 9), and every message then lands in `refused/`. If that
-  happens, update the far tc, move each file from
-  `outbox/to-<name>/refused/` back to `outbox/to-<name>/` by hand, and
-  run `tc flush`.
+- Both machines run this branch's `tc`, fix round 1 or later. The far
+  one needs `tc gate` and `tc send --origin` with the id's random part
+  (D33): an older far tc answers `--origin` with a usage error (its
+  exit 9), homebox exits 11 (refused by the far side with a code tc does
+  not know), and every message lands in `refused/`. If that happens,
+  update the far tc, move each file from
+  `outbox/you/to-<name>/refused/` back to `outbox/you/to-<name>/` by
+  hand, and run `tc flush`.
 - `qa`'s login shell on farbox is POSIX (sh, bash, dash or zsh). ssh
   hands the remote command to it, and tc quotes for POSIX (C3).
 - farbox runs an ssh server you can reach from homebox. The way back
-  (steps 18 to 21) needs one on homebox too; WSL2 often has none. If
+  (steps 19 to 22) needs one on homebox too; WSL2 often has none. If
   so, record those steps as not run.
+- Your ssh mail waits in your own branch of the outbox,
+  `outbox/you/` (D32), named for your login: below, `you` stands for
+  it.
 - Both mailboxes are scratch folders made below, never the live one.
 
 ## Setup
@@ -98,9 +106,12 @@ Before you start:
    - It exits 0 and prints `sent over ssh to farbox-tc: sent #1 to
      far-b: /home/qa/tc-qa/mail/to-far-b/000001-from-home-a.md` (the
      numbers are farbox's).
-   - `ls ~/tc-qa-home/outbox/to-far-b/sent/` lists
-     `000001-from-home-a.md`, the record of the send (D25), and
-     `ls ~/tc-qa-home/outbox/to-far-b/` shows no message waiting.
+   - `ls ~/tc-qa-home/outbox/you/to-far-b/sent/` lists
+     `000001-from-home-a.md`, the record of the send (D25, D32), and
+     `ls ~/tc-qa-home/outbox/you/to-far-b/` shows no message waiting.
+   - `head -n 1 ~/tc-qa-home/outbox/you/to-far-b/sent/000001-from-home-a.md`
+     ends with `, origin <32 hex digits>-1-<32 hex digits>-home-a`: the
+     id every retry of this message sends (D33).
    - On farbox: `tc read far-b` prints `# #1 from home-a to far-b,
      <time>, via ssh gate, key home-a`, then `hello far`.
 10. On homebox: `tc send --from someone-else --to far-b "who am I"`.
@@ -126,12 +137,12 @@ Before you start:
     '~/tc-qa/tc'`, then `tc send --from home-a --to onward "go on"`.
     - homebox prints `tc gate: onward is not a local name; the gate does
       not forward`, then `refused by farbox-tc (exit 7); filed in
-      .../outbox/to-onward/refused/<n>-from-home-a.md, and nothing
+      .../outbox/you/to-onward/refused/<n>-from-home-a.md, and nothing
       retries it`, and exits 7.
     - Beside it, `<n>-from-home-a.md.stderr` holds the far exit code and
-      stderr.
-    - On farbox, `ls ~/tc-qa/outbox` shows no `to-onward`: no ssh ran
-      there.
+      stderr, through tc's printable filter (no raw terminal escapes).
+    - On farbox, `ls ~/tc-qa` shows no `outbox` folder: no ssh ran
+      there, so nothing made one.
 
 ## A dead target keeps its mail in order (C3, D23)
 
@@ -148,7 +159,7 @@ Before you start:
     --from home-a --to far-c "second"`.
     - The first exits 4: `could not reach farbox-tc-dead (ssh: connect to
       host localhost port 1: Connection refused); kept in outbox:
-      .../outbox/to-far-c/<n>-from-home-a.md. Run: tc flush`.
+      .../outbox/you/to-far-c/<n>-from-home-a.md. Run: tc flush`.
     - The second exits 4 without trying: `farbox-tc-dead has 1 waiting
       in the outbox; queued behind them. Run: tc flush`.
     - `tc flush` tries the first only, says `could not reach` for it and
@@ -157,8 +168,11 @@ Before you start:
 16. On homebox: `tc card far-c --ssh farbox-tc --remote-tc '~/tc-qa/tc'`
     (far-c now points at the live alias), then `tc flush`.
     - It prints `#<n> to far-c: sent over ssh to farbox-tc: ...` twice,
-      the first message first, and exits 0. `tc flush` again prints
-      `nothing waiting in the outbox`.
+      the first message first, and exits 0. far-c never joined on
+      farbox, so after the first it also prints `tc flush: #<n> to far-c:
+      farbox-tc said: new inbox: nobody has joined as far-c`: the far
+      tc's warning reaches you (D33). `tc flush` again prints `nothing
+      waiting in the outbox`.
     - On farbox, `tc read far-c` shows `first`, then `second`.
 17. A far tc that is busy is kept, not refused (D23). On farbox, hold
     far-b's inbox lock for 20 s, in the background: `python3 -c 'import
@@ -173,14 +187,15 @@ Before you start:
 ## A retry never delivers twice (D25)
 
 18. On homebox, put a sent message back as if a crash had left it:
-    `cp ~/tc-qa-home/outbox/to-far-b/sent/000001-from-home-a.md
-    ~/tc-qa-home/outbox/to-far-b/`, then `tc flush`.
+    `cp ~/tc-qa-home/outbox/you/to-far-b/sent/000001-from-home-a.md
+    ~/tc-qa-home/outbox/you/to-far-b/`, then `tc flush`.
     - It prints `#1 to far-b: sent over ssh to farbox-tc: already
-      delivered (origin <32 hex digits>-1-home-a)` and exits 0.
+      delivered (origin <32 hex digits>-1-<32 hex digits>-home-a)`, the
+      id step 9's header holds, and exits 0.
     - On farbox, `tc peek far-b` shows no new message.
-    - On homebox, `ls ~/tc-qa-home/outbox/to-far-b/sent/` now also lists
-      `by-hand-1-000001-from-home-a.md`, the copy, filed beside the
-      first, which is unchanged.
+    - On homebox, `ls ~/tc-qa-home/outbox/you/to-far-b/sent/` now also
+      lists `by-hand-1-000001-from-home-a.md`, the copy, filed beside
+      the first, which is unchanged.
 
 ## The way back (C3)
 
@@ -214,7 +229,8 @@ run.
     --remote-tc '~/tc-qa-home/tc'`.
 22. On farbox: `tc send --from far-b --to home-a "hello home"`.
     - It exits 0 with `sent over ssh to homebox-tc: sent #... to home-a:
-      ...`.
+      ...`. If home-a never joined on homebox, it also prints
+      `homebox-tc said: new inbox: nobody has joined as home-a`.
     - On homebox, `tc read home-a` prints `# #... from far-b to home-a,
       <time>, via ssh gate, key far-b`, then `hello home`.
 
@@ -224,15 +240,18 @@ run.
     `~/.ssh/authorized_keys` (step 4), then `rm -r ~/tc-qa` (steps 2, 7
     and the far mailbox).
 24. On homebox: delete the `Host farbox-tc` and `Host farbox-tc-dead`
-    blocks from `~/.ssh/config` (steps 5 and 14), and farbox's host key
-    that step 6 added: `ssh-keygen -R <farbox's name or address>`.
+    blocks from `~/.ssh/config` (steps 5 and 14). Only if step 6 asked
+    you to accept farbox's host key, remove the entry it added:
+    `ssh-keygen -R <farbox's name or address>`. If farbox was known
+    before (step 2 reached it with your normal key), leave the entry:
+    it is yours, not this script's.
 25. On homebox: `rm ~/.ssh/tc_qa_ed25519 ~/.ssh/tc_qa_ed25519.pub`
     (step 3), then `rm -r ~/tc-qa-home` (step 1 and the home mailbox).
 26. If you ran the way back: on homebox, delete the line ending
     `tc-qa-far-b` from `~/.ssh/authorized_keys` (step 20); on farbox,
     delete the `Host homebox-tc` block from `~/.ssh/config`, run
-    `ssh-keygen -R <homebox's name or address>`, and `rm
-    ~/.ssh/tc_qa_back_ed25519 ~/.ssh/tc_qa_back_ed25519.pub` (steps 19
-    and 21).
+    `ssh-keygen -R <homebox's name or address>` only if step 21 asked
+    you to accept homebox's host key, and `rm ~/.ssh/tc_qa_back_ed25519
+    ~/.ssh/tc_qa_back_ed25519.pub` (steps 19 and 21).
 27. Record what you saw in `qa/results/` (D4), with every machine name,
     alias, address and user name replaced by the made-up ones above.

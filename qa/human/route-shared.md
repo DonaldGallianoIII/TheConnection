@@ -15,7 +15,9 @@ Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
         2026-10-15; the lead paragraph changed in round 8 by the SHARED
         fixer, Claude Opus 5.5, 2026-10-15; steps 34 to 39 (D22) added,
         and the last step renumbered, by the SSH lane agent, Claude Opus
-        5.5, 2026-10-15
+        5.5, 2026-10-15; steps 34 to 40 rewritten for D32 and D33, and
+        the last step renumbered and its words made to name both folders,
+        in fix round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
@@ -473,14 +475,20 @@ mail.
 
 ## Each member's outbox is their own (D22)
 
-Added by the SSH lane agent (Claude Opus 5.5), 2026-10-15. Status:
+Added by the SSH lane agent (Claude Opus 5.5), 2026-10-15; rewritten for
+D32 and D33 in fix round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15
+(the old step 38, a known limit, is the check in step 39 now). Status:
 unreviewed.
 
 ssh runs as the Linux user who ran `tc send`, with that user's keys, so
 one member's dead queue must never hold up another's mail, and each
-member's `tc flush` sends only that member's files. These steps need a
-far machine that ann's ssh key reaches through `tc gate` and ben's does
-not. `qa/human/route-ssh.md` sets one up; do its setup as ann only.
+member's `tc flush` sends only that member's files. Each member's ssh
+mail waits in a branch of the outbox that member alone owns,
+`outbox/<user>/` (D32), mode 2750, so no other member can move, rename,
+remove or plant anything in it (D33). These steps need a far machine
+that ann's ssh key reaches through `tc gate` and ben's does not.
+`qa/human/route-ssh.md` sets one up: as ann, do its steps 2 to 7 (not 1
+or 8), with `TC_ROOT=/srv/tc-shared` still exported from step 4 here.
 `farbox-tc` below is the ssh alias that file makes, and `far-b` the name
 on the far machine. Both are made up; use yours.
 
@@ -491,37 +499,66 @@ on the far machine. Both are made up; use yours.
 35. As ben: `tc send --from ben --to far-b "from ben"`.
     - ben has no key there, so ssh fails: it exits 4 and says `could not
       reach farbox-tc (...); kept in outbox:
-      /srv/tc-shared/outbox/to-far-b/<n>-from-ben.md. Run: tc flush`.
+      /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md. Run: tc flush`.
       The words in the parentheses are ssh's own, such as `Permission
       denied (publickey).` or a host it could not resolve.
-    - `ls -ld /srv/tc-shared/outbox/to-far-b` shows `drwxrwsr-t`, owner
-      `ben`, group `tcshare` (3775: setgid, sticky). `ls -l` of the file
-      shows `-rw-r-----`, owner `ben` (0640).
-36. As ann: `tc send --from ann --to far-b "from ann"`.
+    - `ls -ld /srv/tc-shared/outbox/ben /srv/tc-shared/outbox/ben/to-far-b`
+      shows each as `drwxr-s---`, owner `ben`, group `tcshare` (2750:
+      setgid, no group write). `ls -l` of the file shows `-rw-r-----`,
+      owner `ben` (0640).
+36. A member who makes another member's branch first (D33). As ben,
+    before ann has sent anything over ssh: `mkdir
+    /srv/tc-shared/outbox/ann`. Then as ann: `tc send --from ann --to
+    far-b "from ann"`.
+    - It exits 1, writes nothing, and says `/srv/tc-shared/outbox/ann
+      belongs to ben, not to ann: a branch and every folder in it are
+      their member's alone (D32, D33), so tc wrote nothing there. The
+      user who ran init (ann) clears it with one command: mv -T
+      /srv/tc-shared/outbox/ann /srv/tc-shared/outbox/.squatted-ann-1`.
+    - `tc health`, as ann, has a line `squatted
+      /srv/tc-shared/outbox/ann: a folder ben owns, not ann's own branch;
+      The user who ran init (ann) runs: mv -T ...`, the same command.
+    - As ann, run that `mv -T` line exactly as printed. `tc health` then
+      has no `squatted` line.
+37. As ann: `tc send --from ann --to far-b "from ann"` again.
     - It goes out at once, ben's waiting file notwithstanding: exit 0,
       `sent over ssh to farbox-tc: sent #... to far-b: ...`. ann's queue
       holds only ann's files, so ben's file is not ahead of hers.
-    - `ls /srv/tc-shared/outbox/to-far-b/sent/` lists ann's message.
+    - `ls /srv/tc-shared/outbox/ann/to-far-b/sent/` lists ann's message,
+      and `ls -l /srv/tc-shared/outbox/ann/` shows her send lock,
+      `.send-<16 hex digits>.lock`, as `-rw-------`, owner `ann` (0600).
     - On the far machine, `tc read far-b` shows it, from the gate's key
       name, never from `ann`.
-37. As ann: `tc flush`.
+38. As ann: `tc flush`.
     - It prints `1 waiting for farbox-tc belong to other members (ben);
       each member sends their own with tc flush`, then `nothing of yours
       waiting in the outbox`, and exits 0.
     - ben's file is where it was, unchanged: `ls -l` shows the same
       line as in step 35.
-    - As ann: `mv /srv/tc-shared/outbox/to-far-b/<n>-from-ben.md /tmp/`
-      is refused, `Operation not permitted`: the folder is sticky and
-      ben owns both the file and the folder.
-38. A known limit, not a pass or a fail: whoever makes an
-    `outbox/to-<name>/` first owns it, and sticky still lets a folder's
-    owner move any file in it. Here ben made `to-far-b/`, so ben could
-    move ann's queued files there; ann cannot move ben's. Record what
-    you see. The SSH handoff names it for the architect.
-39. Put it back. As ben: `rm /srv/tc-shared/outbox/to-far-b/<n>-from-ben.md`
-    (ben's own file). As ann: run `qa/human/route-ssh.md`'s undo steps.
+39. Neither member can touch the other's branch. Each of these is
+    refused, and the `ls -l` of each branch afterward matches the one
+    before:
+    - As ann: `mv /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md
+      /srv/tc-shared/outbox/ben/to-far-b/moved.md`: `Permission denied`
+      (ben's folder has no group write). The rename stays inside the
+      folder, so nothing is copied out on the way.
+    - As ben: `mv /srv/tc-shared/outbox/ann/to-far-b/sent/<n>-from-ann.md
+      /srv/tc-shared/outbox/ann/to-far-b/sent/moved.md`: `Permission
+      denied`.
+    - As ben: `mkdir /srv/tc-shared/outbox/ann/to-elsewhere`:
+      `Permission denied`.
+    - As ben: `mv /srv/tc-shared/outbox/ann /srv/tc-shared/outbox/ann-old`:
+      `Operation not permitted` (outbox/ is sticky, and ben owns neither
+      it nor ann's branch).
+    - As ben: `cat /srv/tc-shared/outbox/ann/.send-*.lock`: `Permission
+      denied`, so ben cannot open ann's send lock and hold it.
+40. Put it back. As ben: `rm
+    /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md` (ben's own file)
+    and `rmdir /srv/tc-shared/outbox/.squatted-ann-1` (the folder ben
+    made in step 36, moved aside). As ann: run `qa/human/route-ssh.md`'s
+    undo steps.
 
 ## Afterward
 
-40. The mailbox, `/srv/team` and the group stay until you remove them
-    yourself.
+41. The mailbox `/srv/tc-shared`, the folder `/srv/team` that step 31
+    made, and the group stay until you remove them yourself.
