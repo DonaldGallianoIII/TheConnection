@@ -39,13 +39,15 @@
  */
 import {
   createWindow, createCanvas, setFooter, createLookSwitch, pickLook, applyLook,
-  createBoard, createKit, patchBoard, fitTransform, pillText,
+  createBoard, createKit, createFit, pillText,
 } from './look.js';
 
 // C6 and O7: a wire moves within 3 s of a send, and one feed costs the
 // server tens of ms, so a poll this often is cheap.
 const POLL_MS = 3000;
-// Room left around the board when it is scaled to fit the canvas.
+// Room fitTransform leaves around a board it scales down. The board's
+// smallest text is at MIN_TEXT_PX already, so today it never scales down:
+// it wraps to the canvas's width and the canvas scrolls (look.js createFit).
 const FIT_PADDING = 24;
 const LOOK_KEY = 'tc-board-look';
 const TOKEN_HEADER = 'X-TC-Token';
@@ -74,18 +76,13 @@ const lookSwitch = createLookSwitch(document, win.title, {
 });
 const canvas = createCanvas(document, win.body, 'live · dashes run toward the reader · arrow marks the reader');
 const board = createBoard(createKit(document, canvas));
-
-const fit = () => {
-  const r = canvas.root.getBoundingClientRect();
-  const t = fitTransform(r.width, r.height, board.view.extent, FIT_PADDING);
-  canvas.view.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.k})`;
-};
-const ro = new ResizeObserver(fit);
-ro.observe(canvas.root);
+// The canvas's size comes from the observer's own entry, never a layout
+// read after a patch; a resize lays the last feed out again at the new width.
+const fit = createFit(canvas, board, { padding: FIT_PADDING, Observer: ResizeObserver });
+fit.start();
 
 const draw = (feed) => {
-  patchBoard(board, feed);
-  fit();
+  fit.draw(feed);
   // Listeners by pid, not by state (D15: a listener that sent reads writing).
   const pill = pillText(feed);
   win.setConn(pill.text, pill.state);
@@ -139,7 +136,7 @@ addEventListener('pagehide', () => {
   clearInterval(timer);
   for (const ctl of inFlight) ctl.abort();
   inFlight.clear();
-  ro.disconnect();
+  fit.stop();
 });
 </script>
 </body>

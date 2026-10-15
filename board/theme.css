@@ -14,6 +14,10 @@
  * and a text label. With reduced motion the dashes stop but the arrow and
  * label stay.
  *
+ * Text size (round 1, a2's MEDIUM-1): no font-size here is under 11 px, and
+ * the board is never scaled below 1 (look.js MIN_FIT_SCALE), so no text on
+ * the board is drawn under 11 CSS px. tests/board-layout.test.mjs checks it.
+ *
  * Two looks. Dark (the notebook's, the default) sits on :root. Daylight, a
  * light look from a palette Donald supplied, is [data-theme='daylight'] on
  * <html> and overrides only tokens; no rule
@@ -254,7 +258,7 @@
 .tc-foot .tc-sp { flex: 1; }
 
 /* ---------- chips and small text ---------- */
-.tc-h { font-family: var(--tc-mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--tc-dim); }
+.tc-h { font-family: var(--tc-mono); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--tc-dim); }
 .tc-chips { display: flex; gap: var(--tc-gap); flex-wrap: wrap; align-items: center; }
 .tc-chip {
   background: var(--tc-panel);
@@ -277,13 +281,27 @@
   border-radius: var(--tc-radius);
   overflow: hidden;
 }
+/* Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status:
+ * unreviewed. The board wraps to the canvas's width (look.js layoutLevels)
+ * and keeps its size, so a tall board scrolls down here, never sideways. */
+.tc-scroll { position: absolute; inset: 0; overflow-x: hidden; overflow-y: auto; }
 .tc-view { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 .tc-wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+/* The HUD sits over the frame's bottom edge and stays put while the board
+ * scrolls under it; its own face keeps it readable over a box, and a line
+ * too long for a phone ends in an ellipsis instead of running off. */
 .tc-hud {
   position: absolute;
   bottom: 6px;
   left: 8px;
-  font-size: 9px;
+  max-width: calc(100% - 16px);
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--tc-inset);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
   color: var(--tc-dim);
   font-family: var(--tc-mono);
   pointer-events: none;
@@ -306,8 +324,8 @@
  * so an orchestrator always reads as one by its word. */
 .tc-node-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .tc-node-role { flex: none; font-size: 11px; font-weight: 500; }
-.tc-node-sub { font-size: 9px; color: var(--tc-dim); font-family: var(--tc-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tc-node-note { font-size: 9px; color: var(--tc-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-node-sub { font-size: 11px; color: var(--tc-dim); font-family: var(--tc-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-node-note { font-size: 11px; color: var(--tc-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tc-node-note[hidden] { display: none; }
 .tc-node-glyph { display: inline-block; width: 1.2em; }
 
@@ -359,7 +377,7 @@
 .tc-arrow { fill: var(--tc-cyan); }
 .tc-wire-label {
   font-family: var(--tc-mono);
-  font-size: 9px;
+  font-size: 11px;
   fill: var(--tc-text);
   paint-order: stroke;
   stroke: var(--tc-inset);

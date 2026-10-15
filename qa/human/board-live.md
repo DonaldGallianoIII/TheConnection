@@ -57,7 +57,7 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
    - `a` reads `✎ writing` with a thicker border, for about 10 s.
    - `b`'s listener in terminal 2 exits with `MAIL:`. Within 3 s `b` reads
      `✕ no listener` with a dashed border, its wire turns dotted, and the
-     pill reads `1 listening · 1 down`.
+     pill reads `1 listening · 1 no listener`, the same words as the box.
 8. In terminal 2: `./tc read b`, then `./tc wait b` again.
    - Within 3 s `b` reads `● listening` again and the pill goes back to
      `live · 2 listening`.
@@ -143,16 +143,40 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     - The whole board turns at once and keeps updating. The address bar
       keeps the `#token=...` part.
 19. Narrow the window to phone width (about 390 px).
-    - No sideways scroll. The board shrinks to fit inside the canvas.
-20. Turn on reduced motion (OS setting, or devtools
+    - No sideways scroll. The board keeps its size: the boxes wrap to one
+      per row, each child set a little right of its parent, and the canvas
+      scrolls down to the rest.
+20. Fourteen names, the size of Donald's real board. Write eight more
+    worker cards under `a`, on account `unknown` so no native lines join
+    them:
+    ```
+    for w in w1 w2 w3 w4 w5 w6 w7 w8; do
+      echo "{\"version\": 1, \"name\": \"$w\", \"kind\": \"claude\", \"account\": \"unknown\", \"route\": \"local\", \"reports_to\": \"a\"}" > $TC_ROOT/cards/$w.json
+    done
+    ```
+    The board now holds 14 names: `a`, `b`, `c`, `cx`, `far`, `r` and `w1`
+    to `w8`.
+    - At full desktop width, `a`'s children fill rows under it and wrap to
+      a new row instead of running off the side. No box overlaps another.
+    - Every title, state line, status line and wire label reads without
+      zooming. In devtools, a `.tc-node-note` or a `.tc-wire-label` has a
+      computed font-size of 11px or more, and the `.tc-view` element's
+      style ends in `scale(1)`: the board is never shrunk.
+    - Narrow the window to phone width (about 390 px). One box per row, each
+      worker a little right of `a`, so the levels still read. The canvas
+      scrolls down to the rest. Nothing scrolls sideways, on the page or in
+      the canvas.
+    - Do the phone check again with `?gray=1` before the `#`: every state
+      still reads by its glyph and word.
+21. Turn on reduced motion (OS setting, or devtools
     "prefers-reduced-motion: reduce") and send a message.
     - The dashes stop moving, but the arrow and the words still show which
       wire carried it.
-21. Stop the server: Ctrl+C in terminal 1, then restart it with the same
+22. Stop the server: Ctrl+C in terminal 1, then restart it with the same
     command and open the new URL it prints (the token is new).
     - Nothing reads `✕ no listener` until a listener has been seen and then
       stops: a restart forgets who was listening.
-22. Close the tab, then stop the server with Ctrl+C and both listeners with
+23. Close the tab, then stop the server with Ctrl+C and both listeners with
     Ctrl+C. Run `unset TC_ROOT` in each terminal. The throwaway mailbox is
     under the system temp folder.
 

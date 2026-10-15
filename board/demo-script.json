@@ -1,5 +1,5 @@
 {
-  "_about": "Fake sessions and traffic for demo.html, in the live feed's shape (C5): two trees side by side. a is an orchestrator over b and docs, b is an orchestrator over c and d, and z is a second orchestrator over y1 and y2 that mails a. Every state shows: listening, idle, no listener (d), doorbell (c, codex), remote (y2, ssh), and writing on whichever box sends, listener or not (D15). Each script step is one message; demo.html draws it as a wire flowing toward its reader. Names are made up. Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.",
+  "_about": "Fake sessions and traffic for demo.html, in the live feed's shape (C5): two trees side by side. a is an orchestrator over b and docs, b is an orchestrator over c and d, and z is a second orchestrator over y1 and y2 that mails a. Every state shows: listening, idle, no listener (d), doorbell (c, codex), remote (y2, ssh), and writing on whichever box sends, listener or not (D15). Each script step is one message; demo.html draws it as a wire flowing toward its reader. Names and listener pids are made up. Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.",
   "stepMs": 1800,
   "window": {
     "file": "connection.board",
@@ -13,14 +13,14 @@
     null
   ],
   "nodes": [
-    { "id": "a", "kind": "claude", "account": "work", "route": "local", "state": "listening", "unread": 0, "status": "splitting the parser work", "role": "orchestrator", "role_source": "declared", "reports_to": null, "level": 0, "parent": null },
-    { "id": "b", "kind": "claude", "account": "home", "route": "local", "state": "listening", "unread": 1, "status": "relaying for c and d", "role": "orchestrator", "role_source": "inferred", "reports_to": "a", "level": 1, "parent": "a" },
-    { "id": "docs", "kind": "claude", "account": "home", "route": "local", "state": "idle", "unread": 0, "status": "drafting the README", "role": "worker", "role_source": "declared", "reports_to": "a", "level": 1, "parent": "a" },
-    { "id": "c", "kind": "codex", "account": "work", "route": "codex", "state": "doorbell", "unread": 0, "status": null, "role": "worker", "role_source": "declared", "reports_to": "b", "level": 2, "parent": "b" },
-    { "id": "d", "kind": null, "account": null, "route": "local", "state": "down", "unread": 2, "status": null, "role": "worker", "role_source": "inferred", "reports_to": null, "level": 2, "parent": "b" },
-    { "id": "z", "kind": "claude", "account": "studio", "route": "local", "state": "listening", "unread": 0, "status": "reviewing the tests", "role": "orchestrator", "role_source": "inferred", "reports_to": null, "level": 0, "parent": null },
-    { "id": "y1", "kind": "claude", "account": "garage", "route": "local", "state": "listening", "unread": 0, "status": null, "role": "worker", "role_source": "declared", "reports_to": "z", "level": 1, "parent": "z" },
-    { "id": "y2", "kind": "claude", "account": "lab", "route": "ssh", "state": "remote", "unread": 0, "status": null, "role": "worker", "role_source": "inferred", "reports_to": null, "level": 1, "parent": "z" }
+    { "id": "a", "kind": "claude", "account": "work", "route": "local", "state": "listening", "listener_pid": 4101, "unread": 0, "status": "splitting the parser work", "role": "orchestrator", "role_source": "declared", "reports_to": null, "level": 0, "parent": null },
+    { "id": "b", "kind": "claude", "account": "home", "route": "local", "state": "listening", "listener_pid": 4102, "unread": 1, "status": "relaying for c and d", "role": "orchestrator", "role_source": "inferred", "reports_to": "a", "level": 1, "parent": "a" },
+    { "id": "docs", "kind": "claude", "account": "home", "route": "local", "state": "idle", "listener_pid": null, "unread": 0, "status": "drafting the README", "role": "worker", "role_source": "declared", "reports_to": "a", "level": 1, "parent": "a" },
+    { "id": "c", "kind": "codex", "account": "work", "route": "codex", "state": "doorbell", "listener_pid": null, "unread": 0, "status": null, "role": "worker", "role_source": "declared", "reports_to": "b", "level": 2, "parent": "b" },
+    { "id": "d", "kind": null, "account": null, "route": "local", "state": "down", "listener_pid": null, "unread": 2, "status": null, "role": "worker", "role_source": "inferred", "reports_to": null, "level": 2, "parent": "b" },
+    { "id": "z", "kind": "claude", "account": "studio", "route": "local", "state": "listening", "listener_pid": 4103, "unread": 0, "status": "reviewing the tests", "role": "orchestrator", "role_source": "inferred", "reports_to": null, "level": 0, "parent": null },
+    { "id": "y1", "kind": "claude", "account": "garage", "route": "local", "state": "listening", "listener_pid": 4104, "unread": 0, "status": null, "role": "worker", "role_source": "declared", "reports_to": "z", "level": 1, "parent": "z" },
+    { "id": "y2", "kind": "claude", "account": "lab", "route": "ssh", "state": "remote", "listener_pid": null, "unread": 0, "status": null, "role": "worker", "role_source": "inferred", "reports_to": null, "level": 1, "parent": "z" }
   ],
   "links": [
     { "from": "a", "to": "b", "kind": "mailbox" },

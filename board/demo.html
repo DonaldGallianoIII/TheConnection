@@ -13,8 +13,9 @@
  * demo.html: a scripted walk through the board look. Fake sessions and fake
  * traffic from demo-script.json, no mailbox reads. The script is in the live
  * feed's shape (C5), so the demo draws it the way live.html draws the real
- * mailbox: layoutLevels puts two trees side by side, and patchBoard moves
- * one message at a time along its wire. It shows every state and every kind
+ * mailbox: layoutLevels lays out the two trees, wrapped to the canvas's
+ * width (at the window's 1180 px cap the second sits under the first), and
+ * patchBoard moves one message at a time along its wire. It shows every state and every kind
  * of line. The switch on the title bar flips between the dark look and the
  * Daylight light look. ?theme=daylight or ?theme=dark picks one in the URL
  * (compare.html uses that); otherwise the last pick in this browser,
@@ -39,7 +40,7 @@
  */
 import {
   createWindow, createCanvas, setFooter, createLookSwitch, pickLook, applyLook,
-  createBoard, createKit, patchBoard, fitTransform, hueFor, HUES,
+  createBoard, createKit, createFit, pillText, hueFor, HUES,
 } from './look.js';
 
 const FIT_PADDING = 24;
@@ -54,11 +55,11 @@ applyLook(document, look);
 if (query.get('gray') === '1') document.documentElement.style.filter = 'grayscale(1)';
 
 const demo = await (await fetch('demo-script.json')).json();
-const listening = demo.nodes.filter((n) => n.state === 'listening').length;
-const down = demo.nodes.filter((n) => n.state === 'down').length;
+// The same pill live.html shows: listeners by pid, and the box's own word for down.
+const pill = pillText(demo);
 const app = document.getElementById('app');
 const win = createWindow(document, app, { file: demo.window.file, sub: demo.window.sub });
-win.setConn(down ? `${listening} listening · ${down} down` : `${listening} listening`, down ? 'warn' : 'up');
+win.setConn(pill.text, pill.state);
 const lookSwitch = createLookSwitch(document, win.title, {
   look,
   onPick(next) {
@@ -91,17 +92,13 @@ const canvas = createCanvas(document, win.body, demo.hud);
 const board = createBoard(createKit(document, canvas));
 setFooter(document, win.foot, [
   ...demo.footer.map((t) => (t === null ? { spacer: true } : { text: t })),
-  { text: `${demo.nodes.length} sessions · ${listening} listening` },
+  { text: `${demo.nodes.length} sessions · ${pill.listening} listening` },
 ]);
 
-// Fit the board inside the canvas at any width (renderer only).
-const fit = () => {
-  const r = canvas.root.getBoundingClientRect();
-  const t = fitTransform(r.width, r.height, board.view.extent, FIT_PADDING);
-  canvas.view.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.k})`;
-};
-const ro = new ResizeObserver(fit);
-ro.observe(canvas.root);
+// Lay the board out to the canvas's width (renderer only): it wraps, keeps
+// its size, and the canvas scrolls down if it must (look.js createFit).
+const fit = createFit(canvas, board, { padding: FIT_PADDING, Observer: ResizeObserver });
+fit.start();
 
 // One step's feed: the fixed nodes and links, plus the step's message as a
 // wire with age 0. Its sender reads writing, listener or not, as in the live
@@ -114,13 +111,12 @@ const feedFor = (s) => ({
 
 let step = 0;
 const tick = () => {
-  patchBoard(board, feedFor(demo.script[step % demo.script.length]));
+  fit.draw(feedFor(demo.script[step % demo.script.length]));
   step += 1;
 };
 tick();
-fit();
 const timer = setInterval(tick, demo.stepMs);
-addEventListener('pagehide', () => { clearInterval(timer); ro.disconnect(); });
+addEventListener('pagehide', () => { clearInterval(timer); fit.stop(); });
 </script>
 </body>
 </html>

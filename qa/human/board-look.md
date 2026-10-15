@@ -14,8 +14,10 @@ Updated for the shapes demo by Claude Opus 5.5 (the BOARD lane agent),
 2. Open http://127.0.0.1:8780/demo.html in a browser.
    - You should see a dark window with three traffic dots, the title
      `connection.board`, and a status pill on the right reading
-     `4 listening · 1 down`.
-   - Two trees side by side, each root on the top row:
+     `4 listening · 1 no listener`, the same words as `d`'s box.
+   - Two trees, each with its root on top. Side by side at full text size
+     they need more room than the window's 1180 px cap gives, so `z`'s tree
+     sits under `a`'s, and the canvas may scroll down a little:
      - Left: `a · orchestrator` on top. Under it `b · orchestrator · inferred`
        and `docs · worker`. Under `b`, `c · worker` and `d · worker · inferred`.
      - Right: `z · orchestrator · inferred` on top, with `y1 · worker` and
@@ -44,7 +46,9 @@ Updated for the shapes demo by Claude Opus 5.5 (the BOARD lane agent),
    - Ports: the left port on each box is a hollow ring (in), the right one a
      filled dot (out).
 5. Narrow the window to phone width (about 390 px).
-   - No sideways scroll. The board shrinks to fit inside the canvas.
+   - No sideways scroll. The board keeps its size: one box per row, each
+     child set a little right of its parent, and the canvas scrolls down.
+   - Every title, state line and wire label reads without zooming.
 6. Turn on reduced motion (OS setting, or devtools "prefers-reduced-motion: reduce").
    - The dashes stop moving, but the dashed line, arrow and label still show which
      wire is active.

@@ -2,16 +2,20 @@
  * look.js: drawing tools for the board look. Builds the window frame, the
  * canvas, session nodes, ports and wires as DOM and SVG elements. The live
  * board's layer is pure: layoutLevels places a C5 feed's nodes in levels,
- * boardView turns a feed into what to draw, and diffBoard says what changed
- * between two views. patchBoard applies a diff through a drawing kit
- * (createKit for the DOM, or a test's fake), so the board is never rebuilt.
+ * wrapped to a width, boardView turns a feed into what to draw, and
+ * diffBoard says what changed between two views. patchBoard applies a diff
+ * through a drawing kit (createKit for the DOM, or a test's fake), so the
+ * board is never rebuilt. createFit keeps a board laid out to its canvas.
  *
  * @interacts  creates elements under the container the caller passes in; uses
  *             theme.css class names; applyLook writes data-theme on <html>;
  *             never touches innerHTML, storage or globals. layoutLevels,
- *             boardView, diffBoard, roleTitle, hueFor, hintPath, pillText
- *             and fitTransform read only their arguments; patchBoard writes only
- *             the board object it is given and calls only its kit
+ *             boardView, diffBoard, roleTitle, hueFor, hintPath, pillText,
+ *             layoutWidth, labelPoints and fitTransform read only their
+ *             arguments; patchBoard writes only the board object it is given
+ *             and calls only its kit; createFit observes the canvas's scroll
+ *             area through the observer it is given and writes the view's
+ *             size and transform
  * @deps       browser DOM and SVG for the drawing functions; the pure layer
  *             needs neither (node --test runs it with no DOM library)
  * @complexity every drawing function is O(1) per call; a board with n nodes
@@ -28,12 +32,22 @@
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
+// Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+// a2, for Donald (MEDIUM-1): no text on the board is drawn under this many
+// CSS px at the scale it is shown, on a desktop or a phone.
+const MIN_TEXT_PX = 11;
+// The smallest font-size theme.css gives text inside the board (the state
+// line, the note and the wire labels). tests/board-layout.test.mjs reads
+// theme.css and fails if the two drift apart.
+const BOARD_TEXT_MIN_PX = 11;
+
 export const CONFIG = Object.freeze({
   // Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status:
   // unreviewed. Wider and taller than the look kit's 132 x 48, so a title
   // holds "name · orchestrator · inferred" and a third line holds the status.
+  // 64 tall (round 1): three lines of 11 px or more inside a 4 px double border.
   NODE_W: 208,
-  NODE_H: 60,
+  NODE_H: 64,
   PORT_SIZE: 12,
   // Wire bend: horizontal control-point reach is half the span, never less
   // than WIRE_MIN_BEND, so short wires still curve instead of kinking.
@@ -44,13 +58,25 @@ export const CONFIG = Object.freeze({
   // Arrow tip stops short of the port ring instead of sitting on it (marker units).
   ARROW_BACKOFF: 15,
   LABEL_LIFT: 7,
+  // Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+  // A second label line (a native link's words on a mailbox wire) sits with
+  // its baseline this far under the wire's middle: one 11 px line plus
+  // LABEL_LIFT, so it touches neither the first line nor the wire.
+  LABEL_DROP: 18,
   // Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
-  // layoutLevels: the gap between two columns of one tree, between two
-  // levels (room for a wire's bend and its label), between two root trees
-  // (wider than a column gap, so two trees read as two), and around the board.
+  // layoutLevels: the gap between two boxes in one row; between a parent and
+  // its children (room for a wire's two label lines, about 36 px, and a
+  // reports_to hint's words); between two wrapped rows of one parent's
+  // children (room for one wire label); between two root trees side by side
+  // (wider than a column gap, so two trees read as two); and around the board.
+  // Root trees one under another are LAYOUT_ROW_GAP apart. Round 1 added the
+  // wrap gap and the indent: on a phone, where a row holds one box, children
+  // sit LAYOUT_INDENT right of their parent so the levels still read.
   LAYOUT_COL_GAP: 28,
-  LAYOUT_ROW_GAP: 64,
+  LAYOUT_ROW_GAP: 56,
+  LAYOUT_WRAP_GAP: 40,
   LAYOUT_ROOT_GAP: 72,
+  LAYOUT_INDENT: 32,
   LAYOUT_MARGIN: 24,
   // A message at most this many seconds old flows on its wire. The feed's
   // WRITING_WINDOW_S, so the wire moves while its sender reads as writing.
@@ -59,8 +85,16 @@ export const CONFIG = Object.freeze({
   HINT_LABEL_SHIFT: 6,
   // hueFor's string hash step: a small odd prime spreads short names.
   HUE_HASH_STEP: 31,
-  // fitTransform never shrinks a board below this, so a node stays legible.
-  MIN_FIT_SCALE: 0.2,
+  // Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+  // fitTransform never shrinks a board below this: the scale at which the
+  // board's smallest text is MIN_TEXT_PX. With both at 11 it is 1, so the
+  // board never shrinks; layoutLevels wraps it to the width instead and the
+  // canvas scrolls down.
+  MIN_TEXT_PX,
+  BOARD_TEXT_MIN_PX,
+  MIN_FIT_SCALE: MIN_TEXT_PX / BOARD_TEXT_MIN_PX,
+  // The wire layer is never sized under this: SVG draws nothing at zero.
+  MIN_LAYER_PX: 1,
 });
 
 /** Session states. Each one carries a glyph and a word, never color alone. */
@@ -213,12 +247,17 @@ export function setFooter(doc, foot, items) {
 }
 
 /**
- * Canvas with a wire layer (SVG), a node layer and a HUD line.
+ * Canvas: a frame holding a scroll area, which holds the view (a wire layer
+ * in SVG and a node layer), and a HUD line over the frame's bottom edge. The
+ * scroll area scrolls down when the board is taller than the canvas, never
+ * sideways (round 1, a2's MEDIUM-1); the HUD stays put while it scrolls.
  * @interacts  appends to parent
  * @complexity O(1)  @alloc one canvas subtree with an arrow marker def
+ * @returns {{ root, scroll, view, wires, hud }}
  */
 export function createCanvas(doc, parent, hudText) {
   const root = el(doc, 'div', 'tc-canvas');
+  const scroll = el(doc, 'div', 'tc-scroll');
   const view = el(doc, 'div', 'tc-view');
   const wires = svg(doc, 'svg', { class: 'tc-wires', width: CONFIG.WIRE_SPACE, height: CONFIG.WIRE_SPACE });
   const defs = svg(doc, 'defs');
@@ -231,9 +270,10 @@ export function createCanvas(doc, parent, hudText) {
   wires.append(defs);
   const hud = el(doc, 'div', 'tc-hud', hudText || '');
   view.append(wires);
-  root.append(view, hud);
+  scroll.append(view);
+  root.append(scroll, hud);
   parent.append(root);
-  return { root, view, wires, hud };
+  return { root, scroll, view, wires, hud };
 }
 
 /**
@@ -356,6 +396,26 @@ export const LINK_WORDS = Object.freeze({
   notFound: 'not found',
 });
 
+/**
+ * Words on a node's third line. A down node's status was written while it
+ * listened, so it reads as the last thing it said, never as its state now.
+ * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+ */
+export const NOTE_WORDS = Object.freeze({
+  lastStatus: 'last status:',
+});
+
+/**
+ * An empty map keyed by session name, with no prototype, so a name such as
+ * __proto__ or constructor (both legal under C0) is an own key like any
+ * other. Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14.
+ * Status: unreviewed.
+ * @complexity O(1)  @alloc one object
+ */
+function nameMap() {
+  return Object.create(null);
+}
+
 /** Compare two names by code point, as Python's sort does. @complexity O(c) over c characters  @alloc none */
 function byName(p, q) {
   if (p < q) return -1;
@@ -384,73 +444,158 @@ export function hueFor(id) {
 }
 
 /**
- * Where a C5 feed's nodes go: each root's tree side by side, roots in name
- * order, levels top to bottom (C5). A node hangs under its `parent` when its
- * level is the parent's plus one (pause BOARD-3); every other node is a root,
- * so a cycle's root lays out like any other. A tree takes one column per
- * leaf, a parent sits over the middle of its children, and two trees are
- * LAYOUT_ROOT_GAP apart, so no two boxes overlap.
- * @interacts  none; pure
- * @complexity O(n log n) over n nodes: one sort by name, then each node is
- *             visited a fixed number of times  @alloc the returned maps
- * @returns {{ pos: {id: {x, y}}, titles: {id: string}, rows: {id: number}, roots: string[], extent: {w, h} }}
+ * Pack blocks into rows left to right: a block starts a new row when it
+ * would take the row past `limit`. Infinity never wraps.
+ * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+ * @complexity O(b) over b blocks  @alloc one row object per row, returned
+ * @returns {{ items: {id, w, h}[], w, h }[]}
  */
-export function layoutLevels(feed) {
-  const nodes = [...((feed && feed.nodes) || [])].sort((p, q) => byName(p.id, q.id));
-  const known = new Map(nodes.map((n) => [n.id, n]));
+function packRows(blocks, limit, gap) {
+  const out = [];
+  let row = null;
+  for (const b of blocks) {
+    if (row && row.w + gap + b.w <= limit) {
+      row.items.push(b);
+      row.w += gap + b.w;
+      row.h = Math.max(row.h, b.h);
+    } else {
+      row = { items: [b], w: b.w, h: b.h };
+      out.push(row);
+    }
+  }
+  return out;
+}
+
+/**
+ * Where a C5 feed's nodes go, inside `width` board px (Infinity, the
+ * default, never wraps). Roots in name order, levels top to bottom (C5). A
+ * node hangs under its `parent` when its level is the parent's plus one
+ * (D15, pause BOARD-3); every other node is a root, so a cycle's root lays
+ * out like any other. A parent sits over its children. The children, each
+ * with its own subtree, fill a row left to right and wrap to a new row,
+ * LAYOUT_WRAP_GAP lower, when the next one would pass the width (round 1,
+ * a2's MEDIUM-1). Where a row holds a single box (a phone), the parent sits
+ * at the left and its children are indented LAYOUT_INDENT under it while a
+ * box still fits. Root trees fill rows the same way: LAYOUT_ROOT_GAP apart
+ * side by side, LAYOUT_ROW_GAP apart one under another. Each subtree keeps
+ * a band no other box enters, so no two boxes overlap, and the extent is at
+ * most `width` whenever one box and the margins fit in it. Every map is
+ * keyed with no prototype (or is a Map), so a node named __proto__ lays out
+ * like any other.
+ * @interacts  none; pure
+ * @complexity O(n log n) over n nodes: one sort by name, then three walks
+ *             that visit each node a fixed number of times
+ * @alloc      the returned maps; six Maps and the row lists for the walks,
+ *             freed on return
+ * @returns {{ pos: {id: {x, y}}, titles: {id: string}, rows: {id: number}, roots: string[], extent: {w, h} }}
+ *          rows is each node's depth in its tree
+ */
+export function layoutLevels(feed, width = Infinity) {
+  const C = CONFIG;
+  const sorted = [...((feed && feed.nodes) || [])].sort((p, q) => byName(p.id, q.id));
+  const known = new Map(sorted.map((n) => [n.id, n]));
+  const nodes = [...known.values()];
   const kids = new Map();
-  const isChild = new Set();
+  const childIds = new Set();
   for (const n of nodes) {
     const parent = n.parent == null ? undefined : known.get(n.parent);
     if (n.level > 0 && parent && parent.level === n.level - 1) {
       if (!kids.has(parent.id)) kids.set(parent.id, []);
       kids.get(parent.id).push(n.id);
-      isChild.add(n.id);
+      childIds.add(n.id);
     }
   }
-  const roots = nodes.filter((n) => !isChild.has(n.id)).map((n) => n.id);
-  const rows = {};
-  const order = [];
-  for (const r of roots) rows[r] = 0;
-  const queue = [...roots];
-  for (let i = 0; i < queue.length; i += 1) {
-    const id = queue[i];
-    order.push(id);
+  const roots = nodes.filter((n) => !childIds.has(n.id)).map((n) => n.id);
+  // Walk 1, top down: each node's depth, and the width its subtree may use.
+  // A row that cannot hold two boxes is narrow: its children indent.
+  const rows = nameMap();
+  const room = new Map();
+  const indent = new Map();
+  const order = [...roots];
+  const rootRoom = width - 2 * C.LAYOUT_MARGIN;
+  for (const r of roots) {
+    rows[r] = 0;
+    room.set(r, rootRoom);
+  }
+  for (let i = 0; i < order.length; i += 1) {
+    const id = order[i];
+    const w = room.get(id);
+    const narrow = w < 2 * C.NODE_W + C.LAYOUT_COL_GAP;
+    indent.set(id, narrow && w - C.LAYOUT_INDENT >= C.NODE_W ? C.LAYOUT_INDENT : 0);
     for (const c of kids.get(id) || []) {
       rows[c] = rows[id] + 1;
-      queue.push(c);
+      room.set(c, w - indent.get(id));
+      order.push(c);
     }
   }
-  const span = {};
+  // Walk 2, bottom up: each subtree's block, its children's places inside
+  // it, and where the node's own box sits in it.
+  const block = new Map();
+  const inBlock = new Map();
+  const ownX = new Map();
   for (let i = order.length - 1; i >= 0; i -= 1) {
-    const cs = kids.get(order[i]) || [];
-    span[order[i]] = cs.length ? cs.reduce((sum, c) => sum + span[c], 0) : 1;
-  }
-  const colW = CONFIG.NODE_W + CONFIG.LAYOUT_COL_GAP;
-  const rowH = CONFIG.NODE_H + CONFIG.LAYOUT_ROW_GAP;
-  const pos = {};
-  let left = CONFIG.LAYOUT_MARGIN;
-  let deepest = -1;
-  for (const r of roots) {
-    const stack = [[r, left]];
-    while (stack.length) {
-      const [id, x0] = stack.pop();
-      const band = span[id] * colW - CONFIG.LAYOUT_COL_GAP;
-      pos[id] = { x: x0 + (band - CONFIG.NODE_W) / 2, y: CONFIG.LAYOUT_MARGIN + rows[id] * rowH };
-      deepest = Math.max(deepest, rows[id]);
-      let x = x0;
-      for (const c of kids.get(id) || []) {
-        stack.push([c, x]);
-        x += span[c] * colW;
-      }
+    const id = order[i];
+    const cs = kids.get(id) || [];
+    if (!cs.length) {
+      block.set(id, { w: C.NODE_W, h: C.NODE_H });
+      ownX.set(id, 0);
+      continue;
     }
-    left += span[r] * colW - CONFIG.LAYOUT_COL_GAP + CONFIG.LAYOUT_ROOT_GAP;
+    const ind = indent.get(id);
+    const lines = packRows(cs.map((c) => ({ id: c, ...block.get(c) })), room.get(id) - ind, C.LAYOUT_COL_GAP);
+    let y = C.NODE_H + C.LAYOUT_ROW_GAP;
+    let areaW = 0;
+    for (const line of lines) {
+      let x = ind;
+      for (const b of line.items) {
+        inBlock.set(b.id, { x, y });
+        x += b.w + C.LAYOUT_COL_GAP;
+      }
+      areaW = Math.max(areaW, line.w);
+      y += line.h + C.LAYOUT_WRAP_GAP;
+    }
+    ownX.set(id, ind ? 0 : (areaW - C.NODE_W) / 2);
+    block.set(id, { w: Math.max(C.NODE_W, ind + areaW), h: y - C.LAYOUT_WRAP_GAP });
+  }
+  // Walk 3, top down: root trees into rows, then every box by its block.
+  const pos = nameMap();
+  const origin = new Map();
+  let top = C.LAYOUT_MARGIN;
+  let widest = 0;
+  for (const line of packRows(roots.map((r) => ({ id: r, ...block.get(r) })), rootRoom, C.LAYOUT_ROOT_GAP)) {
+    let x = C.LAYOUT_MARGIN;
+    for (const b of line.items) {
+      origin.set(b.id, { x, y: top });
+      x += b.w + C.LAYOUT_ROOT_GAP;
+    }
+    widest = Math.max(widest, line.w);
+    top += line.h + C.LAYOUT_ROW_GAP;
+  }
+  for (const id of order) {
+    const o = origin.get(id);
+    pos[id] = { x: o.x + ownX.get(id), y: o.y };
+    for (const c of kids.get(id) || []) {
+      const at = inBlock.get(c);
+      origin.set(c, { x: o.x + at.x, y: o.y + at.y });
+    }
   }
   const extent = roots.length
-    ? { w: left - CONFIG.LAYOUT_ROOT_GAP + CONFIG.LAYOUT_MARGIN, h: CONFIG.LAYOUT_MARGIN * 2 + (deepest + 1) * rowH - CONFIG.LAYOUT_ROW_GAP }
+    ? { w: widest + 2 * C.LAYOUT_MARGIN, h: top - C.LAYOUT_ROW_GAP + C.LAYOUT_MARGIN }
     : { w: 0, h: 0 };
-  const titles = Object.fromEntries(nodes.map((n) => [n.id, roleTitle(n)]));
+  const titles = nameMap();
+  for (const n of nodes) titles[n.id] = roleTitle(n);
   return { pos, titles, rows, roots, extent };
+}
+
+/**
+ * The width layoutLevels may use on a canvas `canvasWidth` CSS px wide: the
+ * most the board may span at the smallest scale MIN_FIT_SCALE allows, so at
+ * the scale fitTransform then picks it never runs past the canvas.
+ * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+ * @complexity O(1)  @alloc none
+ */
+export function layoutWidth(canvasWidth) {
+  return canvasWidth / CONFIG.MIN_FIT_SCALE;
 }
 
 /**
@@ -481,9 +626,10 @@ function upperFirst(p, q, pos) {
 
 /**
  * The pill's words and state for a feed: `live · N listening`, or
- * `N listening · M down` while a node is down. Listeners are counted by
- * listener_pid (a pid tc read from /proc/locks), never by state: under D15
- * a listener that just sent reads writing and is still listening.
+ * `N listening · M no listener` while a node is down, in the same words its
+ * box shows (STATES.down). Listeners are counted by listener_pid (a pid tc
+ * read from /proc/locks), never by state: under D15 a listener that just
+ * sent reads writing and is still listening.
  * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
  * @interacts  none; pure
  * @complexity O(n) over n feed nodes  @alloc one object
@@ -494,34 +640,45 @@ export function pillText(feed) {
   const listening = nodes.filter((n) => n.listener_pid).length;
   const down = nodes.filter((n) => n.state === 'down').length;
   return down
-    ? { text: `${listening} listening · ${down} down`, state: 'warn', listening }
+    ? { text: `${listening} listening · ${down} ${STATES.down.word}`, state: 'warn', listening }
     : { text: `live · ${listening} listening`, state: 'up', listening };
 }
 
-/** A node's third line: a reports_to that names no node, else its status. @complexity O(1)  @alloc one string */
+/**
+ * A node's third line: a reports_to that names no node, else its status. A
+ * down node's status is stale, so it reads `last status: ...` and never
+ * passes for the node's state now (round 1, LOW-20).
+ * @complexity O(1)  @alloc one string
+ */
 function noteFor(n, known) {
   if (n.reports_to && !known.has(n.reports_to)) return `${LINK_WORDS.reports_to} ${n.reports_to} · ${LINK_WORDS.notFound}`;
-  return n.status || '';
+  if (!n.status) return '';
+  return n.state === 'down' ? `${NOTE_WORDS.lastStatus} ${n.status}` : n.status;
 }
 
 /**
- * What to draw for a C5 feed: one view per node and per edge, keyed by id.
- * Node: title (roleTitle), pos (layoutLevels), state, detail (unread count),
- * note (`reports to N · not found`, else the status line). Edges come from
- * links whose two ends are both nodes: a mailbox link is a wire between side
- * ports that flows, with an arrow at the reader and `from → to · #seq`, when
- * its pair's newest wire is at most FLOW_AGE_S old, and is down when either
- * end is down; a reports_to link is a thin hint from the child's top to the
- * parent's bottom with an arrow at the parent and the words `reports to`; a
- * native link carries the words `native · not observed`.
+ * What to draw for a C5 feed laid out inside `width` (see layoutLevels):
+ * one view per node and per edge, keyed by id. Node: title (roleTitle), pos
+ * (layoutLevels), state, detail (unread count), note (`reports to N · not
+ * found`, else the status line, as `last status: ...` on a down node).
+ * Edges come from links whose two ends are both nodes: a mailbox link is a
+ * wire between side ports that flows, with an arrow at the reader and
+ * `from → to · #seq`, when its pair's newest wire is at most FLOW_AGE_S old,
+ * and is down when either end is down; a reports_to link is a thin hint
+ * from the child's top to the parent's bottom with an arrow at the parent
+ * and the words `reports to`; a native link carries the words `native · not
+ * observed`. A pair with a mailbox link and a native link draws one wire,
+ * with the native words as its second label line (`sub`), under the line,
+ * so neither label covers the other and the wire's dash pattern shows
+ * (round 1, MEDIUM-3).
  * @interacts  none; pure
  * @complexity O(n log n + l + r) over n nodes, l links, r wires  @alloc the returned views
  * @returns {{ nodes: {id: view}, edges: {id: view}, extent: {w, h} }}
  */
-export function boardView(feed) {
-  const lay = layoutLevels(feed);
+export function boardView(feed, width) {
+  const lay = layoutLevels(feed, width);
   const known = new Map(((feed && feed.nodes) || []).map((n) => [n.id, n]));
-  const nodes = {};
+  const nodes = nameMap();
   for (const n of known.values()) {
     nodes[n.id] = {
       id: n.id, title: lay.titles[n.id], pos: lay.pos[n.id], state: STATES[n.state] ? n.state : 'idle',
@@ -534,8 +691,14 @@ export function boardView(feed) {
     const key = pairKey(w.from, w.to);
     if (!flowing.has(key) || w.seq > flowing.get(key).seq) flowing.set(key, w);
   }
-  const edges = {};
-  for (const l of (feed && feed.links) || []) {
+  const links = (feed && feed.links) || [];
+  const pairsOf = (kind) => new Set(links
+    .filter((l) => l.kind === kind && known.has(l.from) && known.has(l.to) && l.from !== l.to)
+    .map((l) => pairKey(l.from, l.to)));
+  const mailboxPairs = pairsOf('mailbox');
+  const nativePairs = pairsOf('native');
+  const edges = nameMap();
+  for (const l of links) {
     const p = known.get(l.from);
     const q = known.get(l.to);
     if (!p || !q || p === q) continue;
@@ -546,11 +709,13 @@ export function boardView(feed) {
       edges[id] = {
         id, kind: l.kind, from: p.id, to: q.id,
         a: { x: child.x + CONFIG.NODE_W / 2, y: child.y }, b: { x: parent.x + CONFIG.NODE_W / 2, y: parent.y + CONFIG.NODE_H },
-        label: LINK_WORDS.reports_to, arrow: 'end', flow: false, back: false, down: false,
+        label: LINK_WORDS.reports_to, sub: '', arrow: 'end', flow: false, back: false, down: false,
       };
       continue;
     }
     if (l.kind !== 'mailbox' && l.kind !== 'native') continue;
+    // A native link whose pair also has mail rides on that wire's second line.
+    if (l.kind === 'native' && mailboxPairs.has(pairKey(l.from, l.to))) continue;
     const [top, low] = upperFirst(p, q, lay.pos);
     const w = l.kind === 'mailbox' ? flowing.get(pairKey(l.from, l.to)) : undefined;
     const back = !!w && w.from !== top.id;
@@ -558,6 +723,7 @@ export function boardView(feed) {
       id, kind: l.kind, from: top.id, to: low.id,
       a: portPoint(lay.pos[top.id], 'out'), b: portPoint(lay.pos[low.id], 'in'),
       label: l.kind === 'native' ? LINK_WORDS.native : (w ? `${w.from} → ${w.to} · #${w.seq}` : ''),
+      sub: l.kind === 'mailbox' && nativePairs.has(pairKey(l.from, l.to)) ? LINK_WORDS.native : '',
       arrow: w ? (back ? 'start' : 'end') : null, flow: !!w, back,
       down: l.kind === 'mailbox' && (p.state === 'down' || q.state === 'down'),
     };
@@ -566,7 +732,7 @@ export function boardView(feed) {
 }
 
 const NODE_FIELDS = ['title', 'state', 'detail', 'note'];
-const EDGE_FIELDS = ['kind', 'from', 'to', 'label', 'arrow', 'flow', 'back', 'down'];
+const EDGE_FIELDS = ['kind', 'from', 'to', 'label', 'sub', 'arrow', 'flow', 'back', 'down'];
 
 /** True when two points sit at the same place. @complexity O(1)  @alloc none */
 function samePoint(p, q) {
@@ -611,20 +777,21 @@ export function diffBoard(prev, next) {
  * @complexity O(1)  @alloc two empty maps and an empty view
  */
 export function createBoard(kit) {
-  return { kit, nodes: new Map(), edges: new Map(), view: { nodes: {}, edges: {}, extent: { w: 0, h: 0 } } };
+  return { kit, nodes: new Map(), edges: new Map(), view: { nodes: nameMap(), edges: nameMap(), extent: { w: 0, h: 0 } } };
 }
 
 /**
- * Bring `board` to `feed`: add, move and remove nodes and edges by id through
- * board.kit, never rebuilding what stays (C5). Returns the diff it applied.
+ * Bring `board` to `feed`, laid out inside `width` (see layoutLevels): add,
+ * move and remove nodes and edges by id through board.kit, never rebuilding
+ * what stays (C5). Returns the diff it applied.
  * @interacts  calls board.kit and the handles it made; writes board.nodes,
  *             board.edges and board.view
  * @complexity O(n log n + l + r) for boardView, plus O(c) kit calls for c changes
  * @alloc      one handle per added node or edge; each removed one is dropped
  *             from the maps after its remove()
  */
-export function patchBoard(board, feed) {
-  const next = boardView(feed);
+export function patchBoard(board, feed, width) {
+  const next = boardView(feed, width);
   const ops = diffBoard(board.view, next);
   for (const id of ops.removeEdges) {
     board.edges.get(id).remove();
@@ -643,24 +810,55 @@ export function patchBoard(board, feed) {
 }
 
 /**
- * One edge view as SVG: a path and its words. A reports_to hint goes under
- * every other wire (first in the layer), thin, with its words beside it.
- * @interacts  inserts into canvas.wires; remove() takes both elements out
- * @complexity O(1) per call  @alloc one path and one text element
- * @returns {{ path, label, update(view), remove() }}
+ * Where an edge's words go: `label` over the line's middle (beside it for a
+ * reports_to hint), and `sub`, its second line, LABEL_DROP under the
+ * middle, so the two never sit on each other.
+ * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+ * @interacts  none; pure
+ * @complexity O(1)  @alloc two small objects
+ * @returns {{ label: {x, y, anchor}, sub: {x, y, anchor} }}
+ */
+export function labelPoints(v) {
+  const mx = (v.a.x + v.b.x) / 2;
+  const my = (v.a.y + v.b.y) / 2;
+  if (v.kind === 'reports_to') {
+    const x = mx + CONFIG.HINT_LABEL_SHIFT;
+    return { label: { x, y: my, anchor: 'start' }, sub: { x, y: my + CONFIG.LABEL_DROP, anchor: 'start' } };
+  }
+  return {
+    label: { x: mx, y: my - CONFIG.LABEL_LIFT, anchor: 'middle' },
+    sub: { x: mx, y: my + CONFIG.LABEL_DROP, anchor: 'middle' },
+  };
+}
+
+/**
+ * One edge view as SVG: a path and its words, on two lines where it has a
+ * second (labelPoints). A reports_to hint goes under every other wire
+ * (first in the layer), thin, with its words beside it.
+ * @interacts  inserts into canvas.wires; remove() takes all three elements out
+ * @complexity O(1) per call  @alloc one path and two text elements
+ * @returns {{ path, label, sub, update(view), remove() }}
  */
 export function drawEdge(doc, canvas, view) {
   const path = svg(doc, 'path', { class: 'tc-wire' });
   const label = svg(doc, 'text', { class: 'tc-wire-label' });
+  const sub = svg(doc, 'text', { class: 'tc-wire-label' });
   if (view.kind === 'reports_to') {
     const after = canvas.wires.firstChild ? canvas.wires.firstChild.nextSibling : null;
     canvas.wires.insertBefore(path, after);
     canvas.wires.insertBefore(label, after);
+    canvas.wires.insertBefore(sub, after);
   } else {
-    canvas.wires.append(path, label);
+    canvas.wires.append(path, label, sub);
   }
+  const place = (text, at, words) => {
+    text.setAttribute('text-anchor', at.anchor);
+    text.setAttribute('x', String(at.x));
+    text.setAttribute('y', String(at.y));
+    text.textContent = words || '';
+  };
   const edge = {
-    path, label,
+    path, label, sub,
     update(v) {
       const hint = v.kind === 'reports_to';
       path.setAttribute('d', hint ? hintPath(v.a, v.b) : wirePath(v.a, v.b));
@@ -668,14 +866,14 @@ export function drawEdge(doc, canvas, view) {
       path.removeAttribute('marker-end');
       path.removeAttribute('marker-start');
       if (v.arrow) path.setAttribute(`marker-${v.arrow}`, 'url(#tc-arrow)');
-      label.setAttribute('text-anchor', hint ? 'start' : 'middle');
-      label.setAttribute('x', String((v.a.x + v.b.x) / 2 + (hint ? CONFIG.HINT_LABEL_SHIFT : 0)));
-      label.setAttribute('y', String((v.a.y + v.b.y) / 2 - (hint ? 0 : CONFIG.LABEL_LIFT)));
-      label.textContent = v.label;
+      const at = labelPoints(v);
+      place(label, at.label, v.label);
+      place(sub, at.sub, v.sub);
     },
     remove() {
       path.remove();
       label.remove();
+      sub.remove();
     },
   };
   edge.update(view);
@@ -709,7 +907,10 @@ export function createKit(doc, canvas) {
 
 /**
  * Scale and offset that fit a board of `extent` inside width x height with
- * `padding` to spare, centered, never enlarged and never under MIN_FIT_SCALE.
+ * `padding` to spare, centered, never enlarged and never under MIN_FIT_SCALE
+ * (so no text drops under MIN_TEXT_PX). A board still taller than the
+ * canvas at that scale starts at the top and the canvas scrolls down; one
+ * laid out at layoutWidth(width) never runs past the width.
  * @complexity O(1)  @alloc one object
  * @returns {{ x, y, k }}
  */
@@ -717,4 +918,52 @@ export function fitTransform(width, height, extent, padding) {
   if (!extent.w || !extent.h) return { x: 0, y: 0, k: 1 };
   const k = Math.max(CONFIG.MIN_FIT_SCALE, Math.min(1, (width - padding) / extent.w, (height - padding) / extent.h));
   return { x: Math.max(0, (width - extent.w * k) / 2), y: Math.max(0, (height - extent.h * k) / 2), k };
+}
+
+/**
+ * Keep a board laid out to its canvas. The canvas's size comes from the
+ * ResizeObserver's own entry, never from a layout read after a patch, so a
+ * poll that changes the board forces no layout (round 1, LOW-4). draw(feed)
+ * lays the feed out at the canvas's width (layoutLevels wraps it) and
+ * patches the board; a resize lays the last feed out again. The view and its
+ * wire layer take the board's extent as their size, so the canvas scrolls
+ * down as far as the board goes and never sideways. `Observer` is
+ * ResizeObserver on a page; a test passes a fake.
+ * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+ * @interacts  observes canvas.scroll from start() until stop() (the page
+ *             calls them on load and pageshow, and on pagehide); writes
+ *             canvas.view's transform, width and height and canvas.wires'
+ *             width and height; calls patchBoard, and through it board.kit
+ * @complexity one draw or resize: patchBoard's O(n log n + l + r)
+ * @alloc      one observer for the fit's life; holds the last feed and the
+ *             last size, each replaced by the next
+ * @returns {{ draw(feed), start(), stop() }}
+ */
+export function createFit(canvas, board, { padding, Observer }) {
+  let size = null;
+  let feed = null;
+  const apply = () => {
+    if (!size) return;
+    if (feed) patchBoard(board, feed, layoutWidth(size.width));
+    const { extent } = board.view;
+    const t = fitTransform(size.width, size.height, extent, padding);
+    canvas.view.style.width = `${extent.w}px`;
+    canvas.view.style.height = `${extent.h}px`;
+    canvas.view.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.k})`;
+    canvas.wires.setAttribute('width', String(Math.max(CONFIG.MIN_LAYER_PX, extent.w)));
+    canvas.wires.setAttribute('height', String(Math.max(CONFIG.MIN_LAYER_PX, extent.h)));
+  };
+  const observer = new Observer((entries) => {
+    const box = entries[entries.length - 1].contentRect;
+    size = { width: box.width, height: box.height };
+    apply();
+  });
+  return {
+    draw(next) {
+      feed = next;
+      apply();
+    },
+    start() { observer.observe(canvas.scroll); },
+    stop() { observer.disconnect(); },
+  };
 }

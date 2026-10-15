@@ -2,7 +2,9 @@
  * Tests for the live board's diff and patch in board/look.js: patchBoard
  * keeps what stays, removes what went and adds what came, through a fake
  * drawing kit, so no DOM library is needed. Also the two new states, what
- * boardView draws for a feed's wires and links, and the pill's words.
+ * boardView draws for a feed's wires and links, and the pill's words. Round
+ * 1 adds names that are Object.prototype keys, a pair with a mailbox wire
+ * and a native line, and a down node's stale status.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
@@ -14,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  STATES, boardView, diffBoard, createBoard, patchBoard, pillText, CONFIG,
+  STATES, NOTE_WORDS, boardView, diffBoard, createBoard, patchBoard, pillText, layoutLevels, labelPoints, CONFIG,
 } from '../board/look.js';
 
 /**
@@ -163,7 +165,7 @@ test('hint lines carry words: reports to, native, and a reports_to that names no
   assert.equal(view.edges['native:a>b'].label, 'native · not observed');
   assert.equal(view.edges['reports_to:r>ghost'], undefined, 'a line to a node that is not there');
   assert.equal(view.nodes.r.note, 'reports to ghost · not found');
-  assert.equal(view.nodes.z.note, 'gone quiet');
+  assert.equal(view.nodes.z.note, 'last status: gone quiet', 'a down node shows its status as current');
   assert.equal(view.edges['mailbox:a>z'].down, true, 'a wire to a down node is not marked down');
 });
 
@@ -176,4 +178,62 @@ test('the pill counts listeners by pid, so a listener that is writing still coun
     ],
   };
   assert.deepEqual(pillText(feed), { text: 'live · 2 listening', state: 'up', listening: 2 });
+});
+
+test('the pill names down nodes in the word their boxes show', () => {
+  const feed = { nodes: [node('l', { listener_pid: 12 }), node('d', { state: 'down' })] };
+  assert.deepEqual(pillText(feed), { text: `1 listening · 1 ${STATES.down.word}`, state: 'warn', listening: 1 });
+  assert.equal(STATES.down.word, 'no listener');
+});
+
+test('nodes named __proto__, constructor and toString lay out and draw like any other (C0 allows all three)', () => {
+  const names = ['__proto__', 'a', 'constructor', 'toString'];
+  const feed = {
+    nodes: [
+      node('__proto__', { role: 'orchestrator', role_source: 'declared' }),
+      node('constructor', { role: 'worker', role_source: 'declared', level: 1, parent: '__proto__' }),
+      node('toString'), node('a'),
+    ],
+    wires: [{ from: '__proto__', to: 'constructor', seq: 3, age_s: 0 }],
+    links: [mailbox('__proto__', 'constructor'), mailbox('a', 'toString')],
+  };
+  const lay = layoutLevels(feed);
+  assert.deepEqual(Object.keys(lay.pos).sort(), names);
+  for (const [id, p] of Object.entries(lay.pos)) {
+    assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y), `${id} at ${p.x}, ${p.y}`);
+  }
+  assert.ok(Number.isFinite(lay.extent.w) && Number.isFinite(lay.extent.h), 'the extent is not finite');
+  assert.equal(lay.rows.constructor, 1);
+  const view = boardView(feed);
+  assert.deepEqual(Object.keys(view.nodes).sort(), names);
+  const wire = view.edges['mailbox:__proto__>constructor'];
+  assert.ok(wire && wire.flow, 'the wire from __proto__ to constructor does not flow');
+  for (const at of [wire.a, wire.b]) assert.ok(Number.isFinite(at.x) && Number.isFinite(at.y), 'a wire end is not finite');
+  const kit = fakeKit();
+  patchBoard(createBoard(kit), feed);
+  assert.deepEqual(kit.created, { nodes: 4, edges: 2 });
+});
+
+test('a mailbox wire and a native line on one pair keep their words apart, on one path', () => {
+  const view = boardView({
+    nodes: [node('a', { kind: 'claude' }), node('b', { kind: 'claude' })],
+    wires: [{ from: 'a', to: 'b', seq: 5, age_s: 0 }],
+    links: [mailbox('a', 'b'), { from: 'a', to: 'b', kind: 'native' }],
+  });
+  const onPair = Object.values(view.edges).filter((e) => [e.from, e.to].sort().join('>') === 'a>b');
+  assert.equal(onPair.length, 1, 'two paths on one pair: the native dashes lie on the mailbox wire');
+  const [wire] = onPair;
+  assert.deepEqual([wire.label, wire.sub], ['a → b · #5', 'native · not observed']);
+  const at = labelPoints(wire);
+  const apart = Math.abs(at.label.y - at.sub.y);
+  assert.ok(apart >= CONFIG.BOARD_TEXT_MIN_PX, `the two label lines sit ${apart} px apart`);
+});
+
+test('a down node\'s status reads as its last status, never as its state now', () => {
+  const view = boardView({
+    nodes: [node('d', { state: 'down', status: '● listening' }), node('l', { status: 'reviewing the parser' })],
+    wires: [], links: [],
+  });
+  assert.equal(view.nodes.d.note, `${NOTE_WORDS.lastStatus} ● listening`);
+  assert.equal(view.nodes.l.note, 'reviewing the parser');
 });
