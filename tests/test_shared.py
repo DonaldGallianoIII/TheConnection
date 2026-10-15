@@ -317,6 +317,14 @@ NO_HARD_LINKS_WORDS = ("tc send: the filesystem under {root} has no hard links (
 # What tc says for an inbox's read/ it cannot look at (an inbox its owner
 # left without search).
 CANNOT_LOOK_WORDS = "tc: could not look at {path} ({why}); nothing was read or written there."
+# An inbox its owner may search but not list: what a user sees in a
+# folder that gives search and no read (the audit's REC-1).
+SEARCH_NO_READ_MODE = 0o100
+# What tc says for a folder it could not list.
+CANNOT_LIST_WORDS = "tc could not list {path} ({why})"
+# What peek, read, wait and log say when they see no mail. None of them
+# may say it for an inbox tc could not list.
+SILENT_WORDS = ("0 unread", "no unread mail", "TIMEOUT", "mailbox empty")
 # tc's PUBLISH_MAX_TRIES, written out: a send never tries more numbers, so
 # a member who plants this many names past the counter covers every try.
 PLANTED_NAMES = 100
@@ -2142,10 +2150,10 @@ class NoLostMailNoHangTest(UmaskTestCase):
                 self.assertEqual(history, ["000001-from-a.md", "000002-from-a.md"])
 
     def test_a_held_lock_makes_each_command_fail_within_the_bound_and_write_nothing(self):
-        """This process holds mail/.seq or a name's inbox lock (LOCK_EX), one root per case: send, read, a codex join, tc card and a codex send each exit 10 (busy, D23) within LOCK_WAIT_SECONDS plus the margin, say whose lock, and change nothing; a codex send with the ring marker held lands, rings once, and says the marker could not be cleared within two waits.
+        """This process holds mail/.seq or a name's inbox lock (LOCK_EX), one root per case: send, read, a codex join, tc card and a codex send (on its inbox lock, and on mail/.seq) each exit 10 (busy, D23) within LOCK_WAIT_SECONDS plus the margin, say whose lock, and change nothing; a codex send with the ring marker held lands, rings once, and says the marker could not be cleared within two waits.
 
         The cases run at once, so the test costs about two waits, not
-        seven. Each child runs under a timeout, so a tc that waits on the
+        eight. Each child runs under a timeout, so a tc that waits on the
         flock forever fails here instead of hanging the suite. Must reject
         a plain blocking flock on mail/.seq, the inbox lock or the marker
         (D20: a member who holds one hangs every other member's command
@@ -2159,9 +2167,9 @@ class NoLostMailNoHangTest(UmaskTestCase):
                     contextlib, fcntl, subprocess, time; LOCK_WAIT_SECONDS,
                     LOCK_REFUSE_MARGIN_SECONDS, LOCK_HELD_WORDS, THREAD,
                     EXIT_BUSY.
-        @complexity O(1): seven children at once, each at most
+        @complexity O(1): eight children at once, each at most
                     LOCK_WAIT_SECONDS of waiting (the marker case two).
-        @alloc      seven TcRoots, seven open lock files and seven
+        @alloc      eight TcRoots, eight open lock files and eight
                     children, all released when the stack closes.
         """
         codex = {"CODEX_THREAD_ID": THREAD, "CLAUDECODE": None}
@@ -2174,6 +2182,8 @@ class NoLostMailNoHangTest(UmaskTestCase):
             ("card, inbox lock", None, "mail/.box-x.lock", ["card", "x", "--ssh", "u@h"], None, "x"),
             ("codex send, inbox lock", "join c", "mail/.box-c.lock", ["send", "--from", "a", "--to", "c", "hi"],
              None, "c"),
+            ("codex send, mail/.seq", "join c", "mail/.seq", ["send", "--from", "a", "--to", "c", "hi"],
+             None, "mail/.seq"),  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): REC-2
             ("codex send, ring marker", "join c", "mail/.ring-pending-c", ["send", "--from", "a", "--to", "c", "hi"],
              None, "mail/.ring-pending-c"),
         ]
@@ -2758,6 +2768,42 @@ class CommandsSayWhatTheyCannotSeeTest(UmaskTestCase):
                 self.assertNotIn("Traceback", err)
         self.assertEqual(mail, ["000001-from-a.md"], "a message landed or moved")
         self.assertEqual(seq_after, seq, "a refused send took a number")
+
+    def test_an_inbox_tc_cannot_list_is_said_by_peek_read_wait_and_log_never_0_or_empty(self):
+        """mail/to-b searchable but not readable, its one message unread: tc peek b, tc read b, tc wait b and tc log each exit 1 and say tc could not list it, with the reason; none says `0 unread`, `no unread mail`, TIMEOUT or `mailbox empty`, and nothing moves.
+
+        The audit's REC-1. Must reject inbox_messages and cmd_log dropping
+        message_files' problem: peek prints `0 unread for b`, read `no
+        unread mail for b`, wait times out, and log says `mailbox empty`,
+        all exit 0, over mail that is there.
+
+        @interacts  one send; mail/to-b chmodded by hand and back; four tc
+                    runs; lists the inbox.
+        @deps       _root.TcRoot.tc; errno, os; SEARCH_NO_READ_MODE,
+                    OWNER_FOLDER_MODE, ONE_POLL_SECONDS, REAL_TEXT,
+                    CANNOT_LIST_WORDS, SILENT_WORDS, EXIT_REFUSED.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root lists any folder")
+        commands = (["peek", "b"], ["read", "b"], ["wait", "b", "--timeout", ONE_POLL_SECONDS], ["log"])
+        with _root.TcRoot() as root:
+            root.tc("send", "--from", "a", "--to", "b", REAL_TEXT)
+            box = root.path / "mail" / "to-b"
+            box.chmod(SEARCH_NO_READ_MODE)
+            try:
+                runs = {argv[0]: root.tc(*argv) for argv in commands}
+            finally:
+                box.chmod(OWNER_FOLDER_MODE)
+            mail = sorted(str(p.relative_to(box)) for p in box.rglob("*.md"))
+        for command, (code, out, err) in runs.items():
+            with self.subTest(command=command):
+                self.assertEqual(code, EXIT_REFUSED, err)
+                self.assertIn(CANNOT_LIST_WORDS.format(path=box, why=os.strerror(errno.EACCES)), err)
+                for silent in SILENT_WORDS:
+                    self.assertNotIn(silent, out, f"tc {command} said {silent!r} over an inbox it could not list")
+        self.assertEqual(mail, ["000001-from-a.md"], "a message moved")
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1.

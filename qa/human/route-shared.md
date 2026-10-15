@@ -3,7 +3,9 @@
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
         steps (6, 7, 13 to 15, and 22) added by the SHARED fixer, Claude
         Opus 5.5; step 25's words and steps 27 to 29 added in round 2 by
-        the SHARED fixer, Claude Opus 5.5
+        the SHARED fixer, Claude Opus 5.5; steps 30 and 31, and the words
+        of steps 3, 15, 28 and 29, in round 3 by the SHARED fixer, Claude
+        Opus 5.5, 2026-10-15
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
@@ -13,7 +15,9 @@ send to a name nobody joined is refused even when an inbox is there
 (D21). A planted link is never printed (D19). A member who sets
 `mail/.seq` back or holds a lock can make the other's command fail, never
 lose a message or hang it, and init never shares a ROOT the group may
-write (round 2). The tests in
+write (round 2). A file a member plants under a read message's name
+never replaces it, and init refuses a ROOT a member could swap through a
+folder above it (round 3, D20, D23). The tests in
 `tests/test_shared.py` prove the modes, the owners and the checks tc
 makes, but one user cannot prove another user's refusals. This script
 does, by hand.
@@ -36,10 +40,15 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
 3. Make a mailbox both can reach, owned by ann and not group-writable:
    `sudo mkdir /srv/tc-shared`, `sudo chown ann:ann /srv/tc-shared`,
    `sudo chmod 0755 /srv/tc-shared`.
-   - Do not give it group `tcshare` with group write. A member could then
-     rename `mail/` itself, or replace `.shared`; init refuses such a
-     ROOT (step 28). ben needs search access on every folder from `/`
-     down to it, which `/srv` gives.
+   - Do not give it group `tcshare` with group write, sticky or not. A
+     member could then rename `mail/` itself, or replace `.shared`; init
+     refuses such a ROOT (step 28). ben needs search access on every
+     folder from `/` down to it, which `/srv` gives.
+   - Every folder above it must belong to root or ann, and must not be
+     writable by its group or anyone unless it is sticky (as `/tmp`).
+     `/srv` at 0755, owned by root, is fine. Init refuses any other
+     (step 31), since a member could rename the mailbox away and put
+     their own in its place.
 4. In every terminal below: `export TC_ROOT=/srv/tc-shared`.
 
 ## ann shares the mailbox
@@ -121,8 +130,14 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
     - As ann: `chmod 644 /srv/tc-shared/.shared`, to put it back.
 15. As ann: `chmod g+w /srv/tc-shared/.shared`, as init left it before
     D21. As ben: `tc init --shared --group tcshare`.
-    - It exits 0 and says, on stderr, `tc init: /srv/tc-shared/.shared
-      is 0664; ask ann to rerun init to tighten it`.
+    - It exits 1 with one line, `tc init: /srv/tc-shared belongs to ann
+      (mode 0755), who is neither root nor you, so ann could put a ROOT of
+      their own, with their own .shared, in place of /srv/tc-shared and
+      change the group. Keep the mailbox under folders only root or you
+      own. Nothing changed.` Since D23 (round 3), init takes a folder from
+      ROOT up to `/` only from root or the user running it, so a member's
+      init on ann's ROOT stops there. Steps 7, 13 and 14 still get their
+      own words: those refusals come first.
     - `ls -l /srv/tc-shared/.shared` still shows `-rw-rw-r--`, owner
       `ann`: ben's init leaves ann's file as it is.
     - As ann: `tc init --shared --group tcshare`. `ls -l` now shows
@@ -222,32 +237,71 @@ fail or ring once more, never read, lose or alter mail.
     - `ls -l /srv/tc-shared/mail/to-ben` shows both messages from ann.
     - As ben: `tc read ben` prints `kept one` and `after the set back`,
       each whole.
-28. Init refuses a ROOT the group may write. As ann: `chmod g+w
-    /srv/tc-shared`, then `tc init --shared --group tcshare`.
+28. Init refuses a ROOT the group may write, sticky or not. As ann:
+    `chmod g+w /srv/tc-shared`, then `tc init --shared --group tcshare`.
     - It exits 1 with one line, `tc init: /srv/tc-shared is 0775: its
-      group or anyone may write it and it is not sticky, so any member
-      could rename .shared or mail/ in it and change the group. Its
+      group or anyone may write it, so any member could rename .shared or
+      mail/ in it, or make them before init, and change the group. Its
       owner, ann, runs chmod g-w,o-w /srv/tc-shared first. Nothing
       changed.`
-    - As ann: `chmod g-w,o-w /srv/tc-shared`, then the same init again.
+    - As ann: `chmod 1775 /srv/tc-shared` (sticky, still group-writable),
+      then the same init. The same line, with `1775`, and exit 1.
+    - As ann: `chmod 0755 /srv/tc-shared`, then the same init again.
       It exits 0.
 29. A member holds a lock, and the other's command fails in about 3
-    seconds instead of hanging.
+    seconds instead of hanging, with exit 10 (busy: nothing written, run
+    it again; D23).
     - As ben: `( flock 9 && sleep 60 ) 9< /srv/tc-shared/mail/.seq &`.
       The shell opens the counter read-only, which the group may, and
       holds its lock for a minute.
     - As ann, at once: `cat /srv/tc-shared/mail/.seq`, then `time tc
-      send --from ann --to ben "while ben holds the counter"`. It exits 1
-      after about 3 seconds with `tc: another process is holding
-      /srv/tc-shared/mail/.seq's lock; try again`. `ls
-      /srv/tc-shared/mail/to-ben` shows no new message, and a second `cat`
-      prints the same number.
+      send --from ann --to ben "while ben holds the counter"; echo $?`.
+      After about 3 seconds it prints `tc: another process is holding
+      /srv/tc-shared/mail/.seq's lock; try again`, and `echo` prints `10`.
+      `ls /srv/tc-shared/mail/to-ben` shows no new message, and a second
+      `cat` prints the same number.
     - As ben: `kill %1`. As ann: the same send now exits 0.
     - As ben: `( flock 9 && sleep 60 ) 9< /srv/tc-shared/mail/.box-ann.lock
-      &`. As ann: `time tc read ann`. It exits 1 after about 3 seconds
-      with `tc: another process is holding ann's lock; try again`, and
-      moves nothing. As ben: `kill %1`.
+      &`. As ann: `time tc read ann; echo $?`. After about 3 seconds it
+      prints `tc: another process is holding ann's lock; try again`,
+      `echo` prints `10`, and it moves nothing. As ben: `kill %1`.
+
+## Nothing planted replaces read mail, and nobody swaps ROOT (round 3)
+
+30. ben plants a file under the name of one of ann's read messages, and
+    ann's read keeps both (D20).
+    - As ann: `ls /srv/tc-shared/mail/to-ann/read/`. Call `R` the name of
+      ann's own note from step 16, now read (step 23), for example
+      `00000N-from-ann.md`. Run `cat /srv/tc-shared/mail/to-ann/read/R`
+      and note what it prints.
+    - As ben: `echo "not written by tc" > /srv/tc-shared/mail/to-ann/R`.
+      It works: a member may put a new file in an inbox.
+    - As ann: `tc read ann`. It prints `tc read: a second R arrived after
+      the first was read. tc never reuses a number, so someone wrote this
+      one by hand. The first stays in read/, unchanged; this one is kept
+      as /srv/tc-shared/mail/to-ann/read/by-hand-1-R:`, then `not written
+      by tc`, and exits 0.
+    - `cat /srv/tc-shared/mail/to-ann/read/R` prints what it did before.
+      `ls /srv/tc-shared/mail/to-ann/read/` shows both `R` and
+      `by-hand-1-R`. `ls /srv/tc-shared/mail/to-ann` no longer shows `R`,
+      so ann's `tc wait ann` never wakes for it again.
+31. Init refuses a ROOT under a folder the group may write (D23).
+    - As a user with sudo: `sudo mkdir /srv/team`, `sudo chgrp tcshare
+      /srv/team`, `sudo chmod 2775 /srv/team`: a team folder every member
+      may write.
+    - As ann: `mkdir /srv/team/tc`, then `TC_ROOT=/srv/team/tc tc init
+      --shared --group tcshare`. It exits 1 with one line, `tc init:
+      /srv/team, on the way to /srv/team/tc, is 2775 and owned by root:
+      its group or anyone may write it and it is not sticky, so any
+      member could rename the entry in it that leads to /srv/team/tc and
+      put their own, with their own .shared, in its place. Its owner,
+      root, runs chmod g-w,o-w /srv/team first, or the mailbox moves.
+      Nothing changed.` `ls -A /srv/team/tc` prints nothing.
+    - As a user with sudo: `sudo chmod 3775 /srv/team` (sticky, as
+      `/tmp`). As ann: the same init. It exits 0: in a sticky folder only
+      an entry's owner may rename it.
 
 ## Afterward
 
-30. The mailbox and the group stay until you remove them yourself.
+32. The mailbox, `/srv/team` and the group stay until you remove them
+    yourself.

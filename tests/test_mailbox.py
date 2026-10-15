@@ -26,9 +26,11 @@ joined will warn there (open item O1). No test depends on `tc read` or
             K3 takes an flock on the root's mail/.seq itself and reads
             /proc/locks to prove each send is blocked on it. K5 sets
             message file times with os.utime. Reads and writes only inside
-            each test's temp folder.
-@deps       python3 stdlib (builtins, contextlib, fcntl, importlib, io, os,
-            pathlib, re, shlex, subprocess, sys, time, unittest,
+            each test's temp folder. At import, K3's block ceiling reads
+            LOCK_WAIT_SECONDS from ../tc's source (tc_constant; SHARED fix
+            round 3, Claude Opus 5.5, unreviewed), which runs nothing.
+@deps       python3 stdlib (ast, builtins, contextlib, fcntl, importlib, io,
+            os, pathlib, re, shlex, subprocess, sys, time, unittest,
             unittest.mock); tests/_root.py; ../tc; Linux only (flock,
             /proc/locks).
 @complexity O(1) tc commands per test, except K3: S = SENDERS = 50
@@ -42,6 +44,7 @@ joined will warn there (open item O1). No test depends on `tc read` or
             is kept between tests.
 """
 
+import ast
 import builtins
 import contextlib
 import fcntl
@@ -65,6 +68,25 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import _root  # noqa: E402  (needs the path line above)
+
+
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-4, K3 reads tc's bound.
+def tc_constant(name):
+    """The value of the module constant `name` in ../tc, read from its source, never run.
+
+    For a test bound that must sit under one of tc's own, so it follows tc
+    instead of a copy. Raises LookupError when tc has no such constant.
+
+    @interacts  reads ../tc's source. Writes nothing; runs nothing of tc.
+    @deps       ast, pathlib; HERE.
+    @complexity O(s) over s bytes of tc's source (under 200 KB).
+    @alloc      the source and its syntax tree, freed on return.
+    """
+    for node in ast.parse((HERE.parent / "tc").read_text()).body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == name for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise LookupError(f"tc has no constant {name}")
+
 
 # Made-up mailbox names. b gets mail; c is a name with none; d holds a
 # listener in K4.
@@ -118,7 +140,15 @@ SENDERS = 50
 # then all must finish within SENDERS_FINISH_CEILING_SECONDS of the release.
 # Together they keep the check under the brief's 10 s. Measured on the
 # owner's machine at a load near 16 on 32 cores: about 0.2 s.
-SENDERS_BLOCK_CEILING_SECONDS = 6
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-4. Each
+# sender gives up LOCK_WAIT_SECONDS after it starts waiting (tc's bounded
+# wait, D20, D23), so the block ceiling sits that bound less
+# SENDERS_RELEASE_MARGIN_SECONDS (room for the release and 50 quick turns at
+# the counter), read from tc rather than copied so the two never drift. A
+# slow start then fails here, by count of senders blocked, never by a first
+# sender giving up and the test blaming tc for not waiting.
+SENDERS_RELEASE_MARGIN_SECONDS = 1
+SENDERS_BLOCK_CEILING_SECONDS = tc_constant("LOCK_WAIT_SECONDS") - SENDERS_RELEASE_MARGIN_SECONDS
 SENDERS_FINISH_CEILING_SECONDS = 3
 
 # /proc/locks columns for a blocked waiter:

@@ -14,7 +14,9 @@ Status: unreviewed
             first, put back after) and call cmd_send or deliver_local in
             process, so they write under that root only. Two tests hold
             the inbox lock themselves and read /proc/locks, to see how a
-            local send takes it. One plants a symlink at a message's .tmp
+            local send takes it; the one that holds it shared also loads
+            tc the same way to read LOCK_WAIT_SECONDS (SHARED fix round 3,
+            Claude Opus 5.5, unreviewed). One plants a symlink at a message's .tmp
             name, pointing at a file in the harness's temp folder, which
             the send must refuse to write through.
 @deps       python3 stdlib (argparse, contextlib, fcntl, importlib, io,
@@ -58,7 +60,11 @@ EXIT_TOO_LARGE = 8
 NEW_INBOX_WORDS = "new inbox: nobody has joined as {name}\n"
 # A send that shares the inbox lock with the test lands at once; this much
 # is room for a loaded machine, not a wait anyone expects.
-SHARED_SEND_CEILING_SECONDS = 5
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-11. The
+# ceiling is tc's LOCK_WAIT_SECONDS, read from tc in the test, less this
+# margin, so a send that asked for the lock alone is still waiting when
+# the ceiling ends, rather than giving up first with exit 10.
+SHARED_SEND_MARGIN_SECONDS = 1
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the refusals' words,
 # written here. The not-built refusal reads like the other two.
 NOT_BUILT_WORDS = "tc send: route {route} is not built yet; nothing sent\n"
@@ -452,24 +458,33 @@ class RouterTest(unittest.TestCase):
 
         Local senders share the lock, so many senders to one inbox queue on
         mail/.seq as before (CORE's K3), never on each other here. Must
-        reject a local send that takes the lock alone.
+        reject a local send that takes the lock alone. SHARED fix round 3
+        (Claude Opus 5.5, unreviewed): the ceiling sits under tc's bounded
+        wait (LOCK_WAIT_SECONDS, read from tc), so such a send is still
+        waiting when it ends and fails with these words, not with tc's.
 
-        @interacts  holds mail/.box-b.lock shared; one background send.
-        @deps       fcntl, subprocess; _root.TcRoot.start.
+        @interacts  loads tc in process (TC_ROOT set to the harness root
+                    first, put back after) to read LOCK_WAIT_SECONDS;
+                    holds mail/.box-b.lock shared; one background send.
+        @deps       load_tc, fcntl, subprocess; _root.TcRoot.start;
+                    SHARED_SEND_MARGIN_SECONDS.
         @complexity O(1).
-        @alloc      one TcRoot, one open lock file, one background child.
+        @alloc      one TcRoot, one module, one open lock file, one
+                    background child.
         """
         with _root.TcRoot() as root:
+            ceiling = load_tc(root).LOCK_WAIT_SECONDS - SHARED_SEND_MARGIN_SECONDS
             lock = root.path / "mail" / ".box-b.lock"
             lock.parent.mkdir()
             with open(lock, "a") as held:
                 fcntl.flock(held, fcntl.LOCK_SH)
                 proc = root.start("send", "--from", "a", "--to", "b", "hi")
                 try:
-                    out, err = proc.communicate(timeout=SHARED_SEND_CEILING_SECONDS)
+                    out, err = proc.communicate(timeout=ceiling)
                 except subprocess.TimeoutExpired:
-                    self.fail(f"the send still waited {SHARED_SEND_CEILING_SECONDS} s on a lock "
-                              f"the test held shared: it took the lock alone")
+                    self.fail(f"the send still waited {ceiling} s on a lock the test held shared, under "
+                              f"tc's own {ceiling + SHARED_SEND_MARGIN_SECONDS} s bound: it asked for the "
+                              f"lock alone")
             landed = sorted(p.name for p in (root.path / "mail" / "to-b").glob("*.md"))
         self.assertEqual(proc.returncode, 0, err)
         self.assertEqual(landed, ["000001-from-a.md"])

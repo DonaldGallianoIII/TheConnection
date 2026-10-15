@@ -1438,15 +1438,25 @@ def inbox_messages(name, shared=None):
     shared one a missing inbox holds nothing. `shared` None means look it
     up here (mailbox_share); a caller that polls passes what it found once.
 
+    SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's REC-1.
+    An inbox tc cannot list (message_files gives a problem and nothing
+    else) refuses, exit 1, with the reason, so peek, read and wait say
+    they could not list it instead of `0 unread`, `no unread mail` or a
+    quiet timeout. An entry tc could not look at stays in skipped, named
+    by the caller, as before.
+
     @interacts  reads ROOT/.shared when `shared` is None; see inbox and
-                message_files.
-    @deps       mailbox_share, inbox, message_files.
+                message_files; on an inbox it cannot list, one line to
+                stderr and exit 1.
+    @deps       mailbox_share, inbox, message_files, refuse; EXIT_REFUSED.
     @complexity O(u) over u *.md entries in the inbox (single digits).
     @alloc      two lists, returned.
     """
     if shared is None:
         shared = mailbox_share() is not None
-    messages, skipped, _ = message_files(inbox(name, shared))  # an entry tc could not look at is in skipped
+    messages, skipped, problem = message_files(inbox(name, shared))  # an entry tc could not look at is in skipped
+    if problem is not None and not messages and not skipped:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): REC-1, not listed
+        refuse(f"{problem}, so its unread mail is unknown; nothing was read or moved", EXIT_REFUSED)
     return [path for path, _ in messages], skipped
 
 
@@ -1630,7 +1640,10 @@ def inbox_lock(name, how=fcntl.LOCK_EX, deadline=None):
 def write_new_file(path, text, mode=NEW_FILE_MODE):
     """Create `path`, which must not exist yet, at `mode`, and write `text` into it.
 
-    For every .tmp tc renames into place (a message, a card, .shared).
+    For every .tmp tc makes before it publishes a file: a card's and
+    .shared's, each renamed into place, and a message's, hard-linked to
+    the message's name and then removed (never renamed: SHARED fix rounds
+    2 and 3, Claude Opus 5.5, unreviewed).
     NEW_FILE_FLAGS fail on anything already at that name and never follow
     a link, so a link planted at a .tmp name is refused, not written
     through. Raises OSError (FileExistsError for a planted link or file);
@@ -1813,7 +1826,8 @@ def cmd_read(args):
                 10, nothing moved: inbox_lock, D20, D23), refuses an inbox or
                 read/ that is a symlink, or under
                 a shared mailbox not its card owner's (exit 1, nothing
-                moved: check_inbox, D17, D20), in a private mailbox makes
+                moved: check_inbox, D17, D20), or that it cannot list
+                (exit 1, inbox_messages, SHARED fix round 3), in a private mailbox makes
                 mail/to-<name>/read/ if missing, lstats each *.md entry,
                 lstats read/<name> for each regular file (and, when it is
                 taken, read/by-hand-<k>-<name> until one is free) and
@@ -1879,7 +1893,8 @@ def cmd_peek(args):
                 (O2); else reads ROOT/.shared (inbox_messages), refuses an
                 inbox or read/ that is a symlink, or under a shared mailbox
                 not its card owner's (exit 1, nothing read: check_inbox,
-                D17, D20), in a private mailbox makes mail/to-<name>/read/
+                D17, D20), or that it cannot list (exit 1, inbox_messages,
+                SHARED fix round 3), in a private mailbox makes mail/to-<name>/read/
                 if missing, lstats each *.md entry and reads each regular
                 file (read_regular_file); prints to stdout, and names each
                 one it will not show on stderr.
@@ -1912,7 +1927,9 @@ def cmd_wait(args):
                 (make_folder's mailbox_share); in a private mailbox makes
                 mail/to-<name>/read/ on the first poll; a linked inbox, or
                 under a shared mailbox one not its card owner's, refuses
-                there (exit 1, check_inbox); prints one line. Under a shared
+                there (exit 1, check_inbox), and so does one it cannot
+                list (exit 1, never a quiet timeout: inbox_messages,
+                SHARED fix round 3); prints one line. Under a shared
                 mailbox it makes no inbox: a name nobody joined polls as no
                 mail (D20).
     @deps       require_names, make_folder, open_by_name, unread,
@@ -2011,18 +2028,25 @@ def cmd_log(args):
     print (message_files, then show); anything else is named. Either makes
     log exit 1 after it prints the rest.
 
+    SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's REC-1.
+    A folder tc cannot list (message_files gives a problem and nothing
+    else) is named on stderr with the reason, the log exits 1 after it
+    prints the rest, and it never says `mailbox empty` while such a folder
+    may hold mail.
+
     @interacts  lists mail/, lstats each inbox, its read/ and each *.md
                 entry, reads each message shown (read_regular_file);
-                prints to stdout, and to stderr for what it will not show.
-                Writes nothing.
+                prints to stdout, and to stderr for what it will not show
+                or could not list. Writes nothing.
     @deps       real_folder, message_files, show, refuse_lines, printable;
                 os; MAIL.
     @complexity O(t) over t message files ever (low hundreds per job), one
                 lstat each and one read for each one shown.
-    @alloc      the list of every message path and the skipped entries,
-                freed on exit; each file's text while it prints.
+    @alloc      the list of every message path, the skipped entries and
+                the folders not listed, freed on exit; each file's text
+                while it prints.
     """
-    every, skipped = [], []
+    every, skipped, unlisted = [], [], []
     for box in sorted(MAIL.glob("to-*")) if MAIL.is_dir() else []:
         for folder in (box, box / "read"):
             if not real_folder(folder):
@@ -2031,14 +2055,17 @@ def cmd_log(args):
                 if folder == box:
                     break
                 continue
-            messages, bad, _ = message_files(folder)  # an entry tc could not look at is in bad
+            messages, bad, problem = message_files(folder)  # an entry tc could not look at is in bad
             every += [path for path, _ in messages]
             skipped += bad
+            if problem is not None and not messages and not bad:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): REC-1
+                unlisted.append(problem)
     every.sort(key=lambda p: p.name)
-    if not every:
+    if not every and not unlisted:
         print("mailbox empty")
     unshown = show(every[-args.last:] if args.last else every)
-    refuse_lines([f"tc log: {printable(p)} not shown ({why})" for p, why in skipped + unshown])
+    refuse_lines([f"tc log: {printable(p)} not shown ({why})" for p, why in skipped + unshown]
+                 + [f"tc log: {printable(problem)}; the mail in it is not shown" for problem in unlisted])
 
 
 # ---------- cards: who each name is and how mail reaches it (C1) ----------
@@ -2784,7 +2811,14 @@ def write_ring_marker(name, state, detail):
     purpose. The wait is bounded (flock_within): past LOCK_WAIT_SECONDS
     nothing is written and the words say another process is holding the
     marker's lock, which every caller already reports as a marker it
-    could not write. A ring at worst rings once more.
+    could not write. SHARED fix round 3 (Claude Opus 5.5, unreviewed): the
+    audit's LOW-7. With the lock held through a codex send, neither of its
+    writes lands, so the marker keeps its old state. A ring that then
+    succeeds may leave a pending state behind, and the next send rings
+    once more. A ring that then fails leaves a `clear` marker clear, and
+    the next send to the inbox, which is not empty, does not ring: one
+    ring fewer, which the send's warning says (a later send may not
+    ring). Either way the mail is in the inbox, never lost or altered.
 
     @interacts  opens mail/.ring-pending-<name> (making it when missing),
                 waits at most LOCK_WAIT_SECONDS for its flock, then
