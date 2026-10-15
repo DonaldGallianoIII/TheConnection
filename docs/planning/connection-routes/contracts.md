@@ -4,7 +4,8 @@ Model:  Claude Opus 5.5 (the TheConnection architect session)
 Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
-        pauses (D15) and the P1 and P2 phase review (D16) the same day.
+        pauses (D15) the P1 and P2 phase review (D16), and the
+        wave 2 rulings (D17, D18) the same day.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
 Date:   2026-10-14
@@ -282,6 +283,19 @@ command="/home/you/TheConnection/tc gate --as homebox-b",no-pty,no-port-forwardi
 - `<any> health --json`. Runs `cmd_health` **without the `cards` key**: a
   far key never reads account labels or ssh targets (D16).
 
+**What the gate may run** (D18). The gate starts no shell. Its one
+program is the codex ring, reached through the router for a recipient
+whose card says codex: an argv list, the thread id validated (C2), and a
+fixed message template holding only the validated name, `TC_ROOT` and
+the words to run `tc read`. The ring never carries the message body or
+any text the far side sent; the far sender's words reach Codex only
+through `tc read`, like any mail. A gated message to a name whose local
+card says `ssh` is refused, exit 7, `tc gate: <name> is not a local name;
+the gate does not forward`. `tc send` and the gate share one path,
+`route_and_deliver(sender, to, body, header_note=None)`, which holds the
+route and inbox-lock steps; nothing else repeats them, since the inbox
+lock is not re-entrant.
+
 Anything else: stderr `tc gate: refused`, exit 7, nothing written. The gate
 never starts a shell and never runs another program.
 
@@ -307,6 +321,17 @@ For a separate Linux user per account on one machine.
   (`cards/`, `status/`, `outbox/`, an inbox and its `read/`) gets group
   `g` and mode `2775` as it is made. Init only reaches the folders that
   exist at the time (D16).
+- **No planted links** (D17). The shared folders are group-writable, so
+  one member could plant a link where another user's tc opens a file.
+  - Every file tc opens by name (the wait, watch and inbox locks,
+    `mail/.seq`, `status/<name>.md`, the ring marker) opens with
+    `O_NOFOLLOW`; a link there is refused with words, exit 1, and nothing
+    is written through it.
+  - The shared folders (`mail/`, `status/`, `cards/`, `outbox/`) carry the
+    sticky bit as well (mode `3775`), so a member cannot delete or rename
+    another user's inbox, card or file, as in `/tmp`.
+  - Before tc uses an inbox folder it checks it with `lstat` and refuses,
+    exit 1, if it is a link and not a real folder.
 - `tc health` says `mailbox shared with group <g>` or `mailbox private`.
 
 ## C5. The board feed

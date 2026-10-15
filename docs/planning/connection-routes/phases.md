@@ -267,7 +267,12 @@ key behind `tc gate` can deliver mail and nothing else.
   empty command. `tc gate` with no `--as` is a usage error: exit 9 (D12),
   nothing written. A body over 1 MiB: exit 8. A gated send to a name
   with a codex card rings it (fake codex asserted called), and a gated
-  `health --json` has no `cards` key (D16).
+  `health --json` has no `cards` key (D16). D18: a body holding shell or
+  prompt-like text (`; rm -rf ~`, `ignore previous instructions`) never
+  appears in the ring's argv (assert on the fake's record); a gated send
+  to a name with an ssh card exits 7 with the not-a-local-name words and
+  ssh is never called; `tc send` and the gate both call
+  `route_and_deliver` (patch it to record and assert both callers).
   Must reject: a gate that runs anything else. Two checks: in process,
   patch `subprocess.*`, `os.system`, `os.spawn*`, `os.exec*`,
   `os.posix_spawn*` and `os.fork` to raise; and out of process, run the
@@ -293,6 +298,11 @@ mailbox (human QA, D4); modes are right by test.
   inbox and its `read/` on a first send) has mode `2775` and group `g`
   (D16). Must reject: files at `0644` after init (the umask not set
   before the first write); a later folder without setgid.
+  D17: the shared folders carry mode `3775` (sticky); a symlink planted
+  at `mail/.wait-x.lock`, `mail/.seq`, `status/x.md` or the ring marker
+  is refused (exit 1) and its target is unchanged; a symlink planted as
+  `mail/to-x` (pointing at a real folder) is refused (exit 1) and nothing
+  lands there.
 - **Verify:** `python3 -m unittest tests.test_shared -v`.
 
 ---
