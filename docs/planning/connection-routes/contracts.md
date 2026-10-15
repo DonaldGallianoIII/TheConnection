@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D21) the same day, and D22 to D26 on
+        wave 2 rulings (D17 to D21) the same day, and D22 to D27 on
         2026-10-15.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
@@ -535,10 +535,16 @@ are tested in Python; `look.js` only lays them out.
 1. **Partners** of a node: the names it has exchanged at least one message
    with, either way, itself excluded.
 2. **Parent.** Declared: the card's `reports_to`, when that name is a
-   node. Inferred, when nothing is declared: the one partner of a node
-   that has exactly one partner, if that partner has `HUB_MIN_PARTNERS`
-   (2) or more, **unless that partner's card declares this node as its
-   own parent** (D15: inference never inverts a declared edge). Else none.
+   node. Inferred, when nothing is declared (D27): the partner holding at
+   least `PARENT_MAJORITY` (two thirds) of the node's messages, sent and
+   received, if that partner has `HUB_MIN_PARTNERS` (2) or more,
+   **unless that partner's card declares this node as its own parent**
+   (D15: inference never inverts a declared edge). Else none, so a node
+   split evenly between two relays gets no guess. A majority, not "the
+   only partner", because the board counts every message ever sent: one
+   message between two siblings must not move both out of their relay's
+   tree for good. An inferred edge that would close a cycle is dropped
+   before roles and levels are worked out.
    A `reports_to` naming no node stays on the node, is drawn as `reports
    to <N> · not found`, and gives no parent. Each node carries the parent
    the walk used as `parent` (declared or inferred, or null), so
@@ -547,8 +553,9 @@ are tested in Python; `look.js` only lays them out.
    `worker` when it has a parent and no children; `peer` otherwise. A
    relay for others under a relay is an `orchestrator` one level down.
 4. **`role_source`**: `declared` when every parent edge that decided the
-   role came from a card; `inferred` when any came from mail. A `peer` is
-   `inferred`.
+   role came from a card; `inferred` when any came from mail; `none` for
+   a `peer`, which no edge decided (D27: `inferred` marks a guess, and a
+   peer is not one).
 5. **Level.** Nodes with no parent are roots, level 0. Walk breadth first
    down parent to child. Nodes still unreached sit on a cycle of
    `reports_to`: the one whose name sorts first becomes a root, and the
@@ -564,7 +571,8 @@ are tested in Python; `look.js` only lays them out.
 side by side, roots in name order, levels top to bottom. Mailbox wires
 between any two nodes (two orchestrators, cousins) draw whatever their
 levels. Each node's title carries its role word (`a · orchestrator`,
-`b · worker`, `x · peer`), with `· inferred` when `role_source` says so.
+`b · worker`, `x · peer`), with `· inferred` only when `role_source` is
+`inferred`, never on a peer.
 Role never rides on color.
 
 Cost: O(n + m + e) for n names, m message file names scanned (every
