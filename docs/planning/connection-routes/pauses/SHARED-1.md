@@ -2,7 +2,8 @@
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
-Pause:  open. Built to C4 as written (option 1); nothing else waits on it.
+Pause:  settled by D19 (2026-10-14): option 2, with outbox/ as well.
+        Built in the SHARED fix round 1 (`cf92cee`).
 
 ## The question
 
@@ -32,12 +33,14 @@ to prepare ROOT?
 
 ## The options
 
-1. **As built: init touches only what exists.** The README's shared
-   section and `qa/human/route-shared.md` (DOCS, D4) tell the owner to
-   put the mailbox where every user in the group can reach it, and to run
-   init after `mail/`, `status/` and `cards/` exist (one `tc send`, one
-   `tc status`, one `tc join` as the first user is enough), or to give
-   ROOT group g and mode 2775 by hand.
+1. **As first built: init touches only what exists.** The README's
+   shared section and `qa/human/route-shared.md` (DOCS, D4) tell the
+   owner to put the mailbox where every user in the group can reach it,
+   and to run init after `mail/`, `status/` and `cards/` exist (one
+   `tc send`, one `tc status`, one `tc join` as the first user is
+   enough), or to give ROOT group g and mode 2775 by hand. Do not follow
+   that last part: with ROOT group-writable and not sticky, a member
+   could rename or replace `mail/` itself (the audit's LOW-11).
 2. **Init also makes `mail/`, `status/` and `cards/`** through
    make_folder, so they exist at 3775 in group g from the start. ROOT
    needs search access for the group, never write. `outbox/` stays the
@@ -60,3 +63,18 @@ access for the group. It removes the trap for the owner's two-user
 walk-through (D4) at the cost of three folders that do no harm. It needs
 a ruling because C4 and D16 describe what init reaches, and a reviewer
 could read them as forbidding it to make anything.
+
+## Ruling
+
+D19 (`decisions.md` on the dev branch): `tc init --shared` creates the
+four top folders, `mail/`, `status/`, `cards/` and `outbox/`, so no other
+user ever has to create one inside a ROOT the first user owns (C4). Built
+in the SHARED fix round 1: init makes ROOT, then the four when missing,
+and its walk gives them group g and 3775. ROOT needs search access for
+the group, never write. Init on a ROOT this user cannot reach says so
+(search access on every folder from `/` down to it) instead of a
+traceback.
+
+Not ruled and not built: words for a PermissionError on a folder tc may
+not make after init (a login that predates the group). That is the
+audit's REC-7, open.

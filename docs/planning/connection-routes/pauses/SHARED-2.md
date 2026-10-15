@@ -2,8 +2,8 @@
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
-Pause:  open. Not fixed: outside D17's named files. Nothing built waits
-        on it.
+Pause:  settled by D19 (2026-10-14): options 2 and 3. Built in the
+        SHARED fix round 1 (`0afc985`).
 
 ## The question
 
@@ -55,3 +55,24 @@ left by which a member can make another user's agent read a file it
 should not, and the second is about four lines in a function this lane
 wrote. Each takes one test in `tests/test_shared.py` in the style of the
 planted-link tests.
+
+## Ruling
+
+D19 (`decisions.md` on the dev branch): messages are read only from
+regular files, and a planted link is skipped, left in place and never
+printed; lock and marker files refuse a FIFO. Built in the SHARED fix
+round 1:
+
+- `read`, `peek` and `log` lstat each `*.md` entry and read only regular
+  files, through `read_regular_file` with MESSAGE_READ_MAX_BYTES. Anything
+  else is named on stderr and the command exits 1 after the rest prints.
+  `tc read` leaves it in place; `tc log` never enters a linked inbox;
+  `tc wait`, the counts and `tc health` leave it out.
+- `open_by_name` goes through `open_regular`: O_NONBLOCK, then an S_ISREG
+  check, so a FIFO at a lock, `mail/.seq`, a status file or the ring
+  marker is refused with words at once.
+
+D19's trust trade (any group member could delete or replace others'
+unread mail) was replaced the same evening by D20, also built in round 1:
+inboxes owned by their recipient at 3770, and message, card and status
+files at 0640.
