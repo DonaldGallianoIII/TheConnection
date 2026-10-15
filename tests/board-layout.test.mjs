@@ -21,8 +21,11 @@
  * after every solid and dashed one, on a knockout in the canvas's face
  * (createKit on the fake document); a tree wire clears both port rings at
  * the widest node border; routes are searched once per routed pair and
- * never on a poll that only aged the mail, and 20 Claude peers on one
- * account draw within a time budget; and theme.css asks no other host.
+ * never on a poll that only aged the mail, a pair's first mail searches
+ * that pair alone, 20 Claude peers on one account search once per native
+ * line with the grid edge flags at work, and createFit searches none on a
+ * resize that wraps no row; a node's state words and unread words are
+ * never cut; and theme.css asks no other host.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
@@ -31,9 +34,16 @@
  *             the font files in board/fonts/; no DOM (a fake observer, kit
  *             and document)
  * @deps       node:test, node:assert, node:fs (Node 18+)
- * @complexity O(n^2) per shape over n <= 14 nodes, for the pairwise overlap
+ * @complexity O(n^2) per shape over n <= 20 nodes, for the pairwise overlap
  *             check; O(r * p * n) for the runs over r runs of p points, and
- *             O(e^2 + e * n) for the labels over e labels
+ *             O(e^2 + e * n) for the labels over e labels. The routing
+ *             dominates: the 20-peer feed's 190 native lines are searched
+ *             three times in all (its first draw, and the resize test's
+ *             first draw and 1000 px), each search O(g log g) over g up to
+ *             12,180 states, about 130 to 210 ms per 190 on the owner's
+ *             machine; the 14-name shared feed's 20 routed pairs about
+ *             six times in all (two cached first draws, and fresh views
+ *             to compare the cached runs with)
  * @alloc      the layouts, dropped at the end of each test
  */
 import test from 'node:test';
@@ -531,11 +541,19 @@ const ACCOUNT_OF = {
   a: 'acct1', b: 'acct1', docs: 'acct1', e1: 'acct1', e2: 'acct1', z: 'acct2', y1: 'acct2', y2: 'acct2', y3: 'acct2',
   c: 'acct3', d: 'acct3', e3: 'acct3', p1: 'acct3', p2: 'acct3',
 };
-// A time budget for the first draw of PEERS Claude cards on one account,
-// every one of their native lines routed: about 150 ms on the owner's
-// machine (2026-10-15), so this leaves room for a loaded one.
-const FIRST_DRAW_BUDGET_MS = 2000;
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+// unreviewed. The first draw of PEERS Claude cards on one account is judged
+// by its counts (one search per native line, PEERS(PEERS-1)/2 = 190, and the
+// grid edge flags hit), not its time. This stopwatch is only a backstop:
+// the draw took 127 to 213 ms on the owner's machine (2026-10-15), so a
+// draw past it is a hang, not a slow machine.
+const FIRST_DRAW_BACKSTOP_MS = 10000;
 const PEERS = 20;
+// createFit's widths for the resize claim: the 20 peers sit four to a row
+// at the desktop canvas and still at NARROWER_W (four boxes and three root
+// gaps need 1,048 px of the room), and three to a row at WRAP_W.
+const NARROWER_W = 1140;
+const WRAP_W = 1000;
 
 /**
  * The 14-name mixed feed with every card Claude, on three accounts of 5, 4
@@ -592,19 +610,88 @@ test('routes are searched once per routed pair, none on a poll that only aged th
   assert.deepEqual(runsById(board.view), runsById(boardView(stopped, width)), 'a reused run differs from a fresh search');
 });
 
-test('twenty Claude peers on one account draw every native line within FIRST_DRAW_BUDGET_MS, and the next poll searches none', (t) => {
+/**
+ * PEERS Claude cards on one account, every pair joined by a native line.
+ * @complexity O(PEERS^2)  @alloc one feed
+ */
+function peersFeed() {
   const nodes = Array.from({ length: PEERS }, (_, i) => fed(`s${i + 1}`, 'peer', 'none', 0, null, { kind: 'claude', account: 'work' }));
   const links = nodes.flatMap((p, i) => nodes.slice(i + 1).map((q) => ({ from: p.id, to: q.id, kind: 'native' })));
-  const feed = { nodes, links, wires: [] };
+  return { nodes, links, wires: [] };
+}
+const NATIVE_LINES = (PEERS * (PEERS - 1)) / 2;
+
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+test('twenty Claude peers on one account: the first draw searches once per native line and reuses grid edges, the next poll searches none', (t) => {
+  const feed = peersFeed();
   const board = createBoard(createCountingKit());
   const start = performance.now();
   patchBoard(board, feed, layoutWidth(DESK_W));
   const ms = performance.now() - start;
-  t.diagnostic(`first draw of ${PEERS} peers on one account: ${ms.toFixed(0)} ms, ${board.routes.searches} route searches`);
-  assert.equal(board.routes.searches, (PEERS * (PEERS - 1)) / 2, 'not one search per native line');
-  assert.ok(ms <= FIRST_DRAW_BUDGET_MS, `the first draw took ${ms.toFixed(0)} ms, over ${FIRST_DRAW_BUDGET_MS}`);
+  t.diagnostic(`first draw of ${PEERS} peers on one account: ${ms.toFixed(0)} ms, ${board.routes.searches} route searches, `
+    + `${board.routes.edgeHits} grid edges looked up again`);
+  assert.equal(board.routes.searches, NATIVE_LINES, 'not one search per native line');
+  assert.ok(board.routes.edgeHits > 0, 'no search looked up a grid edge it had already checked: the edge flags keep nothing');
+  assert.ok(ms <= FIRST_DRAW_BACKSTOP_MS, `the first draw took ${ms.toFixed(0)} ms, past the ${FIRST_DRAW_BACKSTOP_MS} ms backstop`);
+  const hits = board.routes.edgeHits;
   patchBoard(board, { ...feed, at: 'the next poll' }, layoutWidth(DESK_W));
-  assert.equal(board.routes.searches, (PEERS * (PEERS - 1)) / 2, 'the next poll searched again');
+  assert.deepEqual([board.routes.searches, board.routes.edgeHits], [NATIVE_LINES, hits], 'the next poll searched again');
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+// One key covered every routed run, so a pair's first message searched
+// every routed pair again though no box moved. A run rests on the boxes
+// and its own ends only, so the cache keeps runs by their ends.
+test('a pair\'s first mail searches only that pair, and a native pair\'s first mail searches none', () => {
+  const width = layoutWidth(DESK_W);
+  const feed = sharedFeed();
+  const board = createBoard(createCountingKit());
+  patchBoard(board, feed, width);
+  const first = board.routes.searches;
+  const parentOf = Object.fromEntries(feed.nodes.map((x) => [x.id, x.parent]));
+  // docs (under a) and y3 (under z): no link yet, no shared account, not parent and child.
+  assert.ok(!feed.links.some((l) => [l.from, l.to].sort().join('>') === 'docs>y3') && parentOf.y3 !== 'docs', 'docs and y3 are linked already');
+  const mailed = {
+    ...feed, links: [...feed.links, { from: 'docs', to: 'y3', kind: 'mailbox' }], wires: [...feed.wires, { from: 'docs', to: 'y3', seq: 99, age_s: 0 }],
+  };
+  patchBoard(board, mailed, width);
+  assert.equal(board.routes.searches, first + 1, 'a new pair searched more than itself');
+  // c (under b) and e3 (under a) share an account: their native line becomes a mail wire on the same run.
+  assert.ok(feed.links.some((l) => l.kind === 'native' && [l.from, l.to].sort().join('>') === 'c>e3'), 'c and e3 have no native line');
+  const native = {
+    ...mailed, links: [...mailed.links, { from: 'c', to: 'e3', kind: 'mailbox' }], wires: [...mailed.wires, { from: 'e3', to: 'c', seq: 100, age_s: 0 }],
+  };
+  patchBoard(board, native, width);
+  assert.equal(board.routes.searches, first + 1, 'a native pair\'s first mail searched again');
+  assert.deepEqual(runsById(board.view), runsById(boardView(native, width)), 'a cached run differs from a fresh search');
+  assert.equal(board.routes.runs.size, Object.values(board.view.edges).filter((e) => parentOf[e.to] !== e.from && parentOf[e.from] !== e.to).length,
+    'the cache holds runs for pairs no longer drawn');
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+// createFit's @complexity says a width change searches only when a row
+// wraps differently. Pinned on the 20 peers.
+test('createFit searches no route from 1152 to 1140 px, where no row wraps, and every native line again at 1000 px, where one does', () => {
+  let report = null;
+  class FakeObserver {
+    constructor(callback) { report = callback; }
+    observe() {}
+    disconnect() {}
+  }
+  const board = createBoard(createCountingKit());
+  const fit = createFit({ root: {}, frame: { style: {} }, view: { style: {} }, wires: { setAttribute() {} } }, board,
+    { padding: FIT_PADDING, Observer: FakeObserver });
+  fit.start();
+  fit.draw(peersFeed());
+  report([{ contentRect: { width: DESK_W, height: CANVAS_H } }]);
+  assert.equal(board.routes.searches, NATIVE_LINES);
+  const desk = board.view;
+  report([{ contentRect: { width: NARROWER_W, height: CANVAS_H } }]);
+  assert.notEqual(board.view, desk, `${NARROWER_W} px did not lay the board out again, so the claim is not tested`);
+  assert.equal(board.routes.searches, NATIVE_LINES, `${NARROWER_W} px, where no row wraps, searched a route`);
+  report([{ contentRect: { width: WRAP_W, height: CANVAS_H } }]);
+  assert.equal(board.routes.searches, 2 * NATIVE_LINES, `${WRAP_W} px, three to a row, did not search every native line again`);
+  fit.stop();
 });
 
 // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.

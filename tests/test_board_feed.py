@@ -173,6 +173,12 @@ PLANTED_SEQ = 900
 # two workers, so one message between the workers leaves a with 10 of each
 # worker's 11, well past two thirds.
 RELAY_TRADES = 5
+# serve.py's WAKE_CANDIDATES, written here: a stopped name's newest messages
+# a poll may lstat for its wake.
+WAKE_CANDIDATES = 16
+# Old messages to a stopped name in the cost test: three times the
+# candidates, so a walk over its whole history shows in the count.
+HISTORY_TIMES = 3
 
 
 def load_serve():
@@ -774,6 +780,64 @@ class FeedTest(unittest.TestCase):
                          "mail that reached c after the board saw it gone woke it")
         self.assertEqual(pair(late), {"b": ("woken", None, False), "c": ("down", None, False)})
         self.assertEqual(pair(read), {"b": ("working", None, False), "c": ("down", None, False)})
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    def test_a_stopped_name_lstats_only_its_newest_messages_and_none_once_settled(self):
+        """b holds 48 old messages and the one that woke it: a poll lstats at most WAKE_CANDIDATES of them, and none once its window has passed (LOW-14).
+
+        A stand-in snapshot names b listening, then not. While b's wake
+        window is open, its candidates are its newest messages by number,
+        kept as the scan goes, so the poll lstats WAKE_CANDIDATES of them
+        and finds the wake there: working. The first poll past the window
+        looks once more and settles; the next lstats none of b's messages
+        and still reads working. Must reject a walk over b's whole
+        history: it would lstat all 49.
+
+        @interacts  49 message files in a fresh TcRoot; four feed() calls
+                    with Board.snapshot swapped for a stand-in and
+                    serve.file_time wrapped to count.
+        @deps       _root.TcRoot, put_message, age_file, snapshot_for,
+                    serve.Board, unittest.mock.
+        @complexity O(1): 49 messages.
+        @alloc      one TcRoot, removed on exit.
+        """
+        listening = {}
+        old = HISTORY_TIMES * WAKE_CANDIDATES
+        with _root.TcRoot() as root:
+            clock = FakeClock(FAKE_NOW)
+            board = serve.Board(root=root.path, clock=clock)
+            for seq in range(1, old + 1):
+                age_file(put_message(root.path, seq, "a", "b"), FAKE_NOW - OLD_SEND_S)
+            age_file(put_message(root.path, old + 1, "a", "b", unread=True), FAKE_NOW + 1)
+            box = str(root.path / "mail" / "to-b")
+            counted = []
+            real = serve.file_time
+
+            def counting(path):
+                """serve.file_time, noting each path under b's inbox.
+
+                @interacts  see serve.file_time; appends to `counted`.
+                @deps       serve.file_time.
+                @complexity O(1).
+                @alloc      one list entry per path under to-b.
+                """
+                if str(path).startswith(box):
+                    counted.append(path)
+                return real(path)
+
+            polls = []
+            with mock.patch.object(board, "snapshot", snapshot_for(listening, ("b",))), \
+                    mock.patch.object(serve, "file_time", counting):
+                listening["b"] = STAND_IN_PID
+                board.feed()
+                listening.clear()
+                for at in (FAKE_NOW + RECENT_SEND_S, FAKE_NOW + RECENT_SEND_S + 2 * TC_POLL_S,
+                           FAKE_NOW + RECENT_SEND_S + 3 * TC_POLL_S):
+                    clock.now = at
+                    counted.clear()
+                    polls.append((by_id(board.feed())["b"]["state"], len(counted)))
+        self.assertEqual(polls, [("working", WAKE_CANDIDATES), ("working", WAKE_CANDIDATES), ("working", 0)],
+                         "(state, b's messages lstatted) per poll: open, the last look, settled")
 
     # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
     def test_an_inbox_the_board_cannot_list_reads_down_inbox_unreadable(self):

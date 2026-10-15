@@ -53,8 +53,8 @@
  *             l links and r recent wires (tens each, but l grows as
  *             c(c-1)/2 native lines per shared account); a poll with news
  *             adds O(n log n + l + r) for the layout and labels, and
- *             look.js routeAround's search per routed pair only when the
- *             boxes or the drawn pairs changed
+ *             look.js routeAround's search per routed pair only when a box
+ *             moved, else only for a pair new to the board
  * @alloc      one board: its drawn nodes and wires are patched in place,
  *             and each answer with news builds one full view that replaces
  *             the last (look.js patchBoard; one that only aged the mail

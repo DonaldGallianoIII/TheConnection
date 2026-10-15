@@ -43,9 +43,11 @@
  *             c(c-1)/2 native lines per account shared by c Claude cards,
  *             190 for 20 on one; r <= 50), the log from the sort by name.
  *             patchBoard lays nothing out when only ages moved (drawnKey);
- *             else boardView adds placeLabels and, only when the boxes or
- *             the drawn pairs changed (createRouteCache's key), routeAround's
- *             search per routed pair, O(g log g) over its g = 4XY states:
+ *             else boardView adds placeLabels and routeAround's search,
+ *             O(g log g) over its g = 4XY states, per routed pair when
+ *             the boxes, headings, extent or tree runs changed
+ *             (createRouteCache's key), else only per routed pair new to
+ *             the cache:
  *             up to 31,916 on the 14-name test feed at 1152 px (X 79 and Y
  *             101 lines), and 190 searches of up to 12,180 for 20 peers on
  *             one account, which drew in about 150 ms on the owner's machine
@@ -69,8 +71,9 @@
  *             dropped when patchBoard removes it, the last full view
  *             (board.view), replaced on every patch that lays out, the
  *             last feed's key (board.drawn), and its route cache
- *             (board.routes): the routed runs by edge id and their key,
- *             replaced on each layout
+ *             (board.routes): one routed run per routed pair drawn now,
+ *             by its ends, and their key, replaced on each layout, and
+ *             two counts
  */
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -1255,8 +1258,10 @@ function createHeap() {
  * within ROUTE_CLEAR of one of their pieces, the same way, costs
  * ROUTE_ALONG_COST times its length. With no free side on a box, or no run (neither happens on a
  * layoutLevels board), it returns the straight line from the upper box's
- * bottom to the lower's top.
- * @interacts  none; pure
+ * bottom to the lower's top. `counts`, when given (a route cache), gains
+ * one in edgeHits each time the search looks up a grid edge it already
+ * checked, which a test reads to see the edge flags at work.
+ * @interacts  none; pure, but for adding to counts.edgeHits when given
  * @complexity O(g log g) over the g = 4 * X * Y search states, X and Y the
  *             line counts (X at most 4b + 3 and Y at most 4b + 7 over b
  *             obstacles: two lines per obstacle, the ring, the two middle
@@ -1271,7 +1276,7 @@ function createHeap() {
  *             all freed on return; the returned points
  * @returns {{x, y}[]}
  */
-export function routeAround(obstacles, from, to, extent, along = []) {
+export function routeAround(obstacles, from, to, extent, along = [], counts = null) {
   const C = CONFIG.ROUTE_CLEAR;
   const TURN = CONFIG.ROUTE_TURN_COST;
   const shadows = along.flatMap((run) => run.slice(1).map((q, i) => ({ p: run[i], q })));
@@ -1309,6 +1314,8 @@ export function routeAround(obstacles, from, to, extent, along = []) {
     if (!edgeFlags[k]) {
       if (!pieceFree(ix, iy, jx, jy)) edgeFlags[k] = EDGE.BLOCKED;
       else edgeFlags[k] = alongside({ x: xs[ix], y: ys[iy] }, { x: xs[jx], y: ys[jy] }) ? EDGE.ALONG : EDGE.FREE;
+    } else if (counts) {
+      counts.edgeHits += 1;
     }
     return edgeFlags[k];
   };
@@ -1714,20 +1721,24 @@ export function outlineView(feed) {
  * A label sits where placeLabels puts it (`at`), clear of every node box
  * and every other label, or is dropped (`at` null) with its words kept in
  * the title.
- * `routes`, when given (createRouteCache), keeps the routed runs: on the
- * key the last call left there (the boxes, headings, extent, connectors
- * and drawn pairs) they are reused with no search, and each search made
- * adds one to routes.searches. Runs reused or found again are the same,
- * so the board draws the same either way.
+ * `routes`, when given (createRouteCache), keeps the routed runs by their
+ * two ends: on the key the last call left there (the boxes, headings,
+ * extent, connectors and tree wires) each pair it holds a run for reuses
+ * it with no search, and only a pair it has none for searches. Each search
+ * adds one to routes.searches, and each grid edge a search looks up again
+ * one to routes.edgeHits. Runs reused or found again are the same, so the
+ * board draws the same either way.
  * @interacts  none; pure, but for writing `routes` when given
  * @complexity O(n log n + l + r) for the layout and the edges over n
- *             nodes, l links and r wires, plus the route key, O(n + l)
- *             over the boxes and the runs it names; routeAround per routed
- *             pair when there is no `routes` or its key changed; and
- *             placeLabels for the labels
+ *             nodes, l links and r wires, plus the route key, O(n + t)
+ *             over the boxes and the t tree runs it names; routeAround per
+ *             routed pair when there is no `routes` or its key changed,
+ *             else per routed pair new to it; and placeLabels for the
+ *             labels
  * @alloc      the returned views, one box per node, the key string and the
  *             routing's working sets, freed on return; with `routes`, its
- *             runs map, replaced on each call
+ *             runs map, one run per routed pair drawn now, replaced on
+ *             each call
  * @returns {{ nodes: {id: view}, edges: {id: view}, extent: {w, h} }}
  */
 export function boardView(feed, width, routes = null) {
@@ -1800,23 +1811,27 @@ export function boardView(feed, width, routes = null) {
     drawn.push({ l, p, q, pair, from: ends[0], to: ends[1], points: tree ? routeTreeWire(lay, ends[0], ends[1]) : null });
   }
   const along = [...connectors, ...drawn.filter((d) => d.points).map((d) => d.points)];
-  // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
-  // Every routed run rests on these alone: the boxes by name, the
-  // headings, the extent, the runs to keep off, and which pairs are drawn
-  // and how. On the key `routes` holds, its runs are reused and no search
-  // runs; a feed that only moved its ages or its flow changes none of them.
-  const key = routes ? JSON.stringify([Object.entries(boxOf), headBoxes, lay.extent, along,
-    drawn.map((d) => [d.l.kind, d.l.from, d.l.to, d.from, d.to, !d.points])]) : null;
+  // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; keyed per pair
+  // by the P4 phase fixer, round 2. Status: unreviewed.
+  // A routed run rests on the boxes by name, the headings, the extent and
+  // the runs to keep off, one key for them all, and on its own two ends,
+  // never on another routed pair: routeAround keeps off boxes, ports,
+  // headings and `along`, and no routed run is in `along`. So on the key
+  // `routes` holds, a pair it has a run for reuses it, and only a pair new
+  // to it searches; a feed that only moved its ages or its flow, or gave a
+  // native pair its first mail, searches none.
+  const key = routes ? JSON.stringify([Object.entries(boxOf), headBoxes, lay.extent, along]) : null;
   const reuse = !!routes && routes.key === key;
   const runs = new Map();
   for (const { l, p, q, pair, from, to, points } of drawn) {
     const id = `${l.kind}:${l.from}>${l.to}`;
-    let run = points || (reuse ? routes.runs.get(id) : null);
+    const ends = `${from}>${to}`;
+    let run = points || (reuse ? routes.runs.get(ends) : null);
     if (!run) {
-      run = routeAround(obstacles, boxOf[from], boxOf[to], lay.extent, along);
+      run = routeAround(obstacles, boxOf[from], boxOf[to], lay.extent, along, routes);
       if (routes) routes.searches += 1;
     }
-    if (!points) runs.set(id, run);
+    if (!points) runs.set(ends, run);
     const w = l.kind === 'mailbox' ? flowing.get(pair) : undefined;
     const back = !!w && w.from !== from;
     const label = w ? `${w.from} → ${w.to} · #${w.seq}` : '';
@@ -1895,13 +1910,16 @@ export function diffBoard(prev, next) {
 
 /**
  * An empty route cache for boardView: `key`, what the last routed runs
- * rested on; `runs`, those runs by edge id; and `searches`, how many
- * routeAround searches it has run, the count a test reads.
- * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+ * rested on; `runs`, those runs by their two ends (`from>to`, from the
+ * upper box); `searches`, how many routeAround searches it has run; and
+ * `edgeHits`, how many times those searches looked up a grid edge they
+ * had already checked (routeAround's edge flags): the counts a test reads.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; runs by ends and
+ * edgeHits by the P4 phase fixer, round 2. Status: unreviewed.
  * @complexity O(1)  @alloc one object and an empty Map
  */
 export function createRouteCache() {
-  return { key: null, runs: new Map(), searches: 0 };
+  return { key: null, runs: new Map(), searches: 0, edgeHits: 0 };
 }
 
 /**
@@ -1942,7 +1960,8 @@ export function createBoard(kit) {
  * last one drawn (a poll that only aged the mail, with no wire crossing
  * FLOW_AGE_S) would draw the same board, so nothing is laid out and the
  * diff is empty. Otherwise boardView lays it out with board.routes, which
- * skips every route search when the boxes and the drawn pairs stand.
+ * searches only the routed pairs new to it while the boxes, headings,
+ * extent and tree runs stand.
  * @interacts  calls board.kit and the handles it made; writes board.nodes,
  *             board.edges, board.view, board.routes and board.drawn
  * @complexity O(n + l + r) for drawnKey; when it changed, boardView's
@@ -2250,8 +2269,10 @@ export function fitTransform(width, height, extent, padding) {
  *             board.kit.drawOutline; jump calls a node handle's reveal or
  *             board.kit.revealOutline
  * @complexity one draw or width change: patchBoard's (nothing past its
- *             key when only ages moved; route searches only when the boxes
- *             or the drawn pairs changed), or outlineView's O(n log n + r log r)
+ *             key when only ages moved; a route search per routed pair
+ *             only when a box moved, as a width change does only when a
+ *             row wraps differently, else only for a pair new to the
+ *             cache), or outlineView's O(n log n + r log r)
  * @alloc      one observer for the fit's life; holds the last feed, the
  *             last width and the last outline drawn (as a string), each
  *             replaced by the next
