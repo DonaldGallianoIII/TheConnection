@@ -59,21 +59,27 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             2, D20): a message is published by a hard link from its .tmp,
             which never replaces a file, and a name already taken in the
             inbox or its read/ (mail/.seq set back) takes the next number,
-            up to PUBLISH_MAX_TRIES; tc waits at most LOCK_WAIT_SECONDS for
-            the flock on mail/.seq, an inbox lock or the ring marker (a
-            one-shot SIGALRM timer), and then refuses, exit 1, or for the
-            marker says so.
+            up to PUBLISH_MAX_TRIES. tc read never replaces a file in
+            read/ either: an inbox file whose name read/ already holds
+            moves to read/by-hand-<k>-<name>, said beside it (SHARED fix
+            round 3). One command waits at most LOCK_WAIT_SECONDS in all
+            for the flocks on mail/.seq and its inbox lock (one deadline,
+            a one-shot SIGALRM timer), and then refuses, exit 10 (busy,
+            D23); each ring marker write waits as long for the marker's
+            flock, and then says so.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
             grp, json, pathlib, pwd, re, resource, shlex, shutil, signal,
             stat, subprocess, time, datetime, os, sys); Linux only (flock,
             RLIMIT_AS, O_NOFOLLOW, O_NONBLOCK, /proc). nvidia-smi optional; the codex CLI for the codex route.
 @complexity send O(b), b body bytes up to SEND_BODY_MAX_BYTES, once per
             publish try (one, unless mail/.seq was set back; at most
-            PUBLISH_MAX_TRIES); status O(1). Each flock on mail/.seq, an
-            inbox lock or the ring marker waits at most LOCK_WAIT_SECONDS
-            (a codex send may wait on the marker twice).
+            PUBLISH_MAX_TRIES); status O(1). A command's flocks on
+            mail/.seq and its inbox lock wait at most LOCK_WAIT_SECONDS in
+            all; each ring marker write at most LOCK_WAIT_SECONDS (a codex
+            send may wait on the marker twice).
             read/peek/wait-poll O(u), u unread messages in one inbox,
-            single digits in practice. log O(t), t total messages ever,
+            single digits in practice; read adds one lstat per message,
+            and one per by-hand name already taken. log O(t), t total messages ever,
             low hundreds per job. health O(p + k + n + m + c): p processes
             on the machine (hundreds), k lines in /proc/locks (tens), n
             mailbox names and c cards (a few dozen each), m message files in
@@ -309,14 +315,31 @@ MESSAGE_READ_MAX_BYTES = SEND_BODY_MAX_BYTES + MESSAGE_HEADER_MAX_BYTES
 # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20's bound. The worst
 # a member can do through mail/.seq, the locks and the ring marker is make
 # a send fail: never hang another member's tc, never lose a message.
-# How long tc waits for the flock on mail/.seq, an inbox lock or the ring
-# marker. An honest holder keeps one for milliseconds (a number, a count,
-# a glob and its renames). Past this, another process is holding it on
-# purpose or is stuck, and the command fails with words instead of
-# hanging. Three seconds rides out a busy machine and keeps a refusal quick.
+# How long one command waits, in all, for the flocks on mail/.seq and its
+# inbox lock (one deadline per command, lock_deadline; SHARED fix round 3),
+# and each ring marker write for the marker's flock. An honest holder keeps
+# one for milliseconds (a number, a count, a glob and its renames). Past
+# this, another process is holding it on purpose or is stuck, and the
+# command fails with words instead of hanging. Three seconds rides out a
+# busy machine and keeps a refusal quick.
 LOCK_WAIT_SECONDS = 3
 # The words for a lock held past LOCK_WAIT_SECONDS; {what} says whose.
 LOCK_HELD_WORDS = "another process is holding {what}'s lock"
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23. Row 10 of the
+# exit table, busy: another process held mail/.seq or an inbox lock past
+# LOCK_WAIT_SECONDS, nothing was written, and the same command may run
+# again. Not 1, which reads as a final refusal (the ssh route and tc flush
+# would move a queued message to refused/ for good, C3). wait and watch
+# never exit with it, so the re-arm rule is unchanged.
+EXIT_BUSY = 10
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1.
+# The name tc read gives an inbox file whose own name read/ already holds,
+# {k} the first count from 1 that read/ does not hold. tc never reuses a
+# number, so a second file of that name was written by hand, and read/
+# keeps both. The name starts with a letter, so it never matches a
+# message's NNNNNN-from-<sender>.md: tc never makes it, and no scan of
+# message names (the board's) reads a number or a sender from it.
+BY_HAND_NAME = "by-hand-{k}-{name}"
 # How many message numbers one send tries before it gives up. A send links
 # its .tmp to the message's name, which never replaces a file, so a name
 # already taken (mail/.seq set back) takes the next number. Each try moves
@@ -1319,29 +1342,61 @@ class LockWaitOver(Exception):
     """Raised inside flock_within by its timer while the flock is still waited for."""
 
 
-def flock_within(f, how):
-    """Take the flock `how` on the open file `f`, waiting at most LOCK_WAIT_SECONDS. True once held; False when the time ran out, with nothing held.
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-2, one deadline per command.
+def lock_deadline():
+    """When a command stops waiting for mail/.seq and its inbox lock, on time.monotonic(): now plus LOCK_WAIT_SECONDS.
+
+    A command takes it once, before its first lock, and hands it to each
+    flock_within after (inbox_lock, then next_seq on every publish try), so
+    all its waits together stay within LOCK_WAIT_SECONDS (C4, D23).
+
+    @interacts  reads the monotonic clock.
+    @deps       time; LOCK_WAIT_SECONDS.
+    @complexity O(1).
+    @alloc      none.
+    """
+    return time.monotonic() + LOCK_WAIT_SECONDS
+
+
+def flock_within(f, how, deadline=None):
+    """Take the flock `how` on the open file `f`, waiting no later than `deadline` (from lock_deadline; None means LOCK_WAIT_SECONDS from now). True once held; False when the time ran out, with nothing held.
 
     D20: mail/.seq, the inbox locks and the ring marker are 0664, so any
     group member may open one and hold its flock as long as it likes, and
     a plain flock would wait forever. Here the wait still sits in the
     kernel's queue, as a plain flock does, so the lock is taken the moment
     its holder lets go (and /proc/locks shows this process waiting), but a
-    one-shot real-time timer (setitimer, SIGALRM) cuts the wait off at
-    LOCK_WAIT_SECONDS. The timer is cancelled and the old SIGALRM handler
+    one-shot real-time timer (setitimer, SIGALRM) cuts the wait off at the
+    deadline. The timer is cancelled and the old SIGALRM handler
     put back before this returns, whatever happens. A timer that fires
     just as the flock is granted counts as the time running out: the lock
     is let go and False returned, so the caller refuses with nothing
     written. Signal handlers belong to the main thread, so this runs only
     there (tc is one thread).
 
-    @interacts  sets this process's SIGALRM handler and real-time interval
-                timer for the wait and puts both back; takes the flock on
-                `f`, or lets it go when the time ran out.
-    @deps       fcntl, signal; LOCK_WAIT_SECONDS, LockWaitOver.
-    @complexity O(1), plus at most LOCK_WAIT_SECONDS of waiting.
+    SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-2.
+    A command passes its one deadline to every wait, so the waits add up
+    to LOCK_WAIT_SECONDS at most. A deadline already past still takes a
+    lock nobody holds (one LOCK_NB try, no timer), so a command whose
+    earlier waits used its time is refused only while the lock is held.
+
+    @interacts  sets this process's SIGALRM handler and arms a one-shot
+                real-time timer for the wait, then puts the old handler
+                back and cancels the timer (one armed before the call is
+                cancelled, not restored); takes the flock on `f`, or lets
+                it go when the time ran out. Reads the monotonic clock.
+    @deps       fcntl, signal, time; lock_deadline, LockWaitOver.
+    @complexity O(1), plus waiting until `deadline` at most: at most
+                LOCK_WAIT_SECONDS after the command's lock_deadline call.
     @alloc      one closure, freed on return.
     """
+    left = (lock_deadline() if deadline is None else deadline) - time.monotonic()
+    if left <= 0:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): time used up; a free lock is still taken
+        try:
+            fcntl.flock(f, how | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
     waiting = True
 
     def ran_out(signum, frame):
@@ -1351,7 +1406,7 @@ def flock_within(f, how):
     previous = signal.signal(signal.SIGALRM, ran_out)
     try:
         try:
-            signal.setitimer(signal.ITIMER_REAL, LOCK_WAIT_SECONDS)
+            signal.setitimer(signal.ITIMER_REAL, left)
             fcntl.flock(f, how)
             waiting = False
         finally:
@@ -1364,7 +1419,7 @@ def flock_within(f, how):
     return True
 
 
-def next_seq():
+def next_seq(deadline=None):
     """The next message number: mail/.seq read, raised by one and written back under its flock.
 
     @interacts  reads ROOT/.shared and makes mail/ when missing
@@ -1372,19 +1427,21 @@ def next_seq():
                 creating it when missing and refusing a symlink or a FIFO
                 there (exit 1, D17, D19), and holds its flock while it
                 reads and rewrites the number. SHARED fix round 2 (Claude
-                Opus 5.5, unreviewed): waits at most LOCK_WAIT_SECONDS for
-                the flock (flock_within), then refuses, exit 1, `tc:
-                another process is holding <ROOT>/mail/.seq's lock; try
-                again`, with nothing written (D20).
+                Opus 5.5, unreviewed): waits for the flock no later than
+                `deadline`, the command's lock_deadline (flock_within;
+                None: LOCK_WAIT_SECONDS from now, SHARED fix round 3),
+                then refuses, exit 10 (EXIT_BUSY, D23), `tc: another
+                process is holding <ROOT>/mail/.seq's lock; try again`,
+                with nothing written (D20).
     @deps       make_folder, open_by_name, flock_within, refuse; fcntl, os;
-                LOCK_HELD_WORDS, EXIT_REFUSED.
-    @complexity O(1), plus at most LOCK_WAIT_SECONDS of waiting.
+                LOCK_HELD_WORDS, EXIT_BUSY.
+    @complexity O(1), plus waiting until `deadline` at most.
     @alloc      one open file, closed on return.
     """
     make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
     with open(open_by_name(SEQ_FILE, os.O_RDWR | os.O_APPEND), "a+") as f:  # SHARED D17 (Claude Opus 5.5, unreviewed)
-        if not flock_within(f, fcntl.LOCK_EX):  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20
-            refuse(f"tc: {LOCK_HELD_WORDS.format(what=SEQ_FILE)}; try again", EXIT_REFUSED)
+        if not flock_within(f, fcntl.LOCK_EX, deadline):  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20
+            refuse(f"tc: {LOCK_HELD_WORDS.format(what=SEQ_FILE)}; try again", EXIT_BUSY)  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23
         f.seek(0)
         n = int(f.read().strip() or 0) + 1
         f.seek(0)
@@ -1395,7 +1452,7 @@ def next_seq():
 
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the inbox lock (D14), for send, read and card.
 @contextlib.contextmanager
-def inbox_lock(name, how=fcntl.LOCK_EX):
+def inbox_lock(name, how=fcntl.LOCK_EX, deadline=None):
     """Hold mail/.box-<name>.lock (flock) for the `with` block.
 
     One lock per inbox. Held alone (LOCK_EX) by the codex route from its
@@ -1403,7 +1460,8 @@ def inbox_lock(name, how=fcntl.LOCK_EX):
     last rename, by `tc card` from its unread count to its card's rename,
     and by `tc join` for a codex card from its card's rename to its ring
     marker (D16). A local send holds it shared (LOCK_SH) from its card read
-    to its rename: local senders never queue behind each other, only
+    to the link that publishes its message: local senders never queue
+    behind each other, only
     behind those four. So a send never lands between a reader's glob and
     its renames (the lost wake, D14), and never lands in an inbox after a
     `tc card` for that name counted it, where it would never be read once
@@ -1413,28 +1471,31 @@ def inbox_lock(name, how=fcntl.LOCK_EX):
 
     SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20. The lock file
     is 0664 under a shared mailbox, so any member may hold its flock on
-    purpose. The wait is bounded (flock_within): past LOCK_WAIT_SECONDS
-    the command refuses, exit 1, `tc: another process is holding <name>'s
-    lock; try again`, before the block runs, so nothing is written. Send,
-    read, card, a codex join and the codex route all come through here.
+    purpose. The wait is bounded (flock_within): past `deadline` the
+    command refuses, exit 10 (EXIT_BUSY, D23, SHARED fix round 3), `tc:
+    another process is holding <name>'s lock; try again`, before the block
+    runs, so nothing is written. Send, read, card, a codex join and the
+    codex route all come through here. `deadline` is the command's
+    lock_deadline, which a send passes on to next_seq (one deadline per
+    command); None means LOCK_WAIT_SECONDS from now.
 
     @interacts  reads ROOT/.shared and makes mail/ (make_folder, D16);
                 opens mail/.box-<name>.lock through open_by_name, creating
                 it empty (append mode, so it never truncates what is there)
                 and refusing a symlink or a FIFO there (exit 1, D17, D19),
                 and holds the flock until the block ends; the kernel drops
-                it if the process dies. Waits at most LOCK_WAIT_SECONDS for
-                it, then writes one line to stderr and exits 1.
+                it if the process dies. Waits for it no later than
+                `deadline`, then writes one line to stderr and exits 10.
     @deps       make_folder, open_by_name, flock_within, refuse;
-                contextlib, fcntl, os; LOCK_HELD_WORDS, EXIT_REFUSED.
-    @complexity O(1), plus at most LOCK_WAIT_SECONDS of waiting.
+                contextlib, fcntl, os; LOCK_HELD_WORDS, EXIT_BUSY.
+    @complexity O(1), plus waiting until `deadline` at most.
     @alloc      one open file for the block; mail/.box-<name>.lock, made on
                 first use and kept (nothing removes it).
     """
     make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
     with open(open_by_name(MAIL / f".box-{name}.lock", os.O_WRONLY | os.O_APPEND), "a") as lock:  # SHARED D17 (Claude Opus 5.5, unreviewed)
-        if not flock_within(lock, how):  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20
-            refuse(f"tc: {LOCK_HELD_WORDS.format(what=name)}; try again", EXIT_REFUSED)
+        if not flock_within(lock, how, deadline):  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20
+            refuse(f"tc: {LOCK_HELD_WORDS.format(what=name)}; try again", EXIT_BUSY)  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23
         yield
 
 
@@ -1479,11 +1540,15 @@ def cmd_send(args):
                 number is taken; reads cards/<to>.json and refuses (exit 1,
                 nothing written) a card it cannot route; for a local
                 delivery holds mail/.box-<to>.lock shared and reads the card
-                again (a lock held past LOCK_WAIT_SECONDS refuses, exit 1,
-                nothing written: inbox_lock, D20); calls one ROUTES
-                function, which writes the message; prints.
+                again; calls one ROUTES function, which writes the message;
+                prints. SHARED fix round 3 (Claude Opus 5.5, unreviewed): a
+                local delivery takes one lock_deadline before the inbox
+                lock and hands it to deliver_local, so the inbox lock and
+                every mail/.seq wait together take at most
+                LOCK_WAIT_SECONDS; a lock held past it refuses, exit 10,
+                nothing written (inbox_lock, next_seq, D20, D23).
     @deps       require_names, read_body, refuse, card_route, inbox_lock,
-                deliver_local, Delivery; fcntl.
+                lock_deadline, deliver_local, Delivery; fcntl.
     @complexity O(b) over b bytes of body, at most SEND_BODY_MAX_BYTES,
                 plus the route's own work.
     @alloc      the body string, freed on exit; whatever the route keeps.
@@ -1495,11 +1560,12 @@ def cmd_send(args):
         refuse("tc send: empty message", EXIT_REFUSED)  # CARDS fix round 1 (Claude Opus 5.5, unreviewed)
     card, deliver = card_route(args.to)
     if deliver is deliver_local:
+        deadline = lock_deadline()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one per command
         # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the card read again under the shared lock.
-        with inbox_lock(args.to, fcntl.LOCK_SH):
+        with inbox_lock(args.to, fcntl.LOCK_SH, deadline):
             card, deliver = card_route(args.to)
             if deliver is deliver_local:
-                result = deliver_local(card, args.sender, args.to, body)
+                result = deliver_local(card, args.sender, args.to, body, deadline=deadline)
     if deliver is not deliver_local:
         result = deliver(card, args.sender, args.to, body)
     print(result.words, file=sys.stdout if result.exit == 0 else sys.stderr)
@@ -1550,6 +1616,31 @@ def refuse_lines(lines):
         refuse("\n".join(lines), EXIT_REFUSED)
 
 
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, tc read never replaces a file in read/.
+def by_hand_target(path):
+    """Where tc read moves the inbox file at `path` when read/ already holds its name: read/BY_HAND_NAME, k the first count from 1 that nothing holds.
+
+    For cmd_read, under the inbox lock it holds alone. Each name is
+    checked with lstat (os.path.lexists), never followed. lexists says
+    False for a name it cannot look at, so the search always ends; a
+    rename into a read/ tc cannot reach then fails and the file is named,
+    left unread.
+
+    @interacts  lstats read/by-hand-<k>-<name> for k = 1, 2, ... until one
+                is free. Writes nothing.
+    @deps       os, pathlib; BY_HAND_NAME.
+    @complexity O(t) over t names by-hand-<k>-<name> already in read/
+                (none in an honest mailbox; each one a file someone made by
+                hand).
+    @alloc      one path per k tried; the free one, returned.
+    """
+    read = path.parent / "read"
+    k = 1
+    while os.path.lexists(read / BY_HAND_NAME.format(k=k, name=path.name)):
+        k += 1
+    return read / BY_HAND_NAME.format(k=k, name=path.name)
+
+
 def cmd_read(args):
     """`tc read <name>`: print unread mail and move it to read/.
 
@@ -1568,23 +1659,47 @@ def cmd_read(args):
     read run by anyone else moves only that user's own messages and names
     the rest, left unread, never a traceback.
 
+    SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1
+    (D20). A rename replaces whatever holds its target, so before each move
+    tc lstats read/<name>. When that name is taken (a member put a file
+    named like a read message in the inbox, which the group may write
+    under C4), the file moves to the first free read/by-hand-<k>-<name>
+    instead (BY_HAND_NAME, by_hand_target), and the read prints, just
+    before it, that a second file of that name arrived after the first was
+    read, and that tc never reuses a number, so someone wrote it by hand.
+    Nothing in read/ is replaced, and the inbox still empties, so tc wait
+    never wakes for that file again. The note is words, not a refusal: the
+    file is shown and moved, and the read exits 0 for it. The lstat and
+    the rename are two steps, and that is safe here: only tc read moves
+    mail into read/, and only under this lock, so a name found free cannot
+    turn into a message before the rename. A member may make new names in
+    read/ (group write), but under sticky only a file's owner (its sender)
+    or read/'s owner (the reader) may replace or remove a file there; so a
+    name found free and taken before the rename can only be that member's
+    own new file, and the rename replaces nothing but the planter's own.
+
     @interacts  checks the name first (C0, exit 6, nothing written); a name
                 with no inbox gets `no unread mail` and nothing is created
                 (O2); else reads ROOT/.shared (mailbox_share), holds
                 mail/.box-<name>.lock alone from its glob to its last rename
                 (D14; held past LOCK_WAIT_SECONDS by another process, exit
-                1, nothing moved: inbox_lock, D20), refuses an inbox or
+                10, nothing moved: inbox_lock, D20, D23), refuses an inbox or
                 read/ that is a symlink, or under
                 a shared mailbox not its card owner's (exit 1, nothing
                 moved: check_inbox, D17, D20), in a private mailbox makes
-                mail/to-<name>/read/ if missing, lstats each *.md entry and
-                renames each regular file into read/; then, with the lock
-                released, reads each moved file (read_regular_file) and
-                prints to stdout, and names each one it will not show or
-                could not move on stderr.
+                mail/to-<name>/read/ if missing, lstats each *.md entry,
+                lstats read/<name> for each regular file (and, when it is
+                taken, read/by-hand-<k>-<name> until one is free) and
+                renames the file there; then, with the lock released,
+                prints the by-hand note before each file that has one,
+                reads each moved file (read_regular_file) and prints to
+                stdout, and names each one it will not show or could not
+                move on stderr.
     @deps       require_names, mailbox_share, inbox_lock, inbox_messages,
-                show, refuse_lines, printable.
-    @complexity O(u) over u *.md entries in the inbox (single digits).
+                by_hand_target, show, refuse_lines, printable; os.
+    @complexity O(u + t) over u *.md entries in the inbox (single digits)
+                and t names by-hand-<k>-<name> already in read/ (none in an
+                honest mailbox).
     @alloc      the lists of paths and each file's text while printed; one
                 open lock file while the lock is held.
     """
@@ -1602,15 +1717,24 @@ def cmd_read(args):
         messages, skipped = inbox_messages(args.name, shared)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19
         moved, stuck = [], []
         for p in messages:
+            target, first = p.parent / "read" / p.name, None
+            if os.path.lexists(target):  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): MEDIUM-1, never over read/
+                target, first = by_hand_target(p), p.name
             try:
-                p.rename(p.parent / "read" / p.name)
+                p.rename(target)
             except OSError as err:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, not this user's to move
                 stuck.append((p, err.strerror))
                 continue
-            moved.append(p.parent / "read" / p.name)
+            moved.append((target, first))
     if not moved and not stuck:  # mail it could not move is still unread
         print(f"no unread mail for {args.name}")
-    unshown = show(moved)
+    unshown = []
+    for path, first in moved:
+        if first is not None:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): MEDIUM-1, said beside it
+            print(f"tc read: a second {printable(first)} arrived after the first was read. tc never reuses "
+                  f"a number, so someone wrote this one by hand. The first stays in read/, unchanged; this "
+                  f"one is kept as {printable(path)}:")
+        unshown += show([path])
     refuse_lines([f"tc read: {printable(p)} not shown and left in place ({why})" for p, why in skipped]
                  + [f"tc read: {printable(p)} not moved to read/ ({why}); left unread" for p, why in stuck]
                  + [f"tc read: {printable(p)} not shown ({why})" for p, why in unshown])
@@ -2081,7 +2205,7 @@ def cmd_join(args):
                 through write_card, replacing any card there and resetting
                 joined_at. For a codex card, holds mail/.box-<name>.lock
                 alone (making mail/; held past LOCK_WAIT_SECONDS by another
-                process, exit 1, no card written: inbox_lock, D20) while it
+                process, exit 10, no card written: inbox_lock, D20, D23) while it
                 lstats
                 mail/.ring-pending-<name> (not a regular file: exit 1),
                 writes the card, counts mail/to-<name>/*.md and writes or
@@ -2171,8 +2295,8 @@ def cmd_card(args):
                 target and the remote tc path (exit 6); then, holding
                 mail/.box-<name>.lock alone from count to write, so no
                 send lands between them (held past LOCK_WAIT_SECONDS by
-                another process, exit 1, no card written: inbox_lock,
-                D20), counts unread mail in
+                another process, exit 10, no card written: inbox_lock,
+                D20, D23), counts unread mail in
                 mail/to-<name>/ without creating it, refuses (exit 1) when
                 there is any unless --force, and writes cards/<name>.json
                 through write_card; prints the card line, then on stderr a
@@ -2348,7 +2472,7 @@ def read_body(message):
     return raw.decode(sys.stdin.encoding, sys.stdin.errors)
 
 
-def deliver_local(card, sender, to, body, header_note=None):
+def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
     """Route local: today's send. Seq under flock, write a new .tmp, link it into the inbox under a name nothing has.
 
     Warns `new inbox: nobody has joined as <to>` only when the inbox did
@@ -2374,6 +2498,15 @@ def deliver_local(card, sender, to, body, header_note=None):
     private or shared. A link that fails for any other reason refuses
     the send with words, never a traceback, and leaves no .tmp.
 
+    SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-2.
+    Every next_seq of the publish loop waits no later than one deadline,
+    so a send waits at most LOCK_WAIT_SECONDS in all for mail/.seq however
+    many numbers it skips, then exits 10 (next_seq, D23). `deadline`, a
+    keyword C2's route signature leaves out, is the command's
+    lock_deadline when its caller took one before the inbox lock
+    (cmd_send, deliver_codex); None takes one at the first number. A
+    route call with C2's arguments alone works as before.
+
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): under a shared
     mailbox (D20), before a number is taken: an inbox not owned by its
     card's owner refuses the send (exit 1, check_inbox, item 4); a name
@@ -2390,19 +2523,21 @@ def deliver_local(card, sender, to, body, header_note=None):
     @interacts  reads ROOT/.shared (mailbox_share); lstats mail/to-<to>,
                 its read/ and, when shared, cards/<to>.json (check_inbox,
                 then once more for the no-card refusal); takes the
-                mail/.seq flock (next_seq, once per try); private only:
+                mail/.seq flock (next_seq, once per try, every try under
+                one deadline; held past it, exit 10); private only:
                 makes mail/to-<to>/read/; per try lstats
                 read/NNNNNN-from-<sender>.md, creates
                 NNNNNN-from-<sender>.tmp in mail/to-<to>/, links it to
                 NNNNNN-from-<sender>.md there and removes the .tmp's name;
                 stats cards/<to>.json.
-    @deps       mailbox_share, check_inbox, next_seq, inbox, now_iso,
-                write_new_file, Delivery; os; CARDS, SEQ_WIDTH,
+    @deps       mailbox_share, check_inbox, lock_deadline, next_seq, inbox,
+                now_iso, write_new_file, Delivery; os; CARDS, SEQ_WIDTH,
                 SHARED_OWNED_FILE_MODE, NEW_FILE_MODE, PUBLISH_MAX_TRIES,
                 EXIT_REFUSED.
     @complexity O(b) over b bytes of body, once per try: one try in an
                 honest mailbox, at most PUBLISH_MAX_TRIES when mail/.seq
-                was set back.
+                was set back; plus waiting for mail/.seq until `deadline`
+                at most, all tries together.
     @alloc      the message text while written; one message file, kept;
                 one .tmp per try, removed before the next.
     """
@@ -2416,14 +2551,16 @@ def deliver_local(card, sender, to, body, header_note=None):
             return Delivery(EXIT_REFUSED, f"tc send: {to} has a card but no inbox on this shared mailbox; "
                                           f"nothing sent. Ask {to}'s owner to rejoin (tc join {to}, run as "
                                           f"that Linux user), which makes the inbox.", [])
-    n = next_seq()
+    if deadline is None:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one deadline for every try
+        deadline = lock_deadline()
+    n = next_seq(deadline)
     box = MAIL / f"to-{to}" if share is not None else inbox(to, False)
     mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 2
     warnings = []
     # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20, never over a message; a taken name takes the next number.
     for tries in range(PUBLISH_MAX_TRIES):
         if tries:
-            n = next_seq()
+            n = next_seq(deadline)
         path = box / f"{n:0{SEQ_WIDTH}d}-from-{sender}.md"
         if os.path.lexists(box / "read" / path.name):
             continue  # a read message has this name, and tc read would rename over it
@@ -2655,37 +2792,42 @@ def deliver_codex(card, sender, to, body, header_note=None):
                 counts mail/to-<to>/*.md (before and after), reads and
                 stats mail/.ring-pending-<to>, writes the message through
                 deliver_local and, when a ring is owed, the marker
-                (write_ring_marker). The lock held past LOCK_WAIT_SECONDS
-                by another process refuses, exit 1, nothing landed or rung
-                (inbox_lock, D20); the marker's flock held that long skips
-                that write, said as a marker that could not be written or
-                cleared. Then rings through
+                (write_ring_marker). SHARED fix round 3 (Claude Opus 5.5,
+                unreviewed): one lock_deadline, taken before the inbox
+                lock and passed to deliver_local, bounds the inbox lock
+                and mail/.seq together; either held past it by another
+                process refuses, exit 10, nothing landed or rung
+                (inbox_lock, next_seq, D20, D23). The marker's flock held
+                past LOCK_WAIT_SECONDS skips that write, said as a marker
+                that could not be written or cleared. Then rings through
                 ring_codex (one `codex queue` run, at most
                 CODEX_RING_SECONDS) and rewrites the marker: RING_CLEAR on
                 exit 0, else the failure. Reads the clock through
                 wall_clock.
-    @deps       inbox_lock, ring_marker_problem, unread_count, ring_owed,
-                deliver_local, ring_backoff, write_ring_marker, ring_codex,
-                clock_words, wall_clock, Delivery; RING_RINGING,
-                RING_FAILED, RING_TIMED_OUT, RING_CLEAR,
-                RING_BACKOFF_SECONDS, EXIT_REFUSED.
+    @deps       lock_deadline, inbox_lock, ring_marker_problem,
+                unread_count, ring_owed, deliver_local, ring_backoff,
+                write_ring_marker, ring_codex, clock_words, wall_clock,
+                Delivery; RING_RINGING, RING_FAILED, RING_TIMED_OUT,
+                RING_CLEAR, RING_BACKOFF_SECONDS, EXIT_REFUSED.
     @complexity O(u + b) over u unread messages (counted twice) and b
                 bytes of body, plus one codex run of at most
-                CODEX_RING_SECONDS; no run while a backoff holds. Each
-                flock (the inbox lock, mail/.seq, the marker before and
-                after the ring) waits at most LOCK_WAIT_SECONDS.
+                CODEX_RING_SECONDS; no run while a backoff holds. The inbox
+                lock and mail/.seq wait at most LOCK_WAIT_SECONDS in all
+                (one deadline); each marker write, before and after the
+                ring, at most LOCK_WAIT_SECONDS of its own.
     @alloc      the ring's words, freed on return; one message file, kept;
                 the marker file, kept (never removed, D20).
     """
     marker = MAIL / f".ring-pending-{to}"
-    with inbox_lock(to):
+    deadline = lock_deadline()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one per command
+    with inbox_lock(to, deadline=deadline):
         bad = ring_marker_problem(marker)  # SHARED D17 (Claude Opus 5.5, unreviewed): a planted link; D19 a FIFO
         if bad is not None:
             return Delivery(EXIT_REFUSED, f"tc send: {marker} {bad}; nothing sent", [])
         waiting = unread_count(to)
         owed = ring_owed(marker)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, the state, not the file
         held = ring_backoff(marker) if owed else None
-        landed = deliver_local(card, sender, to, body, header_note)
+        landed = deliver_local(card, sender, to, body, header_note, deadline=deadline)
         count = unread_count(to)
         ring = landed.exit == 0 and held is None and (owed or not waiting)
         if ring:

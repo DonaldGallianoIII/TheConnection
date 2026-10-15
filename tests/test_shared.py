@@ -25,7 +25,11 @@ age never taken through a link. And D20's bound (SHARED fix round 2,
 Claude Opus 5.5, unreviewed): a mail/.seq set back never makes a send
 replace a message, unread or read, and a lock held by another process
 makes send, read, a codex join, tc card and a codex send fail within
-LOCK_WAIT_SECONDS, never hang.
+LOCK_WAIT_SECONDS, never hang. And round 3 (SHARED fix round 3, Claude
+Opus 5.5, unreviewed): a held lock exits 10 (busy, D23); tc read never
+replaces a read message with a file planted under its name; and one
+send's waits on mail/.seq share one deadline, however many numbers it
+skips.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -71,10 +75,14 @@ the owner's human QA (D4, qa/human/route-shared.md).
             access and back. The round 2 tests write mail/.seq by hand,
             hold flocks on lock files and the ring marker in this process
             while tc children run under timeouts (several roots at once),
-            and read every file under a root before and after.
+            and read every file under a root before and after. The round
+            3 tests write planted files into an inbox and its read/ by
+            hand, and run a member's loop as a child (python3 -c
+            SEQ_HOLDER, killed by the harness by its pid) that holds
+            mail/.seq on and off and plants empty files in read/.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
-            importlib, io, json, os, pathlib, stat, subprocess, sys, time,
-            unittest, unittest.mock); tests/_root.py.
+            importlib, io, json, os, pathlib, re, stat, subprocess, sys,
+            time, unittest, unittest.mock); tests/_root.py.
 @complexity O(1) per test: a handful of tc runs over a root of a few dozen
             entries, once per group tested (one or two).
 @alloc      one TcRoot per test and group, removed when its context exits.
@@ -91,6 +99,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import stat
 import subprocess
 import sys
@@ -265,6 +274,61 @@ READ_NO_SEARCH_MODE = 0o640
 UNKNOWN_WORDS = "unread unknown"
 # What tc health's last line starts with when .shared turned unreadable.
 GROUP_UNKNOWN_WORDS = "mailbox shared, group unknown: "
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23 and the audit's
+# MEDIUM-1 and LOW-2 (audits/2026-10-14-2358-quick). Written out, not read
+# from tc, for the same reason as SHARED_FOLDER_MODE.
+# Row 10 of the exit table, busy: a lock held past LOCK_WAIT_SECONDS.
+EXIT_BUSY = 10
+# What tc read says before a file whose name read/ already holds.
+SECOND_FILE_WORDS = "tc read: a second {name} arrived after the first was read."
+BY_HAND_WORDS = "tc never reuses a number, so someone wrote this one by hand."
+# Where tc read keeps that file: the first by-hand name read/ does not hold.
+BY_HAND_NAME = "by-hand-{k}-{name}"
+# The texts of the file a member plants in an inbox under a read
+# message's name, and of one planted straight into read/ at the first
+# by-hand name.
+PLANTED_TEXT = "planted by hand under a read message's name\n"
+TAKEN_TEXT = "planted by hand at the first by-hand name\n"
+# The board's message name (board/serve.py, MESSAGE_NAME), written out: a
+# name it matches is read as a number and a sender. A by-hand name never is.
+BOARD_MESSAGE_NAME = re.compile(r"^(\d+)-from-(.+)\.md$")
+# tc's PUBLISH_MAX_TRIES, written out: a send never tries more numbers, so
+# a member who plants this many names past the counter covers every try.
+PLANTED_NAMES = 100
+# Just under LOCK_WAIT_SECONDS: how long the member holds mail/.seq on each
+# turn, so a send that gave every number a wait of its own would get each
+# number in time and wait again, past the bound, for as long as the names
+# hold out.
+HOLD_UNDER_BOUND_SECONDS = 2.5
+# The member's loop, run as its own process (argv: mail/.seq, read/, the
+# sender, the hold, the count). Under mail/.seq's flock it plants `count`
+# names in read/ past the counter, one per number a send could take. Then,
+# turn by turn: hold the lock, let go, wait (at most one hold) until the
+# counter changes, which means a send took a number, and take the lock at
+# once, so the send's next number waits on it again. The test kills it.
+SEQ_HOLDER = """
+import fcntl, os, sys, time
+seq, read, sender, hold, count = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4]), int(sys.argv[5])
+
+def number():
+    with open(seq) as f:
+        return f.read()
+
+with open(seq, "a+") as held:
+    fcntl.flock(held, fcntl.LOCK_EX)
+    held.seek(0)
+    n = int(held.read().strip() or 0)
+    for k in range(n + 1, n + count + 1):
+        open(os.path.join(read, f"{k:06d}-from-{sender}.md"), "a").close()
+    for turn in range(count):
+        time.sleep(hold)
+        was = number()
+        fcntl.flock(held, fcntl.LOCK_UN)
+        give_up = time.monotonic() + hold
+        while number() == was and time.monotonic() < give_up:
+            pass
+        fcntl.flock(held, fcntl.LOCK_EX)
+"""
 
 
 def user_groups():
@@ -1946,11 +2010,14 @@ class NoLostMailNoHangTest(UmaskTestCase):
     The audit's MEDIUM-1 and MEDIUM-3 (audits/2026-10-14-2259-quick). One
     Linux user stands in for the hostile member: it sets mail/.seq back,
     or holds a lock's flock in this process, as any member of the group
-    could.
+    could. SHARED fix round 3 (Claude Opus 5.5, unreviewed): that member
+    also plants a file under a read message's name, and holds mail/.seq
+    on and off from a child process (audits/2026-10-14-2358-quick,
+    MEDIUM-1 and LOW-2); a held lock exits 10 (D23).
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, contents;
-                contextlib, fcntl, subprocess, time.
+                contextlib, fcntl, subprocess, sys, time; SEQ_HOLDER.
     @complexity O(1) per test.
     @alloc      one TcRoot per case.
     """
@@ -2040,21 +2107,23 @@ class NoLostMailNoHangTest(UmaskTestCase):
                 self.assertEqual(history, ["000001-from-a.md", "000002-from-a.md"])
 
     def test_a_held_lock_makes_each_command_fail_within_the_bound_and_write_nothing(self):
-        """This process holds mail/.seq or a name's inbox lock (LOCK_EX), one root per case: send, read, a codex join, tc card and a codex send each exit 1 within LOCK_WAIT_SECONDS plus the margin, say whose lock, and change nothing; a codex send with the ring marker held lands, rings once, and says the marker could not be cleared within two waits.
+        """This process holds mail/.seq or a name's inbox lock (LOCK_EX), one root per case: send, read, a codex join, tc card and a codex send each exit 10 (busy, D23) within LOCK_WAIT_SECONDS plus the margin, say whose lock, and change nothing; a codex send with the ring marker held lands, rings once, and says the marker could not be cleared within two waits.
 
         The cases run at once, so the test costs about two waits, not
         seven. Each child runs under a timeout, so a tc that waits on the
         flock forever fails here instead of hanging the suite. Must reject
         a plain blocking flock on mail/.seq, the inbox lock or the marker
         (D20: a member who holds one hangs every other member's command
-        for as long as it likes).
+        for as long as it likes), and a held lock that exits 1, which
+        reads as a final refusal (SHARED fix round 3, D23).
 
         @interacts  per case, a root: sends, a codex join and a fake codex
                     as setup; one lock file opened and flocked here; the
                     whole root read before and after; one background tc.
         @deps       _root.TcRoot.tc, start, fake_bin, contents;
                     contextlib, fcntl, subprocess, time; LOCK_WAIT_SECONDS,
-                    LOCK_REFUSE_MARGIN_SECONDS, LOCK_HELD_WORDS, THREAD.
+                    LOCK_REFUSE_MARGIN_SECONDS, LOCK_HELD_WORDS, THREAD,
+                    EXIT_BUSY.
         @complexity O(1): seven children at once, each at most
                     LOCK_WAIT_SECONDS of waiting (the marker case two).
         @alloc      seven TcRoots, seven open lock files and seven
@@ -2113,10 +2182,103 @@ class NoLostMailNoHangTest(UmaskTestCase):
                     self.assertEqual(after["mail/.ring-pending-c"], f"{CLEAR_STATE}\n".encode(),
                                      "a marker write went through a lock this test held")
                     continue
-                self.assertEqual(code, EXIT_REFUSED, err)
+                self.assertEqual(code, EXIT_BUSY, err)  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23
                 self.assertEqual(err, f"tc: {LOCK_HELD_WORDS.format(what=what)}; try again\n")
                 self.assertEqual(after, before, "a refused command changed the root")
                 self.assertEqual(rang, 0, "a refused codex send rang")
+
+    # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1.
+    def test_a_read_never_replaces_a_read_message_and_keeps_a_planted_one(self):
+        """Private and shared: b has read #3, a file named 000003-from-a.md is planted in b's inbox, and read/by-hand-1-000003-from-a.md is planted too: tc read b exits 0, read/#3 and the first by-hand file are unchanged byte for byte, the planted file is kept as read/by-hand-2-000003-from-a.md, the read prints the words and the planted text, and the inbox holds no message.
+
+        Must reject the plain rename (the planted file replaces read/#3:
+        D20, a member makes the owner's read destroy a read message), a
+        by-hand search that takes a name already held, a read that leaves
+        the planted file unread (tc wait would wake on it for good), and a
+        new name the board would read a sender from.
+
+        @interacts  per mode: init when shared, a join, three sends, two
+                    reads; two files written by hand.
+        @deps       _root.TcRoot.tc, primary_group; BY_HAND_NAME,
+                    SECOND_FILE_WORDS, BY_HAND_WORDS, PLANTED_TEXT,
+                    TAKEN_TEXT, BOARD_MESSAGE_NAME.
+        @complexity O(1) per mode.
+        @alloc      one TcRoot per mode.
+        """
+        name = "000003-from-a.md"
+        for shared in (False, True):
+            with self.subTest(shared=shared), _root.TcRoot() as root:
+                runs = [root.tc("init", "--shared", "--group", primary_group()[1])] if shared else []
+                runs.append(root.tc("join", "b", env={"CLAUDECODE": "1"}))
+                runs += [root.tc("send", "--from", "a", "--to", "b", f"message {n}") for n in (1, 2, 3)]
+                runs.append(root.tc("read", "b"))
+                box = root.path / "mail" / "to-b"
+                read = box / "read"
+                before = (read / name).read_bytes()
+                taken = read / BY_HAND_NAME.format(k=1, name=name)
+                taken.write_text(TAKEN_TEXT)
+                (box / name).write_text(PLANTED_TEXT)
+                code, out, err = root.tc("read", "b")
+                kept = read / BY_HAND_NAME.format(k=2, name=name)
+                after = (read / name).read_bytes()
+                kept_text = kept.read_text() if kept.exists() else None
+                left = sorted(p.name for p in box.glob("*.md"))
+                for run in runs:
+                    self.assertEqual(run[0], 0, run[2])
+                self.assertEqual(after, before, "tc read replaced read/#3 with a file planted in the inbox")
+                self.assertEqual(taken.read_text(), TAKEN_TEXT, "tc read replaced a by-hand name already held")
+                self.assertEqual(kept_text, PLANTED_TEXT, "the planted file is not at the first free by-hand name")
+                self.assertEqual(left, [], "tc read left the planted file unread")
+                self.assertEqual(code, 0, err)
+                self.assertIn(f"{SECOND_FILE_WORDS.format(name=name)} {BY_HAND_WORDS}", out)
+                self.assertIn(PLANTED_TEXT, out)
+                self.assertIsNone(BOARD_MESSAGE_NAME.match(kept.name), "the board would read a sender from it")
+
+    # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-2.
+    def test_one_sends_waits_on_mail_seq_share_one_deadline(self):
+        """A member holds mail/.seq just under the bound on each turn and has planted a name in read/ for every number a send could take: the send exits 10 with the lock words within LOCK_WAIT_SECONDS plus the margin, and lands nothing.
+
+        Each number the send takes names a planted read message, so it
+        tries the next, and each try waits on the member again. Must
+        reject a send that gives each try a wait of its own: it gets each
+        number in time and waits again, for minutes (PUBLISH_MAX_TRIES
+        tries of HOLD_UNDER_BOUND_SECONDS each), with the inbox lock held.
+
+        @interacts  one send as setup; the member's loop as a child,
+                    proven to hold mail/.seq in /proc/locks; one background
+                    send under a timeout; lists the inbox. The harness kills
+                    both children by pid.
+        @deps       _root.TcRoot.tc, start, _root.flock_holders; subprocess,
+                    sys, time; SEQ_HOLDER, HOLD_UNDER_BOUND_SECONDS,
+                    PLANTED_NAMES, LOCK_WAIT_SECONDS,
+                    LOCK_REFUSE_MARGIN_SECONDS, LOCK_HELD_WORDS, EXIT_BUSY.
+        @complexity O(1): about one LOCK_WAIT_SECONDS of waiting, at most
+                    _root.LOCK_CEILING_SECONDS to prove the hold.
+        @alloc      one TcRoot, two children, PLANTED_NAMES empty files.
+        """
+        with _root.TcRoot() as root:
+            self.assertEqual(root.tc("send", "--from", "a", "--to", "b", "first")[0], 0)
+            box = root.path / "mail" / "to-b"
+            seq = root.path / "mail" / ".seq"
+            member = root.start(argv=[sys.executable, "-c", SEQ_HOLDER, str(seq), str(box / "read"), "a",
+                                      str(HOLD_UNDER_BOUND_SECONDS), str(PLANTED_NAMES)])
+            proof = time.monotonic() + _root.LOCK_CEILING_SECONDS
+            while member.pid not in _root.flock_holders(seq):
+                if member.poll() is not None or time.monotonic() >= proof:
+                    self.fail(f"the member's loop never held {seq}")
+                time.sleep(_root.LOCK_POLL_SECONDS)
+            ceiling = LOCK_WAIT_SECONDS + LOCK_REFUSE_MARGIN_SECONDS
+            proc = root.start("send", "--from", "a", "--to", "b", "second")
+            try:
+                out, err = proc.communicate(timeout=ceiling)
+            except subprocess.TimeoutExpired:
+                self.fail(f"the send still ran {ceiling} s on: each number it skipped bought a wait of its own")
+            planted = len(list((box / "read").glob("*.md")))
+            unread = sorted(p.name for p in box.iterdir() if p.name != "read")
+        self.assertEqual(planted, PLANTED_NAMES, "the member's loop did not plant every name")
+        self.assertEqual(proc.returncode, EXIT_BUSY, err)
+        self.assertEqual(err, f"tc: {LOCK_HELD_WORDS.format(what=seq)}; try again\n")
+        self.assertEqual(unread, ["000001-from-a.md"], "a refused send left a message or a .tmp")
 
 
 class RootAndClaimTest(UmaskTestCase):
