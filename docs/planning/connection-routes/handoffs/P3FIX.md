@@ -250,3 +250,361 @@ Noticed and left, by tier:
 - `mail/` and `outbox/` are opened following a link, as before (D34).
 
 No pause was written.
+
+---
+
+# Round 1b: D35's locks and doorbell, D36's refusals
+
+Model:  Claude Opus 5.5 (the P3 fixer, round 1b)
+Status: unreviewed
+Date:   2026-10-15
+Branch: Claude-Development-TheConnection-P3FIX, from round 1a's head
+        `c7580ed`
+Brief:  audits/2026-10-15-1409-full/fixes/round-1b.md (in the public
+        checkout), against synthesis.md's HIGH-2, MEDIUM-1 and LOW-1,
+        and the dev branch's C2 item 5 and C4 (D35, D36)
+
+## Commits
+
+| Brief's | Commit | Items | Subject |
+|---|---|---|---|
+| (a) | `8d43a5c` | 1, 2, 8 | The wait and watch locks in their owner's inbox; only a name's owner listens |
+| (b) | `122dacf` | 3 | A busy lock's holder named; health lists a lock held by someone else |
+| (c) | `551c4af` | 4, 5 | The doorbell: each sender's own last ring; a gate's retry rings |
+| (d) | `ad0bbae` | 6 | WakeFilesAreTheirOwnersTest, the class proof |
+| follow-up | `b2ff2ed` | 1, 4, 6 | Each case's assertions kept inside its own subtest |
+| (e) | the commit that adds this section | 7 | The two human steps, and this handoff |
+
+The follow-up came from the first mutation run: five of my loops
+asserted after `with self.subTest(...), _root.TcRoot() as root:` closed,
+so the first failing case stopped the loop and its red was not
+attributed to that case. Every mutation below was run again after it.
+
+## What was built
+
+### Item 1: the locks in the owner's inbox (D35 (1))
+
+- `tc wait` and `tc watch` take `mail/to-<name>/.wait.lock` and
+  `.watch.lock` (`WAKE_LOCK_NAME`, tc:858), through `hold_wake_lock`
+  (tc:4208): the inbox is pinned (`pinned_inbox`), and the lock is
+  opened by name in its descriptor by `open_wake_lock` (tc:4076): made
+  `O_CREAT | O_EXCL` at 0600, or, when something is there, opened
+  `O_NOFOLLOW | O_NONBLOCK` and kept only when `fstat` finds a regular
+  file with one name that this user owns (an own one at another mode is
+  set to 0600 through its descriptor). Anything else (another user's
+  file, a link, a FIFO, a folder, a second name) is moved aside in the
+  inbox by `move_aside` (tc:4024) to `<lock>.planted-<k>`, with one line
+  on stderr naming what it was, whose, and where it went; then the
+  owner's lock is made. At most `WAKE_LOCK_TRIES` (3) moves, then exit 1
+  with words.
+- `listeners()` (tc:7459) opens `mail/` once and each inbox by name,
+  lstats the lock in it, and counts it only when it is a regular file
+  the inbox's owner owns; it names a holder only when that holder's
+  process is the owner's (`process_uid`, tc:7430) or one tc cannot look
+  at. Output shape unchanged (name to pid or None, now in name order),
+  so `tc health`, `tc watch` and the board read it as before.
+  `_flock_holders` (tc:7402) now keeps every holder of a file.
+- Init gives a wake lock 0600 (`shared_file_mode`, tc:1705), so the
+  owner's own rerun never opens it to the group.
+- The switch-over (`OLD_WAKE_LOCK_NAME`, tc:887), private mailboxes
+  only: `old_wake_lock_held` (tc:4137) tests `mail/.<kind>-<name>.lock`
+  with a non-blocking shared flock, let go at once, and a held one stops
+  a new wait or watch with exit 3 and today's words, before an inbox is
+  made; `listeners()` keeps listing the old place and reports its holder
+  for a name whose new lock nobody holds. A shared mailbox never reads
+  the old place. Each piece carries a comment that it can go once every
+  session has re-armed.
+- `board/serve.py`: its module block's lines on `tc.listeners` name the
+  new place and cost. The board reads `tc.listeners("wait")` unchanged
+  and shows no new state.
+
+### Item 2: only a name's owner listens (D36 (2))
+
+`refuse_other_listener` (tc:4171), on a shared mailbox only, before
+anything is made: a card another user owns gives C4's words, `tc
+<kind>: <name>'s inbox belongs to <owner>; only <owner> listens for it`,
+and no card gives `tc <kind>: nobody has joined as <name> on this shared
+mailbox; its owner runs tc join <name> first`, exit 1 both. The owner's
+own wait or watch whose inbox is gone is refused too, with words to run
+`tc join` (only join makes an inbox there). A private mailbox makes the
+inbox and its read/ as before.
+
+### Item 3: the holder named (D35 (3))
+
+- `busy_words` (tc:3070), used by `next_seq` and `inbox_lock`: exit 10,
+  nothing written, as before, and the words now read `tc: another
+  process is holding <what>'s lock: <user> (pid <pid>); try again. If
+  it stays held, ask <user> to let it go.`, with `, or ask the user who
+  ran init (<init>) to act` before the stop on a shared mailbox. When
+  /proc/locks names nobody by then: `tc: another process held <what>'s
+  lock past 3 s, and /proc/locks names no holder now (it let go, or the
+  process that took it has ended); try again`. The second case is real:
+  Linux drops a flock from /proc/locks once the process that took it
+  ends, even while another process still holds the file open (a shell's
+  `( flock 9 && sleep 60 ) 9< file` does this).
+- `held_by_others` (tc:7564): `tc health --json` gains
+  `held_by_others`, and `tc health` one `held` line each, for any wait,
+  watch or inbox lock held by a process whose user is not the name's
+  owner (the card's owner, else the inbox's). [] on a private mailbox.
+- The gate's `health --json` drops the key (`health_snapshot(...,
+  held=False)`, tc:7784, called from `cmd_gate`, tc:7251). Round 1c
+  makes the gate's health an allow list (D36 (5)); until then this
+  projection is what keeps it home.
+
+### Item 4: the doorbell (D35 (2), D36 (1), C2 item 5)
+
+- `write_rang_record` (tc:5567) writes `outbox/<user>/.rang-<to>`
+  (`RANG_RECORD_NAME`, tc:909), 0600, its mtime set from `wall_clock()`,
+  in this user's branch through `claim_branch` and `branch_problem`
+  (D33), before the ring, as the marker is. A squatted branch or a
+  record it cannot write is a warning.
+- `rang_long_ago` (tc:5529) reads it by name in the branch's
+  descriptor: old when RING_BACKOFF_SECONDS or more, missing, not this
+  user's regular file, unreachable, or dated after now.
+- `ring_doorbell` (tc:5704) holds the decision and the ring that
+  `deliver_codex` held: steps 1 to 4 unchanged, plus a ring whenever
+  this sender's own record is old, whatever the marker says. Its doc
+  block states the cost: at most one ring per sender per name per
+  backoff while mail waits unread, and on a dead Codex one
+  CODEX_RING_SECONDS wait per sender per backoff. Init gives the record
+  0600.
+
+### Item 5: a gate's retry rings (LOW-1, option B)
+
+`deliver_once` (tc:3521, the branch at tc:3566): an origin id already
+filed for a name whose card says codex runs `ring_doorbell` with nothing
+landing. Step 1's "nothing unread before" has no before on a retry, so
+it reads False, and a ring needs unread mail now; a ring owed by the
+marker (a gate killed after filing, before its ring) rings. A retry is
+never refused for a bad marker, inbox or card: the ring is skipped, the
+answer is still `already delivered`.
+
+### Item 6: the class proof
+
+`tests/test_wake_files.py`, `WakeFilesAreTheirOwnersTest`
+(tests/test_wake_files.py:909),
+`test_no_member_holds_or_redirects_another_members_wake_file` (:1061):
+five subtests on a shared mailbox, ann joined by the running user, the
+member a one-shot child reported as another member (`members_patched`:
+its process, and every file it plants, two ids up; ROOT and `.shared`
+one id up, the init user, as `as_member` does), the owner's command in
+process:
+
+| Subtest | Before | While | Asserted, by value |
+|---|---|---|---|
+| the wait lock | plants and holds a file at ann's lock name; holds the old place `mail/.wait-ann.lock` | at the first poll, tries to hold ann's lock | the wait runs to its timeout (exit 2), this process holds the lock at the name, the member's open fails, `listeners()` names ann's pid and never the member's, the plant moved aside with words |
+| the watch lock | the same for `.watch.lock` | at the first poll | the same, exit 0 |
+| the inbox lock | holds `mail/.box-ann.lock` | holds it through | ann's tc read exits 10 within LOCK_WAIT_SECONDS plus a margin, writes nothing, and its words name the member's user and pid, and the init user |
+| the ring marker, rewritten to clear | a ring fails (owed); the member writes `clear` in place | again each time the send reads the marker | the send, with `wall_clock` past ben's own backoff, rings (the fake codex asserted called, two calls) |
+| the ring marker, rewritten to timed out | the same with `timed out`, touched to the send's clock | again, touched again, each read | the same |
+
+One Linux user cannot see the kernel refuse another user's open, so the
+member child applies the kernel's rule for a member who is not the
+file's owner itself: it may open a file already there only when the
+mode gives the group the access it asks for. That is how "the member's
+open fails" is shown; the second-user walk is route-shared.md step 30.
+
+Plus `test_a_file_planted_at_the_owners_lock_name_is_moved_aside_with_words_and_the_owners_lock_made`
+(:1119): another member's held file, a symlink, a FIFO, or a hard link at
+ann's wait or watch lock name (eight cases): moved aside, as itself, to
+the first aside name with one line naming what and whose; ann's own
+0600 lock made; the command runs to its end; the link's target
+unchanged.
+
+Known gap, in the class's block: the wake-file list is hardcoded.
+
+### Item 7: the human steps
+
+`qa/human/route-shared.md`: step 30, ben holds ann's wait lock (he
+cannot open it) and its old place before ann arms, and health names
+ann's pid; step 31, ben rewrites a Codex member's marker to `clear`, and
+a send after his own backoff rings (a stand-in `codex` on ben's PATH
+records the rings, so real codex is not needed). Each has pass and fail
+lines. Every step after them is renumbered by two, with the references
+to them. Step 29's words were brought to the code as it now is (the
+holder named), and its holder command is now a `python3 -c` one-liner
+whose process stays alive, since the shell's `( flock 9 && ... )` form
+makes /proc/locks name nobody. The header says which numbers in its own
+history are the old ones.
+
+### Item 8: the lock file closed
+
+`cmd_wait` (tc:4266) and `cmd_watch` (tc:7975) hold the lock in a
+`with`, and `hold_wake_lock` closes its own before any exit. The
+ResourceWarning ignore and its garbage collection are gone from
+`tests/test_inbox_pinned.py`; `LockFileClosedTest` checks every way out.
+
+### Item 9: doc blocks
+
+Every function touched has its block brought true in the same commit,
+the module block's layout, `@interacts`, `@complexity` and `@alloc`
+included, and `tests/_root.py`'s listener.
+
+## Mutations
+
+Each was applied with the Edit tool to a scratch copy of the tree at
+`b2ff2ed` (checked equal to it file by file first), run, and put back by
+copying `tc` over it again and checking it equal (`cmp`). Every red
+below is an assertion line, not an error. The class proof's subtests
+come first; other suites that went red are listed after.
+
+| Mutation | Applied as | Class proof subtests red | Red line |
+|---|---|---|---|
+| (a) the wait and watch locks left in mail/ at the group mode | `hold_wake_lock` makes mail/ and opens `mail/.<kind>-<name>.lock` with `open_by_name` (0664 under the shared umask) in place of the pinned inbox and `open_wake_lock` | the wait lock; the watch lock | `self.assertEqual(code, EXIT_TIMEOUT if kind == "wait" else 0,` (exit 3: the member's hold at the old place) |
+| | | the planted test, all eight cases | `self.assertIn(MOVED_WORDS.format(kind=kind, path=lock, what=plant, owner=other, aside=aside), err)` |
+| (b) the busy words without the holder | `busy_words` returns `tc: <LOCK_HELD_WORDS>; try again` first | the inbox lock | `self.assertEqual(got["ran"], (EXIT_BUSY, "", HELD_BY_WORDS.format(` |
+| (c) the ring decision keyed on the marker alone | in `ring_doorbell`, `old = False` | the ring marker, rewritten to clear; rewritten to timed out | `self.assertEqual(len(got["calls"]), 2,` |
+| (d) the record read from the marker's mtime | `rang_long_ago` lstats `mail/.ring-pending-<to>` and ages its mtime | the ring marker, rewritten to timed out (the clear one stays green: its time is the rewrite's own, past the replaced clock's backoff) | `self.assertEqual(len(got["calls"]), 2,` |
+| (e) the owner check removed from tc wait | `refuse_other_listener` skipped for kind wait | none (the class proof runs the owner's own commands); `OnlyTheOwnerListensTest`, its wait subtest | `self.assertEqual(ran[kind], (EXIT_REFUSED, "", ONLY_OWNER_WORDS.format(kind=kind, name=OWNER,`, then `self.assertEqual(after, before, "a refused wait or watch made or changed something")` |
+| (f) the planted-file move removed | in `open_wake_lock`, `moved = None` in place of `move_aside(...)` | the wait lock; the watch lock; the planted test, all eight cases | `self.assertEqual(code, EXIT_TIMEOUT if kind == "wait" else 0,` (exit 1: "something else had the name ... again each time") |
+
+Other suites red under the same mutations, each on an assertion:
+
+- (a): `WakeLockPlaceTest`, all four tests (`self.assertEqual(seen[kind],
+  (True, WAKE_LOCK_MODE, os.geteuid()),`, the `MOVED_WORDS` assertIn,
+  `self.assertEqual((fifo[0], link[0]), (EXIT_TIMEOUT, EXIT_TIMEOUT),
+  (fifo, link))`, `self.assertTrue(held, f"ann's own tc wait ...")`).
+  On the run before the follow-up, `LockFileClosedTest` errored in its
+  helper `lock_fds` (no lock in the inbox to stat): an error, not an
+  assertion, and outside the class proof.
+- (b): `HolderNamedTest`'s two tests (both mailboxes and the let-go
+  words) and the extended held-lock test in tests/test_shared.py, seven
+  cases, on `self.assertEqual(err, HELD_BY_WORDS.format(what=what,
+  user=running_login(), pid=os.getpid()))`.
+- (c): `DoorbellRecordTest`'s clear-marker test and all five record
+  cases, on `self.assertEqual([call["argv"] for call in recorded],`.
+  The gate's retry test stays green under (c): that retry rings because
+  the marker is owed.
+- (d): `DoorbellRecordTest`'s five record cases, same line.
+- (f): `WakeLockPlaceTest`'s link and FIFO cases, on
+  `self.assertEqual(code, EXIT_TIMEOUT if kind == "wait" else 0, err)`.
+
+Two more, not in the brief's list, checked the same way before their
+commits: the lock file left to the garbage collector (`cmd_wait` without
+its `with`) turned `LockFileClosedTest`'s wait cases red on
+`self.assertEqual(leaks, [], ...)`; and item 5 removed (`deliver_once`
+answering `already delivered` without the ring) turned the gate's retry
+test red on `self.assertTrue(record.exists(), f"{record} missing: the
+fake codex never ran")`.
+
+## Tests whose words or helpers changed
+
+- `tests/_root.py`: the proven listener holds
+  `mail/to-<name>/.wait.lock` (`WAIT_LOCK_NAME`).
+- `tests/test_root.py`, `tests/test_mailbox.py` (K4),
+  `tests/test_board_feed.py`, `tests/test_health.py`: the lock's path
+  (test_health's ESC lock now in an inbox of its own).
+- `tests/test_inbox_pinned.py`: the ResourceWarning ignore is gone; the
+  wait row lets one look pass (`Row.skip`) and the two health rows two
+  (`LISTENER_LOOKS`), since the lock and listeners now open the inbox
+  first; the wait row expects `.wait.lock` beside its mail in the real
+  inbox.
+- `tests/test_shared.py`: `shared_as` gives a wake lock 0600; the
+  folders-after-init test waits on b, the joined name, before the send;
+  the D17 and D19 tests lost their wait and watch cases to
+  `WakeLockPlaceTest` (moved aside, no longer refused); the linked-lock
+  listener test uses the new place and the old; three tests pin the new
+  busy words (one accepts either form, since its member lets go and
+  takes the lock on each turn); `QUIET` went with its last user.
+- `tests/test_codex_route.py`: `DoorbellRecordTest`.
+- `tests/test_gate.py`: the retry test.
+
+## Behavior changes, said plainly
+
+1. A private `tc watch <name>` now makes `mail/to-<name>/` and its
+   `read/` (its lock lives there), so health and the board list that
+   name with 0 unread.
+2. `tc wait` opens its inbox before the first poll, so a linked or
+   unlistable inbox is refused before the lock is taken, with the
+   poll's own words.
+3. A link, FIFO, folder, another user's file or a hard link at a wait
+   or watch lock's name is moved aside with words and the command runs;
+   before, a link or FIFO at the old place refused it, exit 1.
+4. On a shared mailbox, a wait or watch on a name nobody joined, or by
+   anyone but its card's owner, is refused, exit 1; before, it polled
+   as no mail. The owner's own, with a card and no inbox, is refused
+   with words to run tc join.
+5. Busy refusals name each holder and whom to ask; `tc health` gains
+   `held_by_others` and `held` lines; the gate's health does not.
+6. A codex name rings more often: a sender with no record of its own
+   (its first send to that name, or a new member) rings even with mail
+   waiting, and each sender rings at most once per backoff while mail
+   waits unread. On a dead Codex each sender waits CODEX_RING_SECONDS
+   once per backoff.
+7. A ring now makes `outbox/` and `outbox/<user>/` on a private mailbox,
+   for the record.
+8. A retry already delivered to a codex name takes the inbox lock and
+   may ring; held past the bound, it exits 10, and the near side keeps
+   the file queued (harmless: the next retry answers again).
+
+## Verified
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'`: 310 run, OK
+  at `8d43a5c`; 312 at `122dacf`; 316 at `551c4af`; 318 at `ad0bbae`;
+  318 run, OK at `b2ff2ed` (round 1a ended at 303).
+- `node --test tests/*.test.mjs`: 66 pass at each commit.
+- Hand runs under a scratch TC_ROOT: a private `tc wait` makes the
+  inbox and a 0600 `.wait.lock`, health names its pid, a second wait
+  exits 3, a timeout exits 2; with `mail/.wait-<name>.lock` held by a
+  live process, health names that pid and a new wait exits 3; held by
+  `( flock 9 && sleep ) 9>file`, the new wait still exits 3 but
+  /proc/locks names nobody (the kernel behavior above).
+- Not run: the two-user walk (route-shared.md steps 29 to 31 included);
+  that is the owner's. Real codex and real ssh: never.
+
+## What was not built
+
+As the brief says, not in this round:
+
+- The gate's allow list (D36 (5)), init making `mail/.origins/` (D36
+  (3)), the far 10 for a write failure that passes and the stuck-queue
+  lines (D36 (4)), and the other LOWs: round 1c. Until round 1c, the
+  gate's projection drops `held_by_others` by hand (above).
+- D28's wait exit record: after the merge. The lock is the owner's 0600
+  file now, so the blocker SHARED's REC-1 named is gone.
+- The DEBTs stay DEBTs.
+- Contracts, CLAUDE.md, 00-index, phases, known-bugs, README and JOIN
+  are not mine. For the architect: CLAUDE.md:61 to 65 still names
+  `mail/.wait-<name>.lock`; C4's "No planted links" bullets still say a
+  link or FIFO at a lock's name is refused, where a wait or watch lock's
+  is now moved aside; and the switch-over code can go once every
+  session has re-armed (a later task).
+
+Noticed and left, by tier:
+
+- LOW: two of the owner's own `tc wait`s racing a planted file can both
+  start: `move_aside` renames whatever has the name when it runs, which
+  can be the first one's fresh lock. Only the owner's own processes and
+  a planter racing at once reach it.
+- LOW: a flock whose taking process has ended is invisible in
+  /proc/locks while still held, so busy words then name nobody, and
+  health and `listeners()` cannot see it. Kernel behavior; the words say
+  so.
+- LOW: with /proc mounted hidepid, `process_uid` sees no other user's
+  process: `listeners()` then names the holder of an owner's 0600 lock
+  as the owner's (only the owner can open it), and `held_by_others`
+  leaves such a holder out.
+- LOW: `tests/test_health.py`'s `HealthTest` leaves its children's
+  pipes to the garbage collector (two ResourceWarnings, also in the
+  baseline).
+- DEBT: the record's branch is reached by path through `claim_branch`,
+  as the send lock's is (DEBT-2: only the init user can swap it).
+- REC: the switch-over code (`OLD_WAKE_LOCK_NAME`, `old_wake_lock_held`,
+  the old-place loop in `listeners()`) and its two tests should go
+  together, in one later task.
+
+## Assumptions
+
+- Names: `.wait.lock`, `.watch.lock`, `<lock>.planted-<k>`,
+  `outbox/<user>/.rang-<to>`; `WAKE_LOCK_TRIES` 3; health's key
+  `held_by_others` and its `held` line.
+- The wake lock is opened read only: flock needs no more, and the
+  owner's 0600 file can be opened for writing when D28 needs it.
+- A name's owner, for health, is its card's owner, else its inbox's.
+- A holder whose process tc cannot look at counts as the owner's in
+  `listeners()` (only the owner can open a 0600 lock) and is left out of
+  `held_by_others` (tc cannot say it is someone else).
+- On a private mailbox the busy words ask no init user: nobody ran init.
+- A retry's ring rule reads step 1 as False and needs unread mail now.
+
+No pause was written.

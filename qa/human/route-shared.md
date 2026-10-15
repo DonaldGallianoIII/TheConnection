@@ -17,7 +17,11 @@ Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
         and the last step renumbered, by the SSH lane agent, Claude Opus
         5.5, 2026-10-15; steps 34 to 40 rewritten for D32 and D33, and
         the last step renumbered and its words made to name both folders,
-        in fix round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15
+        in fix round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15;
+        step 29's words changed for D35 (3), steps 30 and 31 added after
+        it, and every step after them renumbered by two, in P3 fix round
+        1b by the P3 fixer, Claude Opus 5.5, 2026-10-15 (the step numbers
+        earlier in this list are as each round wrote them)
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
@@ -27,7 +31,10 @@ send to a name nobody joined is refused even when an inbox is there
 (D21). A planted link is never printed (D19). A member who sets
 `mail/.seq` back or holds a lock can make the other's command fail, never
 lose a message or hang it, and init never shares a ROOT the group may
-write (round 2). A file a member plants under a message's name, in the
+write (round 2); that failure names who holds the lock, a member cannot
+hold another member's listener, and a member who rewrites a Codex
+member's doorbell holds it off for one backoff at most (P3 fix round 1b,
+D35, D36). A file a member plants under a message's name, in the
 inbox or in read/, never replaces it, and init refuses a ROOT a member
 could swap through a folder above it (round 3, D20, D23). tc read calls
 neither of two such files forged, and a planted name of any length
@@ -48,7 +55,7 @@ every folder above it are judged by the walk, by path, before that (step
 31). A file with a second name (a hard link) is never changed, and a
 nest of folders too deep is named and left (round 8). The only command
 line tc prints is D23's `chmod g-w,o-w`, to the owner of ROOT or of a
-folder above it (steps 28 and 31); for an entry under the four it
+folder above it (steps 28 and 33); for an entry under the four it
 prints none. The tests in
 `tests/test_shared.py` prove the modes, the owners and the checks tc
 makes, but one user cannot prove another user's refusals. This script
@@ -79,7 +86,7 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
    - Every folder above it must belong to root or ann, and must not be
      writable by its group or anyone unless it is sticky (as `/tmp`).
      `/srv` at 0755, owned by root, is fine. Init refuses any other
-     (step 31), since a member could rename the mailbox away and put
+     (step 33), since a member could rename the mailbox away and put
      their own in its place.
 4. In every terminal below: `export TC_ROOT=/srv/tc-shared`.
 
@@ -300,25 +307,106 @@ mail.
       It exits 0.
 29. A member holds a lock, and the other's command fails in about 3
     seconds instead of hanging, with exit 10 (busy: nothing written, run
-    it again; D23).
-    - As ben: `( flock 9 && sleep 60 ) 9< /srv/tc-shared/mail/.seq &`.
-      The shell opens the counter read-only, which the group may, and
-      holds its lock for a minute.
+    it again; D23), and names who holds it (D35 (3), P3 fix round 1b).
+    - As ben: `python3 -c 'import fcntl, sys, time; f = open(sys.argv[1]);
+      fcntl.flock(f, fcntl.LOCK_EX); time.sleep(60)'
+      /srv/tc-shared/mail/.seq &`, and note the pid the shell prints. It
+      opens the counter read-only, which the group may, and holds its
+      lock for a minute. (A shell's `( flock 9 && sleep 60 ) 9< ...`
+      holds it just as well, but the `flock` process that took it ends at
+      once, and /proc/locks stops naming a lock whose taker has ended, so
+      tc then says it names no holder instead.)
     - As ann, at once: `cat /srv/tc-shared/mail/.seq`, then `time tc
       send --from ann --to ben "while ben holds the counter"; echo $?`.
       After about 3 seconds it prints `tc: another process is holding
-      /srv/tc-shared/mail/.seq's lock; try again`, and `echo` prints `10`.
-      `ls /srv/tc-shared/mail/to-ben` shows no new message, and a second
+      /srv/tc-shared/mail/.seq's lock: ben (pid <that pid>); try again.
+      If it stays held, ask ben to let it go, or ask the user who ran
+      init (ann) to act.`, and `echo` prints `10`. `ls
+      /srv/tc-shared/mail/to-ben` shows no new message, and a second
       `cat` prints the same number.
     - As ben: `kill %1`. As ann: the same send now exits 0.
-    - As ben: `( flock 9 && sleep 60 ) 9< /srv/tc-shared/mail/.box-ann.lock
-      &`. As ann: `time tc read ann; echo $?`. After about 3 seconds it
-      prints `tc: another process is holding ann's lock; try again`,
-      `echo` prints `10`, and it moves nothing. As ben: `kill %1`.
+    - As ben: the same one-liner on `/srv/tc-shared/mail/.box-ann.lock`,
+      with `&`, and note its pid. As ann: `time tc read ann; echo $?`.
+      After about 3 seconds it prints `tc: another process is holding
+      ann's lock: ben (pid <that pid>); try again. If it stays held, ask
+      ben to let it go, or ask the user who ran init (ann) to act.`,
+      `echo` prints `10`, and it moves nothing. While ben holds it, `tc
+      health` as ann has a line that starts with `held` and goes on
+      `/srv/tc-shared/mail/.box-ann.lock: ann's inbox lock, held by ben
+      (pid <that pid>), not by its owner ann`. As ben: `kill %1`. `tc
+      health` then has no `held` line.
+30. A member holds another member's wait lock, or the place it lived
+    before D35, and the owner's listener still starts, holds its own lock,
+    and is the one tc health names (D35 (1), P3 fix round 1b).
+    - As ben: `ls -l /srv/tc-shared/mail/to-ann/.wait.lock`. It shows
+      `-rw-------`, owner `ann` (0600): ann's wait made it in step 9.
+    - As ben: `python3 -c 'import fcntl, sys, time; f = open(sys.argv[1]);
+      fcntl.flock(f, fcntl.LOCK_EX); time.sleep(300)'
+      /srv/tc-shared/mail/to-ann/.wait.lock`. It ends at once with
+      `PermissionError: [Errno 13] Permission denied`: ben cannot open
+      ann's lock, so he cannot hold it.
+    - As ben: `python3 -c 'import fcntl, sys, time; f = open(sys.argv[1],
+      "a"); fcntl.flock(f, fcntl.LOCK_EX); time.sleep(300)'
+      /srv/tc-shared/mail/.wait-ann.lock &`. It runs: any member may make
+      a file in `mail/`, here where ann's lock lived before round 1b, and
+      hold it.
+    - As ann, next: `tc wait ann --timeout 300 &`, then `echo $!`. Call
+      the pid it prints A.
+    - As ann: `tc health`. Its `listeners` line names `ann (pid A)`. `tc
+      health --json | python3 -c 'import json, sys;
+      print(json.load(sys.stdin)["listeners"]["ann"])'` prints A.
+    - As ben: `tc send --from ben --to ann "are you listening"`. ann's
+      wait prints `MAIL: 1 unread for ann. Run: tc read ann` and ends; as
+      ann, `wait %1; echo $?` prints `0`, and `tc read ann` shows the
+      message.
+    - Pass: ben's open of ann's lock fails with `Permission denied`; ann's
+      wait holds its own lock, with no `ALREADY LISTENING` and no exit 3;
+      health names A, never the pid of ben's holder; and the mail wakes
+      it. Fail: ann's wait prints `ALREADY LISTENING: another tc wait ann
+      is running. Not starting a second.` and exits 3, or health names
+      ben's holder as ann's listener, or the mail lands and nothing
+      wakes.
+    - Put it back. As ben: `kill %1`, then `rm
+      /srv/tc-shared/mail/.wait-ann.lock` (ben's own file).
+31. A member rewrites a Codex member's doorbell to `clear`, and it costs
+    at most one backoff, never the doorbell for good (D35 (2), D36 (1),
+    P3 fix round 1b). Real codex is not needed: a stand-in named `codex`,
+    first on ben's PATH, records each ring and answers as told.
+    - As ann: `CODEX_THREAD_ID=qa-thread tc join annc` (a made-up thread
+      id). It prints `joined as annc (codex, account ..., route codex)`.
+    - As ben: `mkdir -p ~/tc-qa-bin`, then make the stand-in fail:
+      `printf '#!/bin/sh\necho "$@" >> ~/tc-qa-bin/rings.txt\nexit 1\n' >
+      ~/tc-qa-bin/codex` and `chmod 700 ~/tc-qa-bin/codex`.
+    - As ben: `PATH=~/tc-qa-bin:$PATH tc send --from ben --to annc
+      "first"`. It exits 0 and warns `ring failed for annc: codex exited 1
+      with no stderr; the mail is in its inbox; the next send to annc
+      rings again`. `wc -l < ~/tc-qa-bin/rings.txt` prints `1`. `head -1
+      /srv/tc-shared/mail/.ring-pending-annc` prints `failed`. `ls -l
+      /srv/tc-shared/outbox/ben/.rang-annc` shows `-rw-------`, owner
+      `ben`: ben's own record of his last ring.
+    - As ben, the forger: `printf 'clear\n' >
+      /srv/tc-shared/mail/.ring-pending-annc`. It works: the marker is
+      group-writable (C4).
+    - As ben, make the stand-in answer 0: `printf '#!/bin/sh\necho "$@"
+      >> ~/tc-qa-bin/rings.txt\nexit 0\n' > ~/tc-qa-bin/codex`.
+    - As ben, at once: `PATH=~/tc-qa-bin:$PATH tc send --from ben --to
+      annc "second"`. It exits 0 with no `rang codex` line: the marker
+      says clear, mail waits, and ben's own last ring is under 5 minutes
+      old. `wc -l` still prints `1`.
+    - Wait until 5 minutes (RING_BACKOFF_SECONDS, 300 s) have passed
+      since the first send. If the marker changed meanwhile, write
+      `clear` into it again as above. As ben: `PATH=~/tc-qa-bin:$PATH tc
+      send --from ben --to annc "third"`.
+    - Pass: the third send prints `rang codex annc (queued; delivered
+      when its turn ends or the session is resumed)`, and `wc -l` prints
+      `2`: the forged `clear` held the doorbell off for one backoff at
+      most. Fail: no `rang codex` line and still `1`: the marker alone
+      decided, and annc would never be rung while its mail waits unread.
+    - Put it back. As ann: `tc read annc`. As ben: `rm -r ~/tc-qa-bin`.
 
 ## Nothing planted replaces read mail, and nobody swaps ROOT (round 3)
 
-30. ben plants a file under the name of one of ann's messages, in her
+32. ben plants a file under the name of one of ann's messages, in her
     inbox or in her read/, and ann's read keeps both and calls neither
     forged (D20, round 4). The group may make names in both folders.
     - As ann: `ls /srv/tc-shared/mail/to-ann/read/`. Call `R` the name of
@@ -357,7 +445,7 @@ mail.
       wait ann --timeout 5; echo $?` then prints `TIMEOUT: no mail for
       ann in 5s. Re-arm: tc wait ann` and `2`: the planted name woke it
       once, never again.
-31. Init refuses a ROOT under a folder the group may write (D23).
+33. Init refuses a ROOT under a folder the group may write (D23).
     - As a user with sudo: `sudo mkdir /srv/team`, `sudo chgrp tcshare
       /srv/team`, `sudo chmod 2775 /srv/team`: a team folder every member
       may write.
@@ -393,14 +481,14 @@ mail.
 
 ## A swapped link never leads init out of the mailbox (round 6, D29)
 
-32. A recipient swaps a link in for a member's own message, and the
+34. A recipient swaps a link in for a member's own message, and the
     member's init leaves the folder it points at alone. Here ann is the
     recipient who swaps: she owns her `read/`, and under sticky the
     folder's owner may rename anything in it. Any recipient of a
     member's mail can do the same. The message is ben's from step 10,
     `000001-from-ben.md`, in ann's `read/` since step 11 and still
     owned by ben.
-    - As ben, first: `tc init --shared --group tcshare` once. Step 30
+    - As ben, first: `tc init --shared --group tcshare` once. Step 32
       left files ben made by hand in ann's `read/`, at the mode ben's
       shell gave them; this run fixes any that are not right (a `tc
       init: fixed` line each) and exits 1, so the run below shows only
@@ -433,7 +521,7 @@ mail.
 
 ## A folder swapped on the way never leads init out of the mailbox (round 7)
 
-33. A recipient swaps a whole folder on the way, not one entry, for a
+35. A recipient swaps a whole folder on the way, not one entry, for a
     link to a folder of the member whose init is about to walk it. Here
     ann swaps her own `read/` (she owns it) for a link to a folder of
     ben's, while ben's init runs. Before round 7 the walk opened each
@@ -477,7 +565,8 @@ mail.
 
 Added by the SSH lane agent (Claude Opus 5.5), 2026-10-15; rewritten for
 D32 and D33 in fix round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15
-(the old step 38, a known limit, is the check in step 39 now). Status:
+(the old step 38, a known limit, is the check in step 41 now: P3 fix
+round 1b renumbered it from 39). Status:
 unreviewed.
 
 ssh runs as the Linux user who ran `tc send`, with that user's keys, so
@@ -492,11 +581,11 @@ or 8), with `TC_ROOT=/srv/tc-shared` still exported from step 4 here.
 `farbox-tc` below is the ssh alias that file makes, and `far-b` the name
 on the far machine. Both are made up; use yours.
 
-34. As ann: `tc card far-b --ssh farbox-tc --remote-tc '~/tc-qa/tc'`.
+36. As ann: `tc card far-b --ssh farbox-tc --remote-tc '~/tc-qa/tc'`.
     - It prints `card written: far-b (other, account unknown, route ssh
       to farbox-tc)`. ben reads the same card: `tc cards` as ben shows
       the same line.
-35. As ben: `tc send --from ben --to far-b "from ben"`.
+37. As ben: `tc send --from ben --to far-b "from ben"`.
     - ben has no key there, so ssh fails: it exits 4 and says `could not
       reach farbox-tc (...); kept in outbox:
       /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md. Run: tc flush`.
@@ -506,7 +595,7 @@ on the far machine. Both are made up; use yours.
       shows each as `drwxr-s---`, owner `ben`, group `tcshare` (2750:
       setgid, no group write). `ls -l` of the file shows `-rw-r-----`,
       owner `ben` (0640).
-36. A member who makes another member's branch first (D33). As ben,
+38. A member who makes another member's branch first (D33). As ben,
     before ann has sent anything over ssh: `mkdir
     /srv/tc-shared/outbox/ann`. Then as ann: `tc send --from ann --to
     far-b "from ann"`.
@@ -520,7 +609,7 @@ on the far machine. Both are made up; use yours.
       The user who ran init (ann) runs: mv -T ...`, the same command.
     - As ann, run that `mv -T` line exactly as printed. `tc health` then
       has no `squatted` line.
-37. As ann: `tc send --from ann --to far-b "from ann"` again.
+39. As ann: `tc send --from ann --to far-b "from ann"` again.
     - It goes out at once, ben's waiting file notwithstanding: exit 0,
       `sent over ssh to farbox-tc: sent #... to far-b: ...`. ann's queue
       holds only ann's files, so ben's file is not ahead of hers.
@@ -529,13 +618,13 @@ on the far machine. Both are made up; use yours.
       `.send-<16 hex digits>.lock`, as `-rw-------`, owner `ann` (0600).
     - On the far machine, `tc read far-b` shows it, from the gate's key
       name, never from `ann`.
-38. As ann: `tc flush`.
+40. As ann: `tc flush`.
     - It prints `1 waiting for farbox-tc belong to other members (ben);
       each member sends their own with tc flush`, then `nothing of yours
       waiting in the outbox`, and exits 0.
     - ben's file is where it was, unchanged: `ls -l` shows the same
-      line as in step 35.
-39. Neither member can touch the other's branch. Each of these is
+      line as in step 37.
+41. Neither member can touch the other's branch. Each of these is
     refused, and the `ls -l` of each branch afterward matches the one
     before:
     - As ann: `mv /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md
@@ -552,13 +641,13 @@ on the far machine. Both are made up; use yours.
       it nor ann's branch).
     - As ben: `cat /srv/tc-shared/outbox/ann/.send-*.lock`: `Permission
       denied`, so ben cannot open ann's send lock and hold it.
-40. Put it back. As ben: `rm
+42. Put it back. As ben: `rm
     /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md` (ben's own file)
     and `rmdir /srv/tc-shared/outbox/.squatted-ann-1` (the folder ben
-    made in step 36, moved aside). As ann: run `qa/human/route-ssh.md`'s
+    made in step 38, moved aside). As ann: run `qa/human/route-ssh.md`'s
     undo steps.
 
 ## Afterward
 
-41. The mailbox `/srv/tc-shared`, the folder `/srv/team` that step 31
+43. The mailbox `/srv/tc-shared`, the folder `/srv/team` that step 33
     made, and the group stay until you remove them yourself.
