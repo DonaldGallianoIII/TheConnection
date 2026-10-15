@@ -8,7 +8,9 @@
  *   NODE_PATH=<a Playwright install>/node_modules node tests/board-browser-check.mjs
  *
  * It builds a throwaway mailbox in the system temp folder: 14 names in two
- * orchestrator trees and a pair of peers. The cards are in C1's shape:
+ * orchestrator trees and a pair of peers, the owner's real size, and two
+ * names of 64 characters (C0's longest), a root over a worker. The cards
+ * are in C1's shape:
  * written by `tc join` when this tree's tc has it (it says which), else by
  * hand. p1 and p2 share a named account and mail each other, and e2 and e3
  * share another and do not, so the board draws both kinds of native pair.
@@ -27,7 +29,9 @@
  * less its margins, a wire label over another label, a node box or a tree
  * heading, a wire or connector through a node box, the legend not below the
  * last session, no list of roots (or a root link that does not bring its
- * tree into view), an ellipsis or cut words in the pill or the footer, a
+ * tree into view), an outline row, group heading or root button past the
+ * window's right edge, a long name's role words off screen on the phone,
+ * an ellipsis or cut words in the pill or the footer, a
  * native pair whose two sessions do not both say `native with <the other> ·
  * not observed` in full, and (on the desktop) a down worker's wire that is
  * not dotted, that a wire other than a dotted one is painted over, that
@@ -80,7 +84,7 @@
  *             anything they left by its pid
  * @deps       Node 18+, Playwright (any recent version; 1.63 on the owner's
  *             machine), python3, ./tc, board/serve.py
- * @complexity O(v * (b^2 + w * s * b + d * s' * c)) per view over b <= 14
+ * @complexity O(v * (b^2 + w * s * b + d * s' * c)) per view over b <= 16
  *             boxes, w wires and s samples along each, and the s' samples
  *             along each of the d = 2 down wires, each tested against c
  *             boxes, ports and labels (tens); decoding one screenshot is
@@ -103,11 +107,18 @@ const REPO = join(dirname(HERE), '..');
 const TC = join(REPO, 'tc');
 const SERVE = join(REPO, 'board', 'serve.py');
 
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// Two names of 64 characters, C0's longest, with no hyphen to break at: a
+// root over a worker, so the phone's outline shows one in a row, a group
+// heading and a root button, and the other in a row of its own.
+const LONG_STEM = 'orchestrator_for_the_parser_and_the_lexer_and_the_codegen_team_';
+const LONG_NAMES = [`${LONG_STEM}a`, `${LONG_STEM}b`];
 // The owner's real board is about 14 names: two orchestrator trees (b is a
-// relay under a) and two peers. [name, reports_to].
+// relay under a) and two peers; then the two long names. [name, reports_to].
 const CARDS = [
   ['a', null], ['b', 'a'], ['docs', 'a'], ['c', 'b'], ['d', 'b'], ['e1', 'a'], ['e2', 'a'], ['e3', 'a'],
   ['z', null], ['y1', 'z'], ['y2', 'z'], ['y3', 'z'], ['p1', null], ['p2', null],
+  [LONG_NAMES[0], null], [LONG_NAMES[1], LONG_NAMES[0]],
 ];
 const NAMES = CARDS.map(([name]) => name);
 // Two native pairs: p1 and p2 share an account and mail each other; e2 and
@@ -421,7 +432,7 @@ async function stop(child) {
  *             block)  @alloc one plain object, with s' points per down wire
  */
 function measure(page, names) {
-  return page.evaluate(({ names, wireStep, insidePx, downEdges, dottedStep, endSkip, coverPx }) => {
+  return page.evaluate(({ names, wireStep, insidePx, downEdges, dottedStep, endSkip, coverPx, longNames }) => {
     const visible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     // On screen means reachable: drawn, and not cut off by an ancestor that
     // clips without scrolling (overflow hidden or clip).
@@ -562,10 +573,24 @@ function measure(page, names) {
     out.cutWords = [pill, ...document.querySelectorAll('.tc-conn *, .tc-foot, .tc-foot *')].filter((el) => el && visible(el) && cut(el))
       .map((el) => `${el.className}: ${el.textContent.slice(0, 40)}`);
     out.foot = document.querySelector('.tc-foot').textContent;
+    // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    // Every outline row and its words, group heading and root button, by
+    // its right edge; and each long name's row, whether its role words are
+    // drawn, unclipped, inside the viewport.
+    out.winRight = win.getBoundingClientRect().right;
+    out.edges = [...document.querySelectorAll('.tc-row, .tc-row-title, .tc-row-name, .tc-row-role, .tc-group-head, .tc-root-btn')]
+      .filter(visible).map((el) => ({ cls: el.className, text: el.textContent, right: el.getBoundingClientRect().right }));
+    out.longRows = longNames.map((name) => {
+      const row = [...document.querySelectorAll('.tc-row')].filter(visible).find((r) => r.querySelector('.tc-row-name').textContent === name);
+      if (!row) return { name, found: false, roleOn: false };
+      const role = row.querySelector('.tc-row-role');
+      const r = role.getBoundingClientRect();
+      return { name, found: true, roleOn: !!role.textContent.trim() && reachable(role) && r.width > 0 && r.left >= 0 && r.right <= innerWidth };
+    });
     return out;
   }, {
     names, wireStep: WIRE_STEP_PX, insidePx: WIRE_INSIDE_PX, downEdges: Object.values(DOWN_EDGES), dottedStep: DOTTED_STEP_PX,
-    endSkip: END_SKIP_PX, coverPx: COVER_PX,
+    endSkip: END_SKIP_PX, coverPx: COVER_PX, longNames: LONG_NAMES,
   });
 }
 
@@ -687,7 +712,14 @@ function judge(view, m, errors, jump) {
   const lastBottom = Math.max(...m.boxes.map((b) => b.bottom));
   check('legend below the last session', !!m.legend && m.legend.top >= lastBottom && !m.boxes.some((b) => overlap(m.legend, b)),
     m.legend ? `legend top ${m.legend.top.toFixed(0)}, last session bottom ${lastBottom.toFixed(0)}` : 'no legend shown');
-  check('roots listed at the top', !!m.roots && m.roots.includes('2 orchestrators: a, z'), `roots: ${m.roots}`);
+  check('roots listed at the top', !!m.roots && m.roots.includes(`3 orchestrators: a, ${LONG_NAMES[0]}, z`), `roots: ${m.roots}`);
+  const pastEdge = m.edges.filter((e) => e.right > m.winRight + 1).map((e) => `${e.cls} "${e.text.slice(0, 24)}" ends at ${e.right.toFixed(0)}`);
+  check(`no row, group heading or root button past the window's right edge (${m.winRight.toFixed(0)} px)`, pastEdge.length === 0,
+    pastEdge.join('; '));
+  const roleMiss = m.longRows.filter((r) => !r.roleOn).map((r) => (r.found ? `${r.name.slice(-12)}'s role words are off screen` : `no row for ${r.name}`));
+  if (view.expect === 'outline') {
+    check('each 64-character name\'s role words are on screen', roleMiss.length === 0, roleMiss.join('; '));
+  }
   check('the root link for z brings z\'s tree into view', jump.ok, jump.detail);
   check('nothing cut off in the pill or the footer', m.cutWords.length === 0, m.cutWords.join('; '));
   const badgeMiss = NAMES.flatMap((name) => {
@@ -839,7 +871,7 @@ async function check(chromium) {
   }
   try {
     const { root, joined } = buildMailbox();
-    say(`mailbox: ${root} (14 names, ${MAIL.length} messages; left in the temp folder)`);
+    say(`mailbox: ${root} (${NAMES.length} names, ${MAIL.length} messages; left in the temp folder)`);
     say(`cards: ${joined ? 'written by tc join' : 'written by hand in C1\'s shape (this tree\'s tc has no join)'}`);
     const proven = await startListeners(root, children, listenerOf);
     halt();

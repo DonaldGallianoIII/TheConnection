@@ -513,6 +513,91 @@ test('a parent\'s mail runs beside its connector and shares no piece of it; two 
   assert.equal(peers.points[0].y, peers.points[1].y, 'p1 to p2 is not level');
 });
 
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// Every poll ran the router again for every pair that is not parent and
+// child, and Claude cards on one account make c(c-1)/2 native lines. The
+// board now keeps its runs while the boxes and the drawn pairs stand, and
+// lays nothing out on a poll that only aged the mail.
+const ACCOUNT_OF = {
+  a: 'acct1', b: 'acct1', docs: 'acct1', e1: 'acct1', e2: 'acct1', z: 'acct2', y1: 'acct2', y2: 'acct2', y3: 'acct2',
+  c: 'acct3', d: 'acct3', e3: 'acct3', p1: 'acct3', p2: 'acct3',
+};
+// A time budget for the first draw of PEERS Claude cards on one account,
+// every one of their native lines routed: about 150 ms on the owner's
+// machine (2026-10-15), so this leaves room for a loaded one.
+const FIRST_DRAW_BUDGET_MS = 2000;
+const PEERS = 20;
+
+/**
+ * The 14-name mixed feed with every card Claude, on three accounts of 5, 4
+ * and 5, and one native link for each pair on an account (26 in all).
+ * @complexity O(n^2) over the 14 names  @alloc one feed
+ */
+function sharedFeed() {
+  const nodes = ROUTED.mixed.nodes.map((x) => ({ ...x, kind: 'claude', account: ACCOUNT_OF[x.id] }));
+  const ids = nodes.map((x) => x.id).sort();
+  const native = ids.flatMap((p, i) => ids.slice(i + 1).filter((q) => ACCOUNT_OF[p] === ACCOUNT_OF[q])
+    .map((q) => ({ from: p, to: q, kind: 'native' })));
+  return { ...ROUTED.mixed, nodes, links: [...ROUTED.mixed.links, ...native] };
+}
+
+/** A drawing kit that counts its calls and draws nothing. @complexity O(1) per call  @alloc one handle per create */
+function createCountingKit() {
+  const kit = { calls: 0 };
+  const handle = () => ({ update() { kit.calls += 1; }, remove() { kit.calls += 1; } });
+  kit.createNode = () => { kit.calls += 1; return handle(); };
+  kit.createEdge = () => { kit.calls += 1; return handle(); };
+  return kit;
+}
+
+/** Each edge's run, by id. @complexity O(e) over e edges  @alloc one object */
+const runsById = (view) => Object.fromEntries(Object.entries(view.edges).map(([id, e]) => [id, e.points]));
+
+test('routes are searched once per routed pair, none on a poll that only aged the mail or stopped a flow, and draw as before', () => {
+  const width = layoutWidth(DESK_W);
+  const feed = sharedFeed();
+  const parentOf = Object.fromEntries(feed.nodes.map((x) => [x.id, x.parent]));
+  const kit = createCountingKit();
+  const board = createBoard(kit);
+  patchBoard(board, feed, width);
+  const routed = Object.values(board.view.edges).filter((e) => parentOf[e.to] !== e.from && parentOf[e.from] !== e.to);
+  assert.ok(routed.length >= 20, `only ${routed.length} routed pairs, so the shape tests little`);
+  assert.equal(board.routes.searches, routed.length, 'not one search per routed pair');
+  assert.deepEqual(runsById(board.view), runsById(boardView(feed, width)), 'the cached board draws other runs than boardView alone');
+  // Every age up 3 s, a new `at`, no wire past FLOW_AGE_S: nothing is laid out.
+  const aged = {
+    ...feed, at: 'three seconds on', wires: feed.wires.map((w) => ({ ...w, age_s: w.age_s + 3 })),
+    nodes: feed.nodes.map((x) => ({ ...x, last_mail_age_s: 3 })),
+  };
+  const [view, calls] = [board.view, kit.calls];
+  const ops = patchBoard(board, aged, width);
+  assert.equal(board.routes.searches, routed.length, 'a poll that only aged the mail searched a route');
+  assert.equal(board.view, view, 'a poll that only aged the mail laid the board out again');
+  assert.equal(kit.calls, calls, 'a poll that only aged the mail called the kit');
+  for (const [name, list] of Object.entries(ops)) assert.deepEqual(list, [], name);
+  // One wire past FLOW_AGE_S: its flow and words change, its run does not.
+  const stopped = { ...aged, wires: aged.wires.map((w, i) => (i ? w : { ...w, age_s: CONFIG.FLOW_AGE_S + 1 })) };
+  const changed = patchBoard(board, stopped, width);
+  assert.equal(board.routes.searches, routed.length, 'a wire that stopped flowing set off a route search');
+  assert.ok(changed.updateEdges.length > 0, 'the wire that stopped flowing was not redrawn');
+  assert.deepEqual(runsById(board.view), runsById(boardView(stopped, width)), 'a reused run differs from a fresh search');
+});
+
+test('twenty Claude peers on one account draw every native line within FIRST_DRAW_BUDGET_MS, and the next poll searches none', (t) => {
+  const nodes = Array.from({ length: PEERS }, (_, i) => fed(`s${i + 1}`, 'peer', 'inferred', 0, null, { kind: 'claude', account: 'work' }));
+  const links = nodes.flatMap((p, i) => nodes.slice(i + 1).map((q) => ({ from: p.id, to: q.id, kind: 'native' })));
+  const feed = { nodes, links, wires: [] };
+  const board = createBoard(createCountingKit());
+  const start = performance.now();
+  patchBoard(board, feed, layoutWidth(DESK_W));
+  const ms = performance.now() - start;
+  t.diagnostic(`first draw of ${PEERS} peers on one account: ${ms.toFixed(0)} ms, ${board.routes.searches} route searches`);
+  assert.equal(board.routes.searches, (PEERS * (PEERS - 1)) / 2, 'not one search per native line');
+  assert.ok(ms <= FIRST_DRAW_BUDGET_MS, `the first draw took ${ms.toFixed(0)} ms, over ${FIRST_DRAW_BUDGET_MS}`);
+  patchBoard(board, { ...feed, at: 'the next poll' }, layoutWidth(DESK_W));
+  assert.equal(board.routes.searches, (PEERS * (PEERS - 1)) / 2, 'the next poll searched again');
+});
+
 // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
 // Two parents' connectors once ran down one gutter, so a top relay's
 // worker read as its sub-relay's. Each wrapping block now has a lane.

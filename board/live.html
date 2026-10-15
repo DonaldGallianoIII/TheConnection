@@ -47,12 +47,17 @@
  *             and one per root in the roots list, released when the list
  *             is rebuilt
  * @deps       look.js, theme.css; serve.py's /feed (C5, C6)
- * @complexity one poll: O(n log n + l + r), plus look.js routeAround's
- *             search per routed pair, in patchBoard over n nodes, l
- *             links and r recent wires (tens each)
+ * @complexity one poll: O(n + l + r) for patchBoard's key over n nodes,
+ *             l links and r recent wires (tens each, but l grows as
+ *             c(c-1)/2 native lines per shared account); a poll with news
+ *             adds O(n log n + l + r) for the layout and labels, and
+ *             look.js routeAround's search per routed pair only when the
+ *             boxes or the drawn pairs changed
  * @alloc      one board: its drawn nodes and wires are patched in place,
- *             and each answer builds one full view that replaces the last
- *             (look.js patchBoard); the poller's one AbortController and two
+ *             and each answer with news builds one full view that replaces
+ *             the last (look.js patchBoard; one that only aged the mail
+ *             builds none), and the board keeps its routed runs from one
+ *             answer to the next; the poller's one AbortController and two
  *             timers while a request is out; the last feed, which createFit
  *             keeps to lay out again on a resize
  */

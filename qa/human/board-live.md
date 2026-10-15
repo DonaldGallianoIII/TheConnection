@@ -28,8 +28,9 @@ Playwright install's node_modules.
 NODE_PATH=<a Playwright install>/node_modules node tests/board-browser-check.mjs
 ```
 
-- It builds its own throwaway mailbox with 14 names (two orchestrator
-  trees and two peers). It writes the cards with `tc join` when this
+- It builds its own throwaway mailbox with 16 names (two orchestrator
+  trees and two peers, and a root over a worker whose names are 64
+  characters long). It writes the cards with `tc join` when this
   tree's `tc` has it, else by hand, and prints which. `p1` and `p2` share
   an account and mail each other; `e2` and `e3` share another and do not.
   It starts six listeners and proves them with `tc health`, starts
@@ -41,11 +42,13 @@ NODE_PATH=<a Playwright install>/node_modules node tests/board-browser-check.mjs
   is masked, so it never prints the token, not even in an error.
 - At 1280 x 900 and at 390 x 844 it prints one line per check, each
   `PASS` or `FAIL`: the view (graph on the desktop, outline on the phone),
-  no console errors, no sideways scroll, no text under 11 px, all 14 names
+  no console errors, no sideways scroll, no text under 11 px, all 16 names
   on screen, no box over another, the window at least the viewport's
   height, no label on a label, a box or a heading, no wire through a box,
   the legend below the last session, the roots listed with a working link
-  to `z`, nothing cut off in the pill or the footer, each of `p1`, `p2`,
+  to `z`, no outline row, group heading or root button past the window's
+  edge, the long names' role words on screen at the phone size, nothing
+  cut off in the pill or the footer, each of `p1`, `p2`,
   `e2` and `e3` saying `native with <the other> · not observed` in full,
   and on the desktop the wires of `d` and `e2` dotted, with only the
   canvas showing in their gaps (read pixel by pixel).
