@@ -302,7 +302,10 @@ mailbox (human QA, D4); modes are right by test.
   at `mail/.wait-x.lock`, `mail/.seq`, `status/x.md` or the ring marker
   is refused (exit 1) and its target is unchanged; a symlink planted as
   `mail/to-x` (pointing at a real folder) is refused (exit 1) and nothing
-  lands there.
+  lands there. D19: init makes the four top folders; a planted link in an
+  inbox pointing at a file outside the mailbox is never printed by
+  `peek`, `read` or `log`, and stays in place; a FIFO at
+  `mail/.wait-x.lock` is refused within 2 s instead of hanging.
 - **Verify:** `python3 -m unittest tests.test_shared -v`.
 
 ---
@@ -429,7 +432,8 @@ talking by following the README alone.
   the next send rings again, D14), ssh outbound, ssh inbound through
   `tc gate` (the `authorized_keys` line, and a plain warning never to add a
   key without the gate, and that the far side's login shell must be POSIX,
-  C3), the shared mailbox. Then commands, the board, limits.
+  C3), the shared mailbox (with D19's trade: the group is trusted with
+  mail, not with files outside the mailbox). Then commands, the board, limits.
   Keep "why it exists" honest: same-account Claude sessions should use the
   native path. And say in one sentence why that is not the whole answer even
   for one account: a session in a different permission mode holds a native

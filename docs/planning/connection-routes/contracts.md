@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17, D18) the same day.
+        wave 2 rulings (D17 to D19) the same day.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
 Date:   2026-10-14
@@ -310,7 +310,10 @@ machine.
 For a separate Linux user per account on one machine.
 
 - `tc init --shared --group <g>`: refuses unless the running user is in
-  group `g` (`os.getgroups()`); then sets group `g` and mode `2775` on
+  group `g` (`os.getgroups()`); creates `mail/`, `status/`, `cards/` and
+  `outbox/` if they are missing, so no other user ever has to create a
+  top folder inside a ROOT the first user owns (D19); then sets group
+  `g` and mode `2775` on
   `mail/`, `status/`, `cards/`, `outbox/` and every folder under them,
   sets group `g` and mode `0664` on every file already under them
   (`mail/.seq` and the lock files included), and writes `ROOT/.shared`
@@ -332,6 +335,20 @@ For a separate Linux user per account on one machine.
     another user's inbox, card or file, as in `/tmp`.
   - Before tc uses an inbox folder it checks it with `lstat` and refuses,
     exit 1, if it is a link and not a real folder.
+  - Messages are read only from regular files (`O_NOFOLLOW`, `S_ISREG`, a
+    size cap) by `read`, `peek` and `log`; a link or anything else in an
+    inbox is skipped with words, left in place, and never printed, so a
+    planted link cannot make another member's agent read a file from
+    outside the mailbox (D19).
+  - Lock and marker files open with `O_NONBLOCK` and an `S_ISREG` check,
+    so a FIFO planted at a lock's name is refused with words instead of
+    hanging tc (D19).
+- **What the group is trusted with** (D19). The sticky bit sits on the
+  four top folders only. Inside an inbox, any group member can delete or
+  replace another member's unread mail, because `tc read` must move mail
+  other users wrote. The shared mode assumes the group trusts each other
+  with mail, never with files outside the mailbox. The README's shared
+  section says so.
 - `tc health` says `mailbox shared with group <g>` or `mailbox private`.
 
 ## C5. The board feed
