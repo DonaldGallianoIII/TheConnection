@@ -7,7 +7,7 @@ base_branch: Claude-Development-TheConnection
 
 # tc is one stdlib script and the board is plain ES modules: a compile and
 # syntax check is the whole build.
-build_cmd: python3 -m py_compile tc && node --check board/look.js
+build_cmd: python3 -m py_compile tc board/serve.py && node --check board/look.js
 
 test_cmd: python3 -m unittest discover -s tests -p 'test_*.py' && node --test tests/*.test.mjs
 

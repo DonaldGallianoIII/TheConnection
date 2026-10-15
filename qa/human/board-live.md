@@ -32,10 +32,12 @@ NODE_PATH=<a Playwright install>/node_modules node tests/board-browser-check.mjs
   trees and two peers). It writes the cards with `tc join` when this
   tree's `tc` has it, else by hand, and prints which. `p1` and `p2` share
   an account and mail each other; `e2` and `e3` share another and do not.
-  It starts five listeners and proves them with `tc health`, starts
+  It starts six listeners and proves them with `tc health`, starts
   `serve.py` on a free port under a time limit of its own, then makes `d`
-  a down worker: the feed sees its listener, the listener is stopped by its
-  pid, and the feed says down. It prints each step. Every line it prints
+  and `e2` down workers: the feed sees their listeners, the listeners are
+  stopped by their pids, and the feed says down. `e2`'s wire shares a
+  stretch with its siblings' wires, so it tests that a dotted wire stays
+  dotted beside others. It prints each step. Every line it prints
   is masked, so it never prints the token, not even in an error.
 - At 1280 x 900 and at 390 x 844 it prints one line per check, each
   `PASS` or `FAIL`: the view (graph on the desktop, outline on the phone),
@@ -45,7 +47,8 @@ NODE_PATH=<a Playwright install>/node_modules node tests/board-browser-check.mjs
   the legend below the last session, the roots listed with a working link
   to `z`, nothing cut off in the pill or the footer, each of `p1`, `p2`,
   `e2` and `e3` saying `native with <the other> · not observed` in full,
-  and on the desktop `d`'s wire dotted with no other line lying on it.
+  and on the desktop the wires of `d` and `e2` dotted, with only the
+  canvas showing in their gaps (read pixel by pixel).
 - It saves four screenshots (each size in color and in grayscale) to a
   temp folder and prints their paths. Look at them. None goes in the repo.
 - It stops the server and the listeners by their own pids, prints those

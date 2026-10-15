@@ -8,8 +8,9 @@ Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
 
 Cards are written by hand in C1's shape on every tree, with or without
-CARDS' `tc join`: some are codex and ssh cards, which a join cannot write
-without a real Codex thread (or `tc card`), and writing every card one way
+CARDS' `tc join`: some are codex and ssh cards (a codex join needs a
+Codex thread id in its environment, and an ssh card comes from `tc card`),
+and writing every card one way
 keeps each test the same on either tc. tests/board-browser-check.mjs is
 the one that writes its cards with `tc join` when the tree's tc has it.
 The main test sends its mail with real `tc send`, between names with no

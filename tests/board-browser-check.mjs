@@ -265,8 +265,8 @@ const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 /**
  * The throwaway mailbox: cards in C1's shape (through `tc join` when this
- * tree's tc has it, else written by hand), the mail, five readers' inboxes
- * read, and five status lines.
+ * tree's tc has it, else written by hand), the mail, the inboxes of the
+ * six READERS read, and their status lines.
  * @complexity O(names + mail) tc calls  @alloc the folder, left in place
  * @returns {{ root, joined: boolean }}
  */
