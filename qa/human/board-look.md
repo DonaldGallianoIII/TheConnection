@@ -2,13 +2,14 @@
 
 What this checks: the look kit in `board/` draws the window, sessions and wires
 the way the Greener Pastures node graph does, the demo draws D7's shapes (two
-orchestrators side by side, one of them over a relay that is an orchestrator
-too), and every state and every role reads without color.
+orchestrators, side by side on a wide screen and one under the other at the
+window's 1180 px cap, one of them over a relay that is an orchestrator too),
+and every state and every role reads without color.
 
 Updated for the shapes demo by Claude Opus 5.5 (the BOARD lane agent),
-2026-10-14, and for round 2 (routing, labels, headings, the outline) by
-Claude Opus 5.5 (the BOARD fixer). Status: unreviewed, not yet run by a
-person. `tests/board-browser-check.mjs` measures the same page frame on
+2026-10-14, and for routing, labels, headings, the outline, native badges
+and wires beside their tree lines by Claude Opus 5.5 (the BOARD fixer).
+Status: unreviewed, not yet run by a person. `tests/board-browser-check.mjs` measures the same page frame on
 the live board (see `qa/human/board-live.md`); this script is the demo's.
 
 1. From the repo root, run `TC_ROOT=$(mktemp -d) python3 board/serve.py`.
@@ -32,7 +33,11 @@ the live board (see `qa/human/board-live.md`); this script is the demo's.
    - Click `z` in the roots list: `z`'s heading comes to the top of the
      screen.
    - Each box has a colored bar on its left edge (identity only) and up to
-     three lines: the title, the state, and a status line where one is set.
+     three lines: the title (`a · orchestrator`, with a space each side of
+     the dot), the state, and a status line where one is set. `b` and
+     `docs` share an account, so each also carries a dashed badge in words:
+     `native with docs · not observed` on `b`, `native with b · not
+     observed` on `docs`.
    - A thin line runs from each parent's bottom (a filled dot, out) to each
      child's top (a hollow ring, in), with no words on it.
    - The legend is the first line of the footer, under the board.
@@ -41,7 +46,8 @@ the live board (see `qa/human/board-live.md`); this script is the demo's.
      always run toward the session reading the message.
    - An arrowhead sits at the reader's end and a label like `a → b · #41`
      sits beside the wire, never on it, on a box, or on another label.
-     `a → b` runs down the thin line from `a` to `b`. `z → a · #45` runs
+     `a → b` runs beside the thin line from `a` to `b`, a little to one
+     side of it, never on it. `z → a · #45` runs
      between the two orchestrators, from the side of one box to the side
      of the other, round every box between them.
    - No wire passes through a box, and only the thin tree lines touch a
@@ -54,14 +60,18 @@ the live board (see `qa/human/board-live.md`); this script is the demo's.
    - `● listening` (`a`, `b`, `z`, `y1`), `○ idle` (`docs`), `✕ no listener`
      (`d`), `◎ doorbell` (`c`), `⇄ remote · not checked` (`y2`), and
      `✎ writing` on whichever box sends, all show as words.
-   - `d` has a dashed border and its wire to `b` is dotted. `c` has a double
-     border; `y2` a dotted one.
+   - `d` has a dashed border and its wire to `b` is dotted. The dotted wire
+     runs beside `b`'s thin line to `d`, not on it, so its gaps show. `c`
+     has a double border; `y2` a dotted one.
    - The tree's thin lines carry no words. Hover one: `docs reports to a`,
      or, where no card says so, `d under b · inferred from mail`. The legend
      names the thin line.
-   - A long-dash line joins `b` and `docs`, side to side, with no words.
-     Hover it: `b and docs · native · not observed`. The legend names the
-     long dash.
+   - A long-dash line joins `b` and `docs`, side to side, with no words on
+     the line; the badges on both boxes say it in words. Hover the line:
+     `b and docs · native · not observed`. The legend names the long dash,
+     and the thicker quiet mail line (`thick line: mail, none in the last
+     10 s`), and says the thin line is `reports to, or inferred from
+     mail`.
    - Ports: the port on each box's top edge is a hollow ring (in), the one
      on its bottom edge a filled dot (out).
 5. Narrow the window to phone width (about 390 px).
@@ -71,7 +81,9 @@ the live board (see `qa/human/board-live.md`); this script is the demo's.
      then `z`'s tree the same way; then `recent traffic`, one line per
      pair, newest first, such as `a → b · #41 · 0 s ago`. No wires.
    - Each row reads its name, role, state glyph and word, and unread count:
-     `d · worker · inferred ✕ no listener · 2 unread`.
+     `d · worker · inferred ✕ no listener · 2 unread`. Under `b`'s row a line
+     reads `native with docs · not observed`, and under `docs`'s `native
+     with b · not observed`.
    - The pill takes a line of its own; it and the footer wrap rather than
      end in an ellipsis.
    - Every word reads without zooming.

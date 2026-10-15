@@ -203,8 +203,8 @@ see Hand runs.
 
 - `node --test` drives no browser. Since round 2,
   `tests/board-browser-check.mjs` opens `live.html` in headless Chromium
-  (Playwright, which this machine has under `~/CombatSim/node_modules`),
-  but it is a script run by hand, not part of `node --test`, and it skips
+  (Playwright: set NODE_PATH to a Playwright install's node_modules), but
+  it is a script run by hand, not part of `node --test`, and it skips
   without Playwright. The poll loop is look.js `createPoller`, tested on
   fake timers in `tests/board-patch.test.mjs`. B4's verify is still the
   human script.
@@ -401,7 +401,7 @@ shown.
 
 ## Hand runs
 
-Fix round 2: `NODE_PATH=$HOME/CombatSim/node_modules node
+Fix round 2: `NODE_PATH=<a Playwright install>/node_modules node
 tests/board-browser-check.mjs`, Playwright 1.63, Chromium 153, on the
 round 2 tree: `result: PASS` at 1280 x 900 (graph, 7 labels, 22 wires and
 connectors, 4 headings) and 390 x 844 (outline), each server and listener

@@ -1,16 +1,18 @@
 # QA: the live board
 
-Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14; round 2 by
+Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14; fix rounds by
         Claude Opus 5.5 (the BOARD fixer)
 Status: unreviewed. Written, not yet run by a person.
 
 What this checks: `board/serve.py` serves the live board on 127.0.0.1 only,
 refuses without its token, and `board/live.html` draws a real mailbox and
 follows it as mail moves. Every state, port and wire reads in grayscale.
-Round 2: the board fills the screen and the page scrolls, no wire passes
-through a box, no label sits on a box or another label, the legend is in
-the footer, each tree has a heading and the roots are listed at the top,
-and a phone draws an outline instead of the graph.
+The board fills the screen and the page scrolls, no wire passes through a
+box, no label sits on a box or another label, the legend is in the
+footer, each tree has a heading and the roots are listed at the top, and
+a phone draws an outline instead of the graph. A native pair says so in
+words on both boxes, a parent's mail runs beside its tree line (never on
+it), and a stale feed says so over the board.
 
 Run everything from the repo root, in a throwaway mailbox, never the live one.
 Names below are made up.
@@ -19,29 +21,43 @@ Names below are made up.
 
 A script opens the board in a headless browser at a desktop size and a
 phone size and measures what the steps below ask you to look at. It is
-not part of `node --test`. It needs Playwright; on this machine:
+not part of `node --test`. It needs Playwright: set NODE_PATH to a
+Playwright install's node_modules.
 
 ```
-NODE_PATH=$HOME/CombatSim/node_modules node tests/board-browser-check.mjs
+NODE_PATH=<a Playwright install>/node_modules node tests/board-browser-check.mjs
 ```
 
 - It builds its own throwaway mailbox with 14 names (two orchestrator
-  trees and two peers), starts four listeners and proves them with
-  `tc health`, starts `serve.py` on a free port, and prints both. It never
-  prints the token.
+  trees and two peers). It writes the cards with `tc join` when this
+  tree's `tc` has it, else by hand, and prints which. `p1` and `p2` share
+  an account and mail each other; `e2` and `e3` share another and do not.
+  It starts five listeners and proves them with `tc health`, starts
+  `serve.py` on a free port under a time limit of its own, then makes `d`
+  a down worker: the feed sees its listener, the listener is stopped by its
+  pid, and the feed says down. It prints each step. Every line it prints
+  is masked, so it never prints the token, not even in an error.
 - At 1280 x 900 and at 390 x 844 it prints one line per check, each
   `PASS` or `FAIL`: the view (graph on the desktop, outline on the phone),
   no console errors, no sideways scroll, no text under 11 px, all 14 names
   on screen, no box over another, the window at least the viewport's
   height, no label on a label, a box or a heading, no wire through a box,
   the legend below the last session, the roots listed with a working link
-  to `z`, nothing cut off in the pill or the footer.
+  to `z`, nothing cut off in the pill or the footer, each of `p1`, `p2`,
+  `e2` and `e3` saying `native with <the other> · not observed` in full,
+  and on the desktop `d`'s wire dotted with no other line lying on it.
 - It saves four screenshots (each size in color and in grayscale) to a
   temp folder and prints their paths. Look at them. None goes in the repo.
 - It stops the server and the listeners by their own pids, prints those
   pids, and ends with `result: PASS` (exit 0) or `result: FAIL (n)`
-  (exit 1).
+  (exit 1). It stops them on Ctrl+C or a SIGTERM too, and if it is killed
+  outright, `serve.py` still ends 120 s after it started.
 - Without Playwright it prints `skipped: playwright not found` and exits 0.
+- `node tests/board-browser-check.mjs --self-test` needs no Playwright: it
+  runs the check against a stand-in browser whose page load fails, whose
+  close throws, and which hangs until SIGTERM, then SIGINT, then SIGKILL,
+  and ends `self-test: PASS` only if no run printed a token or left
+  `serve.py` or a listener alive.
 
 ## Set up
 
@@ -116,17 +132,16 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
    - `b` and `c` sit one row below it and read `worker · inferred`.
    - A thin line runs from `a`'s out dot down to each child's in ring, with
      no words on it. Hover it: `b under a · inferred from mail`.
-   - Each message flows down that thin line within 3 s, dashed, with the
-     arrow at the reader. `c → a` flows on `c`'s line with the arrow at
-     `a`'s end.
+   - Each message flows beside that thin line within 3 s, a little to one
+     side of it and never on it, dashed, with the arrow at the reader.
+     `c → a` flows beside `c`'s line with the arrow at `a`'s end.
 10. Wait 10 s with no mail.
     - The dashes and the words leave the wires. The quiet lines stay, with
       no words on them.
 
 ## Cards: doorbell, remote, reports to, native
 
-11. Write four cards by hand (`tc join` is another lane's work, not in this
-    tree yet):
+11. Write four cards by hand, in C1's shape:
     ```
     mkdir -p $TC_ROOT/cards
     echo '{"version": 1, "name": "cx", "kind": "codex", "account": "work", "route": "codex", "thread_id": "t1", "reports_to": "a"}' > $TC_ROOT/cards/cx.json
@@ -146,7 +161,9 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       `reports to ghost · not found`.
     - The roots list at the top now names `a`, `far` and `r`.
     - `far` and `r` are both Claude cards on account `home`, so a long-dash
-      line joins them, side to side, with no words on the board. Hover it:
+      line joins them, side to side, with no words on the line. Each box
+      grows a dashed badge in words: `far`'s reads `native with r · not
+      observed`, `r`'s `native with far · not observed`. Hover the line:
       `far and r · native · not observed`. The legend names the long dash.
 12. Post a status: `./tc status c "reviewing the parser"`.
     - Within 3 s `c`'s third line reads `reviewing the parser`.
@@ -187,10 +204,14 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     - A moving wire: dashes, an arrow at the reader, and `from → to · #n`
       beside it.
     - Stop `c`'s listener (Ctrl+C in terminal 3). Within 3 s `c` reads
-      `✕ no listener` with a dashed border, and its wire is dotted.
+      `✕ no listener` with a dashed border, and its wire is dotted. The
+      dotted wire runs beside `c`'s thin tree line, never on it, so the
+      gaps between its dots show.
     - The tree's lines are thin and solid, with no words; the `native` line
-      is long-dashed, with no words. The footer's legend names each kind of
-      line in words.
+      is long-dashed, with no words, and the badges on `far` and `r` say
+      `native` in words. A quiet mail line is thicker than a tree line.
+      The footer's legend names each kind of line in words, the quiet mail
+      line too (`thick line: mail, none in the last 10 s`).
     - Each orchestrator reads as one by the word `orchestrator` in its title
       and in its tree's heading.
 17. Do the same with `?theme=daylight&gray=1` before the `#`.
@@ -205,9 +226,14 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     - No sideways scroll. The graph gives way to the outline: under each
       root's heading, one row per session, each child indented under its
       parent with a rule down its left, each with its name, role, state
-      glyph and word, and unread count. Under the trees, `recent traffic`:
-      one line per pair, such as `c → a · #4 · 1 m ago`, newest first. No
-      wires.
+      glyph and word, and unread count. A tree of one session (`far`,
+      `r`) has no heading; its row is enough. Under `far`'s and `r`'s rows,
+      a line reads `native with r · not observed` and `native with far ·
+      not observed`. Under the trees, `recent traffic`: one line per pair,
+      such as `c → a · #4 · 1 m ago`, newest first. No wires.
+    - Widen the window slowly. The graph comes back only about 24 px past
+      the width where the outline appeared, and the page never flickers
+      between the two.
     - The pill takes a line of its own under the title and wraps rather
       than end in an ellipsis. The footer's counts wrap onto more lines;
       none ends in an ellipsis.
@@ -225,6 +251,8 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     to `w8`.
     - At full desktop width, `a`'s children fill rows under it and wrap to
       a new row instead of running off the side. No box overlaps another.
+      The thin lines to the wrapped rows run down a lane at the left of
+      `a`'s own tree, which no other parent's lines share.
     - The window grows to hold the whole board and the page scrolls down to
       it; there is no scroll box inside the window. The legend sits under
       the board, in the footer.
@@ -248,11 +276,23 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     "prefers-reduced-motion: reduce") and send a message.
     - The dashes stop moving, but the arrow and the words still show which
       wire carried it.
-22. Stop the server: Ctrl+C in terminal 1, then restart it with the same
-    command and open the new URL it prints (the token is new).
-    - Nothing reads `✕ no listener` until a listener has been seen and then
-      stops: a restart forgets who was listening.
-23. Close the tab, then stop the server with Ctrl+C and both listeners with
+22. Stop the server: Ctrl+C in terminal 1, and look at the open page.
+    - Within about 6 s a dashed line over the board reads `stale · last
+      answer N s ago`, the pill reads the same with `is serve.py running?`,
+      and no wire's dashes move: nothing looks live.
+    - Restart the server with the same command and open the new URL it
+      prints (the token is new). Nothing reads `✕ no listener` until a
+      listener has been seen and then stops: a restart forgets who was
+      listening.
+23. A reports_to cycle. Write two cards that report to each other:
+    ```
+    echo '{"version": 1, "name": "p", "kind": "claude", "account": "lab", "route": "local", "reports_to": "q"}' > $TC_ROOT/cards/p.json
+    echo '{"version": 1, "name": "q", "kind": "claude", "account": "shop", "route": "local", "reports_to": "p"}' > $TC_ROOT/cards/q.json
+    ```
+    - Within 3 s `p` is a root with `q` under it, and `p`'s box carries a
+      dashed badge `reports to q · cycle`, so the loop shows in words. At
+      phone width the same words sit under `p`'s row.
+24. Close the tab, then stop the server with Ctrl+C and both listeners with
     Ctrl+C. Run `unset TC_ROOT` in each terminal. The throwaway mailbox is
     under the system temp folder.
 
