@@ -24,8 +24,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  STATES, NOTE_WORDS, CONN_WORDS, LINK_WORDS, boardView, diffBoard, createBoard, patchBoard, pillText, layoutLevels,
-  levelPort, createPoller, outlineView, CONFIG,
+  STATES, NOTE_WORDS, CONN_WORDS, LINK_WORDS, UNREAD_WORDS, boardView, diffBoard, createBoard, patchBoard, pillText, layoutLevels,
+  levelPort, createPoller, outlineView, tokenProblem, CONFIG,
 } from '../board/look.js';
 
 /**
@@ -338,6 +338,36 @@ test('a reports_to cycle\'s root says whom it reports to, on a badge and in the 
   assert.equal(view.nodes.r.note, 'reports to ghost · not found');
   const row = outlineView(feed).groups.flatMap((g) => g.rows).find((r) => r.id === 'p');
   assert.deepEqual(row.badges, ['reports to q · cycle']);
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// SHARED's tc gives a null unread, with a reason, for an inbox it cannot
+// count, and a reason beside a true count when it could not see only read/.
+test('a null unread reads unread unknown in words, on the box and the row; a count with a reason keeps its count', () => {
+  const feed = {
+    nodes: [
+      node('b', { unread: null, unread_problem: 'made-up reason' }), node('c', { unread: 2, unread_problem: null }),
+      node('d', { unread: 0 }),
+    ],
+    wires: [], links: [],
+  };
+  const view = boardView(feed);
+  assert.deepEqual([view.nodes.b.detail, view.nodes.c.detail, view.nodes.d.detail], [UNREAD_WORDS.unknown, '2 unread', '']);
+  assert.equal(UNREAD_WORDS.unknown, 'unread unknown');
+  const rows = Object.fromEntries(outlineView(feed).groups.flatMap((g) => g.rows).map((r) => [r.id, r.unread]));
+  assert.deepEqual(rows, { b: UNREAD_WORDS.unknown, c: '2 unread', d: '' });
+});
+
+// A pasted token that ends in an ellipsis cannot ride in a header: fetch
+// throws before it sends, and the pill used to blame a running server.
+test('a token outside Latin-1 is called damaged in words, never `is serve.py running?`', () => {
+  assert.equal(tokenProblem(''), CONN_WORDS.noToken);
+  assert.equal(tokenProblem('abcDEF0189_-xyz…'), CONN_WORDS.tokenDamaged);
+  assert.notEqual(CONN_WORDS.tokenDamaged, CONN_WORDS.noServer);
+  assert.match(CONN_WORDS.tokenDamaged, /copy the URL/);
+  assert.equal(tokenProblem('abcDEF0189_-xyz'), null);
+  // A Latin-1 character rides in the header; the server refuses it (401, token refused).
+  assert.equal(tokenProblem('abcé'), null);
 });
 
 test('a down node\'s status reads as its last status, never as its state now', () => {

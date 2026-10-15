@@ -16,25 +16,33 @@ once BOARD merges these tests could start serve.py as a child instead.
             in a daemon thread, and shuts it down and closes its socket in
             cleanup. Its Board reads a throwaway TC_ROOT from
             tests/_root.py. Talks to it with http.client over loopback, and
-            with raw sockets for the deadline and the cap. The deadline
-            tests set serve.REQUEST_DEADLINE_S to SHORT_DEADLINE_S while
-            they run; the cap test starts a second server of its own. The
-            font test reads board/fonts/ to compare what it is served.
-@deps       python3 stdlib (http.client, importlib, json, pathlib, socket,
-            sys, threading, time, unittest, unittest.mock); tests/_root.py;
-            board/serve.py; ../tc.
+            with raw sockets for the deadline, the cap, the refusals
+            http.server makes itself and a client that resets mid-answer
+            (its feed swapped for a stand-in, stderr captured). The
+            deadline tests set serve.REQUEST_DEADLINE_S to
+            SHORT_DEADLINE_S while they run; the cap test starts a second
+            server of its own. The font test reads board/fonts/ to compare
+            what it is served. MainTest calls serve.main with Board and
+            BoardServer swapped for stand-ins that fail if reached.
+@deps       python3 stdlib (contextlib, http.client, importlib, io, json,
+            pathlib, socket, struct, sys, threading, time, unittest,
+            unittest.mock); tests/_root.py; board/serve.py; ../tc.
 @complexity O(1) per test: a handful of requests, one or two of them a
-            feed() of an empty mailbox (tens of ms each). The two deadline
-            tests each wait out SHORT_DEADLINE_S once.
+            feed() of an empty mailbox (tens of ms each); one request line
+            of REQUEST_LINE_MAX bytes and one answer of BIG_FEED_BYTES.
+            The two deadline tests each wait out SHORT_DEADLINE_S once.
 @alloc      one TcRoot, one server socket and one thread per test, all
             released in cleanup.
 """
 
+import contextlib
 import http.client
 import importlib.util
+import io
 import json
 import pathlib
 import socket
+import struct
 import sys
 import threading
 import time
@@ -81,6 +89,21 @@ LOOK_STEP_S = 0.05
 # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
 # board/fonts/: two faces in two subsets each, and one license per face.
 FONT_FILES = 6
+# http.server's own limits, written here: a request line of more than
+# this many bytes gets 414, and more than this many header lines 431.
+REQUEST_LINE_MAX = 65536
+HEADERS_MAX = 100
+# How long the hang-up test waits for its request to reach the feed.
+ENTER_CEILING_S = 5
+# A feed answer this big cannot be sent whole to a client that is gone.
+BIG_FEED_BYTES = 1 << 20
+# SO_LINGER on and zero seconds: close() sends a reset, the way a page that
+# goes away mid-answer can.
+LINGER_RESET = (1, 0)
+# http's own port: serve.py refuses it at start (a browser leaves it out of
+# Host). argparse's exit code for a usage error.
+HTTP_PORT = 80
+ARGPARSE_USAGE_EXIT = 2
 
 
 def load_serve():
@@ -248,6 +271,96 @@ class ServerTest(unittest.TestCase):
                      f"/fonts/{files[0]}/..", "/fonts/missing.woff2"):
             self.assertEqual(self.ask("GET", path)[:2], (404, b""), path)
 
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def raw(self, data):
+        """Send `data` over a raw loopback socket and return every byte the server sends back before it closes.
+
+        Each request is exactly what http.server reads before it refuses,
+        so nothing is left unread, and the server closes without a reset.
+
+        @interacts  one loopback TCP connection, closed before return.
+        @deps       socket.
+        @complexity O(b) over b bytes each way.
+        @alloc      the reply, returned.
+        """
+        with socket.create_connection((LOOPBACK, self.port), timeout=REQUEST_TIMEOUT_SECONDS) as sock:
+            sock.sendall(data)
+            chunks = []
+            while True:
+                chunk = sock.recv(REQUEST_LINE_MAX)
+                if not chunk:
+                    return b"".join(chunks)
+                chunks.append(chunk)
+
+    def test_every_refusal_has_no_body_http_server_s_own_too(self):
+        """A bad request line (400), one too long (414), too many headers (431): each refused with no body.
+
+        A version http.server does not speak (HTTP/2.0, 505) and a request
+        line it reads as HTTP/0.9 (one word) get nothing at all: that
+        version has no status line, and the board sends no body. Must
+        reject http.server's own send_error, which writes an HTML page.
+
+        @interacts  five raw loopback connections.
+        @deps       raw.
+        @complexity O(REQUEST_LINE_MAX) for the long line.
+        @alloc      five replies.
+        """
+        long_line = b"GET /" + b"x" * (REQUEST_LINE_MAX + 1 - len(b"GET /"))
+        for data, code in ((b"GET / / HTTP/1.0\r\n", 400), (long_line, 414),
+                           (b"GET /feed HTTP/1.0\r\n" + b"X-Made-Up: 1\r\n" * (HEADERS_MAX + 1), 431)):
+            with self.subTest(code=code):
+                head, _, body = self.raw(data).partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(f"HTTP/1.0 {code} ".encode()), head[:60])
+                self.assertIn(b"Content-Length: 0", head)
+                self.assertEqual(body, b"", f"a {code} refusal carries a body")
+        for data in (b"GET /feed HTTP/2.0\r\n", b"GARBAGE\r\n"):
+            with self.subTest(data=data):
+                self.assertEqual(self.raw(data), b"", f"{data!r} got a reply with a body")
+
+    def test_a_client_that_hangs_up_mid_answer_prints_one_line_and_no_traceback(self):
+        """The page asks for /feed and resets the connection while the feed runs: one stderr line, no traceback.
+
+        A stand-in feed waits until the client is gone, then answers
+        BIG_FEED_BYTES, so writing the answer fails. Its slot comes back,
+        which says the request thread ended. Must reject socketserver's own
+        handle_error, which prints a traceback of a dozen lines.
+
+        @interacts  one loopback connection reset by the client; the
+                    server's Board.feed swapped for a stand-in; stderr
+                    captured.
+        @deps       socket, threading, contextlib, io, unittest.mock;
+                    all_slots_free.
+        @complexity O(BIG_FEED_BYTES).
+        @alloc      one big answer, dropped by the server.
+        """
+        entered, go = threading.Event(), threading.Event()
+
+        def stand_in():
+            """A feed that waits for the client to go, then answers big.
+
+            @interacts  sets `entered`; waits on `go`.
+            @deps       threading.
+            @complexity O(BIG_FEED_BYTES).
+            @alloc      one big dict, returned.
+            """
+            entered.set()
+            go.wait(REQUEST_TIMEOUT_SECONDS)
+            return {"pad": "x" * BIG_FEED_BYTES}
+
+        err = io.StringIO()
+        with mock.patch.object(self.server.board, "feed", stand_in), contextlib.redirect_stderr(err):
+            sock = socket.create_connection((LOOPBACK, self.port), timeout=REQUEST_TIMEOUT_SECONDS)
+            sock.sendall(f"GET /feed HTTP/1.0\r\nHost: {LOOPBACK}:{self.port}\r\nX-TC-Token: {TOKEN}\r\n\r\n".encode())
+            self.assertTrue(entered.wait(ENTER_CEILING_S), "the request never reached the feed")
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", *LINGER_RESET))
+            sock.close()
+            go.set()
+            freed = self.all_slots_free(self.server, serve.MAX_CONNECTIONS, REQUEST_TIMEOUT_SECONDS)
+        said = err.getvalue()
+        self.assertTrue(freed, "the request thread never ended")
+        self.assertNotIn("Traceback", said)
+        self.assertEqual(said.splitlines(), ["serve.py: a client hung up before its answer was written"])
+
     def test_the_socket_is_bound_to_loopback_only(self):
         """The listening socket's address is 127.0.0.1.
 
@@ -361,6 +474,40 @@ class ServerTest(unittest.TestCase):
             finally:
                 for sock in held + [extra]:
                     sock.close()
+
+
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+class MainTest(unittest.TestCase):
+    """main()'s refusals at start, before anything is loaded or bound.
+
+    @interacts  calls serve.main with Board and BoardServer swapped for
+                stand-ins that fail if reached; stderr captured.
+    @deps       serve.main, contextlib, io, unittest.mock.
+    @complexity O(1).
+    @alloc      none retained.
+    """
+
+    def test_port_80_is_refused_at_start_in_words(self):
+        """`serve.py --port 80` exits 2 with words on stderr, before it loads tc or binds.
+
+        A browser leaves port 80 out of its Host header, which the Host
+        check refuses, so the board would refuse its own page. Must reject
+        a main() that binds port 80 anyway.
+
+        @interacts  one serve.main call.
+        @deps       serve.main.
+        @complexity O(1).
+        @alloc      none retained.
+        """
+        reached = AssertionError("main() went past its usage check")
+        err = io.StringIO()
+        with mock.patch.object(serve, "Board", side_effect=reached), \
+                mock.patch.object(serve, "BoardServer", side_effect=reached), \
+                contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as stop:
+            serve.main(["--port", str(HTTP_PORT)])
+        self.assertEqual(stop.exception.code, ARGPARSE_USAGE_EXIT)
+        self.assertIn(f"--port {HTTP_PORT}", err.getvalue())
+        self.assertIn("Host header", err.getvalue())
 
 
 if __name__ == "__main__":

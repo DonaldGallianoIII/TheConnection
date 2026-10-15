@@ -26,8 +26,9 @@ renamed, mail/.seq raised), and the feed reads only their names.
             module; each Board loads tc with TC_ROOT set to the test's root.
             Writes cards, status lines and message files in that root only.
 @deps       python3 stdlib (contextlib, fcntl, importlib, io, itertools,
-            json, os, pathlib, random, shlex, sys, threading, time,
-            unittest, unittest.mock); tests/_root.py; board/serve.py; ../tc.
+            json, marshal, os, pathlib, random, shlex, shutil, sys,
+            threading, time, unittest, unittest.mock); tests/_root.py;
+            board/serve.py; ../tc.
 @complexity O(1) per test: at most 52 message files, 9 names, two
             listeners, and a few feed() calls, each O(n + m + e) in serve.py
             plus Board.snapshot's parts of tc's health (milliseconds, no
@@ -36,8 +37,11 @@ renamed, mail/.seq raised), and the feed reads only their names.
             stand-in, so it starts no listener and no child. The GPU test
             puts a fake nvidia-smi on PATH and runs it once, through
             tc.machine_stats. The hostile mailbox tests make a FIFO, a
-            looping link, a symlink and a card named with an escape
-            sequence in their own root only.
+            looping link, symlinks to files and folders outside, one
+            message in two folders, a card named with an escape sequence,
+            and two copies of tc (one with a planted bytecode cache) in
+            their own root's temp folder only, and swap tc's
+            mailbox_summary for a stand-in that fails.
 @alloc      one TcRoot per test, removed when its context exits; the feeds
             are plain dicts dropped at the end of each test.
 """
@@ -48,10 +52,12 @@ import importlib.util
 import io
 import itertools
 import json
+import marshal
 import os
 import pathlib
 import random
 import shlex
+import shutil
 import sys
 import threading
 import time
@@ -122,6 +128,16 @@ WAKE_CEILING_S = 2 * TC_POLL_S
 SIGN_OF_LIFE_S = 30
 # A status this long before the last sighting: written before the wake.
 OLD_STATUS_S = 100
+# A made-up reason in the shape SHARED's tc gives for an inbox it cannot
+# count (mailbox_summary's mail_problem).
+MAIL_PROBLEM = "made-up reason: cannot list this inbox"
+# A newest-mail age under 0: tc's mailbox_summary rounds now less a future mtime.
+NEGATIVE_AGE_S = -5
+# A .pyc header (PEP 552): the magic number, then three little-endian
+# 32-bit words: flags (0, checked by the source's mtime and size), the
+# source's mtime and its size, each kept to 32 bits.
+PYC_WORD_BYTES = 4
+PYC_WORD_MASK = 0xFFFFFFFF
 # The seeded property test over the feed's roles and levels: a fixed seed,
 # so a failure replays; a few hundred cases, so it runs in well under a
 # second with no disk. Names are single letters, so the order-reversing
@@ -1280,6 +1296,203 @@ class HostileMailboxTest(unittest.TestCase):
         nodes = by_id(feed)
         self.assertEqual(sorted(nodes), ["a"], "a symlinked card was read")
         self.assertIsNone(nodes["a"]["status"], "a symlinked status was read")
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def test_a_message_that_vanishes_mid_poll_costs_one_retry_not_a_500(self):
+        """tc's mailbox_summary raises FileNotFoundError once (a read moved a file): the feed asks again and answers.
+
+        A stand-in in front of the real mailbox_summary raises the first
+        time only, as a `tc read` between tc's glob and its stat makes it.
+        A stand-in that raises every time still raises, once retried: a
+        real fault is not hidden. Must reject a snapshot with no retry,
+        which answers that poll 500.
+
+        @interacts  one card and one message in a fresh TcRoot; two feed()
+                    calls with board.tc.mailbox_summary swapped for a
+                    stand-in.
+        @deps       _root.TcRoot, write_card, put_message, serve.Board,
+                    unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            write_card(root.path, "a")
+            put_message(root.path, 1, "a", "b")
+            board = serve.Board(root=root.path)
+            real = board.tc.mailbox_summary
+            calls = []
+
+            def vanishes_once():
+                """mailbox_summary, raising FileNotFoundError on its first call only.
+
+                @interacts  see tc.mailbox_summary.
+                @deps       none.
+                @complexity tc.mailbox_summary's.
+                @alloc      one entry in `calls`.
+                """
+                calls.append(1)
+                if len(calls) == 1:
+                    raise FileNotFoundError(2, "No such file or directory", "000001-from-a.md")
+                return real()
+
+            def always_vanishes():
+                """mailbox_summary, raising FileNotFoundError every time.
+
+                @interacts  none.
+                @deps       none.
+                @complexity O(1).
+                @alloc      one entry in `calls`.
+                """
+                calls.append(1)
+                raise FileNotFoundError(2, "No such file or directory", "000001-from-a.md")
+
+            with mock.patch.object(board.tc, "mailbox_summary", vanishes_once):
+                feed = board.feed()
+            self.assertEqual(len(calls), 2, "the summary was not asked again")
+            self.assertEqual(sorted(by_id(feed)), ["a", "b"])
+            calls.clear()
+            with mock.patch.object(board.tc, "mailbox_summary", always_vanishes):
+                with self.assertRaises(FileNotFoundError):
+                    board.feed()
+            self.assertEqual(len(calls), 2, "a summary that keeps failing was asked other than twice")
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def test_an_uncounted_inbox_reads_unknown_with_tc_s_reason(self):
+        """unread None with a mail_problem passes through as null with the reason; a counted inbox with one does not.
+
+        SHARED's tc gives `unread: None` and a `mail_problem` when it
+        cannot count an inbox, and a `mail_problem` with a true count when
+        it could not see only its read/. The reason rides in unread_problem
+        only beside a null unread; a number keeps its number and no reason.
+        A negative newest-mail age reads 0. Must reject a feed that turns an
+        unknown count into 0, drops the reason, or calls a counted inbox
+        unknown.
+
+        @interacts  one feed() with Board.snapshot swapped for a stand-in.
+        @deps       _root.TcRoot, serve.Board, unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        mail = {"b": {"unread": None, "newest_mail_age_s": None, "mail_problem": MAIL_PROBLEM},
+                "c": {"unread": 2, "newest_mail_age_s": NEGATIVE_AGE_S, "mail_problem": MAIL_PROBLEM},
+                "d": {"unread": 0, "newest_mail_age_s": 7}}
+
+        def stand_in():
+            """A snapshot in Board.snapshot's shape with the three inboxes above.
+
+            @interacts  none.
+            @deps       none.
+            @complexity O(1).
+            @alloc      one small dict, returned.
+            """
+            return {"time": "2030-03-17T12:00:00-05:00",
+                    "machine": {"load1": 0.0, "cores": 1, "mem_avail_pct": 50.0}, "listeners": {}, "mail": mail}
+
+        with _root.TcRoot() as root:
+            board = serve.Board(root=root.path, clock=FakeClock(FAKE_NOW))
+            with mock.patch.object(board, "snapshot", stand_in):
+                nodes = by_id(board.feed())
+        self.assertEqual({name: (nodes[name]["unread"], nodes[name]["unread_problem"], nodes[name]["last_mail_age_s"])
+                          for name in mail},
+                         {"b": (None, MAIL_PROBLEM, None), "c": (2, None, 0), "d": (0, None, 7)})
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def test_a_linked_inbox_read_folder_or_message_is_not_counted(self):
+        """mail/to-ghost and mail/to-c/read are links to folders outside, and mail/to-b holds a link to a message: none counts.
+
+        Each outside folder holds a well-named message (from x and from w),
+        and the linked message is from y; none makes a wire or a link. The
+        message a to b, a regular file, is the control. Must reject a scan
+        that follows a linked folder or counts a link as a message, as
+        SHARED's tc does neither.
+
+        @interacts  one message, two outside folders, a file and three links
+                    in a fresh TcRoot; one feed().
+        @deps       _root.TcRoot, put_message, serve.Board.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            put_message(root.path, 1, "a", "b")
+            mail = root.path / "mail"
+            for folder, message in (("outside-box", "000002-from-x.md"), ("outside-read", "000003-from-w.md")):
+                (root.base / folder).mkdir()
+                (root.base / folder / message).write_text("hi\n")
+            (root.base / "outside-message.md").write_text("hi\n")
+            (mail / "to-ghost").symlink_to(root.base / "outside-box")
+            (mail / "to-c").mkdir()
+            (mail / "to-c" / "read").symlink_to(root.base / "outside-read")
+            (mail / "to-b" / "000004-from-y.md").symlink_to(root.base / "outside-message.md")
+            feed = serve.Board(root=root.path).feed()
+        self.assertEqual([(w["from"], w["to"], w["seq"]) for w in feed["wires"]], [("a", "b", 1)])
+        named = {link["from"] for link in feed["links"]} | {link["to"] for link in feed["links"]}
+        self.assertEqual(named & {"x", "y", "w"}, set(), f"a linked folder or message was counted: {feed['links']}")
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def test_a_message_in_both_the_inbox_and_read_counts_once(self):
+        """000005-from-a.md in mail/to-b/ and in mail/to-b/read/ (a read moved it mid-scan): one wire, one sent.
+
+        a sent it RECENT_SEND_S ago, so a reads writing. Must reject a scan
+        that lists the moved message twice: two wires with one seq and a
+        sent count one too high.
+
+        @interacts  one card and the same message file twice in a fresh
+                    TcRoot; one feed() on a fake clock.
+        @deps       _root.TcRoot, write_card, put_message, age_file,
+                    serve.Board.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            write_card(root.path, "a")
+            for unread in (True, False):
+                age_file(put_message(root.path, 5, "a", "b", unread=unread), FAKE_NOW - RECENT_SEND_S)
+            feed = serve.Board(root=root.path, clock=FakeClock(FAKE_NOW)).feed()
+        self.assertEqual([(w["from"], w["to"], w["seq"]) for w in feed["wires"]], [("a", "b", 5)])
+        mailbox = [link for link in feed["links"] if link["kind"] == "mailbox"]
+        self.assertEqual([link["sent"] for link in mailbox], [{"a": 1, "b": 0}])
+        self.assertEqual(by_id(feed)["a"]["state"], "writing")
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def test_the_board_runs_tc_from_its_source_and_writes_no_bytecode_cache(self):
+        """A Board leaves no __pycache__ beside tc, and a cache planted there with a matching header is never run.
+
+        tc is copied into the harness's own temp folder (never next to the
+        repo's tc), once with nothing beside it and once with a planted
+        cache, built from code that sets PLANTED, whose header names the
+        copy's mtime and size, as an import would check it. Must reject a
+        load through an import's loader, which writes the cache in the
+        first case and runs the planted code in the second.
+
+        @interacts  two copies of tc and one planted .pyc in a fresh
+                    TcRoot's temp folder; serve.TC_PATH patched for each
+                    Board.
+        @deps       _root.TcRoot, serve.Board, importlib.util, marshal,
+                    shutil, unittest.mock.
+        @complexity O(s) over s bytes of tc, compiled twice.
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            loaded = {}
+            for case in ("clean", "planted"):
+                folder = root.base / f"tc-{case}"
+                folder.mkdir()
+                copy = folder / "tc"
+                shutil.copy2(serve.TC_PATH, copy)
+                if case == "planted":
+                    cache = pathlib.Path(importlib.util.cache_from_source(str(copy)))
+                    cache.parent.mkdir()
+                    st = copy.stat()
+                    words = (0, int(st.st_mtime) & PYC_WORD_MASK, st.st_size & PYC_WORD_MASK)
+                    header = importlib.util.MAGIC_NUMBER + b"".join(w.to_bytes(PYC_WORD_BYTES, "little") for w in words)
+                    cache.write_bytes(header + marshal.dumps(compile("PLANTED = True\n", str(copy), "exec")))
+                with mock.patch.object(serve, "TC_PATH", copy):
+                    loaded[case] = serve.Board(root=root.path).tc
+            cached = (root.base / "tc-clean" / "__pycache__").exists()
+        self.assertFalse(cached, "loading tc wrote a bytecode cache beside it")
+        self.assertFalse(hasattr(loaded["planted"], "PLANTED"), "the board ran a planted bytecode cache")
+        self.assertTrue(callable(getattr(loaded["planted"], "mailbox_summary", None)), "tc's own source did not run")
+        self.assertEqual(loaded["clean"].ROOT, root.path)
 
 
 if __name__ == "__main__":

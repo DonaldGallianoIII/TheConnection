@@ -36,10 +36,15 @@ query. Cards never come from tc's health:
                            card (cards/<name>.json), sorted
   nodes[].listener_pid     snap["listeners"][name]: the pid tc read from
                            /proc/locks, or None
-  nodes[].unread           snap["mail"][name]["unread"]; 0 with no inbox
+  nodes[].unread           snap["mail"][name]["unread"]; 0 with no inbox;
+                           None when tc cannot count it (SHARED's tc, on an
+                           inbox it cannot see into)
+  nodes[].unread_problem   snap["mail"][name]["mail_problem"], tc's reason,
+                           when unread is None; else None
   nodes[].last_mail_age_s  snap["mail"][name]["newest_mail_age_s"]: seconds
                            since the newest message in the name's inbox or
-                           read/, so mail it received; None with no inbox
+                           read/, so mail it received, never under 0 (a
+                           future mtime reads 0); None with no inbox
   nodes[].kind, account,   the card, read straight from cards/<name>.json
   route, reports_to        (C1), never from a `cards` key in health. With no
                            card: kind and account None, route "local" (C1:
@@ -93,8 +98,8 @@ Known limit (C5 rule 6): with no hints at all, a top relay whose only
 partner is a lower relay is drawn as that relay's `worker`, marked
 `inferred`. `tc join <name> --reports-to <relay>` fixes it.
 
-@interacts  loads ../tc as a module with TC_ROOT set for the load only,
-            then calls tc.now_iso(), tc.listeners("wait") (reads
+@interacts  loads ../tc as a module from its source, compiled in memory,
+            with TC_ROOT set for the load only, then calls tc.now_iso(), tc.listeners("wait") (reads
             /proc/locks, globs mail/.wait-*.lock) and tc.mailbox_summary()
             (globs and stats mail/ and status/ under tc's ROOT); reads the
             load average and /proc/meminfo itself. Never runs nvidia-smi
@@ -102,19 +107,21 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             head of status/<name>.md; lists mail/to-*/ and mail/to-*/read/
             and stats a few message files, and for a name that stopped
             listening, its status file and the messages since its wake.
-            Opens no message body. Writes nothing to the mailbox; the first
-            load of tc may write tc's bytecode cache (__pycache__/ beside
-            tc), as any import of it does. main() binds one
+            Opens no message body. Writes nothing to the mailbox, and
+            reads and writes no bytecode cache of tc's. main() binds one
             TCP socket on 127.0.0.1, prints the URL with the token once to
             stdout, reads the allow-listed files in board/ per request, and
             writes no request log. A failed feed writes one line to stderr,
-            and so does the first poll that meets a card nested past
-            Python's recursion limit. Card and status files are opened with
-            O_NONBLOCK and O_NOFOLLOW and read only when fstat says regular,
-            so a FIFO never blocks a poll and a symlink never redirects one.
+            and so do a client that hangs up mid-answer, any other request
+            that fails past its handler (never a traceback), and the first
+            poll that meets a card nested past Python's recursion limit.
+            Card and status files are opened with O_NONBLOCK and O_NOFOLLOW
+            and read only when fstat says regular, so a FIFO never blocks a
+            poll and a symlink never redirects one; mail folders are listed
+            the same way, never through a link.
 @deps       python3 stdlib (argparse, collections, heapq, hmac, http.server,
-            importlib, io, json, os, pathlib, re, secrets, signal, stat,
-            sys, threading, time, urllib.parse); ../tc; Linux (/proc:
+            io, json, os, pathlib, re, secrets, signal, stat, sys,
+            threading, time, types, urllib.parse); ../tc; Linux (/proc:
             /proc/locks through tc, the load average and /proc/meminfo
             read here).
 @complexity feed(), per poll: O(k + m log m + n + c^2). The snapshot:
@@ -154,8 +161,6 @@ import collections
 import heapq
 import hmac
 import http.server
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -167,6 +172,7 @@ import stat
 import sys
 import threading
 import time
+import types
 import urllib.parse
 
 BOARD_DIR = pathlib.Path(__file__).resolve().parent
@@ -217,6 +223,12 @@ MEMINFO_PATH = "/proc/meminfo"
 # The server (C6). 8780 because 8765 was taken on the owner's machine on
 # 2026-10-14 (O7); --port moves it, and port 0 lets the OS pick.
 DEFAULT_PORT = 8780
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status:
+# unreviewed. http's own port. A browser leaves it out of its Host header,
+# and the Host check wants 127.0.0.1:<port>, so on this port it would
+# refuse the page itself; main() refuses the port at start instead of
+# loosening the check.
+HTTP_DEFAULT_PORT = 80
 # Loopback only. Nothing off this machine can reach the board; the token
 # guards it from other local users' pages.
 BIND_HOST = "127.0.0.1"
@@ -296,26 +308,36 @@ Message = collections.namedtuple("Message", "seq sender to path read")
 
 
 def load_tc(root=None):
-    """Load ../tc as a module without running main(), the way C5 shows.
+    """Load ../tc as a module without running main(), from its source alone.
 
-    tc fixes ROOT, MAIL, STATUS and SEQ_FILE at import, from TC_ROOT. With
-    `root` given, TC_ROOT is set to it for the load and put back after, so
-    the module points at `root` and the process's environment is unchanged.
-    With `root` None, tc reads TC_ROOT as it stands (or its own folder).
+    tc fixes five paths at import, from TC_ROOT: ROOT, MAIL, STATUS,
+    SEQ_FILE and CARDS. With `root` given, TC_ROOT is set to it for the
+    load and put back after, so the module points at `root` and the
+    process's environment is unchanged. With `root` None, tc reads TC_ROOT
+    as it stands (or its own folder).
 
-    @interacts  reads and restores os.environ["TC_ROOT"]; executes ../tc's
-                top level (imports and constants; tc's main() is not run).
-    @deps       importlib; ../tc.
-    @complexity O(1): one module load.
-    @alloc      one module object, returned; the caller holds it.
+    tc's source is read and compiled in memory and run in a fresh module,
+    so no bytecode cache beside tc is read or written. An import would
+    trust a cache by its header alone (the source's mtime and size, which
+    anyone can read), and on a group-writable ROOT another user could plant
+    one for the board to run as its own user.
+
+    @interacts  reads ../tc's source; reads and restores
+                os.environ["TC_ROOT"]; executes tc's top level (imports and
+                constants; tc's main() is not run). Writes no file.
+    @deps       types; ../tc.
+    @complexity O(s) over s bytes of tc's source: one compile.
+    @alloc      the source, freed on return; one module object, returned;
+                the caller holds it.
     """
+    code = compile(TC_PATH.read_bytes(), str(TC_PATH), "exec", dont_inherit=True)
+    tc = types.ModuleType("tc")
+    tc.__file__ = str(TC_PATH)
     old = os.environ.get("TC_ROOT")
     if root is not None:
         os.environ["TC_ROOT"] = str(root)
     try:
-        loader = importlib.machinery.SourceFileLoader("tc", str(TC_PATH))
-        tc = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-        loader.exec_module(tc)
+        exec(code, tc.__dict__)
     finally:
         if root is not None:
             if old is None:
@@ -446,41 +468,71 @@ def scan_messages(mail):
     cannot search, a dead mount) is skipped on its own; the rest of the
     scan stands. Opens no file.
 
+    Never follows a link, as SHARED's tc reads a mailbox: a to-* entry or
+    a read/ that is a link is not looked in, and only a regular file is a
+    message (message_names). A message seen in both the inbox and read/ in
+    one scan (a `tc read` moved it between the two listings) counts once,
+    by recipient and number, as its read/ copy.
+
     @interacts  lists `mail`, each to-*/ folder and each to-*/read/.
-    @deps       os, re.
+    @deps       os, re; message_names.
     @complexity O(b + m) over b inbox folders and m file names in them.
-    @alloc      one Message per message file, in the returned list.
+    @alloc      one Message per message file, in a dict by recipient and
+                number, returned as a list.
     """
-    found = []
     try:
         with os.scandir(mail) as listing:
             entries = list(listing)
     except OSError:
-        return found
+        return []
     boxes = []
     for entry in entries:
         if not entry.name.startswith(INBOX_PREFIX):
             continue
         try:
-            if entry.is_dir():
+            if entry.is_dir(follow_symlinks=False):
                 boxes.append(entry)
         except OSError:
             continue
+    found = {}
     for box in boxes:
         to = box.name[len(INBOX_PREFIX):]
         if not to:
             continue
         for folder, read in ((box.path, False), (os.path.join(box.path, READ_FOLDER), True)):
-            try:
-                entries = os.scandir(folder)
-            except OSError:
-                continue
-            with entries:
-                for entry in entries:
-                    match = MESSAGE_NAME.match(entry.name)
-                    if match:
-                        found.append(Message(int(match.group(1)), match.group(2), to, entry.path, read))
-    return found
+            for name in message_names(folder):
+                match = MESSAGE_NAME.match(name)
+                msg = Message(int(match.group(1)), match.group(2), to, os.path.join(folder, name), read)
+                found[(to, msg.seq)] = msg
+    return list(found.values())
+
+
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+def message_names(folder):
+    """The names of the regular files in `folder` that match MESSAGE_NAME; [] for a link or no folder.
+
+    The folder is opened with O_NOFOLLOW and O_DIRECTORY and listed through
+    that descriptor, so a folder that is a link, even one swapped in after
+    the caller looked, is never listed, and an entry counts only when it is
+    a regular file itself, never a link to one.
+
+    @interacts  opens, lists and closes one folder.
+    @deps       os, re.
+    @complexity O(f) over f entries in the folder.
+    @alloc      one list of names, returned.
+    """
+    try:
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return []
+    try:
+        with os.scandir(fd) as entries:
+            return [entry.name for entry in entries
+                    if MESSAGE_NAME.match(entry.name) and entry.is_file(follow_symlinks=False)]
+    except OSError:
+        return []
+    finally:
+        os.close(fd)
 
 
 def status_preview(folder, name):
@@ -827,17 +879,26 @@ class Board:
         tc's GPU_QUERY_TIMEOUT_SECONDS), scans every process and, on the
         merged tc, reads every card: none of which the feed uses.
 
+        A `tc read` that moves a message between mailbox_summary's glob
+        and its stat makes it raise FileNotFoundError. It is asked once
+        more, and finds the message in read/; a second miss raises, and that
+        poll answers 500.
+
         @interacts  see the module block: /proc/locks, the lock files, mail/
                     and status/ through tc; the load average and
                     /proc/meminfo through machine_now.
         @deps       tc.now_iso, tc.listeners, tc.mailbox_summary;
                     machine_now.
         @complexity O(k + n + m): k lines in /proc/locks, n names, m message
-                    files.
+                    files; twice m when a message moved mid-poll.
         @alloc      one dict, returned.
         """
+        try:
+            mail = self.tc.mailbox_summary()
+        except FileNotFoundError:
+            mail = self.tc.mailbox_summary()
         return {"time": self.tc.now_iso(), "machine": machine_now(),
-                "listeners": self.tc.listeners("wait"), "mail": self.tc.mailbox_summary()}
+                "listeners": self.tc.listeners("wait"), "mail": mail}
 
     def feed(self):
         """One C5 feed object for the mailbox as it is now.
@@ -912,11 +973,14 @@ class Board:
             else:
                 state = IDLE
             role, role_source = roles[name]
+            unread = box.get("unread") if box else 0
+            newest = box.get("newest_mail_age_s") if box else None
             nodes.append({
                 "id": name, "kind": card.get("kind"), "account": card.get("account"),
                 "route": route, "state": state, "listener_pid": pid,
-                "unread": box["unread"] if box else 0,
-                "last_mail_age_s": box["newest_mail_age_s"] if box else None,
+                # An inbox tc cannot count stays unknown, never 0, with tc's reason.
+                "unread": unread, "unread_problem": box.get("mail_problem") if box and unread is None else None,
+                "last_mail_age_s": None if newest is None else max(0, newest),
                 "status": status_preview(self.tc.STATUS, name),
                 "role": role, "role_source": role_source,
                 "reports_to": card.get("reports_to"), "level": levels[name],
@@ -1046,8 +1110,10 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
     Every request is checked in this order. A Host that is not
     127.0.0.1:<port> or localhost:<port>: 421. A method other than GET or
     HEAD: 405. /feed without the right X-TC-Token header: 401. A path not
-    on STATIC_FILES (or not on disk): 404. Every refusal has no body. The
-    whole request, read and answer, has REQUEST_DEADLINE_S (setup()).
+    on STATIC_FILES (or not on disk): 404. Every refusal has no body,
+    http.server's own too (send_error: a request it cannot parse is
+    refused before the Host check, with 400, 414, 431 or 505). The whole
+    request, read and answer, has REQUEST_DEADLINE_S (setup()).
 
     @interacts  reads the request; writes one response; calls the server's
                 Board.feed() under its lock; reads one file in board/.
@@ -1145,6 +1211,25 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def send_error(self, code, message=None, explain=None):
+        """Refuse with `code` and no body: http.server's own refusals too.
+
+        http.server calls this when it cannot take a request at all (a bad
+        request line, one past 65,536 bytes, too many or too long headers,
+        an HTTP version it does not speak), before answer() and its Host
+        check run. Its own page would carry a body, so every refusal here
+        is empty, and the connection closes. A request it read as HTTP/0.9
+        gets no status line either, as that version has none.
+
+        @interacts  writes one empty response.
+        @deps       send_empty.
+        @complexity O(1).
+        @alloc      none retained.
+        """
+        self.close_connection = True
+        self.send_empty(code)
 
     def send_bytes(self, ctype, data, with_body):
         """Send 200 with `data` as `ctype`; the body only when `with_body`.
@@ -1267,6 +1352,26 @@ class BoardServer(http.server.ThreadingHTTPServer):
             self.slots.release()
             raise
 
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def handle_error(self, request, client_address):
+        """One line on stderr for a request that failed past its handler, never a traceback.
+
+        A client that hangs up before its answer is written (a reload, a
+        closed tab, a poll the page gave up on) makes the write raise
+        BrokenPipeError or ConnectionResetError, and socketserver's own
+        handle_error would print a traceback for it.
+
+        @interacts  writes one line to stderr.
+        @deps       sys.
+        @complexity O(1).
+        @alloc      one short string.
+        """
+        error = sys.exc_info()[1]
+        if isinstance(error, (BrokenPipeError, ConnectionResetError)):
+            print("serve.py: a client hung up before its answer was written", file=sys.stderr, flush=True)
+        else:
+            print(f"serve.py: a request failed: {error!r}", file=sys.stderr, flush=True)
+
     def process_request_thread(self, request, client_address):
         """Handle one request on its own thread, then give its slot back.
 
@@ -1297,7 +1402,9 @@ def main(argv=None):
 
     @interacts  see the module block: loads tc for the mailbox TC_ROOT
                 names (or tc's own folder), binds BIND_HOST:--port, prints
-                one line to stdout, sets a SIGTERM handler.
+                one line to stdout, sets a SIGTERM handler. A usage error,
+                --port 80 among them, goes to stderr in words and exits 2
+                (argparse's) before anything is loaded or bound.
     @deps       argparse, secrets, signal; Board, BoardServer.
     @complexity O(1) to start; then one request at a time per thread.
     @alloc      one Board and one BoardServer, closed on the way out.
@@ -1307,6 +1414,9 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,
                     help=f"port on {BIND_HOST} (default {DEFAULT_PORT}; 0 lets the OS pick)")
     args = ap.parse_args(argv)
+    if args.port == HTTP_DEFAULT_PORT:
+        ap.error(f"--port {HTTP_DEFAULT_PORT}: a browser leaves port {HTTP_DEFAULT_PORT} out of its Host header, "
+                 "which the board refuses; pick another port (0 lets the OS pick)")
     token = secrets.token_urlsafe(TOKEN_BYTES)
     server = BoardServer(Board(), args.port, token)
     signal.signal(signal.SIGTERM, stop_on_term)

@@ -22,9 +22,10 @@
  *             never touches innerHTML, storage or globals. layoutLevels,
  *             boardView, diffBoard, roleTitle, hueFor, pillText,
  *             layoutWidth, levelPort, routeTree, routeAround, roundedPath,
- *             placeLabels, rootsList, outlineView and fitTransform read
- *             only their arguments; patchBoard writes only the board object
- *             it is given and calls only its kit; createRoots calls back on
+ *             placeLabels, rootsList, outlineView, fitTransform and
+ *             tokenProblem read only their arguments (boardView writes the
+ *             route cache it is given, if any); patchBoard writes only the
+ *             board object it is given and calls only its kit; createRoots calls back on
  *             a click; createFit observes the canvas's stage through the
  *             observer it is given and writes the window's data-view, the
  *             frame's height and the view's size and transform, and its
@@ -699,6 +700,28 @@ export const TREE_WORDS = Object.freeze({
 export const NOTE_WORDS = Object.freeze({
   lastStatus: 'last status:',
 });
+
+/**
+ * Words for a node's unread mail. The feed's unread is null when tc could
+ * not count an inbox (C5, with its reason in unread_problem): that reads
+ * `unread unknown`, never a blank, which would read as no mail.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+ */
+export const UNREAD_WORDS = Object.freeze({
+  unread: 'unread',
+  unknown: 'unread unknown',
+});
+
+/**
+ * A node's unread words: `N unread`, `unread unknown` when the feed could
+ * not count them (null), else '' (none, or a hand-made feed with no count).
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+ * @complexity O(1)  @alloc one short string
+ */
+function unreadWords(n) {
+  if (n.unread === null) return UNREAD_WORDS.unknown;
+  return n.unread > 0 ? `${n.unread} ${UNREAD_WORDS.unread}` : '';
+}
 
 /**
  * An empty map keyed by session name, with no prototype, so a name such as
@@ -1556,7 +1579,7 @@ function agoWords(ageS) {
  * whose row says the same); in it one row
  * per session of that tree, parent before children, each `depth` levels
  * under its root, with its name, its role words, its state's glyph and
- * word, its unread count, its note (as boardView's) and its badges'
+ * word, its unread count (unreadWords), its note (as boardView's) and its badges'
  * words (badgesOf: a native pair, a cycle's root), one line each. Then the
  * recent traffic: one line per pair, its newest message, `a → b · #18 · 2
  * m ago`, newest first.
@@ -1576,7 +1599,7 @@ export function outlineView(feed) {
       const state = STATES[n.state] ? n.state : 'idle';
       rows.push({
         id, depth, role: roleTitle(n).slice(String(id).length), state, glyph: STATES[state].glyph, word: STATES[state].word,
-        unread: n.unread > 0 ? `${n.unread} unread` : '', note: noteFor(n, known), badges: badges[id].map((b) => b.text),
+        unread: unreadWords(n), note: noteFor(n, known), badges: badges[id].map((b) => b.text),
       });
       const children = kids.get(id) || [];
       for (let i = children.length - 1; i >= 0; i -= 1) stack.push([children[i], depth + 1]);
@@ -1601,7 +1624,7 @@ export function outlineView(feed) {
  * What to draw for a C5 feed laid out inside `width` (see layoutLevels):
  * one view per node and per edge, keyed by id. Node: title (roleTitle), pos
  * and h (layoutLevels: the box's place and height), state, detail (unread
- * count), note (`reports to N · not found`, else the status line, as `last
+ * count, or `unread unknown`: unreadWords), note (`reports to N · not found`, else the status line, as `last
  * status: ...` on a down or woken node), `badges` (badgesOf: `native with b · not
  * observed` on both boxes of a native pair, `reports to q · cycle` on a
  * cycle's root), and `connector`: on a node with a parent in the layout,
@@ -1659,7 +1682,7 @@ export function boardView(feed, width, routes = null) {
   for (const n of known.values()) {
     nodes[n.id] = {
       id: n.id, title: lay.titles[n.id], pos: lay.pos[n.id], h: lay.heights[n.id],
-      state: STATES[n.state] ? n.state : 'idle', detail: n.unread > 0 ? `${n.unread} unread` : '',
+      state: STATES[n.state] ? n.state : 'idle', detail: unreadWords(n),
       note: noteFor(n, known), badges: lay.badges[n.id], connector: null, head: null,
     };
     boxOf[n.id] = { x: lay.pos[n.id].x, y: lay.pos[n.id].y, w: C.NODE_W, h: lay.heights[n.id] };
@@ -2237,6 +2260,8 @@ export function createFit(canvas, board, { padding, Observer, mark }) {
  * 2026-10-14. Status: unreviewed.
  */
 export const CONN_WORDS = Object.freeze({
+  // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+  tokenDamaged: 'token damaged · copy the URL serve.py printed again',
   asking: 'asking the server',
   noToken: 'no token · open the URL serve.py printed',
   tokenRefused: 'token refused · open the URL serve.py printed',
@@ -2248,6 +2273,27 @@ export const CONN_WORDS = Object.freeze({
 });
 // The status serve.py gives /feed without the right token (C6).
 const HTTP_UNAUTHORIZED = 401;
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// The highest code point an HTTP header value may hold: fetch refuses a
+// header past Latin-1 before it sends anything.
+const LATIN1_MAX = 0xff;
+
+/**
+ * What is wrong with the URL's token before any request: CONN_WORDS.noToken
+ * when there is none, CONN_WORDS.tokenDamaged when it holds a character
+ * outside Latin-1 (a pasted ellipsis, say), which cannot ride in the
+ * X-TC-Token header, so fetch would throw and the pill would blame a
+ * server that is running; else null. serve.py's tokens are token_urlsafe,
+ * so any such character is damage; any other wrong token reaches the
+ * server and gets 401, `token refused`.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+ * @complexity O(t) over t characters  @alloc none
+ */
+export function tokenProblem(token) {
+  if (!token) return CONN_WORDS.noToken;
+  for (const ch of token) if (ch.codePointAt(0) > LATIN1_MAX) return CONN_WORDS.tokenDamaged;
+  return null;
+}
 // The pill counts the age of the last answer in whole seconds.
 const MS_PER_S = 1000;
 
