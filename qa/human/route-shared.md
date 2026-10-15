@@ -10,7 +10,9 @@ Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
         and the paragraph after step 23, changed in round 5 by the
         SHARED fixer, Claude Opus 5.5, 2026-10-15; steps 15 and 31
         changed, and step 32 added, in round 6 by the SHARED fixer,
-        Claude Opus 5.5, 2026-10-15
+        Claude Opus 5.5, 2026-10-15; the lead paragraph changed, and
+        step 33 added, in round 7 by the SHARED fixer, Claude Opus 5.5,
+        2026-10-15
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
@@ -28,9 +30,11 @@ wakes `tc wait` at most once (round 4). A member's init on the init
 user's ROOT is refused with words that name who ran init and charge no
 one, and a member who makes ROOT first stops the init user's init
 (round 5, D28). That refused init then fixes the member's own entries
-itself, through a no-follow open, and a link another member swaps in
-for one of them never leads it to a folder outside the mailbox (round
-6, D29). The tests in
+itself, through a no-follow open (round 6, D29). Every folder on the
+way to them is opened through the folder above it, never by its path,
+so a link another member swaps in for one of those entries, or for a
+folder on the way, never leads the walk out of `mail/`, `status/`,
+`cards/` or `outbox/` (round 7). The tests in
 `tests/test_shared.py` prove the modes, the owners and the checks tc
 makes, but one user cannot prove another user's refusals. This script
 does, by hand.
@@ -412,7 +416,49 @@ mail.
       /srv/tc-shared/mail/to-ann/read/000001-from-ben.md`. As ben: `rmdir
       ~/tc-qa-folder`.
 
+## A folder swapped on the way never leads init out of the mailbox (round 7)
+
+33. A recipient swaps a whole folder on the way, not one entry, for a
+    link to a folder of the member whose init is about to walk it. Here
+    ann swaps her own `read/` (she owns it) for a link to a folder of
+    ben's, while ben's init runs. Before round 7 the walk opened each
+    folder by its path, so a swap made after the walk listed `to-ann/`
+    and before it entered `read/` led ben's init into ben's own folder,
+    which it then made group-shared. By hand the swap lands before ben's
+    walk reaches `read/` or after it; the swap inside that gap is the
+    tests' job (`test_a_folder_swapped_for_a_link_on_the_way_never_leads_a_members_rerun_outside`
+    and `..._the_init_users_own_init_outside` in `tests/test_shared.py`).
+    A sleep in a second terminal is enough to show the words.
+    - As ben: `mkdir -m 0700 ~/tc-qa-folder2 ~/tc-qa-folder2/sub`, then
+      `echo notes > ~/tc-qa-folder2/notes` and `chmod 0600
+      ~/tc-qa-folder2/notes`. Run `ls -ld ~/tc-qa-folder2
+      ~/tc-qa-folder2/sub` and `ls -l ~/tc-qa-folder2/notes`, and note
+      the three lines.
+    - As ann, in a second terminal, arm the swap: `sleep 5; mv
+      /srv/tc-shared/mail/to-ann/read /srv/tc-shared/mail/to-ann/read-aside;
+      ln -s ~ben/tc-qa-folder2 /srv/tc-shared/mail/to-ann/read`.
+    - As ben, at once: `tc init --shared --group tcshare`. This run comes
+      before the swap: step 15's first line, then `tc init: no entry you
+      own under it needs a fix. Nothing changed.`, exit 1.
+    - When ann's terminal returns, as ben, the same init again. It exits
+      1 with three lines: step 15's first line, then `tc init: skipped
+      /srv/tc-shared/mail/to-ann/read: a symlink, which tc never
+      follows`, then `tc init: 0 fixed and 1 skipped, each named above.
+      Nothing else changed.` Had the swap landed while ben's walk was
+      inside `mail/to-ann/`, the middle line would instead end
+      `/srv/tc-shared/mail/to-ann/read: a folder when tc first looked,
+      but by the time tc came to enter it a link or another entry had its
+      name, or it was gone or would not open; tc looked at nothing under
+      it`. Either line means the same: ben's init did not go in.
+    - As ben: the same `ls` commands print the three lines you noted,
+      each mode and group unchanged. No `chgrp` or `chmod` line is
+      printed.
+    - Put it back. As ann: `rm /srv/tc-shared/mail/to-ann/read` (the
+      link), then `mv /srv/tc-shared/mail/to-ann/read-aside
+      /srv/tc-shared/mail/to-ann/read`. As ben: `rm ~/tc-qa-folder2/notes`,
+      then `rmdir ~/tc-qa-folder2/sub ~/tc-qa-folder2`.
+
 ## Afterward
 
-33. The mailbox, `/srv/team` and the group stay until you remove them
+34. The mailbox, `/srv/team` and the group stay until you remove them
     yourself.

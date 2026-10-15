@@ -15,7 +15,9 @@ Status: unreviewed. Fix round 1 done (audit
         amended to add one router test; the SHARED fixer, Claude Opus
         5.5). Fix round 6 done (audit `audits/2026-10-15-0300-quick`,
         brief `fixes/round-6.md`, the SHARED fixer, Claude Opus 5.5).
-Date:   2026-10-14; rounds 3 to 6 2026-10-15
+        Fix round 7 done (audit `audits/2026-10-15-0408-quick`, brief
+        `fixes/round-7.md`, the SHARED fixer, Claude Opus 5.5).
+Date:   2026-10-14; rounds 3 to 7 2026-10-15
 Branch: Claude-Development-TheConnection-SHARED, from
         Claude-Development-TheConnection at c8708e5 (after P0, P1 and P2
         merged; the plan with D16, D17 and D18). Round 1 builds to the
@@ -27,7 +29,8 @@ Branch: Claude-Development-TheConnection-SHARED, from
         amended by the architect for this round). Round 5 builds to
         8bdf363 (C4's walk with no trust in the `.shared` owner, D28).
         Round 6 builds to 463074c (C4's "Nobody can swap ROOT" with
-        D29, exit row 10, D20, D21, D23, D29).
+        D29, exit row 10, D20, D21, D23, D29). Round 7 builds to
+        ef3885c (C4 with D29; D20, D21, D29).
 Where:  ~/TheConnection-lanes/shared
 
 ## Commits
@@ -61,7 +64,28 @@ Where:  ~/TheConnection-lanes/shared
 | Round 5 (d) | `6230442` | A send whose .tmp name is taken takes the next number, as a taken message name does |
 | Round 6 (a) | `4e7213e` | On the init user's ROOT, init fixes a member's own entries through a no-follow open, and prints no line to paste (D29) |
 | Round 6 (b) | `9eeae68` | Print every path absolute, and name the last name a send found taken without blaming mail/.seq for a planted .tmp |
-| Round 6 (c) | the last commit of round 6 | Say how a member's rerun ends, fix two tags and the handoff's claims, and walk Ben's swap in the QA script |
+| Round 6 (c) | `576ca51` | Say how a member's rerun ends, fix two tags and the handoff's claims, and walk Ben's swap in the QA script |
+| Round 7 (a) | `a538fa8` | Init's walks pin every folder on the way, not just the last name, so a swapped link never leads them out of the mailbox |
+| Round 7 (b) | `04cae7b` | Out of tries, say only what the tries found about mail/.seq, and name both causes of the bound |
+| Round 7 (c) | the last commit of round 7 | Say the walk pins every folder on the way, in this handoff and the QA script, and walk a folder swapped on the way by hand |
+
+Round 7's three commits change `tc`, `tests/test_shared.py`,
+`qa/human/route-shared.md` and this file, nothing else. Commit (a)
+holds item 1 (HIGH-1), (b) items 2 and 3 (LOW-1, LOW-2), (c) item 4 and
+the rest of this file. A restart of the machine (Windows Update) stopped
+the round between (b) and (c); (a) and (b) were whole, and the
+architect ran the suites at (b): 181 Python tests OK, 8 Node tests OK.
+Existing tests changed: `test_init_walks_a_top_folder_whose_own_change_failed`
+wraps `share_entry` in its new signature (`entry, where, gid, owner`);
+`owner_patched_lstat` also matches an lstat made by name in a folder's
+descriptor, by the file it finds (`os.path.samestat`), since the walk
+no longer lstats by path; and
+`test_a_send_that_finds_every_tmp_name_taken_names_the_tmp_and_blames_no_set_back`
+reads LOW-1's words (`TMP_TAKEN_WHY` replaces round 6's
+`TMP_AHEAD_WHY`). No test in the tree expects the words `mail/.seq was
+not behind` any more (round 7's own test asserts they are absent), and
+no file in `tests/` but `tests/test_shared.py` names `share_entry`
+(grep of `tests/`).
 
 Round 6's three commits change `tc`, `tests/test_shared.py`,
 `qa/human/route-shared.md` and this file, nothing else. Commit (a)
@@ -664,7 +688,10 @@ comment.
   and init's last refusal over skipped entries (`tc init: <n> skipped,
   each named above. The owner of each folder or file among them runs
   ...`; with no folder or file among them, round 5's `its owner fixes
-  each by hand.`). tc prints no `chgrp` or `chmod` line anywhere.
+  each by hand.`). tc prints no `chgrp` or `chmod` line anywhere. (The
+  walk still reached each entry by a path, so `O_NOFOLLOW` guarded its
+  last name only; round 7 pins every folder on the way: see Round 7
+  below.)
 - Paths absolute (item 2, LOW-1, commit b). `ROOT` is made absolute
   once, where tc builds it, so every path tc prints names one folder
   from any working folder. The brief named `os.path.abspath`; the build
@@ -679,7 +706,8 @@ comment.
   `mail/.seq was behind the names there: set back, or names planted
   ahead of it` only when some try found a message's name taken; when
   every try found a `.tmp`, `each by a .tmp name planted ahead;
-  mail/.seq was not behind`.
+  mail/.seq was not behind`. (Round 7 takes out the second half: LOW-1,
+  below.)
 - Words and tags (item 4, commit c). LOW-3: assumption 16, the D21 "Not
   verified" bullet and tc's module block now say a member's same-group
   rerun passes the walk only where root owns ROOT and every folder
@@ -694,8 +722,85 @@ comment.
   her `read/`; ben's init says it skipped a link and fixes the message
   at its new name; ben's folder is untouched.
 
-**Tests.** `tests/test_shared.py`, 70 tests in eleven classes (66
-before round 6, 63 before round 5, 56
+**Round 7: every folder on the way pinned, and the words out of tries**
+(audit `audits/2026-10-15-0408-quick`, brief `fixes/round-7.md`, item
+numbers are the brief's; dev's plan at `ef3885c`: C4 with D29, D20,
+D21, D29). Every new block in `tc` carries a `SHARED fix round 7
+(Claude Opus 5.5, unreviewed)` comment.
+
+- One pinned walk for both walks (item 1, HIGH-1, commit a). Round 6's
+  `fix_own_entries`, and init's own `shared_entries` since round 1,
+  listed each folder with `os.walk`, by its path, and opened each entry
+  by a path built from it. `O_NOFOLLOW` guards only the last name, so
+  the owner of a folder on the way (a recipient, in their own inbox;
+  the init user, in the four) could swap it for a link after the walk
+  listed it, and the walk then changed the walker's own folders and
+  files at the far end, outside the mailbox, to group g, folders
+  `2775`, files `0640`. Both walks now go through `walk_pinned(top)`:
+  - The top (`mail/`, `status/`, `cards/`, `outbox/`) is lstat()ed,
+    opened with `O_RDONLY|O_NOFOLLOW|O_DIRECTORY|O_NONBLOCK`
+    (`FOLDER_FLAGS`), and kept only when fstat on that descriptor finds
+    the folder the lstat found. A top that is a link is named `a
+    symlink, which tc never follows` (`LINK_WHY`), one that is anything
+    but a folder `not a folder` (`NOT_A_FOLDER_WHY`), and one that
+    changed between the lstat and the open with `NOT_ENTERED_WHY`.
+  - `os.fwalk(".", dir_fd=<the top's descriptor>, follow_symlinks=False)`
+    lists every folder through its descriptor and enters each subfolder
+    by its name in its parent's descriptor, only when fstat finds the
+    folder its lstat found.
+  - Each entry is lstat()ed by its name in its folder's descriptor
+    (`os.lstat(name, dir_fd=...)`), and `share_entry` opens it the same
+    way (`os.open(name, O_RDONLY|O_NOFOLLOW|O_NONBLOCK, dir_fd=...)`,
+    `ENTRY_FLAGS`), then fstat (the owner and type checks as before),
+    then `fchown` and `fchmod` on that descriptor. `share_entry(entry,
+    where, gid, owner)` takes `(dir_fd, name)` or a descriptor already
+    open on the entry (the top); `where`, the path, only picks the mode
+    for the entry's place and names it in the words.
+  - `os.fwalk` skips a folder whose lstat and fstat differ without a
+    word. So when a folder is listed, `walk_pinned` opens it once to see
+    it can be entered (`can_enter`), and after the top's walk names
+    each such folder `os.fwalk` did not enter: `tc init: skipped <path>:
+    a folder when tc first looked, but by the time tc came to enter it a
+    link or another entry had its name, or it was gone or would not
+    open; tc looked at nothing under it` (`NOT_ENTERED_WHY`). It counts
+    as skipped, so a member's rerun ends `<n> fixed and <m> skipped`, and
+    the init user's init names it among its skips and exits 1 (with no
+    folder or file among them, `its owner fixes each by hand.`).
+  So below the four no path is resolved, and a folder swapped for a
+  link on the way is named and never entered. The four themselves are
+  still opened by their paths under ROOT (`O_NOFOLLOW` on their own
+  names), so ROOT and the folders above it are resolved by name, as at
+  every command (Spotted item 11).
+- The out-of-tries words (item 2, LOW-1, commit b). A try that finds its
+  `.tmp` taken stops before `os.link`, where a message at the number's
+  own name would show, so round 6's `mail/.seq was not behind` was not
+  known: a set-back counter with `.tmp` names planted at the same
+  numbers got it. The words could say the counter was not behind only
+  after a try reached `os.link` and found the name free of a read
+  message, and such a try publishes, so out of tries they never say it
+  now. When no try found a message's name taken, the why is `each by a
+  .tmp name already there, so no try got as far as the message's own
+  name` (`TMP_TAKEN_WHY`), and no more. `already there`, not round 6's
+  `planted ahead`: a `.tmp` left by a send that died has the same name.
+- The cost lines (item 3, LOW-2, commit b). `deliver_local`'s
+  `@complexity` and the module block's send line say the
+  `PUBLISH_MAX_TRIES` bound is reached by a set-back `mail/.seq` or by
+  names planted ahead of it, `.tmp` names among them.
+- Words (item 4, commit c). This file (assumptions 43, 47 and 48 to 52,
+  and the rows below) and the lead paragraph of
+  `qa/human/route-shared.md` say the walk pins every folder on the way.
+  `fix_own_entries`' block says the same, made true in commit (a), and
+  names what it does not pin (ROOT and above). New QA step 33: ann
+  swaps her own `read/` for a link to a folder of ben's while ben's init
+  runs, armed with a sleep in a second terminal. The brief named the
+  parts ben (the swapper) and carol (whose init runs); the script's two
+  users play them, ann as the recipient who swaps and ben as the member
+  whose init runs, so no third user is needed. By hand the swap lands
+  before or after the walk enters `read/`, and the step gives the words
+  for both; the race inside the walk is the tests' job.
+
+**Tests.** `tests/test_shared.py`, 73 tests in eleven classes (70
+before round 7, 66 before round 6, 63 before round 5, 56
 before round 4, 48 in ten before round 3, 39 in seven before round 2), each on
 `tests/_root.py`. Every class inherits `UmaskTestCase`, so each test
 runs under umask 022 and a tc that never sets its own writes 0644 and
@@ -704,8 +809,8 @@ fails. `SharedTest` (H1, 4), `NoPlantedLinksTest` (D17, 5),
 `NobodyTouchesAnotherMembersMailTest` (D20, 8), `InitAndRefusalsTest`
 (init, make_folder, the refusals' words and absolute paths, 9),
 `SharedIsTheInitUsersAndDeliveryNeedsACardTest` (D21, 8),
-`NoLostMailNoHangTest` (rounds 2 to 6, 13), `RootAndClaimTest` (rounds 2
-to 6, 11), `HealthSaysWhatItCannotSeeTest` (round 2, 3),
+`NoLostMailNoHangTest` (rounds 2 to 7, 14), `RootAndClaimTest` (rounds 2
+to 7, 13), `HealthSaysWhatItCannotSeeTest` (round 2, 3),
 `CommandsSayWhatTheyCannotSeeTest` (rounds 3 and 4, 3) and
 `GroupsToTestTest` (1). Round 4 adds seven: the by-hand words for a
 plant in `read/`, a planted name of 250 bytes and of exactly the
@@ -733,7 +838,17 @@ absolute paths; and a send whose every number has a planted `.tmp`
 names the last `.tmp`. In these the running user is the member, and
 ROOT and `.shared` are what a patched `os.lstat` reports as the init
 user's. The wrong-group and skipped-entry tests now run the owner's
-init in place of the lines. The lock
+init in place of the lines. Round 7 adds three: a folder on the way
+swapped for a link after the walk listed it, in a member's rerun and
+in the init user's own init (`folder_swap`: b's inbox holds `read/`
+and a second folder, each with a file not right yet, and the fix of the
+file in the folder entered first, a wrapped os.fchown, renames the
+other aside and links a folder outside the root at its name), each
+asserting that folder, the folder and the file in it keep their stat,
+the skip line, and the one file fixed; and a set-back `mail/.seq` with
+a `.tmp` planted at each of its numbers, whose words never say the
+counter was not behind. `owner_patched_lstat` now matches an lstat
+made by name in a folder's descriptor by the file it finds. The lock
 test runs its eight cases at once (round 3 added "codex
 send, mail/.seq"), each child under a
 timeout, so it costs about two waits and a broken tc fails it instead of
@@ -809,6 +924,12 @@ Node 22). Each command's result line:
 | Round 6 (b) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 178 tests`, `OK` |
 | Round 6 (c) | `python3 -m unittest tests.test_shared -v` | `Ran 70 tests`, `OK` |
 | Round 6 (c) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 178 tests`, `OK` |
+| Round 7 (a) | `python3 -m unittest tests.test_shared` | `Ran 72 tests`, `OK` |
+| Round 7 (a) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 180 tests`, `OK` |
+| Round 7 (b) | `python3 -m unittest tests.test_shared` | `Ran 73 tests`, `OK` |
+| Round 7 (b) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 181 tests`, `OK` (and the architect's run after the restart) |
+| Round 7 (c) | `python3 -m unittest tests.test_shared -v` | `Ran 73 tests`, `OK` |
+| Round 7 (c) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 181 tests`, `OK` |
 | each | `node --test tests/*.test.mjs` | `# tests 8`, `# pass 8`, `# fail 0` |
 
 The base, `c8708e5`, ran 108 Python tests and 8 Node tests, all passing.
@@ -999,6 +1120,23 @@ one at 2775.
 | 2 (b) | `.absolute()` dropped from `ROOT` | `test_a_relative_tc_root_still_names_every_path_absolute` | `AssertionError: 'sent #1 to b: root/mail/to-b/000001-from-a.md\n' != 'sent #1 to b: .../root/mail/to-b/000001-from-a.md\n'` |
 | 3 (b) | the words name `path.name` again, not the name found taken | `test_a_send_that_finds_every_tmp_name_taken_names_the_tmp_and_blames_no_set_back` | `AssertionError: 'tc s[107 chars]om-a.md (each by a .tmp name planted ahead; ma[100 chars]m.\n' != 'tc s[107 chars]om-a.tmp (each by a .tmp name planted ahead; m[101 chars]m.\n'` (and `... t by 000101-from-a.md ...' != '... t by read/000101-from-a.md ...'` in `test_a_send_that_finds_every_number_taken_exits_10_and_the_next_send_lands`) |
 | 3 (b) | the counter always blamed (`if True` for `if behind`) | `test_a_send_that_finds_every_tmp_name_taken_names_the_tmp_and_blames_no_set_back` | `AssertionError: 'tc s[112 chars]tmp (mail/.seq was behind the names there: set[113 chars]m.\n' != 'tc s[112 chars]tmp (each by a .tmp name planted ahead; mail/.[96 chars]m.\n'` |
+
+Round 7, on the code of the commit named, each run against its tests.
+Method: each mutation made by hand with the Edit tool, the tests run,
+the line put back the same way, and `sha256sum -c` against the hash
+taken before (`OK` each time). The red line is the assertion line
+alone. `...` cuts a temp path or a time; `<uid>`, `<gid>` (the primary
+group) and `<gid2>` (the shared, supplementary group) stand for this
+machine's numbers. Modes print in decimal: 16877 is a folder at 0755,
+17917 one at 2775.
+
+| Item | Mutation | Test | Red |
+|---|---|---|---|
+| 1 (a) | `os.walk` back in `walk_pinned`: each folder listed by `os.walk(top)` and opened by its path (`os.open(h, os.O_RDONLY)`) in place of `os.fwalk` | `test_a_folder_swapped_for_a_link_on_the_way_never_leads_a_members_rerun_outside` | `AssertionError: Lists differ: [(168[56 chars]), (17917, <uid>, <gid2>, ...)] != [(168[56 chars]), (16877, <uid>, <gid>, ...)]` (the outside folder's subfolder made group-shared; the same in `test_a_folder_swapped_for_a_link_on_the_way_never_leads_the_init_users_own_init_outside`) |
+| 1 (a), evidence | the not-entered report dropped (`for path in ():`) | the same two tests | `AssertionError: 'tc i[310 chars]nit: 1 fixed and 0 skipped, each named above. [19 chars]d.\n' != 'tc i[310 chars]nit: skipped .../root/mail/t[249 chars]d.\n'` (member); `AssertionError: 0 != 1 :` (init user: init exited 0, nothing named) |
+| 2 (b) | round 6's words back (`"each by a .tmp name planted ahead; mail/.seq was not behind"` for `TMP_TAKEN_WHY`) | `test_a_set_back_counter_with_tmp_names_at_its_numbers_is_never_called_not_behind` | `AssertionError: 'not behind' unexpectedly found in 'tc send: 100 message numbers in a row were taken in .../root/mail/to-b, the last by 000100-from-a.tmp (each by a .tmp name planted ahead; mail/.seq was not behind); nothing sent. Each try moved mail/.seq on, so the next send starts past them.\n' : words about mail/.seq that no try checked` (and `AssertionError: 'tc send: 100 message numbers in a row we[218 chars]m.\n' != "tc send: 100 message numbers in a row we[240 chars]m.\n"` in `test_a_send_that_finds_every_tmp_name_taken_names_the_tmp_and_blames_no_set_back`) |
+
+Item 3 is words in two doc blocks, with no behavior to mutate.
 
 ## Assumptions
 
@@ -1198,7 +1336,10 @@ one at 2775.
     read meets the new one. The brief asked for "still there means not
     moved"; the inode test keeps a real move from being called stuck.
 43. **Round 6: which entries a member's refused init opens.** Each
-    entry under the four is lstat()ed first. A folder or regular file
+    entry under the four is lstat()ed first (since round 7 by its name
+    in its own folder's descriptor, never by a path, and every folder on
+    the way is entered through its parent's descriptor: assumption 48).
+    A folder or regular file
     another user owns is passed over in silence: naming every other
     member's message would bury the member's own lines. Everything else
     goes to `share_entry` with the member's id: the member's own folders
@@ -1235,9 +1376,53 @@ one at 2775.
     taken.** tc cannot tell a set-back counter from message names
     planted ahead of it, so the words name both when any try found a
     message's name (in the inbox or `read/`) taken. When every try found
-    a `.tmp` name taken, the counter was not behind any message, and the
-    words say the `.tmp` names were planted ahead. The last taken name
-    is named relative to the inbox: `read/<name>` for one in `read/`.
+    a `.tmp` name taken, the words say so, and since round 7 nothing
+    more: a try stopped at its `.tmp` never looked at the message's own
+    name in the inbox, so tc does not know whether the counter was
+    behind (round 6 said it was not, which a set-back counter with
+    `.tmp` names at its numbers made false: the audit's LOW-1, item 2).
+    The last taken name is named relative to the inbox: `read/<name>`
+    for one in `read/`.
+48. **Round 7: `os.fwalk(".", dir_fd=<the top's descriptor>)`, not
+    `os.fwalk(top)`.** The brief named `os.fwalk(top,
+    follow_symlinks=False)` and a top opened with
+    `O_RDONLY|O_NOFOLLOW|O_DIRECTORY|O_NONBLOCK` and checked against its
+    lstat. Handing `os.fwalk` that checked descriptor walks the folder
+    the check found; `os.fwalk(top)` would open `top` by its path a
+    second time, which a swap in between could change. Same function,
+    same `follow_symlinks=False`; its paths are `.`-relative, and the
+    printed path is the top's joined with them.
+49. **Round 7: entries are lstat()ed by name in their folder's
+    descriptor** (`os.lstat(name, dir_fd=...)`). The brief's "no
+    `os.lstat(path)`" forbids a path below the top; one name in a
+    pinned folder, never followed, resolves nothing on the way. The
+    lstat stays so a member's rerun passes over another user's folders
+    and files in silence, as round 6 did, and fstat on the open
+    descriptor still decides whose an entry is. Init's own walk gains
+    that lstat too (one per entry, which `os.fwalk`'s descent and the
+    not-entered names use).
+50. **Round 7: a folder `os.fwalk` did not enter is named.** `os.fwalk`
+    drops a folder whose fstat and lstat differ without a word, so the
+    brief's "tc names what it skipped" needed more. When a folder is
+    listed, `walk_pinned` opens it once (`can_enter`); one it could open
+    then, and that `os.fwalk` did not enter, is named after the top's
+    walk with `NOT_ENTERED_WHY`. A folder this user cannot open when it
+    is listed (another member's at 0700) is not expected, so a member's
+    rerun passes over it in silence as before, and init's own walk names
+    it once, from its own open. A folder removed between its listing and
+    its entry is named too ("or it was gone"): tc looked at nothing under
+    it, which is the fact. The names come at the end of each top's walk,
+    not as each folder is passed.
+51. **Round 7: a top that is not a folder is named, not changed.** Init
+    used to give a regular file at `mail/` (or `status/`, `cards/`,
+    `outbox/`) a file's mode. The brief opens the top with
+    `O_DIRECTORY`, so such a top is now `skipped <top>: not a folder`,
+    with no fix (its owner fixes it by hand), and init exits 1. No test
+    covers this case.
+52. **Round 7: `already there`, not `planted ahead`, out of tries.** A
+    `.tmp` name a send finds taken was made by a member, or left by a
+    send that died between making its `.tmp` and removing it; tc cannot
+    tell which, so the words say what it found.
 
 ## Pauses
 
@@ -1340,8 +1525,60 @@ the architect's yes, and the one the second added (an unreadable
     read. `qa/human/route-shared.md`'s paragraph after step 23
     and the comment on `SHARED_WRITABLE_FILE_MODE` (item 9) were
     unchanged in round 4; round 5 changes both.
+11. **Spotted in round 7, not fixed: ROOT is not pinned (for the
+    architect, HIGH by the synthesis's rule).** `walk_pinned` opens each
+    of the four by its path under ROOT, as the brief says, so ROOT and
+    every folder above it are resolved by name, once per top. In a
+    member's rerun, ROOT is the init user's, and `root_walk_problem`
+    stops at ROOT, so nothing checks the folders above it. Where the
+    init user owns ROOT's parent (a mailbox in their home), they can
+    rename ROOT and put a link to a folder of the member's at its name
+    after the walk's lstat of ROOT, or between one top and the next (a
+    big `mail/` widens that gap). The member's init then opens that
+    folder's `mail/` (or `status/`, `cards/`, `outbox/`) and makes the
+    member's own entries there group-shared. It needs such a folder to
+    exist under the link's target. A fix: open ROOT once, open the four
+    by name in its descriptor with `FOLDER_FLAGS`, and check ROOT's
+    descriptor against the walk's lstat of ROOT's real path. Not done:
+    the brief starts the pin at the top folder, and the change is the
+    architect's to make (C4's D29 lines, merge item 9).
+12. **Spotted in round 7, not fixed: a hard link is not a link.** A
+    member who may read and write another member's file outside the
+    mailbox may hard-link it into the mailbox (`fs.protected_hardlinks`
+    allows that). fstat then finds the other member's own regular file,
+    and that member's init gives it group g and 0640. No folder on the
+    way is swapped, so the pinned walk cannot tell. A check that refuses
+    a regular file with more than one link (`st_nlink > 1`) in a
+    member's own walk would close it. The precondition (write access to
+    the file already) keeps it LOW.
+13. **Spotted in round 7, not fixed: `os.fwalk` opens before it
+    compares.** For a folder swapped for a link, `os.fwalk` opens the
+    name (following the link) and only then finds the fstat differs, so
+    tc opens, and never changes, what the link points at, for an
+    instant. A FIFO opens without blocking; a device node would be
+    opened and closed. LOW.
+14. **Spotted in round 7 (the synthesis's note), not fixed.** Round 6's
+    bullet above says "tc prints no `chgrp` or `chmod` line anywhere".
+    D23's walk refusals (`swap_words`) still tell the owner of ROOT, or
+    of a folder on the way to it, to run `chmod g-w,o-w <path>` first
+    (also under round 2's ROOT bullet). Those name folders root or the
+    running user owns, not entries under the four, so the round 5
+    mechanism does not apply; the sentence reads wider than the code.
 
 ## Not in this round
+
+Round 7, as its brief says. LOW-3 of `audits/2026-10-15-0408-quick`
+(`tc watch --names` says `LISTENER DOWN` for a `tc wait` that exited 0
+on mail; pre-existing, and on dev's known-bugs list at `ef3885c`) rides
+with D28's follow-up (`tc wait` writes its exit reason into its lock
+file). LOW-4 to LOW-8 (dev's `CLAUDE.md:57`, `contracts.md` C2's
+`deliver_local` line, C1's "like a message", C4's modes and "ring once
+more", and the comments in dev's `tests/test_board_feed.py:253` and
+`tests/test_board_leak.py:133`) and the synthesis's "Merge commit
+changes on dev" (items 1 to 9, among them taking SHARED's side of
+`tests/test_router.py`, and C4's D29 lines saying every folder on the
+way is pinned) are the architect's, at the merge. REC-2 is done: the
+two swap tests in commit (a).
 
 Round 6, as its brief says. REC-1 of `audits/2026-10-15-0300-quick`
 (D28's follow-up writes a listener's exit reason into its wait lock, a
@@ -1487,3 +1724,15 @@ thread and to `ITIMER_REAL`) stays a stated limit (assumption 20).
   own link. The `.shared`-changed case is a replaced `shared_group`,
   not a real rewrite between init's read and its walk. `board/serve.py`
   was not run with a relative TC_ROOT (assumption 46).
+- Round 7: QA step 33, and the lead paragraph as changed, are not run;
+  no second Linux user. In the swap tests the swap is made from a
+  wrapped `os.fchown` inside tc's own process, at the one moment that
+  matters (after the walk listed the folder, before it entered it), not
+  by another process racing tc; the folder swapped and the link are this
+  user's own, and the other owner is a patched `os.lstat`. Which of the
+  two folders the walk enters first is the filesystem's listing order;
+  the tests swap whichever comes second, so both orders pass, but only
+  the order this machine gave was run. Not tested: a top that is not a
+  folder (assumption 51), a top swapped between its lstat and its open,
+  a folder that is gone or will not open between its listing and its
+  entry (assumption 50), and Spotted items 11 to 13.
