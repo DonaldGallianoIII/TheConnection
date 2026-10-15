@@ -233,7 +233,7 @@ key behind `tc gate` can deliver mail and nothing else.
   list, `-T` present and `--` right before the target; the body is the
   fake's stdin and not in its argv; exit 0. A name containing a quote:
   refused by C0 before ssh runs. A card with the default remote path:
-  the remote command is exactly `~/TheConnection/tc send --from a --to b`
+  the remote command is exactly `~/TheConnection/tc send --from a --to b --origin <id>` (D25)
   (the `~/` bare); a remote path with a space is quoted after the bare
   `~/`; a hand-made card whose path is `~bob/tc`: exit 6 and the fake is
   never called (D13). Fake exiting 0: exit 0, the message in

@@ -67,6 +67,8 @@ DEFAULT_REMOTE_TC = "~/TheConnection/tc"
 EXIT_REFUSED = 1
 EXIT_BAD_NAME = 6
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the not-built note, written here.
+# SSH S1 (Claude Opus 5.5, unreviewed): the ssh route is built, so tc card
+# prints no note; a test asserts it stays silent.
 NOT_BUILT_NOTE = "note: sends to {name} are refused until the ssh route is built\n"
 BAD_NAME_WORDS = ('tc: bad name "{name}": letters, digits, dot, dash, underscore, '
                   '1 to 64, not starting with a dash\n')
@@ -288,7 +290,10 @@ class CardsTest(unittest.TestCase):
     def test_card_ssh_gives_route_ssh_and_the_default_remote_path(self):
         """`tc card x --ssh u@h`: route ssh, ssh {target u@h, tc ~/TheConnection/tc}.
 
-        Also --remote-tc /opt/tc/tc is kept as given.
+        Also --remote-tc /opt/tc/tc is kept as given. SSH S1 (Claude Opus
+        5.5, unreviewed): with the ssh route built, neither run prints the
+        not-built note; tests/test_ssh_route.py sends to such a card on
+        the fake.
 
         @interacts  two tc card runs.
         @deps       _root.TcRoot.tc, card_of.
@@ -304,11 +309,12 @@ class CardsTest(unittest.TestCase):
         self.assertEqual(list(card), CARD_FIELDS)
         self.assertEqual((card["route"], card["ssh"]), ("ssh", {"target": "u@h", "tc": DEFAULT_REMOTE_TC}))
         self.assertEqual(out, "card written: x (other, account unknown, route ssh to u@h)\n")
-        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the not-built note, while ssh is not in ROUTES.
-        self.assertEqual(err, NOT_BUILT_NOTE.format(name="x"))
+        # SSH S1 (Claude Opus 5.5, unreviewed): ssh is in ROUTES, so no not-built note.
+        self.assertEqual(err, "")
+        self.assertNotIn(NOT_BUILT_NOTE.format(name="x"), err)
         self.assertEqual(code2, 0, f"tc card y exited {code2}: {err2}")
         self.assertEqual(card2["ssh"], {"target": "h", "tc": "/opt/tc/tc"})
-        self.assertEqual(err2, NOT_BUILT_NOTE.format(name="y"))
+        self.assertEqual(err2, "")
 
     # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13 (CARDS-4 item 3).
     def test_tc_card_never_takes_this_sessions_account(self):

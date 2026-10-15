@@ -22,7 +22,7 @@ pause; no lane reuses a number for a new meaning.
 | Code | Meaning | Who exits with it | Since |
 |---|---|---|---|
 | 0 | ok (`wait`: mail; `watch`: heartbeat) | every command | today |
-| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force` | `send`, `join`, `card`, router, `gate` (empty message) | today (empty message), this plan (D33) |
+| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force`, a body that is not UTF-8 text, an outbox branch another user owns or that is a link (D33) | `send`, `join`, `card`, router, `gate` (empty message), `flush` (a refused branch) | today (empty message), this plan (D33) |
 | 2 | `wait` timed out or hit its keepalive | `wait` | today |
 | 3 | another listener or watcher already holds this name's lock | `wait`, `watch` | today |
 | 4 | kept in the outbox: ssh could not reach the target, the target already has a queue, or another tc holds this member's send lock or it would not open | `send` (ssh route), `flush` | this plan (C3, D33) |
@@ -32,7 +32,7 @@ pause; no lane reuses a number for a new meaning.
 | 8 | message over `SEND_BODY_MAX_BYTES` | `send`, `gate` | this plan (C0) |
 | 9 | usage error: an unknown command, flag or missing argument, or a malformed `--origin` on `tc send`; the usage text goes to stderr | every command (the parser) | this plan (D12, D33) |
 | 10 | busy: another process held `mail/.seq` or an inbox lock past `LOCK_WAIT_SECONDS`, or a send found `PUBLISH_MAX_TRIES` message numbers in a row taken by hand-made files (the next send starts past them); nothing written; try again. Never from `wait` or `watch`, so the re-arm rule below is unchanged. The ssh route and `flush` treat a far 10 like a dropped connection: the message stays queued (C3) | `send`, `read`, `card`, `join`, the codex route, `gate` | this plan (D23, D33) |
-| 11 | refused by the far side with a code tc does not know (anything but 0, 255, 10, 1, 6, 7, 8): the far code is in the words and in the note beside the file in `refused/`; nothing retries it | `send` (ssh route), `flush` | this plan (D33) |
+| 11 | refused by the far side with a code tc does not know (anything but 0, 255, 10, 1, 6, 7, 8): the far code is in the words and in the note beside the file in `refused/`; nothing retries it. `flush` files it the same way and keeps its own exit, 0 or 4 | `send` (ssh route) | this plan (D33) |
 
 Why 9 (D12): argparse exits 2 on a usage error, the same code as a `wait`
 timeout. A mistyped listener exits at once, its session reads 2 as a
@@ -259,8 +259,12 @@ subprocess.run(argv, input=body, text=True, capture_output=True,
   plus a named margin, about 60 s, so a far gate that rings a codex name
   answers before the near side gives up. The far gate files the origin id
   as soon as the message lands, before the ring.
-- The send lock (one per member per target) lives in that member's own
-  outbox branch, so no other member can hold or plant it (D33).
+- The send lock (one per member per target, `0600`) lives in that
+  member's own outbox branch, so no other member can hold or plant it
+  (D33). A send that finds it held by another of the member's own sends
+  waits up to `SEND_LOCK_WAIT_SECONDS` (one ssh run plus a lock wait,
+  about 62 s) before it queues with exit 4, so one send can take up to
+  about two ssh runs; a waking session should expect that.
 - The body goes on stdin, never on the command line.
 - **Every ssh send leaves a record** (D25, D32). The outbox has one
   branch per Linux user, then copies `mail/`'s layout:
@@ -287,9 +291,10 @@ subprocess.run(argv, input=body, text=True, capture_output=True,
   key has already filed with exit 0 and the words `already delivered`, so
   a flush retry never delivers twice and no other key or member can
   pre-file another's ids.
-- **Queue order first.** If `outbox/` already holds mail waiting for this
-  target (files directly in an `outbox/to-<to>/` whose card points at
-  it), the new message is published behind it without trying: exit 4,
+- **Queue order first.** If the sender's own branch already holds mail
+  waiting for this target (files directly in an `outbox/<user>/to-<to>/`
+  whose card points at it), the new message is published behind it
+  without trying: exit 4,
   words `<target> has <n> waiting in the outbox; queued behind them. Run:
   tc flush`. While a target has a queue, `tc flush` is its only sender.
 - Exit 0: the file moves to `sent/`; words `sent over ssh to <target>:
@@ -310,12 +315,15 @@ subprocess.run(argv, input=body, text=True, capture_output=True,
   in the words and in the note (D33). tc keeps at most a named number of
   bytes of what the far side prints.
 
-**`tc flush [--to <name>]`**: tries each waiting outbox file in seq
-order; on success moves it to its `sent/`; on a connection failure or a
-far 10 for a target, stops trying that target, so its mail stays in
-order; on a far refusal, moves the file to its `refused/` with the far
-stderr beside it. Prints one line per file. Exit 0 when nothing is left
-to send, 4 when anything is.
+**`tc flush [--to <name>]`**: tries each of the running user's waiting
+outbox files in publish order (the file's time, then its number), so a
+counter set back never reorders a queue; on success moves it to its
+`sent/`; on a connection failure or a far 10 for a target, stops trying
+that target, so its mail stays in order; on a far refusal of any code
+(1, 6, 7, 8, or one tc does not know), moves the file to its `refused/`
+with the far stderr beside it. Prints one line per file. Exit 0 when
+none of the user's files is left waiting, 4 when any is, 1 when the
+user's branch is refused.
 
 **Each sender's queue is their own** (D22). On a shared mailbox (C4),
 ssh runs as the Linux user who ran `tc send`, with that user's keys, and
@@ -356,9 +364,12 @@ any text the far side sent; the far sender's words reach Codex only
 through `tc read`, like any mail. A gated message to a name whose local
 card says `ssh` is refused, exit 7, `tc gate: <name> is not a local name;
 the gate does not forward`. `tc send` and the gate share one path,
-`route_and_deliver(sender, to, body, header_note=None)`, which holds the
-route and inbox-lock steps; nothing else repeats them, since the inbox
-lock is not re-entrant.
+`route_and_deliver(sender, to, body, header_note=None, *, forward=True,
+on_landed=None)`, which holds the route and inbox-lock steps under one
+lock deadline; nothing else repeats them, since the inbox lock is not
+re-entrant. The gate passes `forward=False` (no ssh card is followed)
+and `on_landed`, which files the origin id once the message lands,
+before any codex ring.
 
 Anything else: stderr `tc gate: refused`, exit 7, nothing written. The gate
 never starts a shell and never runs another program.
@@ -377,10 +388,12 @@ For a separate Linux user per account on one machine.
   group `g` (`os.getgroups()`); creates `mail/`, `status/`, `cards/` and
   `outbox/` if they are missing, so no other user ever has to create a
   top folder inside a ROOT the first user owns (D19); then sets group
-  `g` and the mode for each entry's place: `3775` on the four, `3770` on
-  an inbox and its `read/`, `2775` on any other folder; `0664` on
-  `mail/.seq`, the locks and the ring marker, `0640` on every message,
-  card and status file; and writes `ROOT/.shared` at `0644`, holding the
+  `g` and the mode for each entry's place: `3775` on the four and on
+  `mail/.origins/`, `3770` on an inbox and its `read/`, `2750` on an
+  outbox branch `outbox/<user>/` and on `mail/.origins/<user>/` and every
+  folder in either, `2775` on any other folder; `0664` on `mail/.seq`,
+  the locks and the ring marker, `0600` on a send lock, `0640` on every
+  message, card and status file; and writes `ROOT/.shared` at `0644`, holding the
   group name. It names and leaves the same entries as a member's rerun
   (below), and exits 1 once the rest is done if it left any.
 - **Nobody can swap ROOT** (D21, D23). Init makes a missing ROOT `0755`
@@ -497,7 +510,10 @@ For a separate Linux user per account on one machine.
   the init user runs to clear it (a `mv` of that branch aside), and
   `tc health` lists such a squatted branch, so nobody learns of it from a
   failed send. The same shape holds on the far side for
-  `mail/.origins/<user>/<key-name>/`.
+  `mail/.origins/<user>/<key-name>/`, with one difference: a squatted
+  `mail/.origins/<user>/` never stops a delivery (refusing there would
+  file the far sender's message as refused for good); the gate delivers,
+  warns, and the owner of `mail/.origins/` clears it.
 - **The outbox is per sender** (D22, D32). `outbox/` is sticky like the
   other shared folders, and each member's queue lives in a branch that
   member made and owns, `outbox/<user>/` and every folder under it, so
