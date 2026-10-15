@@ -37,7 +37,11 @@ look into stops it with words, never a traceback. And round 4 (SHARED
 fix round 4, Claude Opus 5.5, unreviewed): tc read names neither file
 as the forgery when two share a name, whichever was planted, and a
 planted name up to the filesystem's name limit still moves, so tc wait
-wakes for it at most once.
+wakes for it at most once; init's walk trusts the owner of an existing
+.shared and nobody else, and runs ROOT's rule on ROOT's real path
+whatever the given walk passed; a local send whose card turns codex
+under a held lock waits one bound; tc log says it could not look at a
+read/; and a send out of numbers exits 10.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -91,14 +95,21 @@ the owner's human QA (D4, qa/human/route-shared.md).
             chmod the root's temp folder and folders they make in it,
             and an inbox, and put each back; make links by hand; read the
             user database; and load tc in process to run cmd_init with
-            os.lstat wrapped (or root_walk_problem replaced) and
-            deliver_local with os.link replaced. The round 4 tests write
-            files under long names into an inbox and its read/, read
-            read/'s name limit (os.pathconf) and run tc wait in the
-            foreground under ONE_POLL_SECONDS.
+            os.lstat wrapped and deliver_local with os.link replaced.
+            The round 4 tests write files under long names into an inbox
+            and its read/, read read/'s name limit (os.pathconf) and run
+            tc wait in the foreground under ONE_POLL_SECONDS; plant
+            PLANTED_NAMES empty files in read/; hold an inbox lock here
+            alone, then shared, while a send waits on it (read in
+            /proc/locks with its access, lock_waiters) and write a card
+            by hand under it; make a folder with a link to itself and
+            chmod it 1777; chmod an inbox to read without search and
+            back; and load tc in process to run cmd_init with os.geteuid
+            replaced (and os.lstat wrapped), resetting the umask between
+            cases.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
-            importlib, io, json, os, pathlib, re, stat, subprocess, sys,
-            time, unittest, unittest.mock); tests/_root.py.
+            importlib, io, json, os, pathlib, pwd, re, stat, subprocess,
+            sys, time, unittest, unittest.mock); tests/_root.py.
 @complexity O(1) per test: a handful of tc runs over a root of a few dozen
             entries, once per group tested (one or two).
 @alloc      one TcRoot per test and group, removed when its context exits.
@@ -319,6 +330,36 @@ LONG_NAME_BYTES = 250
 MESSAGE_SUFFIX = ".md"
 # The text of a file planted straight into read/ under a message's name.
 IN_READ_TEXT = "planted by hand in read/ under the same name\n"
+# SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-1, dev
+# C4 amended. What init says for a folder on the way that a third user
+# owns, when an existing .shared's owner is trusted as well.
+OWNED_PAST_THE_INIT_USER_WORDS = ("tc init: {folder} belongs to {owner} (mode {mode:04o}), who is none of root, "
+                                  "you and {init_user} (the owner of .shared), so {owner} could put a ROOT of "
+                                  "their own, with their own .shared, in place of {root} and change the group. "
+                                  "Keep the mailbox under folders only root, you or {init_user} own.")
+# The audit's LOW-3: how long this test holds an inbox lock alone after a
+# send began to wait for it. Under LOCK_WAIT_SECONDS, so the send still
+# waits when the lock is let down to shared; over FLIP_SLACK_SECONDS, so a
+# second bound of its own would show.
+CARD_CHANGE_HOLD_SECONDS = 2
+# Room past a send's one bound for it to print and exit.
+FLIP_SLACK_SECONDS = 1
+# /proc/locks columns for a blocked waiter:
+# "1: -> FLOCK ADVISORY WRITE <pid> <maj>:<min>:<inode> 0 EOF". The access
+# word is READ for LOCK_SH and WRITE for LOCK_EX.
+WAITER_MARK = "->"
+WAITER_MARK_COLUMN = 1
+WAITER_KIND_COLUMN = 2
+WAITER_ACCESS_COLUMN = 4
+WAITER_PID_COLUMN = 5
+WAITER_FILE_COLUMN = 6
+# The audit's LOW-4: what tc log says for a folder lstat cannot reach.
+LOG_CANNOT_LOOK_WORDS = "tc log: tc could not look at {path} ({why}); the mail in it is not shown"
+# The audit's DEBT-3: what a send says when every number it tried was
+# taken. Unchanged in round 4; only its exit code moved from 1 to 10.
+ALL_TAKEN_WORDS = ("tc send: {tries} message numbers in a row were taken in {box}, the last {last} (mail/.seq "
+                   "may have been set back); nothing sent. Each try moved mail/.seq on, so the next send starts "
+                   "past them.\n")
 # The texts of the file a member plants in an inbox under a read
 # message's name, and of one planted straight into read/ at the first
 # by-hand name.
@@ -1962,18 +2003,16 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
         a rerun that changes another user's .shared, and one that says
         nothing about a .shared the group may write.
 
-        SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23's walk
-        (root_walk_problem) takes a folder on the way from ROOT to / only
-        from root or the user running init, so a member's rerun reaches
-        .shared only when root owns ROOT and the folders above it, which
-        one user cannot make. The walk is replaced here (it has tests of
-        its own in RootAndClaimTest) so this test keeps to .shared.
+        SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's
+        LOW-1, dev C4 amended. D23's walk (root_walk_problem) trusts the
+        owner of an existing .shared, so this member's rerun passes it on
+        a ROOT the init user owns, and the walk runs for real here (round
+        3 replaced it, when only root and the running user passed).
 
         @interacts  one init; one chmod by hand; loads tc in process and
-                    runs cmd_init with os.geteuid and root_walk_problem
-                    replaced; lstats .shared.
+                    runs cmd_init with os.geteuid replaced; lstats .shared.
         @deps       _root.TcRoot.tc, primary_group, load_tc, run_init;
-                    unittest.mock; tc.user_name, tc.root_walk_problem.
+                    unittest.mock; tc.user_name.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
@@ -1984,8 +2023,7 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
             marker.chmod(PRE_D21_MARKER_MODE)
             tc = load_tc(root)
             owner = tc.user_name(os.getuid())
-            with mock.patch.object(os, "geteuid", return_value=os.getuid() + 1), \
-                    mock.patch.object(tc, "root_walk_problem", return_value=None):
+            with mock.patch.object(os, "geteuid", return_value=os.getuid() + 1):
                 code, out, err = run_init(tc, name)
             left = (stat.S_IMODE(os.lstat(marker).st_mode), marker.read_text())
         self.assertEqual(first[0], 0, first[2])
@@ -2049,6 +2087,32 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
         self.assertEqual(mail, ["mail/to-c/000001-from-a.md"])
 
 
+# SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-3, which lock a waiter asked for.
+def lock_waiters(path):
+    """{(pid, access)} for each process blocked waiting for an flock on `path`, read from /proc/locks; access is READ (LOCK_SH) or WRITE (LOCK_EX).
+
+    The harness's flock_holders() names only holders. A waiter's line
+    carries "->" before FLOCK, so it is read here, apart.
+
+    @interacts  stats `path`; reads /proc/locks. Writes nothing.
+    @deps       os, pathlib; Linux /proc/locks; WAITER_* columns.
+    @complexity O(k) over k lines in /proc/locks (tens).
+    @alloc      the table's lines and one set of pairs, returned.
+    """
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return set()
+    key = f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}"
+    found = set()
+    for line in pathlib.Path("/proc/locks").read_text().splitlines():
+        cols = line.split()
+        if (len(cols) > WAITER_FILE_COLUMN and cols[WAITER_MARK_COLUMN] == WAITER_MARK
+                and cols[WAITER_KIND_COLUMN] == "FLOCK" and cols[WAITER_FILE_COLUMN] == key):
+            found.add((int(cols[WAITER_PID_COLUMN]), cols[WAITER_ACCESS_COLUMN]))
+    return found
+
+
 # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20's bound.
 def contents(path):
     """Every entry under `path`: {relative path: bytes for a file, "folder" or "other"}, from lstat, never through a link.
@@ -2080,12 +2144,15 @@ class NoLostMailNoHangTest(UmaskTestCase):
     MEDIUM-1 and LOW-2); a held lock exits 10 (D23). SHARED fix round 4
     (Claude Opus 5.5, unreviewed): the member plants in read/ as well as
     in the inbox, and under a name up to the filesystem's limit
-    (audits/2026-10-15-0102-quick, MEDIUM-1 and HIGH-1).
+    (audits/2026-10-15-0102-quick, MEDIUM-1 and HIGH-1); holds an inbox
+    lock while a card turns codex (LOW-3); and plants a name for every
+    number a send could take, which exits 10 (DEBT-3).
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, contents,
-                load_tc; contextlib, errno, fcntl, os, pwd, subprocess,
-                sys, time, unittest.mock; SEQ_HOLDER.
+                load_tc, landed, lock_waiters; contextlib, errno, fcntl,
+                json, os, pwd, subprocess, sys, time, unittest.mock;
+                SEQ_HOLDER.
     @complexity O(1) per test.
     @alloc      one TcRoot per case.
     """
@@ -2407,6 +2474,99 @@ class NoLostMailNoHangTest(UmaskTestCase):
                 self.assertEqual(kept_text, PLANTED_TEXT)
                 self.assertEqual(in_read, IN_READ_TEXT, "tc read changed the file already in read/")
 
+    # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-3, one bound in every path.
+    def test_a_local_send_whose_card_turns_codex_under_a_held_lock_waits_one_bound(self):
+        """This process holds c's inbox lock alone while a send to c (no card yet: route local) waits for it shared; c's card then turns codex, and after CARD_CHANGE_HOLD_SECONDS the lock is let down to shared: the send reads the codex card, asks for the lock alone (deliver_codex, proven in /proc/locks), and exits 10 within LOCK_WAIT_SECONDS of when it began to wait, plus FLIP_SLACK_SECONDS. Nothing lands and nothing rings.
+
+        The lock is held throughout, across the card change. The card is
+        written by hand, standing in for a codex join that lands between
+        the send's two card reads (a real one would wait on this lock
+        too). Must reject a deliver_codex that takes a deadline of its
+        own: the send then waits CARD_CHANGE_HOLD_SECONDS and a whole
+        second LOCK_WAIT_SECONDS (C4: per command).
+
+        @interacts  makes mail/ and the inbox lock and holds its flock here
+                    (alone, then shared); one background send, proven
+                    waiting in /proc/locks twice; writes cards/c.json by
+                    hand; a fake codex, asserted never called; lists the
+                    inboxes. The harness kills the send by its pid.
+        @deps       _root.TcRoot.start, fake_bin, lock_waiters, landed;
+                    fcntl, json, subprocess, time; THREAD,
+                    CARD_CHANGE_HOLD_SECONDS, FLIP_SLACK_SECONDS,
+                    LOCK_WAIT_SECONDS, LOCK_HELD_WORDS, EXIT_BUSY.
+        @complexity O(1): about LOCK_WAIT_SECONDS of waiting, at most
+                    _root.LOCK_CEILING_SECONDS to see the first wait.
+        @alloc      one TcRoot, one open lock file, one child.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("codex", 0)
+            (root.path / "mail").mkdir()
+            lock = root.path / "mail" / ".box-c.lock"
+            with open(lock, "a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                proc = root.start("send", "--from", "a", "--to", "c", "hi")
+                proof = time.monotonic() + _root.LOCK_CEILING_SECONDS
+                while (proc.pid, "READ") not in lock_waiters(lock):
+                    if proc.poll() is not None or time.monotonic() >= proof:
+                        self.fail(f"the local send never waited for {lock} shared")
+                    time.sleep(_root.LOCK_POLL_SECONDS)
+                began = time.monotonic()
+                (root.path / "cards").mkdir()
+                (root.path / "cards" / "c.json").write_text(json.dumps(
+                    {"version": 1, "name": "c", "kind": "codex", "route": "codex", "thread_id": THREAD}))
+                time.sleep(max(0.0, began + CARD_CHANGE_HOLD_SECONDS - time.monotonic()))
+                fcntl.flock(held, fcntl.LOCK_SH)
+                bound = began + LOCK_WAIT_SECONDS
+                while (proc.pid, "WRITE") not in lock_waiters(lock):
+                    if proc.poll() is not None or time.monotonic() >= bound:
+                        self.fail("the send never asked for c's lock alone after its card turned codex")
+                    time.sleep(_root.LOCK_POLL_SECONDS)
+                try:
+                    out, err = proc.communicate(timeout=max(0.0, bound + FLIP_SLACK_SECONDS - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    self.fail(f"the send still waited {LOCK_WAIT_SECONDS + FLIP_SLACK_SECONDS} s after it began to "
+                              f"wait: deliver_codex took a second bound of its own")
+            record = folder.parent / "calls.jsonl"
+            rang = calls()
+            mail = landed(root)
+        self.assertEqual(proc.returncode, EXIT_BUSY, err)
+        self.assertEqual(err, f"tc: {LOCK_HELD_WORDS.format(what='c')}; try again\n")
+        self.assertEqual(mail, [], "a refused send landed a message")
+        self.assertEqual(rang, [], f"a refused send rang ({record})")
+
+    # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's DEBT-3, out of numbers is busy.
+    def test_a_send_that_finds_every_number_taken_exits_10_and_the_next_send_lands(self):
+        """A first send to b, then a file planted in read/ for each of the PLANTED_NAMES numbers past the counter: the next send exits 10 (busy) with the words unchanged and lands nothing, and the send after it lands as the number past the planted ones.
+
+        Dev exit row 10, amended: each try moved mail/.seq on, so the next
+        send starts past the taken names, and the refusal may run again.
+        Must reject exit 1, which C3 reads from the far side as final: a
+        far member who plants names past the counter would turn an
+        incoming ssh message into a permanent refusal.
+
+        @interacts  three sends; PLANTED_NAMES empty files written by hand
+                    in read/; lists the inbox.
+        @deps       _root.TcRoot.tc; PLANTED_NAMES, ALL_TAKEN_WORDS,
+                    EXIT_BUSY.
+        @complexity O(PLANTED_NAMES) files, three tc runs.
+        @alloc      one TcRoot, PLANTED_NAMES empty files.
+        """
+        with _root.TcRoot() as root:
+            first = root.tc("send", "--from", "a", "--to", "b", "first")
+            box = root.path / "mail" / "to-b"
+            for n in range(2, PLANTED_NAMES + 2):
+                (box / "read" / f"{n:06d}-from-a.md").write_text("")
+            code, out, err = root.tc("send", "--from", "a", "--to", "b", "second")
+            unread = sorted(p.name for p in box.iterdir() if p.name != "read")
+            after = root.tc("send", "--from", "a", "--to", "b", "third")
+        self.assertEqual(first[0], 0, first[2])
+        self.assertEqual(code, EXIT_BUSY, err)
+        self.assertEqual(err, ALL_TAKEN_WORDS.format(tries=PLANTED_NAMES, box=box,
+                                                     last=f"{PLANTED_NAMES + 1:06d}-from-a.md"))
+        self.assertEqual(unread, ["000001-from-a.md"], "a refused send left a message or a .tmp")
+        self.assertEqual(after[0], 0, after[2])
+        self.assertIn(f"sent #{PLANTED_NAMES + 2} to b", after[1])
+
     # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-2.
     def test_one_sends_waits_on_mail_seq_share_one_deadline(self):
         """A member holds mail/.seq just under the bound on each turn and has planted a name in read/ for every number a send could take: the send exits 10 with the lock words within LOCK_WAIT_SECONDS plus the margin, and lands nothing.
@@ -2495,11 +2655,16 @@ class RootAndClaimTest(UmaskTestCase):
     nobody can swap ROOT: a sticky ROOT the group may write is refused
     too, and init walks every folder from ROOT up to /, as given and by
     its real path. A folder another user owns is what a patched os.lstat
-    reports.
+    reports. SHARED fix round 4 (Claude Opus 5.5, unreviewed): the
+    audit's LOW-1 and LOW-2 (audits/2026-10-15-0102-quick): the walk
+    trusts an existing .shared's owner (a member is a patched os.geteuid),
+    and ROOT's rule runs on ROOT's real path even when the given walk
+    passed it above ROOT.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, tree, load_tc,
-                run_init, owner_patched_lstat; pwd.
+                run_init, owner_patched_lstat; contextlib, pwd,
+                unittest.mock.
     @complexity O(1) per test.
     @alloc      one TcRoot per test.
     """
@@ -2626,8 +2791,11 @@ class RootAndClaimTest(UmaskTestCase):
 
         One Linux user cannot make a folder another user owns, so the
         owner rule is shown by what tc's lstat reports
-        (owner_patched_lstat). ROOT owned by another user is also what a
-        member's own init meets on a ROOT the init user owns. Must reject
+        (owner_patched_lstat). ROOT owned by another user, with no .shared
+        yet, is also what a member's own init meets before the first init
+        (SHARED fix round 4: once .shared exists, its owner is trusted
+        too; test_the_walk_trusts_the_owner_of_an_existing_shared_and_nobody_else).
+        Must reject
         a walk that checks modes alone: the owner of a folder on the way
         may rename what is in it whatever its mode, and put a ROOT with
         their own .shared in place (D23).
@@ -2694,6 +2862,96 @@ class RootAndClaimTest(UmaskTestCase):
                 self.assertIn(WRITABLE_ON_THE_WAY_WORDS.format(folder=team, root=given / "link",
                                                                mode=GROUP_WRITABLE_ROOT_MODE, owner=owner), err)
                 self.assertEqual(made, [], "a refused init made something in the real ROOT")
+
+    # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-1, dev C4 amended.
+    def test_the_walk_trusts_the_owner_of_an_existing_shared_and_nobody_else(self):
+        """In process, with os.geteuid reporting another user (a member): on a root this user shared, so this user owns ROOT, the folder above it and .shared, the member's same-group init exits 0; on the same kind of ROOT with no .shared it is refused, naming ROOT and its owner; with .shared, a folder above ROOT that a third user owns (patched os.lstat) is refused, naming the owner of .shared as trusted too.
+
+        D21 already trusts the user who ran init with the group, so a
+        member's rerun reaches D21's own checks and fixes that member's
+        own entries, as tc's remedies say. Before the first init there is
+        no .shared to trust. One Linux user cannot be a member, so the
+        member is os.geteuid reporting this user's id plus two, and the
+        third user is what owner_patched_lstat reports (plus one). Must
+        reject a walk that trusts only root and the running user (the
+        member's rerun is refused at ROOT), and one that trusts ROOT's
+        owner without a .shared.
+
+        @interacts  per case: sets this process's umask to CHILD_UMASK
+                    (an in-process init sets its own); an init or a send;
+                    loads tc in process and runs cmd_init with os.geteuid
+                    replaced (and, in the third case, os.lstat wrapped);
+                    stats every entry under ROOT before and after.
+        @deps       _root.TcRoot.tc, primary_group, load_tc, run_init,
+                    owner_patched_lstat, tree; contextlib, os, stat,
+                    unittest.mock; tc.user_name; CHILD_UMASK,
+                    OWNED_ON_THE_WAY_WORDS, OWNED_PAST_THE_INIT_USER_WORDS.
+        @complexity O(1) per case, three cases.
+        @alloc      one TcRoot and one module per case.
+        """
+        label, name, gid = primary_group()
+        member = os.getuid() + 2
+        for case in ("shared", "no .shared", "shared, a third user above"):
+            os.umask(CHILD_UMASK)  # an in-process init that ran sets tc's own; setUp's cleanup restores the old one
+            with self.subTest(case=case), _root.TcRoot() as root:
+                setup = root.tc("send", "--from", "a", "--to", "b", "hi") if case == "no .shared" else \
+                    root.tc("init", "--shared", "--group", name)
+                tc = load_tc(root)
+                before = tree(root.path, under=None)
+                patches = contextlib.ExitStack()
+                patches.enter_context(mock.patch.object(os, "geteuid", return_value=member))
+                if case.endswith("above"):
+                    patches.enter_context(mock.patch.object(os, "lstat", owner_patched_lstat(root.base)))
+                with patches:
+                    code, out, err = run_init(tc, name)
+                after = tree(root.path, under=None)
+                self.assertEqual(setup[0], 0, setup[2])
+                if case == "shared":
+                    self.assertEqual(code, 0, err)
+                    continue
+                self.assertEqual(code, EXIT_REFUSED, err)
+                self.assertEqual(after, before, "a refused init changed an entry")
+                if case == "no .shared":
+                    self.assertIn(OWNED_ON_THE_WAY_WORDS.format(
+                        folder=root.path, owner=tc.user_name(os.getuid()),
+                        mode=stat.S_IMODE(os.lstat(root.path).st_mode)), err)
+                    self.assertNotIn(".shared", after)
+                else:
+                    self.assertIn(OWNED_PAST_THE_INIT_USER_WORDS.format(
+                        folder=root.base, owner=tc.user_name(os.getuid() + 1), init_user=tc.user_name(os.getuid()),
+                        mode=stat.S_IMODE(os.lstat(root.base).st_mode), root=root.path), err)
+
+    # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-2.
+    def test_a_root_that_links_to_its_own_folder_still_gets_the_root_rule(self):
+        """In process, TC_ROOT tc/here where here is a link to . (so ROOT's real path is tc, which the path as given passes as a folder above ROOT), and tc at 1777: init exits 1 with ROOT's chmod words and makes nothing in tc.
+
+        Must reject a walk that marks an entry looked at by its path
+        alone: the given walk passes tc above ROOT by the sticky
+        exception, the real walk then skips it, and a sticky ROOT the
+        group may write is shared (C4: ROOT has no sticky exception).
+
+        @interacts  one folder and one link made by hand under the root's
+                    temp folder, the folder chmodded to 1777; loads tc in
+                    process pointed at the link and runs cmd_init; lists
+                    the folder.
+        @deps       _root.TcRoot, primary_group, load_tc, run_init;
+                    STICKY_WORLD_WRITABLE_MODE, CHMOD_WORDS.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        label, name, gid = primary_group()
+        with _root.TcRoot() as root:
+            folder = root.base / "tc"
+            folder.mkdir()
+            (folder / "here").symlink_to(".")
+            folder.chmod(STICKY_WORLD_WRITABLE_MODE)
+            tc = load_tc(root, folder / "here")
+            code, out, err = run_init(tc, name)
+            made = sorted(p.name for p in folder.iterdir())
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertIn(f"is {STICKY_WORLD_WRITABLE_MODE:04o}: its group or anyone may write it", err)
+        self.assertIn(CHMOD_WORDS.format(root=folder / "here"), err)
+        self.assertEqual(made, ["here"], "a refused init made something in the real ROOT")
 
     def test_of_two_joins_of_one_name_at_once_the_loser_is_refused_and_makes_nothing(self):
         """In process, shared: another joiner's mkdir of mail/to-x lands just before this join's (patched os.mkdir), and lstat reports it as that user's: claim_inbox exits 1 with the taken words and makes no read/ inside it.
@@ -2850,9 +3108,11 @@ class CommandsSayWhatTheyCannotSeeTest(UmaskTestCase):
     """send, read, peek, wait and log never die with a traceback, or say 0 or `mailbox empty`, for an inbox they cannot see into.
 
     audits/2026-10-14-2358-quick (the synthesis's coverage note on
-    check_inbox, and REC-1). One user stands in for a member by taking
-    access away from an inbox it owns. Skipped as root, who searches and
-    lists any folder.
+    check_inbox, and REC-1), and for log a read/ it cannot look at
+    (SHARED fix round 4, Claude Opus 5.5, unreviewed: LOW-4 of
+    audits/2026-10-15-0102-quick). One user stands in for a member by
+    taking access away from an inbox it owns. Skipped as root, who
+    searches and lists any folder.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase; errno, os.
@@ -2932,6 +3192,39 @@ class CommandsSayWhatTheyCannotSeeTest(UmaskTestCase):
                 for silent in SILENT_WORDS:
                     self.assertNotIn(silent, out, f"tc {command} said {silent!r} over an inbox it could not list")
         self.assertEqual(mail, ["000001-from-a.md"], "a message moved")
+
+    # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-4.
+    def test_log_says_it_could_not_look_at_a_read_folder_never_mailbox_empty(self):
+        """b has read its one message, then mail/to-b is set readable without search, so lstat cannot reach its read/: tc log exits 1, says it could not look at mail/to-b/read, with the reason, and never says `mailbox empty`.
+
+        Must reject a log that drops a read/ it cannot lstat without a
+        word (real_folder and os.path.islink both answer False on the
+        error): it prints `mailbox empty` and exits 0 while read/ holds
+        the history.
+
+        @interacts  one send and one read; mail/to-b chmodded by hand and
+                    back; one tc log.
+        @deps       _root.TcRoot.tc; errno, os; READ_NO_SEARCH_MODE,
+                    OWNER_FOLDER_MODE, REAL_TEXT, LOG_CANNOT_LOOK_WORDS,
+                    EXIT_REFUSED.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root searches any folder")
+        with _root.TcRoot() as root:
+            runs = [root.tc("send", "--from", "a", "--to", "b", REAL_TEXT), root.tc("read", "b")]
+            box = root.path / "mail" / "to-b"
+            box.chmod(READ_NO_SEARCH_MODE)
+            try:
+                code, out, err = root.tc("log")
+            finally:
+                box.chmod(OWNER_FOLDER_MODE)
+        for run in runs:
+            self.assertEqual(run[0], 0, run[2])
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertIn(LOG_CANNOT_LOOK_WORDS.format(path=box / "read", why=os.strerror(errno.EACCES)), err)
+        self.assertNotIn("mailbox empty", out, "tc log said the mailbox is empty while read/ holds the history")
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1.

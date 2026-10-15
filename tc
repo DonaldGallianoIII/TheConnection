@@ -39,7 +39,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             database, makes a missing ROOT 0755 and refuses a ROOT its
             group or anyone may write (D21, SHARED fix rounds 2 and 3),
             and any folder from ROOT up to /, as given and by its real
-            path, that root or the user running init does not own, or
+            path, that root, the user running init or the owner of an
+            existing .shared (round 4) does not own, or
             that its group or anyone may write without the sticky bit
             (D23), makes the four when missing (D19), sets the group
             and mode of every folder and file under them that is not right
@@ -62,7 +63,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             2, D20): a message is published by a hard link from its .tmp,
             which never replaces a file, and a name already taken in the
             inbox or its read/ (mail/.seq set back) takes the next number,
-            up to PUBLISH_MAX_TRIES. tc read never replaces a file in
+            up to PUBLISH_MAX_TRIES, then refuses, exit 10 (busy, round
+            4). tc read never replaces a file in
             read/ either: an inbox file whose name read/ already holds
             moves to read/by-hand-<k>-<name>, said beside it (SHARED fix
             round 3), with <name> cut to fit the filesystem's name limit,
@@ -277,7 +279,8 @@ ROOT_UMASK = 0o022
 # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D21 and D23, nobody
 # can swap ROOT. The superuser's user id. Init accepts a folder on the way
 # from ROOT to / only when it or the user running init owns it, as ssh's
-# StrictModes accepts an authorized_keys path.
+# StrictModes accepts an authorized_keys path, or (SHARED fix round 4,
+# dev C4 amended) the owner of an existing .shared, whom D21 trusts.
 SUPERUSER_UID = 0
 # The folders a shared mailbox shares, by name under ROOT (C4). outbox/ is
 # the ssh route's (C3); init reaches it whenever it is there.
@@ -341,7 +344,10 @@ LOCK_HELD_WORDS = "another process is holding {what}'s lock"
 # LOCK_WAIT_SECONDS, nothing was written, and the same command may run
 # again. Not 1, which reads as a final refusal (the ssh route and tc flush
 # would move a queued message to refused/ for good, C3). wait and watch
-# never exit with it, so the re-arm rule is unchanged.
+# never exit with it, so the re-arm rule is unchanged. SHARED fix round 4
+# (Claude Opus 5.5, unreviewed): dev exit row 10 amended. Also a send that
+# found PUBLISH_MAX_TRIES message numbers in a row taken by hand-made
+# files: the next send starts past them, so it too may run again.
 EXIT_BUSY = 10
 # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1.
 # The name tc read gives an inbox file whose own name read/ already holds,
@@ -360,7 +366,9 @@ BY_HAND_NAME = "by-hand-{k}-{name}"
 # already taken (mail/.seq set back) takes the next number. Each try moves
 # mail/.seq on by one, so a later send starts past the numbers this one
 # tried. An honest mailbox never collides; 100 rides past a counter set
-# back over a long run of one sender's mail to one recipient.
+# back over a long run of one sender's mail to one recipient. A send that
+# finds every one taken exits 10, busy (SHARED fix round 4, Claude Opus
+# 5.5, unreviewed).
 PUBLISH_MAX_TRIES = 100
 # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-3.
 # What os.link fails with on a filesystem that has no hard links (vfat,
@@ -1090,7 +1098,7 @@ def settle_marker_mode(marker):
 
 # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D21 and D23, nobody
 # can swap ROOT (the audit's MEDIUM-2 and LOW-1).
-def swap_words(path, st, is_root):
+def swap_words(path, st, is_root, init_user=None):
     """Words when the folder or link at `path` (its lstat result `st`) would let a member swap ROOT, else None.
 
     Safe: root (SUPERUSER_UID) or this user owns it, and neither its group
@@ -1103,6 +1111,14 @@ def swap_words(path, st, is_root):
     is on the real path's walk. The words name the entry, its owner and
     its mode.
 
+    SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-1,
+    dev C4 amended. `init_user`, the user id of an existing .shared's
+    owner (root_walk_problem), may own an entry too: D21 already trusts
+    that user with the group, so a member's same-group rerun on the init
+    user's ROOT reaches D21's own checks. None (no .shared yet) leaves
+    root and this user alone. The words name that user when it is a third
+    one.
+
     @interacts  reads this process's user id and the user database.
                 Writes nothing.
     @deps       user_name; os, stat; ROOT, SUPERUSER_UID.
@@ -1111,10 +1127,16 @@ def swap_words(path, st, is_root):
     """
     mode = stat.S_IMODE(st.st_mode)
     owner = user_name(st.st_uid)
-    if st.st_uid not in (SUPERUSER_UID, os.geteuid()):
-        return (f"tc init: {path} belongs to {owner} (mode {mode:04o}), who is neither root nor you, so "
+    trusted = {SUPERUSER_UID, os.geteuid()}
+    neither, keep = "neither root nor you", "root or you"
+    if init_user is not None and init_user not in trusted:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-1
+        trusted.add(init_user)
+        neither = f"none of root, you and {user_name(init_user)} (the owner of .shared)"
+        keep = f"root, you or {user_name(init_user)}"
+    if st.st_uid not in trusted:
+        return (f"tc init: {path} belongs to {owner} (mode {mode:04o}), who is {neither}, so "
                 f"{owner} could put a ROOT of their own, with their own .shared, in place of {ROOT} and "
-                f"change the group. Keep the mailbox under folders only root or you own. Nothing changed.")
+                f"change the group. Keep the mailbox under folders only {keep} own. Nothing changed.")
     if stat.S_ISLNK(st.st_mode) or not mode & (stat.S_IWGRP | stat.S_IWOTH):
         return None
     if is_root:
@@ -1142,23 +1164,38 @@ def root_walk_problem():
     at ROOT_MODE and walks again. One lstat cannot reach is refused with
     words on search access.
 
-    @interacts  lstats each entry on both walks (os.path.realpath reads
-                the links); reads this process's user id and the user
-                database for the words. Writes nothing.
-    @deps       swap_words; os, pathlib; ROOT.
+    SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-1
+    and LOW-2. The owner of ROOT/.shared, when it is a regular file (the
+    only kind shared_group reads), is trusted with root and this user
+    (swap_words' `init_user`, dev C4 amended); with no .shared, nobody
+    else is. An entry counts as looked at by its path and by whether it
+    is ROOT, so when the given walk passed ROOT's real path as a folder
+    above ROOT (TC_ROOT a link to its own parent), the real walk still
+    runs the ROOT rule on it.
+
+    @interacts  lstats ROOT/.shared, then each entry on both walks
+                (os.path.realpath reads the links); reads this process's
+                user id and the user database for the words. Writes
+                nothing.
+    @deps       swap_words; os, pathlib, stat; ROOT, SHARED_MARKER_NAME.
     @complexity O(d) over d entries from ROOT up to / on the two walks
                 (about ten each).
     @alloc      the two lists of paths and the set of those seen, freed on
                 return; one string or none, returned.
     """
+    try:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-1, the user D21 trusts with the group
+        marker = os.lstat(ROOT / SHARED_MARKER_NAME)
+        init_user = marker.st_uid if stat.S_ISREG(marker.st_mode) else None
+    except OSError:
+        init_user = None
     given = ROOT.absolute()
     real = pathlib.Path(os.path.realpath(given))
     seen = set()
     for walk in ([given, *given.parents], [real, *real.parents]):
         for at, path in enumerate(walk):
-            if path in seen:
+            if (path, at == 0) in seen:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-2, ROOT's rule always runs
                 continue
-            seen.add(path)
+            seen.add((path, at == 0))
             try:
                 st = os.lstat(path)
             except FileNotFoundError:
@@ -1166,7 +1203,7 @@ def root_walk_problem():
             except OSError as err:
                 return (f"tc init: cannot look at {path} ({err.strerror}); this user needs search (x) access "
                         f"on every folder from / down to {ROOT}. Nothing changed.")
-            words = swap_words(path, st, at == 0)
+            words = swap_words(path, st, at == 0, init_user)
             if words is not None:
                 return words
     return None
@@ -1237,14 +1274,22 @@ def cmd_init(args):
     .shared in its place. ROOT itself gets no sticky exception (a sticky
     ROOT the group may write is refused too: a member could make .shared
     or mail/ in it before the first init). Init walks again once ROOT is
-    made, so a ROOT another user made first is refused as well. So
-    another member's init on a ROOT the init user owns is refused at
-    ROOT, unless one of the .shared refusals above came first.
+    made, so a ROOT another user made first is refused as well.
+
+    SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-1,
+    dev C4 amended. The walk also takes a folder the owner of an existing
+    .shared owns (the user D21 already trusts with the group). So another
+    member's same-group rerun on the init user's ROOT passes the walk and
+    fixes that member's own entries, as the skipped line below and
+    make_folder's words tell it to; another group, or an unreadable
+    .shared, is refused before the walk (D21). Before the first init
+    there is no .shared, and only root and this user pass.
 
     @interacts  reads the group database and this process's groups;
                 reads ROOT/.shared (shared_group) and, unless it names g,
                 lstats it for its owner and reads the user database
-                (marker_other_owner); lstats every folder from ROOT up to
+                (marker_other_owner); lstats ROOT/.shared for its owner,
+                then every folder from ROOT up to
                 / on the path as given and its real path, and reads the
                 user database for the words (root_walk_problem), before
                 and after it makes a missing ROOT and its missing parents
@@ -1692,9 +1737,16 @@ def cmd_send(args):
                 lock and hands it to deliver_local, so the inbox lock and
                 every mail/.seq wait together take at most
                 LOCK_WAIT_SECONDS; a lock held past it refuses, exit 10,
-                nothing written (inbox_lock, next_seq, D20, D23).
+                nothing written (inbox_lock, next_seq, D20, D23). SHARED
+                fix round 4 (Claude Opus 5.5, unreviewed): the audit's
+                LOW-3. Every send takes that one deadline before it
+                routes and hands it to deliver_local or deliver_codex,
+                also when the card read under the lock turned codex, so
+                no path waits two bounds; any other route gets C2's
+                arguments alone.
     @deps       require_names, read_body, refuse, card_route, inbox_lock,
-                lock_deadline, deliver_local, Delivery; fcntl.
+                lock_deadline, deliver_local, deliver_codex, Delivery;
+                fcntl.
     @complexity O(b) over b bytes of body, at most SEND_BODY_MAX_BYTES,
                 plus the route's own work.
     @alloc      the body string, freed on exit; whatever the route keeps.
@@ -1705,14 +1757,16 @@ def cmd_send(args):
     if not body.strip():
         refuse("tc send: empty message", EXIT_REFUSED)  # CARDS fix round 1 (Claude Opus 5.5, unreviewed)
     card, deliver = card_route(args.to)
+    deadline = lock_deadline()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one per command
     if deliver is deliver_local:
-        deadline = lock_deadline()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one per command
         # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the card read again under the shared lock.
         with inbox_lock(args.to, fcntl.LOCK_SH, deadline):
             card, deliver = card_route(args.to)
             if deliver is deliver_local:
                 result = deliver_local(card, args.sender, args.to, body, deadline=deadline)
-    if deliver is not deliver_local:
+    if deliver is deliver_codex:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-3, also after a turn to codex
+        result = deliver_codex(card, args.sender, args.to, body, deadline=deadline)
+    elif deliver is not deliver_local:
         result = deliver(card, args.sender, args.to, body)
     print(result.words, file=sys.stdout if result.exit == 0 else sys.stderr)
     for warning in result.warnings:
@@ -2104,12 +2158,18 @@ def cmd_log(args):
     prints the rest, and it never says `mailbox empty` while such a folder
     may hold mail.
 
+    SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-4.
+    The same holds for an inbox or read/ that lstat cannot reach for any
+    reason but not being there (the read/ of an inbox readable without
+    search): `tc log: tc could not look at <folder> (<why>); the mail in
+    it is not shown`, exit 1, and no `mailbox empty`.
+
     @interacts  lists mail/, lstats each inbox, its read/ and each *.md
                 entry, reads each message shown (read_regular_file);
                 prints to stdout, and to stderr for what it will not show
-                or could not list. Writes nothing.
-    @deps       real_folder, message_files, show, refuse_lines, printable;
-                os; MAIL.
+                or could not list or look at. Writes nothing.
+    @deps       message_files, show, refuse_lines, printable; os, stat;
+                MAIL.
     @complexity O(t) over t message files ever (low hundreds per job), one
                 lstat each and one read for each one shown.
     @alloc      the list of every message path, the skipped entries and
@@ -2119,8 +2179,15 @@ def cmd_log(args):
     every, skipped, unlisted = [], [], []
     for box in sorted(MAIL.glob("to-*")) if MAIL.is_dir() else []:
         for folder in (box, box / "read"):
-            if not real_folder(folder):
-                if os.path.islink(folder):
+            try:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-4, a folder tc cannot look at is said
+                st = os.lstat(folder)
+            except FileNotFoundError:
+                st = None
+            except OSError as err:
+                unlisted.append(f"tc could not look at {folder} ({err.strerror})")
+                st = None
+            if st is None or not stat.S_ISDIR(st.st_mode):
+                if st is not None and stat.S_ISLNK(st.st_mode):
                     skipped.append((folder, "it is a symlink, not a real folder; tc never enters it"))
                 if folder == box:
                     break
@@ -2717,9 +2784,13 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
     group-writable mail/.seq back, so the number's name may already hold
     unread mail in the inbox, or a read message in its read/ (where tc
     read would rename over it). Either way the send takes the next number
-    and tries again, up to PUBLISH_MAX_TRIES, then refuses, Delivery exit
-    1, with words saying mail/.seq may have been set back. One code path,
-    private or shared. A link that fails for any other reason refuses
+    and tries again, up to PUBLISH_MAX_TRIES, then refuses with words
+    saying mail/.seq may have been set back. SHARED fix round 4 (Claude
+    Opus 5.5, unreviewed): the audit's DEBT-3, dev exit row 10 amended.
+    That refusal is Delivery exit 10 (EXIT_BUSY), not 1: each try moved
+    mail/.seq on, so the next send starts past the taken names, and the
+    ssh route keeps a far 10 queued where a 1 would file it as refused
+    (C3). One code path, private or shared. A link that fails for any other reason refuses
     the send with words, never a traceback, and leaves no .tmp. SHARED fix
     round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-3. On a
     filesystem without hard links (os.link fails with one of
@@ -2757,11 +2828,12 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
                 read/NNNNNN-from-<sender>.md, creates
                 NNNNNN-from-<sender>.tmp in mail/to-<to>/, links it to
                 NNNNNN-from-<sender>.md there and removes the .tmp's name;
-                stats cards/<to>.json.
+                stats cards/<to>.json. Every name taken: Delivery exit 10.
     @deps       mailbox_share, check_inbox, lock_deadline, next_seq, inbox,
                 now_iso, write_new_file, Delivery; os; ROOT, CARDS,
                 SEQ_WIDTH, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE,
-                PUBLISH_MAX_TRIES, NO_HARD_LINK_ERRNOS, EXIT_REFUSED.
+                PUBLISH_MAX_TRIES, NO_HARD_LINK_ERRNOS, EXIT_REFUSED,
+                EXIT_BUSY.
     @complexity O(b) over b bytes of body, once per try: one try in an
                 honest mailbox, at most PUBLISH_MAX_TRIES when mail/.seq
                 was set back; plus waiting for mail/.seq until `deadline`
@@ -2817,8 +2889,8 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
         if not isinstance(failed, FileExistsError):
             return Delivery(EXIT_REFUSED, f"tc send: could not publish {path} ({failed.strerror}); nothing sent",
                             warnings)
-    else:
-        return Delivery(EXIT_REFUSED, f"tc send: {PUBLISH_MAX_TRIES} message numbers in a row were taken in "
+    else:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): DEBT-3, busy, not refused (dev exit row 10)
+        return Delivery(EXIT_BUSY, f"tc send: {PUBLISH_MAX_TRIES} message numbers in a row were taken in "
                                       f"{box}, the last {path.name} (mail/.seq may have been set back); nothing "
                                       f"sent. Each try moved mail/.seq on, so the next send starts past them.",
                         warnings)
@@ -2988,7 +3060,7 @@ def ring_backoff(marker):
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14, a failed ring is never lost.
 # Phase fix round 1 (Claude Opus 5.5, unreviewed): D16, the marker before the
 # ring, and the backoff after a timeout.
-def deliver_codex(card, sender, to, body, header_note=None):
+def deliver_codex(card, sender, to, body, header_note=None, *, deadline=None):
     """Route codex: deliver_local under the inbox lock, then ring the Codex thread when a wake is owed.
 
     A listener started inside Codex dies when its command returns (D3), so
@@ -3037,7 +3109,13 @@ def deliver_codex(card, sender, to, body, header_note=None):
                 lock and passed to deliver_local, bounds the inbox lock
                 and mail/.seq together; either held past it by another
                 process refuses, exit 10, nothing landed or rung
-                (inbox_lock, next_seq, D20, D23). The marker's flock held
+                (inbox_lock, next_seq, D20, D23). SHARED fix round 4
+                (Claude Opus 5.5, unreviewed): the audit's LOW-3.
+                `deadline`, a keyword C2's route signature leaves out
+                (as deliver_local's), is the command's lock_deadline from
+                cmd_send, so a local send whose card turned codex under
+                its lock never waits two bounds; None takes one here, so
+                a call with C2's arguments alone works as before. The marker's flock held
                 past LOCK_WAIT_SECONDS skips that write, said as a marker
                 that could not be written or cleared. Then rings through
                 ring_codex (one `codex queue` run, at most
@@ -3059,7 +3137,8 @@ def deliver_codex(card, sender, to, body, header_note=None):
                 the marker file, kept (never removed, D20).
     """
     marker = MAIL / f".ring-pending-{to}"
-    deadline = lock_deadline()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one per command
+    if deadline is None:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-3, the command's own when given
+        deadline = lock_deadline()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one per command
     with inbox_lock(to, deadline=deadline):
         bad = ring_marker_problem(marker)  # SHARED D17 (Claude Opus 5.5, unreviewed): a planted link; D19 a FIFO
         if bad is not None:
