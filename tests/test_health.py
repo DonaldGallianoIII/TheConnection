@@ -33,6 +33,10 @@ SETTLE_TIMEOUT = 10
 SETTLE_STEP = 0.2
 # Thresholds no real machine reaches, so only the condition under test fires.
 QUIET = ["--load-ratio", "100000", "--mem-min-pct", "0", "--gpu-max-c", "100000"]
+# Phase fix round 1 (Claude Opus 5.5, unreviewed): ESC, a byte a terminal
+# acts on, and how tc health must print it.
+ESC = "\x1b"
+ESC_SHOWN = "\\x1b"
 
 
 class HealthTest(unittest.TestCase):
@@ -165,6 +169,36 @@ class HealthCardsTest(unittest.TestCase):
         self.assertIn("\ncards      b (claude, account unknown, route local), reports to a\n"
                       "           c (codex, account work, route codex)\n"
                       "           x (other, account far, route ssh to u@h)\n", text)
+
+
+    # Phase fix round 1 (Claude Opus 5.5, unreviewed): escaped output.
+    def test_health_escapes_control_characters(self):
+        """ESC in a card's account, a card file's name, an inbox's name and a listener lock's name: tc health prints escapes.
+
+        Must reject a card field or a file name printed raw: the terminal
+        would act on it.
+
+        @interacts  two hand-written card files, one inbox folder and one
+                    lock file made by hand; one tc health.
+        @deps       _root.TcRoot.tc.
+        @complexity O(1): one health run.
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            cards = root.path / "cards"
+            cards.mkdir()
+            (cards / "b.json").write_text(json.dumps(
+                {"name": "b", "kind": "claude", "account": f"{ESC}[2J", "route": "local"}))
+            (cards / f"{ESC}q.json").write_text("{ not json")
+            mail = root.path / "mail"
+            (mail / f"to-{ESC}x").mkdir(parents=True)
+            (mail / f".wait-{ESC}y.lock").touch()
+            code, out, err = root.tc("health")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(ESC, out, "tc health printed a raw ESC")
+        for shown in (f"{ESC_SHOWN}q (?, account ?, route ?)", f"b (claude, account {ESC_SHOWN}[2J, route local)",
+                      f"{ESC_SHOWN}x: 0 unread", f"stopped: {ESC_SHOWN}y"):
+            self.assertIn(shown, out)
 
 
 if __name__ == "__main__":

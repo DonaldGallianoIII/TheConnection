@@ -17,9 +17,16 @@ Status: unreviewed
             harness's temp folder (DEBT-3). One test holds the inbox lock
             itself and reads /proc/locks (LOW-9).
 @deps       python3 stdlib (argparse, collections.abc, contextlib, fcntl,
-            importlib, io, json, os, pathlib, sys, unittest, unittest.mock);
+            importlib, io, json, os, pathlib, subprocess, sys, unittest,
+            unittest.mock);
             tests/_root.py; RELEASE_CEILING_SECONDS and wait_until_blocked
             from test_codex_route.py; ../tc.
+            Four tests (phase fix round 1, Claude Opus 5.5, unreviewed)
+            write hand-made cards: control characters in fields and a file
+            name, a card copied under another name, a card nested
+            DEEP_NESTING deep, and a FIFO or a symlink at a card's name
+            (each tc run then has CARD_READ_CEILING_SECONDS, so a read
+            that blocks fails instead of hanging).
 @complexity O(1) per test: one to six tc runs, each under a second.
 @alloc      one TcRoot per test (or per case), removed when its context
             exits. Nothing is kept between tests.
@@ -35,6 +42,7 @@ import io
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -67,6 +75,22 @@ SECRET = "secret123"
 # A joined_at from long before any test run, to see a rejoin replace it.
 OLD_JOINED_AT = "2000-01-01T00:00:00+00:00"
 CLAUDE_ENV = {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "s1", "CLAUDE_PID": "9"}
+# Phase fix round 1 (Claude Opus 5.5, unreviewed): hand-made cards for the
+# escaping, naming and nesting checks.
+# ESC and BEL, two bytes a terminal acts on, and how tc must print each.
+ESC, BEL = "\x1b", "\x07"
+ESC_SHOWN, BEL_SHOWN = "\\x1b", "\\x07"
+# Deep enough that json.loads raises RecursionError, not ValueError (it
+# does from about 10,000 here), and small enough, 2 x 20,000 bytes, to stay
+# under tc's 64 KiB card read cap, so the parser refuses it, not the cap.
+DEEP_NESTING = 20000
+# How long tc cards, tc health or a send may take with a FIFO or a symlink
+# at a card's name. Each runs in about 0.1 s; a read that blocks on the
+# FIFO never returns, so the ceiling turns that into a failure.
+CARD_READ_CEILING_SECONDS = 2
+# A valid card the symlink points at, outside cards/. Followed, it would
+# read as a working local card.
+LINKED_CARD = {"name": "x", "kind": "other", "account": "far", "route": "local"}
 
 
 def files_under(root):
@@ -624,6 +648,131 @@ class CardsTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(out, "a (other, account far, route ssh to u@h)\n"
                               "c (codex, account unknown, route codex)\n")
+
+
+    # Phase fix round 1 (Claude Opus 5.5, unreviewed): escaped output.
+    def test_cards_escapes_control_characters(self):
+        """BEL in a kind, ESC[2J in an account, ESC in an unreadable card's file name: tc cards prints escapes, never the bytes.
+
+        Must reject a field or a file name printed raw: the terminal would
+        ring, or clear its screen.
+
+        @interacts  two hand-written card files, one tc cards.
+        @deps       _root.TcRoot.tc.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            cards = root.path / "cards"
+            cards.mkdir()
+            (cards / "b.json").write_text(json.dumps(
+                {"name": "b", "kind": f"claude{BEL}", "account": f"{ESC}[2J", "route": "local"}))
+            (cards / f"{ESC}q.json").write_text("{ not json")
+            code, out, err = root.tc("cards")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(ESC, out, "tc cards printed a raw ESC")
+        self.assertNotIn(BEL, out, "tc cards printed a raw BEL")
+        self.assertEqual(out, f"{ESC_SHOWN}q.json: unreadable card\n"
+                              f"b (claude{BEL_SHOWN}, account {ESC_SHOWN}[2J, route local)\n")
+
+    # Phase fix round 1 (Claude Opus 5.5, unreviewed): a card is named by its file.
+    def test_cards_names_a_card_by_its_file(self):
+        """cards/b.json copied by hand from a's card: tc cards lists it as b and says the card names a.
+
+        The router sends to b by that file, and tc health names it b. Must
+        reject a line named from the card's own name field: it would list
+        a twice.
+
+        @interacts  one join, one hand copy of its card, one tc cards.
+        @deps       _root.TcRoot.tc.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            root.tc("join", "a")
+            cards = root.path / "cards"
+            (cards / "b.json").write_text((cards / "a.json").read_text())
+            code, out, err = root.tc("cards")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, "a (other, account unknown, route local)\n"
+                              "b (other, account unknown, route local), card says name a\n")
+
+    # Phase fix round 1 (Claude Opus 5.5, unreviewed): RecursionError is unreadable too.
+    def test_a_card_nested_too_deep_is_unreadable_not_a_crash(self):
+        """A card nested DEEP_NESTING deep: tc cards and tc health call it unreadable, and tc send refuses it in words.
+
+        json.loads raises RecursionError on it, not ValueError. Must reject
+        a card read that catches only OSError and ValueError: each command
+        would end in a traceback.
+
+        @interacts  one hand-written card, one tc cards, one tc health, one
+                    tc send.
+        @deps       _root.TcRoot.tc, files_under.
+        @complexity O(DEEP_NESTING) to write and parse the card.
+        @alloc      one TcRoot; the card's text, 2 x DEEP_NESTING characters.
+        """
+        with _root.TcRoot() as root:
+            (root.path / "cards").mkdir()
+            (root.path / "cards" / "b.json").write_text("[" * DEEP_NESTING + "]" * DEEP_NESTING)
+            listed = root.tc("cards")
+            health = root.tc("health")
+            before = files_under(root)
+            sent = root.tc("send", "--from", "a", "--to", "b", "hi")
+            after = files_under(root)
+        self.assertEqual(listed[0], 0, f"tc cards exited {listed[0]} on a card nested too deep")
+        self.assertEqual(listed[1], "b.json: unreadable card\n")
+        self.assertEqual(health[0], 0, f"tc health exited {health[0]} on a card nested too deep")
+        self.assertIn("\ncards      b (?, account ?, route ?)\n", health[1])
+        self.assertEqual(sent[0], EXIT_REFUSED, f"tc send exited {sent[0]}")
+        self.assertTrue("b.json is unreadable" in sent[2] and "Traceback" not in sent[2],
+                        "tc send did not refuse a card nested too deep in words")
+        self.assertEqual(after, before, "a send to a card nested too deep wrote a file")
+
+
+    # Phase fix round 1 (Claude Opus 5.5, unreviewed): a card is read only from a regular file.
+    def test_a_fifo_or_a_symlink_at_a_card_is_unreadable_and_never_blocks(self):
+        """A FIFO, then a symlink, at cards/x.json: tc cards, tc health and tc send --to x each return within 2 s, calling it unreadable.
+
+        The symlink points at a valid card outside cards/. Must reject a
+        card read with a plain open(): it blocks on the FIFO (the run is
+        killed at CARD_READ_CEILING_SECONDS) and follows the symlink.
+
+        @interacts  per case: one FIFO or one symlink and its target made by
+                    hand, one tc cards, one tc health, one tc send, each
+                    under CARD_READ_CEILING_SECONDS, in its own root.
+        @deps       _root.TcRoot.tc, files_under; os, subprocess.
+        @complexity O(1): two cases, three runs each.
+        @alloc      one TcRoot per case.
+        """
+        for kind in ("fifo", "symlink"):
+            with self.subTest(kind=kind):
+                with _root.TcRoot() as root:
+                    cards = root.path / "cards"
+                    cards.mkdir()
+                    path = cards / "x.json"
+                    if kind == "fifo":
+                        os.mkfifo(path)
+                    else:
+                        outside = root.base / "outside.json"
+                        outside.write_text(json.dumps(LINKED_CARD))
+                        path.symlink_to(outside)
+                    ran = {}
+                    for what, argv in (("cards", ("cards",)), ("health", ("health",)),
+                                       ("send", ("send", "--from", "a", "--to", "x", "hi"))):
+                        before = files_under(root)  # the last one taken is the send's
+                        try:
+                            ran[what] = root.tc(*argv, timeout=CARD_READ_CEILING_SECONDS)
+                        except subprocess.TimeoutExpired:
+                            self.fail(f"tc {what} did not return within {CARD_READ_CEILING_SECONDS} s "
+                                      f"with a {kind} at cards/x.json")
+                    after = files_under(root)
+                self.assertEqual(ran["cards"], (0, "x.json: unreadable card\n", ""))
+                self.assertEqual(ran["health"][0], 0, f"tc health exited {ran['health'][0]}")
+                self.assertIn("\ncards      x (?, account ?, route ?)\n", ran["health"][1])
+                self.assertEqual(ran["send"][0], EXIT_REFUSED, f"tc send exited {ran['send'][0]}")
+                self.assertTrue("x.json is unreadable" in ran["send"][2] and "Traceback" not in ran["send"][2],
+                                f"tc send did not refuse a {kind} card in words")
+                self.assertEqual(after, before, f"a send to a {kind} card wrote a file")
 
 
 if __name__ == "__main__":

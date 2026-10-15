@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tc: file mailbox between Claude Code sessions on one machine.
+tc: file mailbox between agent sessions (Claude Code, Codex) on one machine.
 
 One session (the one you talk to) relays for others you can't reach directly.
 All run as the same Linux user, so a shared directory is the whole transport.
@@ -24,10 +24,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             another process. `send` to a codex card runs `codex queue` (C2)
             in a session of its own, and kills that one process group if the
             ring times out.
-@deps       python3 stdlib (argparse, collections, contextlib, fcntl, json,
-            pathlib, re, resource, shlex, shutil, signal, subprocess, time,
-            datetime, os, sys); Linux only (flock, RLIMIT_AS, O_NOFOLLOW,
-            /proc). nvidia-smi optional; the codex CLI for the codex route.
+@deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
+            json, pathlib, re, resource, shlex, shutil, signal, stat,
+            subprocess, time, datetime, os, sys); Linux only (flock,
+            RLIMIT_AS, O_NOFOLLOW, O_NONBLOCK, /proc). nvidia-smi optional; the codex CLI for the codex route.
 @complexity send O(b), b body bytes up to SEND_BODY_MAX_BYTES; status O(1).
             read/peek/wait-poll O(u), u unread messages in one inbox,
             single digits in practice. log O(t), t total messages ever,
@@ -50,6 +50,7 @@ import argparse
 import collections
 import contextlib
 import datetime
+import errno
 import fcntl
 import json
 import os
@@ -59,6 +60,7 @@ import resource
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -106,6 +108,11 @@ EXIT_REFUSED = 1
 CARDS = ROOT / "cards"
 # The card's own format number, so a later shape can be told apart.
 CARD_VERSION = 1
+# Phase fix round 1 (Claude Opus 5.5, unreviewed): the most of one card file
+# tc reads. A card is eleven short fields, a few hundred bytes; 64 KiB is
+# far past any card tc writes, and it bounds what one hand-made file can
+# make tc health, tc cards or a send read. A file over it is unreadable.
+CARD_READ_MAX_BYTES = 65536
 CARD_KINDS = ("claude", "codex", "other")
 # The account word when nothing names one. C1: never a blank.
 UNKNOWN_ACCOUNT = "unknown"
@@ -159,6 +166,9 @@ RING_BACKOFF_SECONDS = 300
 # How the backoff's words name a time: the local clock to the second, which
 # is all a sender needs to know when a send rings again.
 CLOCK_FORMAT = "%H:%M:%S"
+# The most of a ring marker tc reads: two short lines, so 4 KiB bounds a
+# hand-made one; only its first line is used.
+RING_MARKER_READ_MAX_BYTES = 4096
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -587,43 +597,124 @@ def write_card(card):
     return path
 
 
-def describe_card(card):
-    """One card in words: `<name> (<kind>, account <a>, route <r>)`, plus `, reports to <N>`.
+# Phase fix round 1 (Claude Opus 5.5, unreviewed): what tc cards and tc
+# health print from a card or a file name is escaped.
+def printable(value):
+    """`value` as text, each character str.isprintable() refuses written as its escape.
 
-    An ssh card's route reads `route ssh to <target>`. A field missing from
-    a hand-made card shows as `?`.
+    Anyone who can write cards/ shapes a card, and a file name holds any
+    byte but / and NUL. So ESC (0x1b) prints as the four characters
+    \\x1b, never raw, and no card or file name can clear the screen,
+    retitle the window or redraw a line where tc cards or tc health runs.
+    `tc health --json` needs none of this: json.dumps escapes them.
 
     @interacts  none; string work only.
-    @deps       none.
-    @complexity O(1).
+    @deps       the unicode_escape codec.
+    @complexity O(c) over c characters of the text.
+    @alloc      one string, returned.
+    """
+    text = str(value)
+    if text.isprintable():
+        return text
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode("ascii") for c in text)
+
+
+def describe_card(card, file_name=None):
+    """One card in words: `<name> (<kind>, account <a>, route <r>)`, plus `, reports to <N>`.
+
+    Given `file_name`, the name is the file's (cards/<name>.json), as the
+    router and tc health name it, and a card whose `name` field says
+    otherwise ends `, card says name <x>`, so a copied card shows both.
+    Without it (join and card describe the card they just wrote) the name
+    is the `name` field. An ssh card's route reads `route ssh to
+    <target>`. A field missing from a hand-made card shows as `?`. Every
+    field goes through printable(), so no control character in a card
+    reaches the terminal raw.
+
+    @interacts  none; string work only.
+    @deps       printable; pathlib.
+    @complexity O(f) over f characters in the card's fields (a few
+                hundred).
     @alloc      one string, returned.
     """
     route = card.get("route", "?")
     if route == "ssh" and isinstance(card.get("ssh"), dict):
         route = f"ssh to {card['ssh'].get('target', '?')}"
-    text = (f"{card.get('name', '?')} ({card.get('kind', '?')}, "
-            f"account {card.get('account', '?')}, route {route})")
+    name = pathlib.Path(file_name).stem if file_name is not None else card.get("name", "?")
+    text = (f"{printable(name)} ({printable(card.get('kind', '?'))}, "
+            f"account {printable(card.get('account', '?'))}, route {printable(route)})")
     if card.get("reports_to"):
-        text += f", reports to {card['reports_to']}"
+        text += f", reports to {printable(card['reports_to'])}"
+    if file_name is not None and "name" in card and card["name"] != name:
+        text += f", card says name {printable(card['name'])}"
     return text
+
+
+# Phase fix round 1 (Claude Opus 5.5, unreviewed): every card file, and the
+# ring marker, is read here.
+def read_regular_file(path, limit):
+    """The text of the file at `path`, read only when it is a regular file of at most `limit` bytes.
+
+    Opened with O_NONBLOCK and O_NOFOLLOW and checked with fstat before
+    any read, so a FIFO at a card's name (or the ring marker's) never
+    blocks tc health, tc cards, the board's feed or a send, and a symlink
+    never points tc at a file outside the mailbox. Raises
+    FileNotFoundError when nothing is at the name; ValueError, with words,
+    for a symlink, anything that is not a regular file, a file over
+    `limit`, or bytes that are not UTF-8; OSError for any other failure to
+    open or read. A card's callers treat each but the first as an
+    unreadable card.
+
+    @interacts  opens, fstats and reads one file, and closes it.
+    @deps       os, stat, errno.
+    @complexity O(r) over r bytes read, at most `limit` + 1.
+    @alloc      the bytes read and the decoded text, which is returned;
+                one descriptor, closed on return.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError as err:
+        if err.errno == errno.ELOOP:
+            raise ValueError("it is a symlink, which tc never follows") from err
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("it is not a regular file")
+        chunks, left = [], limit + 1
+        while left > 0:
+            chunk = os.read(fd, left)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if len(data) > limit:
+        raise ValueError(f"it is over {limit} bytes")
+    return data.decode("utf-8")
 
 
 def all_cards():
     """Every card under cards/, by name: a list of (file name, card or None).
 
     None stands for a file that is not a JSON object (hand-edited or cut
-    short); the caller says so instead of guessing.
+    short, or nested too deep for the parser, which raises RecursionError)
+    or that read_regular_file will not read (a FIFO, a symlink, anything
+    but a regular file, or one over CARD_READ_MAX_BYTES); the caller says
+    so instead of guessing.
 
-    @interacts  globs and reads cards/*.json. Writes nothing.
-    @deps       json, pathlib.
+    @interacts  globs cards/*.json and reads each through
+                read_regular_file. Writes nothing.
+    @deps       read_regular_file, CARD_READ_MAX_BYTES; json, pathlib.
     @complexity O(n) over n cards (single digits).
     @alloc      one list of n dicts, returned.
     """
     out = []
     for path in sorted(CARDS.glob("*.json")) if CARDS.exists() else []:
         try:
-            card = json.loads(path.read_text())
-        except (OSError, ValueError):
+            card = json.loads(read_regular_file(path, CARD_READ_MAX_BYTES))
+        except (OSError, ValueError, RecursionError):  # Phase fix round 1 (Claude Opus 5.5, unreviewed)
             card = None
         out.append((path.name, card if isinstance(card, dict) else None))
     return out
@@ -786,8 +877,11 @@ def cmd_card(args):
 def cmd_cards(args):
     """`tc cards`: every card, one line each, in words.
 
+    Each card is named by its file, as the router names it. Every field
+    and file name it prints goes through printable().
+
     @interacts  reads cards/*.json through all_cards; prints to stdout.
-    @deps       all_cards, describe_card.
+    @deps       all_cards, describe_card, printable.
     @complexity O(n) over n cards (single digits).
     @alloc      the list of cards, freed on exit.
     """
@@ -795,7 +889,9 @@ def cmd_cards(args):
     if not cards:
         print("no cards")
     for file_name, card in cards:
-        print(describe_card(card) if card is not None else f"{file_name}: unreadable card")
+        # Phase fix round 1 (Claude Opus 5.5, unreviewed): named by its file, escaped.
+        print(describe_card(card, file_name) if card is not None
+              else f"{printable(file_name)}: unreadable card")
 
 
 # ---------- router: tc send delivers by the recipient's card (C2) ----------
@@ -811,19 +907,24 @@ def read_card(name):
     """The card for `name` as a dict, or None when it has none.
 
     Raises ValueError, with words naming the file, for a card that is not
-    a JSON object: the router refuses rather than guess a route.
+    a JSON object, including one nested too deep for the parser
+    (RecursionError), and for one read_regular_file will not read (a
+    FIFO, a symlink, anything but a regular file, one over
+    CARD_READ_MAX_BYTES): the router refuses rather than guess a route.
+    Only nothing at the name is no card.
 
-    @interacts  reads cards/<name>.json. Writes nothing.
-    @deps       json, pathlib.
+    @interacts  reads cards/<name>.json through read_regular_file. Writes
+                nothing.
+    @deps       read_regular_file, CARD_READ_MAX_BYTES; json, pathlib.
     @complexity O(1): one small file.
     @alloc      one dict, returned.
     """
     path = CARDS / f"{name}.json"
-    if not path.exists():
-        return None
     try:
-        card = json.loads(path.read_text())
-    except (OSError, ValueError) as err:
+        card = json.loads(read_regular_file(path, CARD_READ_MAX_BYTES))  # Phase fix round 1 (Claude Opus 5.5, unreviewed)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, RecursionError) as err:  # Phase fix round 1 (Claude Opus 5.5, unreviewed)
         raise ValueError(f"the card {path} is unreadable ({err})") from err
     if not isinstance(card, dict):
         raise ValueError(f"the card {path} is not a JSON object")
@@ -996,16 +1097,18 @@ def ring_backoff(marker):
     is read on wall_clock(). A marker dated after now (the clock was set
     back) holds nothing, so a clock change cannot stop rings for long. A
     marker that cannot be read holds nothing either: the send rings, as
-    D14 has it.
+    D14 has it. It is read through read_regular_file, so a FIFO or a link
+    at its name never blocks the send that holds the inbox lock.
 
-    @interacts  reads and stats `marker`; reads the clock (wall_clock).
-                Writes nothing.
-    @deps       wall_clock; RING_TIMED_OUT, RING_BACKOFF_SECONDS.
+    @interacts  reads (read_regular_file) and stats `marker`; reads the
+                clock (wall_clock). Writes nothing.
+    @deps       read_regular_file, wall_clock; RING_TIMED_OUT,
+                RING_BACKOFF_SECONDS, RING_MARKER_READ_MAX_BYTES.
     @complexity O(1): one short file.
     @alloc      the marker's text, freed on return.
     """
     try:
-        state = marker.read_text().partition("\n")[0]
+        state = read_regular_file(marker, RING_MARKER_READ_MAX_BYTES).partition("\n")[0]
         stamp = marker.stat().st_mtime
     except (OSError, ValueError):
         return None
@@ -1377,9 +1480,19 @@ def _gpu_text(gpus):
     return " · ".join(f"GPU {g['temp_c']}C {g['util_pct']}%" for g in gpus)
 
 
+# Phase fix round 1 (Claude Opus 5.5, unreviewed): names escaped, and this block.
 def _who(table):
-    up = [f"{n} (pid {pid})" for n, pid in table.items() if pid]
-    down = [n for n, pid in table.items() if not pid]
+    """Listener or watcher names in words: `<name> (pid <p>)` for each live one, then the stopped ones.
+
+    A name comes from a lock file's name, so it goes through printable().
+
+    @interacts  none; string work only.
+    @deps       printable.
+    @complexity O(n) over n names in `table` (a few dozen).
+    @alloc      two lists and one string, returned.
+    """
+    up = [f"{printable(n)} (pid {pid})" for n, pid in table.items() if pid]
+    down = [printable(n) for n, pid in table.items() if not pid]
     text = " · ".join(up) if up else "none running"
     return text + (f" · stopped: {', '.join(down)}" if down else "")
 
@@ -1387,8 +1500,13 @@ def _who(table):
 def cmd_health(args):
     """`tc health [--json]`: the snapshot, as JSON or one screen of words.
 
+    In words, every card field and every name taken from a file name (a
+    card, an inbox, a listener's lock) goes through printable(); the JSON
+    is escaped by json.dumps.
+
     @interacts  see health_snapshot; prints to stdout.
-    @deps       health_snapshot, describe_card, _who, _age, _gpu_text; json.
+    @deps       health_snapshot, describe_card, printable, _who, _age,
+                _gpu_text; json.
     @complexity as health_snapshot.
     @alloc      the snapshot and the printed text, freed on exit.
     """
@@ -1416,7 +1534,7 @@ def cmd_health(args):
             bits.append(f"last mail {_age(b['newest_mail_age_s'])} ago")
         if b["status_age_s"] is not None:
             bits.append(f"status {_age(b['status_age_s'])} ago")
-        rows.append(f"{name}: " + ", ".join(bits))
+        rows.append(f"{printable(name)}: " + ", ".join(bits))  # Phase fix round 1 (Claude Opus 5.5, unreviewed)
     print("mail       " + ("\n           ".join(rows) if rows else "empty"))
 
 
@@ -1527,7 +1645,10 @@ def main():
     @complexity O(a) over a arguments to parse, plus the command.
     @alloc      the parser and the parsed arguments, freed on exit.
     """
-    ap = TcParser(prog="tc", description="Mailbox between Claude sessions.")
+    # Phase fix round 1 (Claude Opus 5.5, unreviewed): agent sessions, not only Claude.
+    ap = TcParser(prog="tc", description="Mailbox between agent sessions: a Claude Code session "
+                                          "wakes when its tc wait exits; a Codex session runs tc "
+                                          "join once, and then a send rings it.")
     sub = ap.add_subparsers(dest="cmd", required=True, parser_class=TcParser)
 
     s = sub.add_parser("send", help="send a message (text arg or stdin)")
@@ -1559,7 +1680,7 @@ def main():
     lg.add_argument("--last", type=int, default=0)
     lg.set_defaults(fn=cmd_log)
 
-    h = sub.add_parser("health", help="machine load, memory, GPU, sessions, listeners, mail")
+    h = sub.add_parser("health", help="machine load, memory, GPU, sessions, listeners, cards, mail")
     h.add_argument("--json", action="store_true", help="machine-readable, for a board")
     h.set_defaults(fn=cmd_health)
 
@@ -1575,7 +1696,8 @@ def main():
     wt.set_defaults(fn=cmd_watch)
 
     # CARDS R2 (Claude Opus 5.5, unreviewed): join, card, cards (C1).
-    j = sub.add_parser("join", help="write the address card for the session this runs in")
+    j = sub.add_parser("join", help="write the address card for the session this runs in; a Codex "
+                                    "session must join before a send can ring it")
     j.add_argument("name")
     j.add_argument("--account", help="account label (default: CLAUDE_CONFIG_DIR's base name, else unknown)")
     j.add_argument("--kind", choices=CARD_KINDS, help="override the kind tc works out")
