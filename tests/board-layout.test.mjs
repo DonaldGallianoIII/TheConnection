@@ -62,7 +62,7 @@ const SHAPES = {
     n('y1', 'worker', 'inferred', 1, 'y'), n('y2', 'worker', 'inferred', 1, 'y')],
   // A cycle's root carries no parent: the walk used none for it (D15).
   cycle: [n('p', 'orchestrator', 'declared', 0, null), n('q', 'orchestrator', 'declared', 1, 'p')],
-  ghost: [n('r', 'peer', 'inferred', 0, null, { reports_to: 'ghost' })],
+  ghost: [n('r', 'peer', 'none', 0, null, { reports_to: 'ghost' })],
   sharedWorker: [n('a', 'orchestrator', 'declared', 0, null), n('a2', 'worker', 'declared', 1, 'a'),
     n('b', 'worker', 'declared', 1, 'a'), n('x', 'orchestrator', 'inferred', 0, null),
     n('x1', 'worker', 'inferred', 1, 'x'), n('x2', 'worker', 'inferred', 1, 'x')],
@@ -126,7 +126,7 @@ test('a shared worker sits once, under its declared parent', () => {
   assert.ok(lay.pos.b.x + CONFIG.NODE_W < lay.pos.x.x, 'b is not in a\'s tree');
 });
 
-test('each title carries its role word, and "· inferred" exactly when role_source says so', () => {
+test('each title carries its role word, and "· inferred" exactly when role_source says so, never on a peer', () => {
   for (const [name, nodes] of Object.entries(SHAPES)) {
     const lay = layoutLevels({ nodes });
     for (const node of nodes) {
@@ -136,7 +136,12 @@ test('each title carries its role word, and "· inferred" exactly when role_sour
     }
   }
   assert.equal(roleTitle({ id: 'a', role: 'orchestrator', role_source: 'declared' }), 'a · orchestrator');
-  assert.equal(roleTitle({ id: 'x', role: 'peer', role_source: 'inferred' }), 'x · peer · inferred');
+  // Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+  // D27: a peer is no guess. The feed says role_source none; a feed that
+  // says inferred on a peer still draws no `inferred`.
+  assert.equal(roleTitle({ id: 'x', role: 'peer', role_source: 'none' }), 'x · peer');
+  assert.equal(roleTitle({ id: 'x', role: 'peer', role_source: 'inferred' }), 'x · peer');
+  assert.equal(roleTitle({ id: 'w', role: 'worker', role_source: 'inferred' }), 'w · worker · inferred');
 });
 
 test('an empty feed lays out nothing; fitTransform never enlarges or shrinks past its floor', () => {
@@ -193,7 +198,7 @@ const FIT_PADDING = 24;
 const FOURTEEN = {
   star: [n('hub', 'orchestrator', 'declared', 0, null),
     ...Array.from({ length: 13 }, (_, i) => n(`w${i + 1}`, 'worker', 'declared', 1, 'hub'))],
-  peers: Array.from({ length: 14 }, (_, i) => n(`p${i + 1}`, 'peer', 'inferred', 0, null)),
+  peers: Array.from({ length: 14 }, (_, i) => n(`p${i + 1}`, 'peer', 'none', 0, null)),
 };
 // The text drawn inside the board's view, so scaled with it, the headings
 // over the trees too.
@@ -351,7 +356,7 @@ const ROUTED = {
     ...['c', 'd'].map((id) => fed(id, 'worker', 'declared', 2, 'b', { reports_to: 'b' })),
     fed('z', 'orchestrator', 'declared', 0, null),
     ...['y1', 'y2', 'y3'].map((id) => fed(id, 'worker', 'declared', 1, 'z', { reports_to: 'z' })),
-    fed('p1', 'peer', 'inferred', 0, null), fed('p2', 'peer', 'inferred', 0, null),
+    fed('p1', 'peer', 'none', 0, null), fed('p2', 'peer', 'none', 0, null),
   ], [['b', 'a'], ['a', 'docs'], ['c', 'b'], ['y1', 'z'], ['z', 'y2'], ['z', 'y3'], ['a', 'z'], ['a', 'e1'],
     ['a', 'e2'], ['a', 'e3'], ['p2', 'p1'], ['b', 'd']]),
   // The hub mails every worker, and three pairs of workers in different rows mail each other.
@@ -587,7 +592,7 @@ test('routes are searched once per routed pair, none on a poll that only aged th
 });
 
 test('twenty Claude peers on one account draw every native line within FIRST_DRAW_BUDGET_MS, and the next poll searches none', (t) => {
-  const nodes = Array.from({ length: PEERS }, (_, i) => fed(`s${i + 1}`, 'peer', 'inferred', 0, null, { kind: 'claude', account: 'work' }));
+  const nodes = Array.from({ length: PEERS }, (_, i) => fed(`s${i + 1}`, 'peer', 'none', 0, null, { kind: 'claude', account: 'work' }));
   const links = nodes.flatMap((p, i) => nodes.slice(i + 1).map((q) => ({ from: p.id, to: q.id, kind: 'native' })));
   const feed = { nodes, links, wires: [] };
   const board = createBoard(createCountingKit());

@@ -96,9 +96,9 @@ NODE_PATH=<a Playwright install>/node_modules node tests/board-browser-check.mjs
      reaches the bottom of the browser window however tall that is.
    - The pill on the right reads `live · 2 listening`.
    - Under the title, the list of roots: `2 peers: b, c`.
-   - Two boxes, `b · peer · inferred` and `c · peer · inferred`, each with
-     `● listening` on its second line, each under a heading with its own
-     title. Each box has a hollow ring on the middle of its top edge (in)
+   - Two boxes, `b · peer` and `c · peer`, each with `● listening` on its
+     second line, each under a heading with its own title. No box says
+     `inferred` on a peer: a peer is no guess (D27). Each box has a hollow ring on the middle of its top edge (in)
      and a filled dot on the middle of its bottom edge (out).
    - The legend is the first line of the footer, under the board, never
      over a box.
@@ -114,8 +114,8 @@ is expected here. Send nothing to `cx` or `far` after step 11:
 their cards route mail to `codex` and `ssh`, which this script never runs.
 
 6. In terminal 4: `./tc send --from b --to a "ready"`
-   - Within 3 s a box `a · peer · inferred` appears, reading
-     `○ idle · 1 unread` (`a` has an inbox now, and no listener).
+   - Within 3 s a box `a · peer` appears, reading `○ idle` with `1 unread`
+     (`a` has an inbox now, and no listener).
    - The wire between `a` and `b` turns dashed and moves, with the words
      `b → a · #1` beside it (never on it) and an arrow at `a`, the reader.
      `a` and `b` are side by side, so the wire runs straight across between

@@ -761,12 +761,17 @@ function byName(p, q) {
 
 /**
  * A node's title: its name and role word, plus `· inferred` exactly when
- * role_source says inferred (C5). A node with no role is its name alone.
+ * role_source says inferred (C5), and never on a peer (D27: `inferred`
+ * marks a guess, and a peer is none; the feed gives a peer role_source
+ * `none`). A node with no role is its name alone.
+ * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14; the peer rule
+ * by the P4 phase fixer, round 2, 2026-10-15. Status: unreviewed.
  * @complexity O(1)  @alloc one string
  */
 export function roleTitle(node) {
   if (!node.role) return String(node.id);
-  return `${node.id} · ${node.role}${node.role_source === 'inferred' ? ' · inferred' : ''}`;
+  const guessed = node.role_source === 'inferred' && node.role !== 'peer';
+  return `${node.id} · ${node.role}${guessed ? ' · inferred' : ''}`;
 }
 
 /**

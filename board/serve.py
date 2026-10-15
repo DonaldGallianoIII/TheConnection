@@ -93,11 +93,14 @@ counts as a wake.
 Roles and levels follow C5 step by step. Partners are the names a node has
 exchanged mail with, either way, itself excluded; a partner need not be a
 node. A parent is always a node: declared from the card's reports_to when
-it names a node, else inferred as the one partner of a node with exactly
-one partner when that partner has HUB_MIN_PARTNERS or more, unless that
-partner's card declares this node as its own parent (D15: inference never
-inverts a declared edge). A reports_to that names no node, or the node
-itself, gives no parent and stops inference. An inferred edge that closes
+it names a node, else inferred (D27) as the partner holding at least
+PARENT_MAJORITY (two thirds) of the node's messages, sent and received,
+when that partner has HUB_MIN_PARTNERS or more, unless that partner's card
+declares this node as its own parent (D15: inference never inverts a
+declared edge); a node split evenly between two relays gets no guess. A
+reports_to that names no node, or the node itself, gives no parent and
+stops inference. A peer's role_source is `none`, never `inferred`: no
+edge decided it. An inferred edge that closes
 a cycle, through any chain of declared ones, is taken out with every other
 inferred edge on that cycle (drop_inferred_cycles), before roles and
 levels are read, so the drawing never depends on the order the names sort
@@ -132,9 +135,9 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             and read only when fstat says regular, so a FIFO never blocks a
             poll and a symlink never redirects one; mail folders are listed
             the same way, never through a link.
-@deps       python3 stdlib (argparse, collections, errno, heapq, hmac,
-            http.server, io, json, os, pathlib, re, secrets, signal, stat,
-            sys, threading, time, types, urllib.parse); ../tc; Linux
+@deps       python3 stdlib (argparse, collections, errno, fractions, heapq,
+            hmac, http.server, io, json, os, pathlib, re, secrets, signal,
+            stat, sys, threading, time, types, urllib.parse); ../tc; Linux
             (/proc: /proc/locks through tc, the load average and
             /proc/meminfo read here).
 @complexity feed(), per poll: O(k + m (log W + log K) + n + c^2). The
@@ -146,8 +149,9 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             again and each of the m names matched twice (no body read);
             the last WIRE_HISTORY picked in O(m log W), W = 50; W + n + l
             more stats for l linked pairs (at most n^2/2, tens in
-            practice); each card read once, c cards; levels in O(n + e), e
-            parent edges (at most n); c(c-1)/2 native links over the
+            practice); each card read once, c cards; parents, roles and
+            levels in O(n + l + e) from the l pairs' counts, e parent
+            edges (at most n); c(c-1)/2 native links over the
             claude cards on one named account; and for each of s names
             that stopped listening within DOWN_WINDOW_S, its newest
             K = WAKE_CANDIDATES messages kept in a heap as the scan goes
@@ -161,14 +165,14 @@ partner is a lower relay is drawn as that relay's `worker`, marked
 @alloc      per feed(): tc.mailbox_summary builds m path and stat objects; here
             one Message per message file, each one's dedupe key and dict
             slot, the name list of each folder (message_names), and for
-            each message a short-lived sorted pair (a list and two tuples),
-            a default count dict and two default partner sets, each kept
-            only the first time (a pair's counts, a name's partners); for
-            each name that stopped
-            listening, a heap of at most K Messages while its wake window
-            is open and the set of its inbox's file names; then the
-            returned dict (n nodes, at most W wires, l + n + c(c-1)/2
-            links); all freed when the caller drops them.
+            each message a short-lived sorted pair (a list and two tuples)
+            and a default count dict, kept only for a pair's first
+            message as the per-pair counts; the partner counts, one dict
+            per name with a partner and two entries per pair; for each
+            name that stopped listening, a heap of at most K Messages
+            while its wake window is open and the set of its inbox's file
+            names; then the returned dict (n nodes, at most W wires,
+            l + n + c(c-1)/2 links); all freed when the caller drops them.
             Held across calls: the
             loaded tc module; last_listening_at, one float per name seen
             listening, pruned past DOWN_WINDOW_S on every feed();
@@ -186,6 +190,7 @@ partner is a lower relay is drawn as that relay's `worker`, marked
 import argparse
 import collections
 import errno
+import fractions
 import heapq
 import hmac
 import http.server
@@ -245,10 +250,18 @@ STATUS_READ_MAX_BYTES = 4096
 # Messages carried in "wires" (C5): the recent traffic the page animates.
 # Links still read every message file name.
 WIRE_HISTORY = 50
-# A node with exactly one partner is that partner's worker when the partner
-# has at least this many partners (O11). With two, one partner alone is a
-# pair of peers, and a relay needs a second partner to be one.
+# A node's guessed parent must have at least this many partners (O11, C5
+# rule 2): a hub. With two, a pair that mails only each other is a pair of
+# peers, and a relay needs a second partner to be one.
 HUB_MIN_PARTNERS = 2
+# Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+# unreviewed. With no card to say so, a node's parent is guessed only from
+# a partner holding at least this share of the node's messages, sent and
+# received (D27). The board counts every message ever sent, so one message
+# between two siblings must not move both out of their relay's tree, and a
+# worker split evenly between two relays gets no guess. Two thirds is a
+# clear majority, and no two partners can both hold it.
+PARENT_MAJORITY = fractions.Fraction(2, 3)
 # A card is a few hundred bytes (C1). The board reads at most this much of a
 # file in cards/ and skips a bigger one, which is not a card. The merged tc
 # caps its own card reads at the same 65,536 bytes; feed() never calls tc's
@@ -343,7 +356,9 @@ ACCOUNT_UNKNOWN = "unknown"
 WRITING, DOWN, WOKEN, WORKING, LISTENING, DOORBELL, REMOTE, IDLE = (
     "writing", "down", "woken", "working", "listening", "doorbell", "remote", "idle")
 ORCHESTRATOR, WORKER, PEER = "orchestrator", "worker", "peer"
-DECLARED, INFERRED = "declared", "inferred"
+# C5 rule 4's role_source words. NO_EDGE is a peer's (D27): no parent edge
+# decided its role, so it is no guess and never reads `inferred`.
+DECLARED, INFERRED, NO_EDGE = "declared", "inferred", "none"
 LINK_MAILBOX, LINK_REPORTS_TO, LINK_NATIVE = "mailbox", "reports_to", "native"
 
 # One message, from its file name alone; `read` when it lies in read/.
@@ -727,17 +742,23 @@ def after_listening(seen, now, wake, waking, inbox, sent, status_path):
 def parents_of(names, cards, partners):
     """C5 rule 2: {name: (parent, DECLARED or INFERRED)} for each node with one.
 
-    Declared: the card's reports_to, when it names a node other than the
-    node itself. A reports_to that names no node (or itself) gives no
-    parent, and nothing is inferred over it. Inferred, when nothing is
-    declared: the one partner of a node with exactly one partner, when that
-    partner is a node with HUB_MIN_PARTNERS or more partners and its card
-    does not report to this node (D15: an inferred edge never runs against
-    a declared one, whatever order the names sort in).
+    `partners` is {name: {partner: messages}}: how many messages each pair
+    exchanged, both ways counted, a name's own notes left out. Declared:
+    the card's reports_to, when it names a node other than the node
+    itself. A reports_to that names no node (or itself) gives no parent,
+    and nothing is inferred over it. Inferred, when nothing is declared
+    (D27): the partner holding at least PARENT_MAJORITY of the node's
+    messages, when that partner is a node with HUB_MIN_PARTNERS or more
+    partners and its card does not report to this node (D15: an inferred
+    edge never runs against a declared one, whatever order the names sort
+    in). No partner holding that share, as with a node split evenly between
+    two relays: no guess.
 
     @interacts  none; pure.
-    @deps       none.
-    @complexity O(n) over n names: one set lookup per node and per partner.
+    @deps       fractions (PARENT_MAJORITY).
+    @complexity O(n + p) over n names and p partner entries (two per
+                pair that exchanged mail): each node's counts summed and
+                walked once.
     @alloc      the returned dict, one entry per node with a parent.
     """
     found = {}
@@ -747,12 +768,15 @@ def parents_of(names, cards, partners):
             if declared in names and declared != name:
                 found[name] = (declared, DECLARED)
             continue
-        mine = partners.get(name, ())
-        if len(mine) == 1:
-            (only,) = mine
-            if (only in names and len(partners.get(only, ())) >= HUB_MIN_PARTNERS
-                    and cards.get(only, {}).get("reports_to") != name):
-                found[name] = (only, INFERRED)
+        mine = partners.get(name, {})
+        total = sum(mine.values())
+        for partner, count in mine.items():
+            if count < PARENT_MAJORITY * total:
+                continue
+            if (partner in names and len(partners.get(partner, ())) >= HUB_MIN_PARTNERS
+                    and cards.get(partner, {}).get("reports_to") != name):
+                found[name] = (partner, INFERRED)
+            break
     return found
 
 
@@ -806,7 +830,8 @@ def hierarchy(names, cards, partners):
 
     @interacts  none; pure.
     @deps       parents_of, drop_inferred_cycles, roles_of, levels_of.
-    @complexity O(n + e) over n names and e parent edges.
+    @complexity O(n + p + e) over n names, p partner entries and e parent
+                edges.
     @alloc      the three returned dicts and their helpers' working sets.
     """
     parents = drop_inferred_cycles(parents_of(names, cards, partners))
@@ -818,7 +843,8 @@ def roles_of(names, parents):
 
     orchestrator: one or more nodes have it as parent; declared when every
     one of those edges is. worker: it has a parent and no children; the
-    source is that edge's. peer: neither, always inferred.
+    source is that edge's. peer: neither; NO_EDGE (`none`, D27), since no
+    edge decided it and a peer is no guess.
 
     @interacts  none; pure.
     @deps       none.
@@ -836,7 +862,7 @@ def roles_of(names, parents):
         elif name in parents:
             roles[name] = (WORKER, parents[name][1])
         else:
-            roles[name] = (PEER, INFERRED)
+            roles[name] = (PEER, NO_EDGE)
     return roles
 
 
@@ -1067,7 +1093,7 @@ class Board:
         inbox = {name: set() for name in self.first_missing_at}
         candidates = {name: [] for name in self.first_missing_at
                       if not self.wakes.get(name, {}).get("settled")}
-        partners, sent, newest_pair, newest_sent = {}, {}, {}, {}
+        sent, newest_pair, newest_sent = {}, {}, {}
         for msg in messages:
             if msg.sender not in newest_sent or msg.seq > newest_sent[msg.sender].seq:
                 newest_sent[msg.sender] = msg
@@ -1082,13 +1108,18 @@ class Board:
                         heapq.heappushpop(heap, msg)
             if msg.sender == msg.to:
                 continue
-            partners.setdefault(msg.sender, set()).add(msg.to)
-            partners.setdefault(msg.to, set()).add(msg.sender)
             pair = tuple(sorted((msg.sender, msg.to)))
             counts = sent.setdefault(pair, dict.fromkeys(pair, 0))
             counts[msg.sender] += 1
             if pair not in newest_pair or msg.seq > newest_pair[pair].seq:
                 newest_pair[pair] = msg
+        # C5 rule 1 with D27's counts: each name's partners, and how many
+        # messages it exchanged with each, both ways.
+        partners = {}
+        for (low, high), counts in sent.items():
+            both = counts[low] + counts[high]
+            partners.setdefault(low, {})[high] = both
+            partners.setdefault(high, {})[low] = both
 
         parents, roles, levels = hierarchy(names, cards, partners)
 

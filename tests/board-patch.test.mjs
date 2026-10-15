@@ -59,7 +59,7 @@ function createFakeKit() {
 
 /** One feed node, a listening peer unless `extra` says otherwise. @complexity O(1)  @alloc one object */
 function node(id, extra) {
-  return { id, state: 'listening', role: 'peer', role_source: 'inferred', level: 0, parent: null, unread: 0, ...extra };
+  return { id, state: 'listening', role: 'peer', role_source: 'none', level: 0, parent: null, unread: 0, ...extra };
 }
 
 /** One mailbox link between two names. @complexity O(1)  @alloc one object */

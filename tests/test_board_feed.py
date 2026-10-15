@@ -169,6 +169,10 @@ CYCLES_BROKEN_MIN = 20
 HAND_MOVED_PREFIX = "by-hand-1-"
 # A hand-made file's number, far above any tc gave in the test.
 PLANTED_SEQ = 900
+# D27's relay shape: a trades this many messages each way with each of its
+# two workers, so one message between the workers leaves a with 10 of each
+# worker's 11, well past two thirds.
+RELAY_TRADES = 5
 
 
 def load_serve():
@@ -892,7 +896,7 @@ class ShapesTest(unittest.TestCase):
     @alloc      one TcRoot per test.
     """
 
-    def shape(self, cards=(), talks=()):
+    def shape(self, cards=(), talks=(), notes=()):
         """Feed for a root with these cards and these exchanges; checks ids and parents.
 
         Every node is drawn once, and each parent is the one the walk used
@@ -900,23 +904,24 @@ class ShapesTest(unittest.TestCase):
 
         `cards` is (name, reports_to) pairs, each a claude card on one
         account. `talks` is (x, y) pairs: one message x to y and one y to
-        x, both read, so both names have an inbox.
+        x, both read, so both names have an inbox; a pair listed k times
+        trades k messages each way. `notes` is (x, y) pairs of one message
+        x to y alone, read.
 
         @interacts  writes cards and message files in a fresh TcRoot; one
                     feed().
         @deps       _root.TcRoot, write_card, put_message, serve.Board,
                     check_parents_match_walk.
-        @complexity O(c + t) over c cards and t exchanges.
+        @complexity O(c + t + o) over c cards, t exchanges and o notes.
         @alloc      one TcRoot, removed before return; the feed, returned.
         """
         with _root.TcRoot() as root:
             for name, reports_to in cards:
                 write_card(root.path, name, reports_to=reports_to)
             seq = 0
-            for x, y in talks:
-                for sender, to in ((x, y), (y, x)):
-                    seq += 1
-                    put_message(root.path, seq, sender, to)
+            for sender, to in [way for x, y in talks for way in ((x, y), (y, x))] + list(notes):
+                seq += 1
+                put_message(root.path, seq, sender, to)
             feed = serve.Board(root=root.path).feed()
         ids = [node["id"] for node in feed["nodes"]]
         self.assertEqual(len(ids), len(set(ids)), f"a node is drawn twice: {ids}")
@@ -1130,6 +1135,53 @@ class ShapesTest(unittest.TestCase):
                           and node["reports_to"] in ids and node["reports_to"] != node["id"]]
                 self.assertEqual(badged, [], "a root names a parent node: the page draws a cycle no card makes")
 
+    # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    def test_one_message_between_siblings_leaves_both_under_their_relay(self):
+        """a relays to b and c, trading RELAY_TRADES messages each way with each; b mails c once: b and c stay under a (D27).
+
+        No cards. a holds 10 of b's 11 messages and 10 of c's 11, past
+        PARENT_MAJORITY, and a is a hub, so both are a's inferred workers
+        and a their inferred orchestrator. Must reject the old rule (a
+        parent only for a node with exactly one partner): b's one message
+        to c gives each two partners, and all three read as peers.
+
+        @interacts  one shape root.
+        @deps       shape, assert_nodes.
+        @complexity O(1): 21 messages.
+        @alloc      one feed.
+        """
+        feed = self.shape(talks=[("a", "b"), ("a", "c")] * RELAY_TRADES, notes=[("b", "c")])
+        self.assert_nodes(feed, {
+            "a": ("orchestrator", "inferred", 0, None),
+            "b": ("worker", "inferred", 1, "a"),
+            "c": ("worker", "inferred", 1, "a"),
+        })
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    def test_a_worker_split_evenly_between_two_relays_gets_no_guess(self):
+        """x trades one message each way with r1 and with r2, each a relay over two workers: x is a peer, role_source none (D27).
+
+        Neither relay holds PARENT_MAJORITY of x's messages, so no parent
+        is guessed. A peer is no guess: its role_source is `none`, and
+        `inferred` is nowhere on its node. The relays' own workers, whose
+        messages are all with their relay, are still guessed under them.
+        Must reject a peer marked inferred.
+
+        @interacts  one shape root.
+        @deps       shape, assert_nodes, by_id.
+        @complexity O(1).
+        @alloc      one feed.
+        """
+        feed = self.shape(talks=[("r1", "w1"), ("r1", "w2"), ("r2", "w3"), ("r2", "w4"), ("x", "r1"), ("x", "r2")])
+        self.assert_nodes(feed, {
+            "x": ("peer", "none", 0, None),
+            "r1": ("orchestrator", "inferred", 0, None),
+            "w1": ("worker", "inferred", 1, "r1"),
+            "w3": ("worker", "inferred", 1, "r2"),
+        })
+        x = by_id(feed)["x"]
+        self.assertNotIn("inferred", json.dumps(x), f"a peer carries a guess: {x}")
+
     def test_two_orchestrators_share_a_worker(self):
         """b reports to a by card, and x also mails b: b once, at level 1 under a.
 
@@ -1230,7 +1282,8 @@ class InferencePropertyTest(unittest.TestCase):
 
         Cards report only to a name earlier in a shuffled order, so the
         declared graph has no cycle. Mail runs between random names, and
-        sometimes from OUTSIDER, a partner that is no node.
+        sometimes from OUTSIDER, a partner that is no node. `partners` is
+        in feed()'s shape: {name: {partner: messages exchanged}}.
 
         @interacts  draws from `rng`.
         @deps       random.
@@ -1247,8 +1300,9 @@ class InferencePropertyTest(unittest.TestCase):
         for _ in range(rng.randint(0, MAIL_PER_NAME * len(names))):
             sender, to = rng.choice(names + [OUTSIDER]), rng.choice(names)
             if sender != to:
-                partners.setdefault(sender, set()).add(to)
-                partners.setdefault(to, set()).add(sender)
+                for one, other in ((sender, to), (to, sender)):
+                    mine = partners.setdefault(one, {})
+                    mine[other] = mine.get(other, 0) + 1
         return set(names), cards, partners
 
     def test_declared_edges_survive_any_mail_and_any_name_order(self):
@@ -1293,7 +1347,7 @@ class InferencePropertyTest(unittest.TestCase):
             fparents, froles, flevels = serve.hierarchy(
                 {flip[n] for n in names},
                 {flip[n]: {**c, "reports_to": flip.get(c["reports_to"])} for n, c in cards.items()},
-                {flip[n]: {flip[m] for m in ms} for n, ms in partners.items()})
+                {flip[n]: {flip[m]: count for m, count in ms.items()} for n, ms in partners.items()})
             self.assertEqual({back[n]: (back[p], s) for n, (p, s) in fparents.items()}, parents,
                              f"the names' order changed the parents: {where}")
             self.assertEqual({back[n]: r for n, r in froles.items()}, roles, f"the names' order changed a role: {where}")

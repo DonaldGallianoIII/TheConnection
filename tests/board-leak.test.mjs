@@ -45,7 +45,7 @@ function createFakeKit() {
 }
 
 /** One feed node, a listening peer unless `extra` says otherwise. @complexity O(1)  @alloc one object */
-const node = (id, extra) => ({ id, state: 'listening', role: 'peer', role_source: 'inferred', level: 0, parent: null, ...extra });
+const node = (id, extra) => ({ id, state: 'listening', role: 'peer', role_source: 'none', level: 0, parent: null, ...extra });
 /** One mailbox link between two names. @complexity O(1)  @alloc one object */
 const mailbox = (from, to) => ({ from, to, kind: 'mailbox', sent: { [from]: 1, [to]: 1 }, last_age_s: 1 });
 
