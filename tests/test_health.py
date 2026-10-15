@@ -155,7 +155,7 @@ class HealthCardsTest(unittest.TestCase):
         self.assertEqual(empty_json["cards"], [])
         self.assertIn("\ncards      none\n", empty_text)
         self.assertEqual(code, 0, err)
-        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-4. ssh_target,
+        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): ssh_target,
         # null unless the route is ssh, and the ssh card in `tc cards`' words.
         self.assertEqual(json.loads(out)["cards"], [
             {"name": "b", "kind": "claude", "account": "unknown", "route": "local", "reports_to": "a",

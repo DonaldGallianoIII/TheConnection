@@ -14,8 +14,9 @@ Status: unreviewed
             in a recorder, one wraps pathlib.Path.write_text, rename and
             os.open. Both patches end with the test. A third plants a
             symlink at the card's .tmp name, pointing at a file in the
-            harness's temp folder (DEBT-3). One test holds the inbox lock
-            itself and reads /proc/locks (LOW-9).
+            harness's temp folder, which the join must refuse to write
+            through. One test holds the inbox lock itself and reads
+            /proc/locks, to see that tc card counts and writes under it.
 @deps       python3 stdlib (argparse, collections.abc, contextlib, fcntl,
             importlib, io, json, os, pathlib, subprocess, sys, unittest,
             unittest.mock);
@@ -66,7 +67,7 @@ JOIN_READS = {"CODEX_THREAD_ID", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE
 DEFAULT_REMOTE_TC = "~/TheConnection/tc"
 EXIT_REFUSED = 1
 EXIT_BAD_NAME = 6
-# CARDS fix round 1 (Claude Opus 5.5, unreviewed): REC-13's note, written here.
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): the not-built note, written here.
 NOT_BUILT_NOTE = "note: sends to {name} are refused until the ssh route is built\n"
 BAD_NAME_WORDS = ('tc: bad name "{name}": letters, digits, dot, dash, underscore, '
                   '1 to 64, not starting with a dash\n')
@@ -304,7 +305,7 @@ class CardsTest(unittest.TestCase):
         self.assertEqual(list(card), CARD_FIELDS)
         self.assertEqual((card["route"], card["ssh"]), ("ssh", {"target": "u@h", "tc": DEFAULT_REMOTE_TC}))
         self.assertEqual(out, "card written: x (other, account unknown, route ssh to u@h)\n")
-        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): REC-13, while ssh is not in ROUTES.
+        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the not-built note, while ssh is not in ROUTES.
         self.assertEqual(err, NOT_BUILT_NOTE.format(name="x"))
         self.assertEqual(code2, 0, f"tc card y exited {code2}: {err2}")
         self.assertEqual(card2["ssh"], {"target": "h", "tc": "/opt/tc/tc"})
@@ -378,7 +379,7 @@ class CardsTest(unittest.TestCase):
         self.assertEqual(code2, 0, f"--force exited {code2}: {err2}")
         self.assertEqual(forced["route"], "ssh")
 
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-9.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): no send lands between tc card's count and write.
     def test_tc_card_counts_and_writes_under_the_inbox_lock(self):
         """With the test holding mail/.box-x.lock, `tc card x --ssh u@h` writes no card until it is released.
 
@@ -505,7 +506,7 @@ class CardsTest(unittest.TestCase):
         """cards/b.json comes only from a rename of a .tmp sibling; nothing writes it in place.
 
         White box, so it fails every run, not by timing luck. Must reject a
-        card written in place. Since the CARDS fix round (DEBT-3) the .tmp
+        card written in place. Since the CARDS fix round the .tmp
         is made by os.open with O_EXCL and O_NOFOLLOW, so os.open is
         recorded too, and the .tmp must come from exactly one such call.
 
@@ -560,7 +561,7 @@ class CardsTest(unittest.TestCase):
                          "the .tmp was opened without O_EXCL and O_NOFOLLOW")
         self.assertEqual(left, ["b.json"], f"cards/ holds {left}")
 
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): DEBT-3.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a link at the card's .tmp is refused.
     def test_a_link_planted_at_the_card_tmp_is_refused(self):
         """In process: a link at cards/b.json.<pid>.tmp makes tc join exit 1 with words; nothing is written through it.
 

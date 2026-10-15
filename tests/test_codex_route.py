@@ -79,9 +79,9 @@ import _root  # noqa: E402  (needs the path line above)
 # queued for the thread, 1 for a thread it does not know. phases.md R4 asks
 # for a fixture recorded from Codex 0.162.1 on 2026-10-14. This is not one:
 # agents never run the real codex, so it is written from the plan's words
-# (phases.md R4, decisions.md D3), and its label says so (CARDS fix round 1,
-# LOW-13). Donald's run (D4) records the real codes. The fakes below exit
-# with these.
+# (phases.md R4, decisions.md D3), and its label says so (CARDS fix round
+# 1). Donald's run (D4) records the real codes. The fakes below exit with
+# these.
 CODEX_FIXTURE_LABEL = ("written from the plan's words (0 queued, 1 unknown thread), "
                        "not recorded from a run of codex")
 CODEX_QUEUE_EXIT = {"queued": 0, "unknown thread": 1}
@@ -92,7 +92,7 @@ FAKE_UNKNOWN_THREAD_STDERR = "fake codex: no thread t1\n"
 THREAD = "t1"
 TC_PATH = str(_root.TC.resolve())
 RANG_WORDS = "rang codex {to} (queued; delivered when its turn ends or the session is resumed)"
-# C2's ring line. Since the CARDS fix round (REC-9) each command carries
+# C2's ring line. Since the CARDS fix round each command carries
 # the mailbox root, and both words are quoted with shlex.quote.
 RING_MESSAGE = ("MAIL: {n} unread for {to}. Run: TC_ROOT={root} {tc} read {to}, act on it, "
                 "reply with TC_ROOT={root} {tc} send --from {to} --to {sender}.")
@@ -428,7 +428,7 @@ class CodexRouteTest(unittest.TestCase):
     def test_the_fixture_is_labeled(self):
         """The fixture's label says plainly it is written from the plan's words, not recorded from codex.
 
-        The label names the same codes the fakes use (LOW-13). It guards the
+        The label names the same codes the fakes use. It guards the
         wording: a label that claims a recording fails here.
 
         @interacts  none.
@@ -794,10 +794,9 @@ class CodexRouteTest(unittest.TestCase):
         out, and os.killpg for a recorder, so nothing runs and no signal is
         sent. The test also checks the ring's stdin is /dev/null, it waits
         30 s, it starts codex in a session of its own and kills that group
-        (CARDS fix round 1, LOW-7), and it decodes with errors="replace"
-        (LOW-8). Since D16 the words name when a send rings again (the
-        marker's time plus RING_BACKOFF_SECONDS), and the marker says
-        `timed out`.
+        (CARDS fix round 1), and it decodes with errors="replace". Since
+        D16 the words name when a send rings again (the marker's time plus
+        RING_BACKOFF_SECONDS), and the marker says `timed out`.
 
         @interacts  loads tc in process; patches subprocess.Popen and
                     os.killpg for one deliver_codex call, which writes one
@@ -858,7 +857,7 @@ class CodexRouteTest(unittest.TestCase):
         self.assertEqual(waits, [CODEX_RING_SECONDS])
         self.assertEqual(killed, [(STAND_IN_PID, signal.SIGKILL)])
 
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-7.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a timeout kills codex's whole group.
     def test_a_ring_that_times_out_kills_codex_and_its_child(self):
         """In process, with the timeout patched to 2 s: a codex that started a child of its own leaves nothing running.
 
@@ -897,7 +896,7 @@ class CodexRouteTest(unittest.TestCase):
         self.assertTrue(fake_gone, "the timed-out codex is still running")
         self.assertTrue(child_gone, "codex's own child outlived the timed-out ring")
 
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): REC-9.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the ring names the root.
     def test_the_ring_names_the_root_and_quotes_it(self):
         """In process, with TC_ROOT holding a space: the ring's line is `TC_ROOT=<quoted root> <quoted tc>` in both commands.
 
@@ -948,7 +947,7 @@ class CodexRouteTest(unittest.TestCase):
                                                           root=shlex.quote(str(spaced.resolve()))))
         self.assertIn(f"TC_ROOT='{spaced.resolve()}' ", seen[0][-1])
 
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-8.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): odd bytes from codex.
     def test_odd_bytes_from_codex_never_fail_a_send(self):
         """A fake that writes bytes that are not UTF-8 to stderr and exits 1: the send exits 0 and warns.
 

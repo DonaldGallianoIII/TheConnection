@@ -13,9 +13,10 @@ Status: unreviewed
             Two tests load tc as a module (TC_ROOT set to the harness root
             first, put back after) and call cmd_send or deliver_local in
             process, so they write under that root only. Two tests hold
-            the inbox lock themselves and read /proc/locks (LOW-9). One
-            plants a symlink at a message's .tmp name, pointing at a file
-            in the harness's temp folder (DEBT-3).
+            the inbox lock themselves and read /proc/locks, to see how a
+            local send takes it. One plants a symlink at a message's .tmp
+            name, pointing at a file in the harness's temp folder, which
+            the send must refuse to write through.
 @deps       python3 stdlib (argparse, contextlib, fcntl, importlib, io,
             json, os, pathlib, subprocess, sys, unittest); tests/_root.py;
             RELEASE_CEILING_SECONDS and wait_until_blocked from
@@ -59,9 +60,9 @@ NEW_INBOX_WORDS = "new inbox: nobody has joined as {name}\n"
 # is room for a loaded machine, not a wait anyone expects.
 SHARED_SEND_CEILING_SECONDS = 5
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the refusals' words,
-# written here. REC-13: the not-built refusal reads like the other two.
+# written here. The not-built refusal reads like the other two.
 NOT_BUILT_WORDS = "tc send: route {route} is not built yet; nothing sent\n"
-# LOW-15: who fixes a bad card. Never the sender running tc join.
+# Who fixes a bad card. Never the sender running tc join.
 CARD_FIX_WORDS = ("Ask {to}'s owner to rejoin (tc join {to}, run in {to}'s own session), or, "
                   "if {to} lives on another machine, write its card with tc card {to} --ssh <target>.")
 EMPTY_WORDS = "tc send: empty message\n"
@@ -276,10 +277,10 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(code, EXIT_REFUSED, f"exited {code}: {err}")
         self.assertIn("b.json is unreadable", err)
         self.assertEqual(after, before, "a send to an unreadable card wrote a file")
-        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-15.
+        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): who fixes a bad card.
         self.assertTrue(err.endswith("nothing sent. " + CARD_FIX_WORDS.format(to="b") + "\n"), err)
 
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-10.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a card with no string route.
     def test_a_card_with_no_route_is_refused_in_words(self):
         """A hand-made card with no route, a null route, or route 5: exit 1, the file named, `has no route`, never `None`.
 
@@ -303,7 +304,7 @@ class RouterTest(unittest.TestCase):
                 self.assertNotIn("None", err)
                 self.assertEqual(after, before, f"a card with no route wrote {sorted(set(after) - set(before))}")
 
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-11.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): exit 1 as a number, through refuse.
     def test_an_empty_message_is_refused_through_refuse_with_exit_1(self):
         """An empty message exits 1 with `tc send: empty message`, in process and as a command.
 
@@ -328,7 +329,7 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(said.getvalue(), EMPTY_WORDS)
         self.assertEqual(after, [], f"an empty message wrote {after}")
 
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13, REC-2.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13, the warning reads the card file.
     def test_the_new_inbox_warning_keys_on_the_card_file(self):
         """In process: deliver_local(None, ...) to a joined name with no inbox gives no warning.
 
@@ -348,7 +349,7 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(got.exit, 0)
         self.assertEqual(got.warnings, [], "a joined name got the new-inbox warning")
 
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): DEBT-3.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a link at a message's .tmp is refused.
     def test_a_link_planted_at_the_message_tmp_is_refused(self):
         """A link at the next message's .tmp name: the send exits 1 with words, and nothing is written through it.
 
@@ -417,7 +418,7 @@ class RouterTest(unittest.TestCase):
         self.assertTrue(header.startswith("# #1 from x to b, "), header)
         self.assertTrue(header.endswith(", via ssh gate, key x"), header)
 
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-9.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a local send lands under the inbox lock.
     def test_a_local_send_waits_for_a_held_inbox_lock(self):
         """With the test holding mail/.box-b.lock alone, a send to b (no card) does not land until it is released.
 

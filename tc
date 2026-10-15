@@ -12,8 +12,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   status/<name>.md                         latest self-reported status
   mail/.seq                                message counter (flock guarded)
   mail/.watch-<name>.lock                  held by `tc watch <name>` while it runs
-  mail/.box-<name>.lock                    the inbox lock: send, tc read, tc card (D14)
-  mail/.ring-pending-<name>                a codex ring owed after one failed (D14)
+  mail/.box-<name>.lock                    the inbox lock: send, read, card, codex join (D14)
+  mail/.ring-pending-<name>                a codex ring owed, and why (D14, D16)
   cards/<name>.json                        one address card per name (C1)
 
 @interacts  writes mail/, status/ and cards/ under ROOT; no network. The waking side is
@@ -37,13 +37,17 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             every inbox and read/ (one stat each: hundreds to thousands, and
             it grows with the history). Each watch poll O(k + n) plus one
             nvidia-smi run where it exists; it reads no cards. O(p) once per
-            heartbeat. join O(1); card O(u) for its unread count; cards O(c).
+            heartbeat. join O(1), or O(u) for a codex card's unread count;
+            card O(u) for its unread count; cards O(c).
 @alloc      one file per message, kept forever (read/ is the history); one
-            card per name, replaced on a rejoin. Nothing
-            held in memory past one command. `wait` measured flat at 13 MB RSS
-            over 200k polls; it also hard-caps itself at WAIT_MEMORY_CAP_BYTES
-            so a runaway dies alone. `wait` holds mail/.wait-<name>.lock for its
-            lifetime; the kernel releases it when the process exits or is killed.
+            card per name, replaced on a rejoin; one inbox lock file per
+            name (mail/.box-<name>.lock), kept; one ring marker per codex
+            name (mail/.ring-pending-<name>), kept until a ring exits 0.
+            Nothing held in memory past one command. `wait` measured flat at
+            13 MB RSS over 200k polls; it also hard-caps itself at
+            WAIT_MEMORY_CAP_BYTES so a runaway dies alone. `wait` holds
+            mail/.wait-<name>.lock for its lifetime; the kernel releases it
+            when the process exits or is killed.
 """
 
 import argparse
@@ -113,6 +117,8 @@ CARD_VERSION = 1
 # far past any card tc writes, and it bounds what one hand-made file can
 # make tc health, tc cards or a send read. A file over it is unreadable.
 CARD_READ_MAX_BYTES = 65536
+# C1's kinds of session, and the only values `tc join --kind` takes. A codex
+# card is the one the codex route rings; claude and other route local.
 CARD_KINDS = ("claude", "codex", "other")
 # The account word when nothing names one. C1: never a blank.
 UNKNOWN_ACCOUNT = "unknown"
@@ -143,7 +149,7 @@ CODEX_RING_SECONDS = 30
 THREAD_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 # How a .tmp file is made: create it, fail if anything at all already has
 # that name (O_EXCL), and never follow a link (O_NOFOLLOW). A link planted at
-# a .tmp name someone can guess is refused, never written through (DEBT-3).
+# a .tmp name someone can guess is refused, never written through.
 NEW_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 # The new file's mode before the umask, the same as open() gives one.
 NEW_FILE_MODE = 0o666
@@ -260,7 +266,7 @@ def next_seq():
     return n
 
 
-# CARDS fix round 1 (Claude Opus 5.5, unreviewed): the inbox lock (D14, LOW-9).
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): the inbox lock (D14), for send, read and card.
 @contextlib.contextmanager
 def inbox_lock(name, how=fcntl.LOCK_EX):
     """Hold mail/.box-<name>.lock (flock) for the `with` block.
@@ -273,9 +279,10 @@ def inbox_lock(name, how=fcntl.LOCK_EX):
     to its rename: local senders never queue behind each other, only
     behind those four. So a send never lands between a reader's glob and
     its renames (the lost wake, D14), and never lands in an inbox after a
-    `tc card` for that name counted it (LOW-9). Nothing slow runs under it:
-    the codex ring waits until it is released, and `tc read` prints after
-    it is released, so a reader stalled on its stdout never blocks a send.
+    `tc card` for that name counted it, where it would never be read once
+    the card says ssh. Nothing slow runs under it: the codex ring waits
+    until it is released, and `tc read` prints after it is released, so a
+    reader stalled on its stdout never blocks a send.
 
     @interacts  makes mail/; opens mail/.box-<name>.lock, creating it empty
                 (append mode, so it never truncates what is there), and holds
@@ -283,7 +290,8 @@ def inbox_lock(name, how=fcntl.LOCK_EX):
                 process dies.
     @deps       contextlib, fcntl.
     @complexity O(1), plus however long another holder keeps it.
-    @alloc      one open file for the block.
+    @alloc      one open file for the block; mail/.box-<name>.lock, made on
+                first use and kept (nothing removes it).
     """
     MAIL.mkdir(parents=True, exist_ok=True)
     with open(MAIL / f".box-{name}.lock", "a") as lock:
@@ -291,7 +299,7 @@ def inbox_lock(name, how=fcntl.LOCK_EX):
         yield
 
 
-# CARDS fix round 1 (Claude Opus 5.5, unreviewed): DEBT-3.
+# CARDS fix round 1 (Claude Opus 5.5, unreviewed): a link planted at a .tmp name is refused.
 def write_new_file(path, text):
     """Create `path`, which must not exist yet, and write `text` into it.
 
@@ -318,7 +326,7 @@ def cmd_send(args):
     No card means route local: today's send, with today's stdout line. A
     local delivery reads the card again under the inbox lock (shared) and
     lands under it, so a `tc card` for this name either counts this message
-    or is read here first (LOW-9). The codex route takes the lock itself.
+    or is read here first. The codex route takes the lock itself.
     The route's Delivery decides the rest: words to stdout on exit 0, else
     to stderr; every warning to stderr; then its exit code.
 
@@ -340,10 +348,10 @@ def cmd_send(args):
     # CARDS R3 (Claude Opus 5.5, unreviewed): size, then the card, then the route.
     body = read_body(args.message)
     if not body.strip():
-        refuse("tc send: empty message", EXIT_REFUSED)  # CARDS fix round 1: LOW-11
+        refuse("tc send: empty message", EXIT_REFUSED)  # CARDS fix round 1 (Claude Opus 5.5, unreviewed)
     card, deliver = card_route(args.to)
     if deliver is deliver_local:
-        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-9.
+        # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the card read again under the shared lock.
         with inbox_lock(args.to, fcntl.LOCK_SH):
             card, deliver = card_route(args.to)
             if deliver is deliver_local:
@@ -707,8 +715,8 @@ def all_cards():
     @interacts  globs cards/*.json and reads each through
                 read_regular_file. Writes nothing.
     @deps       read_regular_file, CARD_READ_MAX_BYTES; json, pathlib.
-    @complexity O(n) over n cards (single digits).
-    @alloc      one list of n dicts, returned.
+    @complexity O(c) over c cards (a few dozen).
+    @alloc      one list of c dicts, returned.
     """
     out = []
     for path in sorted(CARDS.glob("*.json")) if CARDS.exists() else []:
@@ -821,7 +829,8 @@ def cmd_card(args):
 
     @interacts  checks both names and a self-report (exit 6), the ssh
                 target and the remote tc path (exit 6); then, holding
-                mail/.box-<name>.lock alone (LOW-9), counts unread mail in
+                mail/.box-<name>.lock alone from count to write, so no
+                send lands between them, counts unread mail in
                 mail/to-<name>/ without creating it, refuses (exit 1) when
                 there is any unless --force, and writes cards/<name>.json
                 through write_card; prints the card line, then on stderr a
@@ -848,7 +857,7 @@ def cmd_card(args):
         "version": CARD_VERSION,
         "name": args.name,
         "kind": "other",
-        "account": far_account(args.account),  # CARDS fix round 1: D13
+        "account": far_account(args.account),  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13
         "route": "ssh",
         "session_id": None,
         "pid": None,
@@ -857,8 +866,8 @@ def cmd_card(args):
         "reports_to": args.reports_to,
         "joined_at": now_iso(),
     }
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-9. Count and write
-    # under the inbox lock, so no send lands here between the two.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): count and write under
+    # the inbox lock, so no send lands here between the two.
     with inbox_lock(args.name):
         waiting = unread_count(args.name)
         if waiting and not args.force:
@@ -867,8 +876,8 @@ def cmd_card(args):
                    f"(tc read {args.name}), or pass --force.", EXIT_REFUSED)
         write_card(card)
     print(f"card written: {describe_card(card)}")
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): REC-13. Silent once
-    # the route's lane adds its line to ROUTES.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): say that sends are
+    # refused for now. Silent once the route's lane adds its line to ROUTES.
     if card["route"] not in ROUTES:
         print(f"note: sends to {args.name} are refused until the {card['route']} route is built",
               file=sys.stderr)
@@ -882,7 +891,7 @@ def cmd_cards(args):
 
     @interacts  reads cards/*.json through all_cards; prints to stdout.
     @deps       all_cards, describe_card, printable.
-    @complexity O(n) over n cards (single digits).
+    @complexity O(c) over c cards (a few dozen).
     @alloc      the list of cards, freed on exit.
     """
     cards = all_cards()
@@ -932,17 +941,17 @@ def read_card(name):
 
 
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): one place picks the route,
-# so cmd_send can ask again under the inbox lock (LOW-9).
+# so cmd_send can ask again under the inbox lock.
 def card_route(to):
     """The card for `to` and the ROUTES function its route names. Refuses what it cannot route.
 
     No card is route local. Each refusal is words on stderr, exit 1,
     nothing written: a card that is not a JSON object, a card with no
-    string route (LOW-10), and a route not in ROUTES (C2, REC-13). The
-    first two tell the sender who fixes the card: that name's owner, by
-    rejoining in its own session, or the sender with `tc card` for a name
-    on another machine. Never `tc join` run by the sender, which would
-    write the sender's own identity into the card (LOW-15).
+    string route, and a route not in ROUTES (C2). The first two tell the
+    sender who fixes the card: that name's owner, by rejoining in its own
+    session, or the sender with `tc card` for a name on another machine.
+    Never `tc join` run by the sender, which would write the sender's own
+    identity into the card.
 
     @interacts  reads cards/<to>.json (read_card); on a refusal writes one
                 line to stderr and exits.
@@ -1022,12 +1031,12 @@ def deliver_local(card, sender, to, body, header_note=None):
     path = inbox(to) / f"{n:0{SEQ_WIDTH}d}-from-{sender}.md"
     tmp = path.with_suffix(".tmp")
     header = f"# #{n} from {sender} to {to}, {now_iso()}" + (f", {header_note}" if header_note else "")
-    try:  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): DEBT-3
+    try:  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a planted link is refused
         write_new_file(tmp, f"{header}\n\n{body.rstrip()}\n")
     except OSError as err:
         return Delivery(EXIT_REFUSED, f"tc send: could not create {tmp} ({err.strerror}); nothing sent", [])
     tmp.rename(path)  # atomic, so a waiter never reads a half-written file
-    joined = (CARDS / f"{to}.json").exists()  # CARDS fix round 1: D13
+    joined = (CARDS / f"{to}.json").exists()  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13
     warnings = [] if box_existed or joined else [f"new inbox: nobody has joined as {to}"]
     return Delivery(0, f"sent #{n} to {to}: {path}", warnings)
 
@@ -1225,10 +1234,10 @@ def ring_codex(card, sender, to, count):
     THREAD_ID_PATTERN's shape, never reaches codex's argv (D14): the
     words say which. The line names the mailbox root as well as tc, both
     quoted, so a Codex session whose own default root differs reads and
-    replies in this one (REC-9). codex runs in a session of its own: past CODEX_RING_SECONDS
-    its whole process group is killed, so a child it started (a node
-    CLI's native codex) is not left behind (LOW-7). Its output is decoded
-    with errors="replace", so odd bytes never fail a send (LOW-8).
+    replies in this one. codex runs in a session of its own: past
+    CODEX_RING_SECONDS its whole process group is killed, so a child it
+    started (a node CLI's native codex) is not left behind. Its output is
+    decoded with errors="replace", so odd bytes never fail a send.
 
     @interacts  when the thread_id passes, starts `codex queue --thread
                 <thread_id> --message <C2's line>` in a new session with
@@ -1249,7 +1258,7 @@ def ring_codex(card, sender, to, count):
         return RingFailure("its card has no thread_id", False)
     if not isinstance(thread, str) or not THREAD_ID_PATTERN.fullmatch(thread):
         return RingFailure("its card's thread_id is not a thread id", False)
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): REC-9, LOW-7, LOW-8.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the root in the line, a session of its own, odd bytes.
     run = f"TC_ROOT={shlex.quote(str(ROOT.resolve()))} {shlex.quote(str(pathlib.Path(__file__).resolve()))}"
     message = (f"MAIL: {count} unread for {to}. Run: {run} read {to}, act on it, "
                f"reply with {run} send --from {to} --to {sender}.")
@@ -1436,7 +1445,7 @@ def cards_summary():
 
     The name is the file's (cards/<name>.json), the one the router reads.
     ssh_target is an ssh card's target (`u@h`), so `tc health` can say
-    what `tc cards` says; null for any other route (LOW-4). A card that is
+    what `tc cards` says; null for any other route. A card that is
     not a JSON object keeps its name with the other five fields null, so
     it still shows.
 
@@ -1448,7 +1457,7 @@ def cards_summary():
     out = []
     for file_name, card in all_cards():
         card = card or {}
-        ssh = card.get("ssh")  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): LOW-4
+        ssh = card.get("ssh")  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): ssh_target
         target = ssh.get("target") if card.get("route") == "ssh" and isinstance(ssh, dict) else None
         out.append({"name": pathlib.Path(file_name).stem, "kind": card.get("kind"),
                     "account": card.get("account"), "route": card.get("route"),
@@ -1523,7 +1532,7 @@ def cmd_health(args):
     cards = []
     for c in snap["cards"]:
         shown = {k: ("?" if v is None and k != "reports_to" else v) for k, v in c.items()}
-        if c["ssh_target"] is not None:  # CARDS fix round 1: LOW-4, `route ssh to <target>`
+        if c["ssh_target"] is not None:  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): `route ssh to <target>`
             shown["ssh"] = {"target": c["ssh_target"]}
         cards.append(describe_card(shown))
     print("cards      " + ("\n           ".join(cards) if cards else "none"))
