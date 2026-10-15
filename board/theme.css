@@ -206,6 +206,17 @@
  * in a look's token set. */
 .tc-backdrop {
   --tc-page-pad: 16px;
+  /* Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15.
+   * Status: unreviewed. Sizes too. The stale line's height, from its
+   * parts: one 12 px line of words, its padding and its border, top and
+   * bottom. A root jump stops --tc-jump-gap under the top of the screen,
+   * and while the line is up, that far under the line, so the line never
+   * covers the heading the jump brought into view. */
+  --tc-stale-line: 16px;
+  --tc-stale-pad: 4px;
+  --tc-stale-border: 1px;
+  --tc-stale-h: calc(var(--tc-stale-line) + 2 * var(--tc-stale-pad) + 2 * var(--tc-stale-border));
+  --tc-jump-gap: 8px;
   min-height: 100vh;
   min-height: 100dvh;
   margin: 0;
@@ -326,14 +337,19 @@
   background: var(--tc-bg);
   font-family: var(--tc-mono);
   font-size: 12px;
+  line-height: var(--tc-stale-line);
   font-weight: 700;
   color: var(--tc-text);
-  border: 1px dashed var(--tc-text);
+  border: var(--tc-stale-border) dashed var(--tc-text);
   border-radius: 6px;
-  padding: 4px 10px;
+  padding: var(--tc-stale-pad) 10px;
 }
 .tc-stale[hidden] { display: none; }
 .tc-win[data-conn="stale"] .tc-wire.flow { animation: none; }
+/* Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+ * unreviewed. While the stale line sticks to the top, a root jump stops
+ * under it, not behind it. */
+.tc-win[data-conn="stale"] :is(.tc-head, .tc-group-head, .tc-row) { scroll-margin-top: calc(var(--tc-stale-h) + var(--tc-jump-gap)); }
 
 /* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
  * unreviewed. The footer: the legend on its own first row, then
@@ -432,7 +448,7 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  scroll-margin-top: 8px;
+  scroll-margin-top: var(--tc-jump-gap);
 }
 .tc-head[hidden] { display: none; }
 
@@ -456,10 +472,10 @@
   border-bottom: 1px solid var(--tc-line);
   padding-bottom: 3px;
   margin-bottom: 4px;
-  scroll-margin-top: 8px;
+  scroll-margin-top: var(--tc-jump-gap);
   overflow-wrap: anywhere;
 }
-.tc-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 3px 0 3px 8px; scroll-margin-top: 8px; }
+.tc-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 3px 0 3px 8px; scroll-margin-top: var(--tc-jump-gap); }
 .tc-row-note[hidden], .tc-group-head[hidden] { display: none; }
 .tc-row.nested { border-left: 2px solid var(--tc-line); }
 /* Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status:
@@ -502,7 +518,15 @@
  * narrow, so each is widened a little to read as one at 11 px. */
 .tc-node-role { flex: none; font-size: 11px; font-weight: 500; white-space: pre; word-spacing: .2em; }
 .tc-node-sub { font-size: 11px; color: var(--tc-dim); font-family: var(--tc-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tc-node-note { font-size: 11px; color: var(--tc-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+ * unreviewed. A box's third line: its unread words first, whole (`2
+ * unread`, `unread unknown`, never cut), then its note, which may shorten.
+ * The state words have the second line to themselves, so `woken · not
+ * read` is never cut either (look.js createNode). */
+.tc-node-line { display: flex; min-width: 0; font-size: 11px; }
+.tc-node-line[hidden], .tc-node-unread[hidden] { display: none; }
+.tc-node-unread { flex: none; font-size: 11px; font-family: var(--tc-mono); color: var(--tc-dim); white-space: pre; }
+.tc-node-note { min-width: 0; font-size: 11px; color: var(--tc-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tc-node-note[hidden] { display: none; }
 .tc-node-glyph { display: inline-block; width: 1.2em; }
 /* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.

@@ -317,6 +317,9 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     - Scroll to the bottom of the board. The stale line stays at the top of
       the screen, on its own face. Narrow to phone width and scroll the
       outline: the same.
+    - Still stale, scroll back to the top and click a root in the roots
+      list. Its tree's heading comes to just under the stale line, never
+      behind it. The same at phone width.
     - Restart the server with the same command and open the new URL it
       prints (the token is new). Nothing reads `✕ no listener`,
       `◔ working` or `△ woken · not read` until a listener has been seen

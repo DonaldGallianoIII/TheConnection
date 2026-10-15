@@ -41,7 +41,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import {
   layoutLevels, layoutWidth, roleTitle, fitTransform, boardView, createBoard, createFit, createKit, levelPort, rootsList,
-  outlineView, createCanvas, patchBoard, STATES, CONFIG, LEGEND_WORDS,
+  outlineView, createCanvas, createNode, patchBoard, STATES, CONFIG, LEGEND_WORDS, UNREAD_WORDS,
 } from '../board/look.js';
 
 /** One feed node with the fields the layout reads. @complexity O(1)  @alloc one object */
@@ -202,7 +202,8 @@ const FOURTEEN = {
 };
 // The text drawn inside the board's view, so scaled with it, the headings
 // over the trees too.
-const BOARD_TEXT = ['.tc-node-title', '.tc-node-role', '.tc-node-sub', '.tc-node-note', '.tc-node-badge', '.tc-wire-label', '.tc-head'];
+const BOARD_TEXT = ['.tc-node-title', '.tc-node-role', '.tc-node-sub', '.tc-node-line', '.tc-node-unread', '.tc-node-note', '.tc-node-badge',
+  '.tc-wire-label', '.tc-head'];
 const CSS = readFileSync(new URL('../board/theme.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
 
 /**
@@ -861,6 +862,27 @@ test('the outline is brought up to date in place: an age tick rewrites only traf
   assert.equal(p1.children[0].hidden, true, 'p1\'s tree of one draws a heading');
   kit.revealOutline('p1');
   assert.equal(p1.children[1].scrolled, 1, 'the jump to p1 did not reach its row');
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+// One ellipsized line held `woken · not read · unread unknown` and cut C5's
+// words. The state words now have their line; the unread words lead the next.
+test('a node\'s state words have the second line to themselves, and its unread words lead the third, whole', () => {
+  const doc = createFakeDoc();
+  const canvas = createCanvas(doc, doc.createElement('div'));
+  const node = createNode(doc, canvas, {
+    title: 'y1 · worker', pos: { x: 0, y: 0 }, state: 'woken', detail: UNREAD_WORDS.unknown, note: 'last status: parsing the logs', levels: true,
+  });
+  const part = (cls) => everyEl(node.root).find((e) => e.className === cls);
+  assert.equal(part('tc-node-sub').textContent, `${STATES.woken.glyph}${STATES.woken.word}`, 'the state line holds more than the state');
+  assert.equal(part('tc-node-unread').textContent, `${UNREAD_WORDS.unknown} · `);
+  assert.equal(part('tc-node-note').textContent, 'last status: parsing the logs');
+  assert.deepEqual(part('tc-node-line').children.map((e) => e.className), ['tc-node-unread', 'tc-node-note'], 'the unread words do not lead the line');
+  node.setNote('');
+  assert.deepEqual([part('tc-node-unread').textContent, part('tc-node-note').hidden, part('tc-node-line').hidden], [UNREAD_WORDS.unknown, true, false]);
+  node.setState('listening', '');
+  assert.equal(part('tc-node-line').hidden, true, 'an empty third line still shows');
+  assert.equal(cssRule('.tc-node-unread').includes('flex: none'), true, 'the unread words may shrink');
 });
 
 // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.

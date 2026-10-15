@@ -401,6 +401,11 @@ test('a token outside Latin-1 is called damaged in words, never `is serve.py run
   assert.equal(tokenProblem('abcDEF0189_-xyz'), null);
   // A Latin-1 character rides in the header; the server refuses it (401, token refused).
   assert.equal(tokenProblem('abcé'), null);
+  // Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+  // NUL, LF and CR are Latin-1, yet fetch refuses them in a header: damage too.
+  for (const token of ['abc\ndef', 'abc\rdef', 'abc\0def', 'abcdef\n']) {
+    assert.equal(tokenProblem(token), CONN_WORDS.tokenDamaged, `${JSON.stringify(token)} would make fetch throw`);
+  }
 });
 
 test('a down node\'s status reads as its last status, never as its state now', () => {

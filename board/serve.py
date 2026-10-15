@@ -1294,9 +1294,12 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
     127.0.0.1:<port> or localhost:<port>: 421. A method other than GET or
     HEAD: 405. /feed without the right X-TC-Token header: 401. A path not
     on STATIC_FILES (or not on disk): 404. Every refusal has no body,
-    http.server's own too (send_error: a request it cannot parse is
-    refused before the Host check, with 400, 414, 431 or 505). The whole
-    request, read and answer, has REQUEST_DEADLINE_S (setup()).
+    http.server's own too (send_error), which come before the Host check:
+    a request whose version http.server has read gets 400, 414 or 431, a
+    status line and no body; one it still holds as HTTP/0.9 gets no bytes
+    at all, not even a status line: a one-word request line, an unreadable
+    version (`GET / FOO/1.0`) and HTTP/2.0, whose 505 never goes out. The
+    whole request, read and answer, has REQUEST_DEADLINE_S (setup()).
 
     @interacts  reads the request; writes one response; calls the server's
                 Board.feed() under its lock; reads one file in board/.
@@ -1404,7 +1407,9 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
         an HTTP version it does not speak), before answer() and its Host
         check run. Its own page would carry a body, so every refusal here
         is empty, and the connection closes. A request it read as HTTP/0.9
-        gets no status line either, as that version has none.
+        gets no status line either, as that version has none: a one-word
+        request line, an unreadable version, and HTTP/2.0, whose 505 is
+        never sent.
 
         @interacts  writes one empty response.
         @deps       send_empty.

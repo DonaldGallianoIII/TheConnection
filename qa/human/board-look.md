@@ -10,7 +10,8 @@ Updated for the shapes demo by Claude Opus 5.5 (the BOARD lane agent),
 2026-10-14, for routing, labels, headings, the outline, native badges
 and wires beside their tree lines by Claude Opus 5.5 (the BOARD fixer),
 and for D24's working and woken states and the dash-dot line by Claude
-Opus 5.5 (the P4 phase fixer), 2026-10-15.
+Opus 5.5 (the P4 phase fixer), 2026-10-15, and for the unread words on a
+line of their own by the same fixer's round 2.
 Status: unreviewed, not yet run by a person. `tests/board-browser-check.mjs` measures the same page frame on
 the live board (see `qa/human/board-live.md`); this script is the demo's.
 
@@ -37,7 +38,10 @@ the live board (see `qa/human/board-live.md`); this script is the demo's.
      screen.
    - Each box has a colored bar on its left edge (identity only) and up to
      three lines: the title (`a · orchestrator`, with a space each side of
-     the dot), the state, and a status line where one is set. `b` and
+     the dot), the state's glyph and word alone, and a line with the unread
+     count first, never cut (`1 unread` on `b` and `y1`), then the status
+     where one is set. `y1`'s second line reads `△ woken · not read` in
+     full. `b` and
      `docs` share an account, so each also carries a dashed badge in words:
      `native with docs · not observed` on `b`, `native with b · not
      observed` on `docs`.

@@ -492,8 +492,11 @@ export function createRoots(doc, parent, onJump) {
  * left and right edges (portPoint), or with `levels` on the top and bottom
  * edges (levelPort), as the live board draws them. The
  * title splits at its first ' · ': the name may shorten with an ellipsis,
- * the role words after it never do. A third line holds `note` (a status
- * line, or a reports_to that names nobody); empty, it is hidden. Under it,
+ * the role words after it never do. The second line holds the state's
+ * glyph and word alone, so a long one (`woken · not read`) is never cut.
+ * A third line holds `detail` (the unread words: `2 unread`, `unread
+ * unknown`) in full, then `note` (a status line, or a reports_to that
+ * names nobody), which may shorten; with neither, it is hidden. Under it,
  * one badge line per item of `badges` ({ lead, names, tail, text }: a
  * native pair, a cycle's root or an inbox the board could not list, in
  * words), each in a dashed rule; only
@@ -518,9 +521,25 @@ export function createNode(doc, canvas, { title, hue, pos, state, detail, note, 
   const glyph = el(doc, 'span', 'tc-node-glyph');
   const word = el(doc, 'span');
   sub.append(glyph, word);
+  // Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+  // unreviewed. The third line: the unread words, never cut, then the note.
+  const line = el(doc, 'span', 'tc-node-line');
+  const unreadPart = el(doc, 'span', 'tc-node-unread');
   const noteLine = el(doc, 'span', 'tc-node-note');
+  line.append(unreadPart, noteLine);
   const badgeBox = el(doc, 'span', 'tc-node-badges');
-  body.append(t, sub, noteLine, badgeBox);
+  body.append(t, sub, line, badgeBox);
+  let detailText = '';
+  let noteText = '';
+  // The unread words lead the line, with a ` · ` before the note when
+  // both are there; the line hides when it has neither.
+  const fillLine = () => {
+    unreadPart.textContent = detailText && noteText ? `${detailText} · ` : detailText;
+    unreadPart.hidden = !detailText;
+    noteLine.textContent = noteText;
+    noteLine.hidden = !noteText;
+    line.hidden = !detailText && !noteText;
+  };
   const half = CONFIG.PORT_SIZE / 2;
   const at = levels ? levelPort : portPoint;
   const origin = { x: 0, y: 0 };
@@ -559,7 +578,9 @@ export function createNode(doc, canvas, { title, hue, pos, state, detail, note, 
       const st = STATES[s] || STATES.idle;
       root.dataset.state = s;
       glyph.textContent = st.glyph;
-      word.textContent = d ? `${st.word} · ${d}` : st.word;
+      word.textContent = st.word;
+      detailText = d || '';
+      fillLine();
     },
     setTitle(title) {
       const text = String(title ?? '');
@@ -569,8 +590,8 @@ export function createNode(doc, canvas, { title, hue, pos, state, detail, note, 
       root.title = text;
     },
     setNote(text) {
-      noteLine.textContent = text || '';
-      noteLine.hidden = !text;
+      noteText = text || '';
+      fillLine();
     },
     moveTo(p) {
       node.pos = p;
@@ -2313,21 +2334,31 @@ const HTTP_UNAUTHORIZED = 401;
 // The highest code point an HTTP header value may hold: fetch refuses a
 // header past Latin-1 before it sends anything.
 const LATIN1_MAX = 0xff;
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+// unreviewed. NUL, LF and CR: Latin-1, but fetch refuses a header value
+// that holds one inside it, before anything is sent. A fragment's %00, %0A
+// or %0D decodes to them. A token never holds one, so one anywhere is
+// damage.
+const HEADER_REFUSED = Object.freeze(['\0', '\n', '\r']);
 
 /**
  * What is wrong with the URL's token before any request: CONN_WORDS.noToken
  * when there is none, CONN_WORDS.tokenDamaged when it holds a character
- * outside Latin-1 (a pasted ellipsis, say), which cannot ride in the
- * X-TC-Token header, so fetch would throw and the pill would blame a
- * server that is running; else null. serve.py's tokens are token_urlsafe,
- * so any such character is damage; any other wrong token reaches the
+ * outside Latin-1 (a pasted ellipsis, say) or one of HEADER_REFUSED (NUL,
+ * LF, CR), which fetch refuses in the X-TC-Token header, so fetch would
+ * throw and the pill would blame a server that is running; else null.
+ * serve.py's tokens are token_urlsafe and hold none of these, so any of
+ * them, wherever it sits, is damage; any other wrong token reaches the
  * server and gets 401, `token refused`.
- * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; NUL, LF and CR
+ * by the P4 phase fixer, round 2. Status: unreviewed.
  * @complexity O(t) over t characters  @alloc none
  */
 export function tokenProblem(token) {
   if (!token) return CONN_WORDS.noToken;
-  for (const ch of token) if (ch.codePointAt(0) > LATIN1_MAX) return CONN_WORDS.tokenDamaged;
+  for (const ch of token) {
+    if (ch.codePointAt(0) > LATIN1_MAX || HEADER_REFUSED.includes(ch)) return CONN_WORDS.tokenDamaged;
+  }
   return null;
 }
 // The pill counts the age of the last answer in whole seconds.
