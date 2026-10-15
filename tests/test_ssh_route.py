@@ -1370,9 +1370,16 @@ class SharedOutboxTest(UmaskTestCase):
         them. Must reject ann's message in an outbox/to-far-b/ ben made:
         sticky never stops a folder's owner.
 
+        P3 fix round 1a (Claude Opus 5.5, unreviewed): a2's note on this
+        proof. Ann's branch is asserted first, by itself: there, a real
+        folder and hers. So a tc that makes no branch at all (the shared
+        outbox/to-<name>/ back) fails on that assertion, saying what D32
+        wants, never by a FileNotFoundError in seen_as.
+
         @interacts  tc init, one tc card, one send (kept, ssh failing);
-                    makes ben-member's folders by hand; lstats every entry
-                    of ann's branch and the folders above her message.
+                    makes ben-member's folders by hand; lstats ann's
+                    branch, then every entry of it and the folders above
+                    her message.
         @deps       primary_group, assert_called, branch, send_lock_path,
                     seen_as, may, may_move_or_remove, may_make_in; os,
                     stat.
@@ -1393,6 +1400,15 @@ class SharedOutboxTest(UmaskTestCase):
             code, out, err = root.tc("send", "--from", "ann", "--to", "far-b", "from ann")
             assert_called(self, folder, calls)
             queued = [p for p in top.rglob("*-from-ann.md")]
+            # P3 fix round 1a (Claude Opus 5.5, unreviewed): the branch first, so a tc with none fails here.
+            try:
+                st = os.lstat(branch(root))
+                found = ("a symlink" if stat.S_ISLNK(st.st_mode) else "not a folder" if not stat.S_ISDIR(st.st_mode)
+                         else None if st.st_uid == os.geteuid() else f"owned by user {st.st_uid}")
+            except FileNotFoundError:
+                found = "missing"
+            self.assertIsNone(found, f"D32: ann's ssh mail waits in her own branch, {branch(root)}, a real folder "
+                                     f"she owns, where no other member can move anything; it is {found}")
             above = [p for q in queued for p in [q, *q.parents] if top in p.parents]
             mine = [branch(root), *branch(root).rglob("*")]
             moves = sorted({str(p) for p in above + mine
