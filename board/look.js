@@ -94,8 +94,8 @@ export const CONFIG = Object.freeze({
   // Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
   // fitTransform never shrinks a board below this: the scale at which the
   // board's smallest text is MIN_TEXT_PX. With both at 11 it is 1, so the
-  // board never shrinks; layoutLevels wraps it to the width instead and the
-  // canvas scrolls down.
+  // board never shrinks; layoutLevels wraps it to the width instead, its
+  // frame grows to its height and the page scrolls down (round 2).
   MIN_TEXT_PX,
   BOARD_TEXT_MIN_PX,
   MIN_FIT_SCALE: MIN_TEXT_PX / BOARD_TEXT_MIN_PX,
@@ -245,25 +245,34 @@ export function createWindow(doc, parent, { file, sub }) {
 }
 
 /**
- * Footer cells. Each item is { text } or { spacer: true }. Replaces what was there.
+ * Footer cells. Each item is { text }, { spacer: true }, or { legend, text }:
+ * a legend is a row of its own, the first line of the footer, never over
+ * the board (round 2, item 4). Replaces what was there. Cells wrap to a new
+ * line on a narrow screen instead of cutting words off (round 2, item 6).
+ * Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
  * @complexity O(k) for k items  @alloc k spans
  */
 export function setFooter(doc, foot, items) {
-  foot.replaceChildren(...items.map((it) => (it.spacer ? el(doc, 'span', 'tc-sp') : el(doc, 'span', '', it.text))));
+  foot.replaceChildren(...items.map((it) => {
+    if (it.spacer) return el(doc, 'span', 'tc-sp');
+    if (it.legend) return el(doc, 'span', `tc-legend tc-legend-${it.legend}`, it.text);
+    return el(doc, 'span', 'tc-cell', it.text);
+  }));
 }
 
 /**
- * Canvas: a frame holding a scroll area, which holds the view (a wire layer
- * in SVG and a node layer), and a HUD line over the frame's bottom edge. The
- * scroll area scrolls down when the board is taller than the canvas, never
- * sideways (round 1, a2's MEDIUM-1); the HUD stays put while it scrolls.
+ * Canvas: a stage holding the frame the board draws in, which holds the
+ * view (a wire layer in SVG and a node layer). The frame grows to the
+ * board's laid out height and the page scrolls, never sideways (round 2,
+ * item 1); nothing sits over it (the legend is in the footer, item 4).
+ * createFit watches the stage, which keeps the width the board may use.
  * @interacts  appends to parent
  * @complexity O(1)  @alloc one canvas subtree with an arrow marker def
- * @returns {{ root, scroll, view, wires, hud }}
+ * @returns {{ root, frame, view, wires }}
  */
-export function createCanvas(doc, parent, hudText) {
-  const root = el(doc, 'div', 'tc-canvas');
-  const scroll = el(doc, 'div', 'tc-scroll');
+export function createCanvas(doc, parent) {
+  const root = el(doc, 'div', 'tc-stage');
+  const frame = el(doc, 'div', 'tc-canvas');
   const view = el(doc, 'div', 'tc-view');
   const wires = svg(doc, 'svg', { class: 'tc-wires', width: CONFIG.WIRE_SPACE, height: CONFIG.WIRE_SPACE });
   const defs = svg(doc, 'defs');
@@ -274,12 +283,11 @@ export function createCanvas(doc, parent, hudText) {
   marker.append(svg(doc, 'path', { d: 'M 0 0 L 10 5 L 0 10 z', class: 'tc-arrow' }));
   defs.append(marker);
   wires.append(defs);
-  const hud = el(doc, 'div', 'tc-hud', hudText || '');
   view.append(wires);
-  scroll.append(view);
-  root.append(scroll, hud);
+  frame.append(view);
+  root.append(frame);
   parent.append(root);
-  return { root, scroll, view, wires, hud };
+  return { root, frame, view, wires };
 }
 
 /**
@@ -401,6 +409,17 @@ export const LINK_WORDS = Object.freeze({
   reports_to: 'reports to',
   native: 'native · not observed',
   notFound: 'not found',
+});
+
+/**
+ * The legend: what each kind of line on the board means, in words. It is a
+ * row of the footer, never over the board (round 2, item 4); `empty` stands
+ * in for it while the feed holds no sessions.
+ * Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+ */
+export const LEGEND_WORDS = Object.freeze({
+  graph: 'dashes run toward the reader · arrow marks the reader',
+  empty: 'no sessions yet · send a message or start a listener',
 });
 
 /**
@@ -917,9 +936,10 @@ export function createKit(doc, canvas) {
 /**
  * Scale and offset that fit a board of `extent` inside width x height with
  * `padding` to spare, centered, never enlarged and never under MIN_FIT_SCALE
- * (so no text drops under MIN_TEXT_PX). A board still taller than the
- * canvas at that scale starts at the top and the canvas scrolls down; one
- * laid out at layoutWidth(width) never runs past the width.
+ * (so no text drops under MIN_TEXT_PX). createFit passes the board's own
+ * height plus `padding` as the height, since the frame grows to the board
+ * (round 2), so only the width can call for a smaller scale; a board laid
+ * out at layoutWidth(width) never runs past the width.
  * @complexity O(1)  @alloc one object
  * @returns {{ x, y, k }}
  */
@@ -930,32 +950,38 @@ export function fitTransform(width, height, extent, padding) {
 }
 
 /**
- * Keep a board laid out to its canvas. The canvas's size comes from the
+ * Keep a board laid out to its canvas. The stage's width comes from the
  * ResizeObserver's own entry, never from a layout read after a patch, so a
  * poll that changes the board forces no layout (round 1, LOW-4). draw(feed)
- * lays the feed out at the canvas's width (layoutLevels wraps it) and
- * patches the board; a resize lays the last feed out again. The view and its
- * wire layer take the board's extent as their size, so the canvas scrolls
- * down as far as the board goes and never sideways. `Observer` is
- * ResizeObserver on a page; a test passes a fake.
- * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
- * @interacts  observes canvas.scroll from start() until stop() (the page
- *             calls them on load and pageshow, and on pagehide); writes
- *             canvas.view's transform, width and height and canvas.wires'
- *             width and height; calls patchBoard, and through it board.kit
- * @complexity one draw or resize: patchBoard's O(n log n + l + r)
+ * lays the feed out at that width (layoutLevels wraps it) and patches the
+ * board; a resize that changes the width lays the last feed out again, and
+ * one that changes only the height (the frame growing) lays out nothing.
+ * The frame takes the board's height plus `padding` (round 2, item 1), so
+ * the page scrolls down as far as the board goes, never sideways, and the
+ * fit never shrinks the board to the frame's height; the view and its wire
+ * layer take the board's extent. `Observer` is ResizeObserver on a page; a
+ * test passes a fake.
+ * Model: Claude Opus 5.5 (the BOARD fixer, rounds 1 and 2), 2026-10-14. Status: unreviewed.
+ * @interacts  observes canvas.root (the stage) from start() until stop()
+ *             (the page calls them on load and pageshow, and on pagehide);
+ *             writes canvas.frame's height, canvas.view's transform, width
+ *             and height and canvas.wires' width and height; calls
+ *             patchBoard, and through it board.kit
+ * @complexity one draw or width change: patchBoard's O(n log n + l + r)
  * @alloc      one observer for the fit's life; holds the last feed and the
- *             last size, each replaced by the next
+ *             last width, each replaced by the next
  * @returns {{ draw(feed), start(), stop() }}
  */
 export function createFit(canvas, board, { padding, Observer }) {
-  let size = null;
+  let width = null;
   let feed = null;
   const apply = () => {
-    if (!size) return;
-    if (feed) patchBoard(board, feed, layoutWidth(size.width));
+    if (width === null) return;
+    if (feed) patchBoard(board, feed, layoutWidth(width));
     const { extent } = board.view;
-    const t = fitTransform(size.width, size.height, extent, padding);
+    const height = extent.h + padding;
+    const t = fitTransform(width, height, extent, padding);
+    canvas.frame.style.height = `${height}px`;
     canvas.view.style.width = `${extent.w}px`;
     canvas.view.style.height = `${extent.h}px`;
     canvas.view.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.k})`;
@@ -963,8 +989,9 @@ export function createFit(canvas, board, { padding, Observer }) {
     canvas.wires.setAttribute('height', String(Math.max(CONFIG.MIN_LAYER_PX, extent.h)));
   };
   const observer = new Observer((entries) => {
-    const box = entries[entries.length - 1].contentRect;
-    size = { width: box.width, height: box.height };
+    const next = entries[entries.length - 1].contentRect.width;
+    if (next === width) return;
+    width = next;
     apply();
   });
   return {
@@ -972,7 +999,7 @@ export function createFit(canvas, board, { padding, Observer }) {
       feed = next;
       apply();
     },
-    start() { observer.observe(canvas.scroll); },
+    start() { observer.observe(canvas.root); },
     stop() { observer.disconnect(); },
   };
 }

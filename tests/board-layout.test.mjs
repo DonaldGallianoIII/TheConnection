@@ -245,7 +245,7 @@ test('createFit takes the canvas size from the ResizeObserver entry, never from 
   const attrs = {};
   const canvas = {
     root: { getBoundingClientRect: noLayoutRead },
-    scroll: { getBoundingClientRect: noLayoutRead },
+    frame: { style: {}, getBoundingClientRect: noLayoutRead },
     view: { style: {} },
     wires: { setAttribute(name, value) { attrs[name] = value; } },
   };
@@ -263,17 +263,26 @@ test('createFit takes the canvas size from the ResizeObserver entry, never from 
   fit.start();
   fit.draw({ nodes: FOURTEEN.star, links: [], wires: [] });
   assert.equal(made.size, 0, 'it drew before the canvas had a size');
-  report([{ contentRect: { width: PHONE_W, height: CANVAS_H } }]);
+  report([{ contentRect: { width: DESK_W, height: CANVAS_H } }]);
   assert.equal(made.size, FOURTEEN.star.length);
   for (const [id, handle] of made) {
-    assert.ok(handle.view.pos.x + CONFIG.NODE_W <= PHONE_W, `${id} runs past the phone's width`);
+    assert.ok(handle.view.pos.x + CONFIG.NODE_W <= DESK_W, `${id} runs past the desktop's width`);
   }
-  const t = fitTransform(PHONE_W, CANVAS_H, board.view.extent, FIT_PADDING);
+  const { extent } = board.view;
+  const t = fitTransform(DESK_W, extent.h + FIT_PADDING, extent, FIT_PADDING);
   assert.equal(canvas.view.style.transform, `translate(${t.x}px, ${t.y}px) scale(${t.k})`);
-  assert.equal(canvas.view.style.height, `${board.view.extent.h}px`);
-  assert.equal(Number(attrs.height), board.view.extent.h, 'the wire layer is not the board\'s height');
-  const phoneHub = made.get('hub').view.pos;
-  report([{ contentRect: { width: DESK_W, height: CANVAS_H } }]);
-  assert.notDeepEqual(made.get('hub').view.pos, phoneHub, 'a resize did not lay the board out again');
+  assert.equal(t.k, 1, 'the board was shrunk');
+  assert.equal(canvas.view.style.height, `${extent.h}px`);
+  assert.equal(Number(attrs.height), extent.h, 'the wire layer is not the board\'s height');
+  // Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+  // Round 2, item 1: the frame grows to the board's height, so the page
+  // scrolls to every box; a height-only resize lays nothing out again.
+  assert.equal(canvas.frame.style.height, `${extent.h + FIT_PADDING}px`, 'the frame does not grow to the board');
+  const laidOut = board.view;
+  report([{ contentRect: { width: DESK_W, height: extent.h + FIT_PADDING } }]);
+  assert.equal(board.view, laidOut, 'a height-only resize laid the board out again');
+  const deskHub = made.get('hub').view.pos;
+  report([{ contentRect: { width: DESK_W - CONFIG.NODE_W, height: CANVAS_H } }]);
+  assert.notDeepEqual(made.get('hub').view.pos, deskHub, 'a width change did not lay the board out again');
   fit.stop();
 });

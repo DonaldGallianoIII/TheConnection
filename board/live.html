@@ -20,7 +20,9 @@
  * aborted. A late or failed answer turns the pill to words such as
  * `stale · last answer 12 s ago · timed out`, never `live`. A page restored
  * from the back/forward cache starts polling again on pageshow. It only
- * reads; nothing on the page writes to the mailbox. ?theme=dark or ?theme=daylight picks a
+ * reads; nothing on the page writes to the mailbox. The window is at least
+ * the viewport's height, the board's frame grows to the board and the page
+ * scrolls down; the legend is the footer's first row (round 2). ?theme=dark or ?theme=daylight picks a
  * look, the switch flips it, and ?gray=1 draws the page in grayscale, the
  * colorblind check.
  *
@@ -47,7 +49,7 @@
  */
 import {
   createWindow, createCanvas, setFooter, createLookSwitch, pickLook, applyLook,
-  createBoard, createKit, createFit, createPoller, pillText, CONN_WORDS,
+  createBoard, createKit, createFit, createPoller, pillText, CONN_WORDS, LEGEND_WORDS,
 } from './look.js';
 
 // C6 and O7: a wire moves within 3 s of a send, and one feed costs the
@@ -56,9 +58,9 @@ const POLL_MS = 3000;
 // A feed answers in tens of ms. One still out after this is late: the pill
 // says so, and the request is dropped before the next poll would be due.
 const FETCH_TIMEOUT_MS = 2500;
-// Room fitTransform leaves around a board it scales down. The board's
-// smallest text is at MIN_TEXT_PX already, so today it never scales down:
-// it wraps to the canvas's width and the canvas scrolls (look.js createFit).
+// Room under the board in its frame. The board's smallest text is at
+// MIN_TEXT_PX already, so it never scales down: it wraps to the canvas's
+// width, the frame grows to its height and the page scrolls (look.js createFit).
 const FIT_PADDING = 24;
 const LOOK_KEY = 'tc-board-look';
 const TOKEN_HEADER = 'X-TC-Token';
@@ -85,7 +87,7 @@ const lookSwitch = createLookSwitch(document, win.title, {
     history.replaceState(null, '', `?${query}${location.hash}`);
   },
 });
-const canvas = createCanvas(document, win.body, 'live · dashes run toward the reader · arrow marks the reader');
+const canvas = createCanvas(document, win.body);
 const board = createBoard(createKit(document, canvas));
 // The canvas's size comes from the observer's own entry, never a layout
 // read after a patch; a resize lays the last feed out again at the new width.
@@ -96,11 +98,10 @@ const draw = (feed) => {
   // Listeners by pid, not by state (D15: a listener that sent reads writing).
   const pill = pillText(feed);
   win.setConn(pill.text, pill.state);
-  canvas.hud.textContent = feed.nodes.length
-    ? 'live · dashes run toward the reader · arrow marks the reader'
-    : 'no sessions yet · send a message or start a listener';
   const m = feed.machine;
+  // The legend is the footer's first row, never over the board.
   setFooter(document, win.foot, [
+    { legend: 'graph', text: feed.nodes.length ? LEGEND_WORDS.graph : LEGEND_WORDS.empty },
     { text: `load ${m.load1} / ${m.cores}` }, { text: `mem free ${m.mem_avail_pct}%` }, { spacer: true },
     { text: `${feed.nodes.length} sessions · ${pill.listening} listening` }, { text: `at ${feed.at}` },
   ]);

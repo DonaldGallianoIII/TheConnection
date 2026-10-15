@@ -18,6 +18,13 @@
  * the board is never scaled below 1 (look.js MIN_FIT_SCALE), so no text on
  * the board is drawn under 11 CSS px. tests/board-layout.test.mjs checks it.
  *
+ * Page frame (round 2, items 1, 4 and 6): the window is at least the
+ * viewport's height less the page's margins, the board's frame grows to the
+ * board's height and the page scrolls down, never sideways. The legend is
+ * the footer's first row, never over the board. The pill and the footer
+ * wrap onto more lines on a narrow screen; nothing there ends in an
+ * ellipsis.
+ *
  * Two looks. Dark (the notebook's, the default) sits on :root. Daylight, a
  * light look from a palette Donald supplied, is [data-theme='daylight'] on
  * <html> and overrides only tokens; no rule
@@ -139,13 +146,19 @@
   --tc-bar-pressed-words: #1c1c1e;
 }
 
-/* Page backdrop, same radial glow as the notebook. */
+/* Page backdrop, same radial glow as the notebook. The page scrolls down
+ * when the board is taller than the viewport. --tc-page-pad is the margin
+ * round the window (round 2): the window's least height is the viewport's
+ * less two of these. It is a size, not a color, so it lives here and not
+ * in a look's token set. */
 .tc-backdrop {
+  --tc-page-pad: 16px;
   min-height: 100vh;
+  min-height: 100dvh;
   margin: 0;
   display: grid;
-  place-items: center;
-  padding: 16px;
+  place-items: start center;
+  padding: var(--tc-page-pad);
   box-sizing: border-box;
   background: var(--tc-backdrop);
   color: var(--tc-text);
@@ -157,9 +170,13 @@
 .tc-mount { width: 100%; min-width: 0; display: flex; justify-content: center; }
 
 /* ---------- window frame ---------- */
+/* Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status:
+ * unreviewed. At least the viewport's height less the page's margins, and
+ * as tall as the board needs past that (item 1). */
 .tc-win {
   width: min(1180px, 100%);
-  height: min(724px, calc(100vh - 32px));
+  min-height: calc(100vh - 2 * var(--tc-page-pad));
+  min-height: calc(100dvh - 2 * var(--tc-page-pad));
   background: var(--tc-bg);
   border: 1px solid var(--tc-line);
   border-radius: var(--tc-radius-win);
@@ -169,12 +186,13 @@
   box-shadow: var(--tc-shadow-win);
 }
 .tc-title {
-  height: 42px;
+  min-height: 42px;
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 9px;
-  padding: 0 14px;
+  gap: 4px 9px;
+  padding: 6px 14px;
   background: var(--tc-title-bg);
   border-bottom: 1px solid var(--tc-line);
   color: var(--tc-bar-text);
@@ -185,11 +203,12 @@
 .tc-dot.g { background: #28c840; }
 .tc-fname { white-space: nowrap; font-family: var(--tc-mono); font-size: 12px; font-weight: 600; margin-left: 4px; }
 .tc-sub { font-size: 11px; color: var(--tc-bar-dim); }
+/* The pill's words wrap onto a second line rather than end in an ellipsis
+ * (round 2, item 6). */
 .tc-conn {
   margin-left: auto;
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -198,6 +217,7 @@
   color: var(--tc-bar-muted);
 }
 .tc-cdot {
+  flex: none;
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -205,7 +225,6 @@
   box-shadow: 0 0 9px currentColor;
   animation: tc-pulse var(--tc-pulse-speed) ease-in-out infinite;
 }
-.tc-conn > span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .tc-conn[data-state="up"] .tc-cdot { color: var(--tc-conn-up); }
 .tc-conn[data-state="warn"] .tc-cdot { color: var(--tc-conn-warn); }
 .tc-conn[data-state="down"] .tc-cdot { color: var(--tc-conn-down); animation: none; }
@@ -238,24 +257,29 @@
 .tc-look-dot { width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid currentColor; }
 .tc-look-btn[aria-pressed="true"] .tc-look-dot { background: currentColor; }
 
-.tc-body { flex: 1; position: relative; overflow: hidden; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.tc-body { flex: 1 0 auto; position: relative; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
 
+/* Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status:
+ * unreviewed. The footer: the legend on its own first row (item 4), then
+ * the counts, each of which wraps to a new line rather than being cut off
+ * (item 6). */
 .tc-foot {
-  height: 30px;
+  min-height: 30px;
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 14px;
-  padding: 0 14px;
+  gap: 2px 14px;
+  padding: 6px 14px;
   background: var(--tc-foot-bg);
   border-top: 1px solid var(--tc-line);
   font-family: var(--tc-mono);
   font-size: 11px;
   color: var(--tc-bar-muted);
-  overflow: hidden;
-  white-space: nowrap;
 }
+.tc-foot > span { min-width: 0; overflow-wrap: anywhere; }
 .tc-foot .tc-sp { flex: 1; }
+.tc-legend { flex: 1 0 100%; }
 
 /* ---------- chips and small text ---------- */
 .tc-h { font-family: var(--tc-mono); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--tc-dim); }
@@ -272,40 +296,24 @@
 .tc-chip[data-hue] { border-color: var(--tc-chip-hue); box-shadow: inset 3px 0 0 var(--tc-chip-hue); }
 
 /* ---------- canvas ---------- */
+/* Model: Claude Opus 5.5 (the BOARD fixer, rounds 1 and 2), 2026-10-14.
+ * Status: unreviewed. The board wraps to the stage's width (look.js
+ * layoutLevels) and keeps its size. The frame fills what the window has
+ * left and grows to the board's height (look.js createFit sets it), so a
+ * tall board makes the page scroll down, never sideways. The frame's edge
+ * is an inset shadow, not a border, so its width is the stage's. */
+.tc-stage { flex: 1 0 auto; min-width: 0; display: flex; flex-direction: column; }
 .tc-canvas {
   position: relative;
-  flex: 1;
+  flex: 1 0 auto;
   min-height: 260px;
   background: var(--tc-inset);
-  border: 1px solid var(--tc-line2);
+  box-shadow: inset 0 0 0 1px var(--tc-line2);
   border-radius: var(--tc-radius);
   overflow: hidden;
 }
-/* Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status:
- * unreviewed. The board wraps to the canvas's width (look.js layoutLevels)
- * and keeps its size, so a tall board scrolls down here, never sideways. */
-.tc-scroll { position: absolute; inset: 0; overflow-x: hidden; overflow-y: auto; }
 .tc-view { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 .tc-wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
-/* The HUD sits over the frame's bottom edge and stays put while the board
- * scrolls under it; its own face keeps it readable over a box, and a line
- * too long for a phone ends in an ellipsis instead of running off. */
-.tc-hud {
-  position: absolute;
-  bottom: 6px;
-  left: 8px;
-  max-width: calc(100% - 16px);
-  padding: 0 4px;
-  border-radius: 4px;
-  background: var(--tc-inset);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  color: var(--tc-dim);
-  font-family: var(--tc-mono);
-  pointer-events: none;
-}
 
 /* ---------- session node ---------- */
 .tc-node {
@@ -391,7 +399,11 @@
   .tc-wire.flow, .tc-cdot { animation: none; }
 }
 
+/* On a narrow screen the pill takes a row of its own under the title, so
+ * its words never run into the look switch (round 2, item 6). */
 @media (max-width: 640px) {
   .tc-sub, .tc-look-word { display: none; }
   .tc-body { padding: 8px; }
+  .tc-conn { order: 1; flex: 1 0 100%; margin-left: 0; }
+  .tc-look { margin-left: auto; }
 }

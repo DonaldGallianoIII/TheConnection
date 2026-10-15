@@ -16,7 +16,8 @@
  * mailbox: layoutLevels lays out the two trees, wrapped to the canvas's
  * width (at the window's 1180 px cap the second sits under the first), and
  * patchBoard moves one message at a time along its wire. It shows every state and every kind
- * of line. The switch on the title bar flips between the dark look and the
+ * of line. The page frame is live.html's: the window fills the viewport's
+ * height, the page scrolls, and the legend is the footer's first row. The switch on the title bar flips between the dark look and the
  * Daylight light look. ?theme=daylight or ?theme=dark picks one in the URL
  * (compare.html uses that); otherwise the last pick in this browser,
  * otherwise dark. ?gray=1 draws the page in grayscale, the colorblind check:
@@ -90,15 +91,17 @@ for (const n of demo.nodes) {
 }
 win.body.append(chips);
 
-const canvas = createCanvas(document, win.body, demo.hud);
+const canvas = createCanvas(document, win.body);
 const board = createBoard(createKit(document, canvas));
+// The legend is the footer's first row, never over the board.
 setFooter(document, win.foot, [
+  { legend: 'graph', text: demo.legend },
   ...demo.footer.map((t) => (t === null ? { spacer: true } : { text: t })),
   { text: `${demo.nodes.length} sessions · ${pill.listening} listening` },
 ]);
 
 // Lay the board out to the canvas's width (renderer only): it wraps, keeps
-// its size, and the canvas scrolls down if it must (look.js createFit).
+// its size, the frame grows to its height and the page scrolls (look.js createFit).
 const fit = createFit(canvas, board, { padding: FIT_PADDING, Observer: ResizeObserver });
 
 // One step's feed: the fixed nodes and links, plus the step's message as a
