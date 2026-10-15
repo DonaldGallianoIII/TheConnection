@@ -250,8 +250,7 @@ class RouterTest(unittest.TestCase):
         """A hand-made card naming route pigeon: exit 1, `route pigeon is not built yet`.
 
         SSH S1 (Claude Opus 5.5, unreviewed): the ssh card this test also
-        sent to is built now; its send is
-        tests/test_ssh_route.py's
+        sent to is built now; its send is tests/test_ssh_route.py's
         test_a_card_from_tc_card_is_sent_over_ssh_now_the_route_is_built,
         on the fake.
 

@@ -14,7 +14,8 @@ alike. tests/board-browser-check.mjs is the one that writes its cards
 with `tc join`. The main test sends its mail with real `tc send`, between
 names with no card, so the file names the feed parses are tc's own. No
 test sends to a name with a codex or ssh card: tc's router rings `codex`
-for the one and refuses the other until the ssh route is built. The
+for the one and runs `ssh` for the other (SSH fix round 1, Claude Opus
+5.5, unreviewed: the ssh route is built, the audit's LOW-29). The
 shape tests write message files by hand
 in tc's layout (`NNNNNN-from-<sender>.md` under `to-<name>/read/`, a .tmp
 renamed, mail/.seq raised), and the feed reads only their names.
@@ -400,9 +401,10 @@ class FeedTest(unittest.TestCase):
         down. A new Board has seen nobody listening, so b is idle there.
 
         The three messages run between a and b only: tc's router rings
-        `codex` for a name with a codex card and refuses one with an ssh
-        card until the ssh route is built, so no test sends to cx or far;
-        a card alone makes their nodes.
+        `codex` for a name with a codex card and runs `ssh` for one with
+        an ssh card (SSH fix round 1, Claude Opus 5.5, unreviewed: the
+        audit's LOW-29), so no test sends to cx or far; a card alone makes
+        their nodes.
 
         Must reject a feed that opens message bodies: every body is mode
         000 before the first feed.

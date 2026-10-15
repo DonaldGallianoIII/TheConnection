@@ -46,7 +46,12 @@ rewrites it as `clear`, so the D14 and D16 tests read its state
             shlex, signal, subprocess, sys, tempfile, time, unittest,
             unittest.mock); tests/_root.py; ../tc. test_router.py and
             test_cards.py import FINISH_CEILING_SECONDS and
-            wait_until_blocked from here.
+            wait_until_blocked from here; test_ssh_route.py imports
+            FINISH_CEILING_SECONDS, load_tc and wait_until_blocked;
+            test_flush.py FINISH_CEILING_SECONDS, LOCK_POLL_SECONDS and
+            load_tc; test_gate.py FINISH_CEILING_SECONDS, THREAD,
+            load_tc and ring_argv (SSH fix round 1, Claude Opus 5.5,
+            unreviewed: the audit's LOW-27).
 @complexity O(1) per test: two to five tc runs and as many fake calls,
             each under a second. A blocked-child check polls /proc/locks
             at most BLOCK_CEILING_SECONDS / LOCK_POLL_SECONDS = 100 times, each

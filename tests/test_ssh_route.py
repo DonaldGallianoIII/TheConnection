@@ -74,6 +74,7 @@ import re
 import shlex
 import stat
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -134,6 +135,10 @@ SHOWN_ESCAPE = "\\x1b[2J"
 TOKEN_PATTERN = re.compile(r"[0-9a-f]{32}")
 HEADER_ORIGIN_PATTERN = re.compile(r", origin (\S+)$")
 ORIGIN_NONCE_HEX_DIGITS = 32
+# The most digits an origin id's number has (tc's ORIGIN_SEQ_MAX_DIGITS),
+# and the largest body a send takes (C0's SEND_BODY_MAX_BYTES), written here.
+ORIGIN_SEQ_MAX_DIGITS = 18
+MAX_BODY_BYTES = 1048576
 # The seed of the source a test swaps in for tc's origin_nonce, so the id
 # it builds is known. Any fixed number does.
 NONCE_SEED = 25
@@ -171,6 +176,13 @@ ASIDE_NAME = ".squatted-{name}-1"
 # wrapper execs the sleep, so the kill at the timeout ends it.
 SHORT_SEND_SECONDS = 2
 SLOW_SLEEP_SECONDS = 30
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-9. tc's
+# SEND_LOCK_WAIT_SECONDS (one ssh run) patched down to this where a test
+# holds the send lock past it; and how long a test holds the lock before
+# it lets go, past tc's LOCK_WAIT_SECONDS patched down to SHORT_LOCK_WAIT_SECONDS,
+# well under one ssh run.
+SHORT_LOCK_WAIT_SECONDS = 0.5
+HOLD_PAST_LOCK_WAIT_SECONDS = 1.5
 # Owner may read, write and run the slow wrapper. Nobody else needs to.
 OWN_WRAPPER_MODE = 0o700
 
@@ -433,7 +445,7 @@ class SshRouteTest(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0]["argv"], want)
         self.assertEqual(seen[0]["argv"].index("--") + 1, seen[0]["argv"].index(TARGET))
-        self.assertEqual(seen[0]["stdin"], body + "\n")
+        self.assertEqual(seen[0]["stdin"], body, "the wire text is the body, trailing whitespace cut, no newline added")
         self.assertFalse(any("hello" in word for word in seen[0]["argv"]), "the body is on ssh's command line")
         self.assertTrue(TOKEN_PATTERN.fullmatch(token), token)
         self.assertRegex(origin, rf"^{token}-1-[0-9a-f]{{{ORIGIN_NONCE_HEX_DIGITS}}}-a$")
@@ -715,16 +727,22 @@ class SshRouteTest(unittest.TestCase):
         self.assertEqual(len(seen), 1)
 
     def test_a_send_lock_held_past_the_bound_keeps_the_message_and_runs_no_ssh(self):
-        """With the send lock held past tc's 3 s bound: exit 4, the not-tried words, one file waiting, no ssh; a send to another target still goes.
+        """In process, SEND_LOCK_WAIT_SECONDS patched short: with the send lock held past it, exit 4, the not-tried words, one file waiting, no ssh; a send to another target still goes.
 
         Also a symlink planted at the lock's name: exit 4, kept, the words
-        name it, and nothing is written through it (D17).
+        name it, and nothing is written through it (D17). SSH fix round 1
+        (Claude Opus 5.5, unreviewed): the bound is one ssh run now (the
+        audit's LOW-9), so the wait is patched down here instead of waited
+        out.
 
-        @interacts  one tc card per name; holds the send lock; three
-                    sends; plants one symlink at another target's lock.
-        @deps       send_lock_path, assert_called, outbox; fcntl.
-        @complexity O(1): about LOCK_WAIT_SECONDS (3 s).
-        @alloc      one TcRoot, one open lock file.
+        @interacts  one tc card per name; holds the send lock; loads tc and
+                    calls route_and_deliver twice with PATH set to the
+                    fake's and SEND_LOCK_WAIT_SECONDS patched; one send as
+                    a command; plants one symlink at another target's lock.
+        @deps       load_tc, send_lock_path, assert_called, outbox, queue;
+                    fcntl, unittest.mock.
+        @complexity O(1): about SHORT_LOCK_WAIT_SECONDS.
+        @alloc      one TcRoot, one module, one open lock file.
         """
         with _root.TcRoot() as root:
             folder, calls = root.fake_bin("ssh", 0)
@@ -736,24 +754,130 @@ class SshRouteTest(unittest.TestCase):
             outside = root.base / "outside.txt"
             outside.write_text("untouched\n")
             send_lock_path(root, OTHER_TARGET).symlink_to(outside)
-            with open(lock, "a") as held:
-                fcntl.flock(held, fcntl.LOCK_EX)
-                code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi")
-            linked = root.tc("send", "--from", "a", "--to", "c", "hi")
+            tc = load_tc(root)
+            with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}), \
+                    mock.patch.object(tc, "SEND_LOCK_WAIT_SECONDS", SHORT_LOCK_WAIT_SECONDS):
+                with open(lock, "a") as held:
+                    fcntl.flock(held, fcntl.LOCK_EX)
+                    got = tc.route_and_deliver("a", "b", "hi")
+                linked = tc.route_and_deliver("a", "c", "hi")
             not_called = not (folder.parent / "calls.jsonl").exists()
             waiting = outbox(root, "b") + outbox(root, "c")
             path = queue(root, "b") / "000001-from-a.md"
             kept = outside.read_text()
             good = root.tc("send", "--from", "a", "--to", "d", "hi")
             seen = assert_called(self, folder, calls)
-        self.assertEqual((code, err), (EXIT_QUEUED, NOT_TRIED_WORDS.format(target=TARGET, path=path)))
-        self.assertEqual(linked[0], EXIT_QUEUED, linked)
-        self.assertIn("it is a symlink", linked[2])
+        self.assertEqual((got.exit, got.words + "\n"), (EXIT_QUEUED, NOT_TRIED_WORDS.format(target=TARGET, path=path)))
+        self.assertEqual(linked.exit, EXIT_QUEUED, linked)
+        self.assertIn("it is a symlink", linked.words)
         self.assertEqual(kept, "untouched\n", "the send wrote through a link at its lock")
         self.assertTrue(not_called, "ssh ran without the send lock")
         self.assertEqual(waiting, ["000001-from-a.md", "000002-from-a.md"])
         self.assertEqual(good[0], 0, good)
         self.assertEqual(len(seen), 1)
+
+    def test_a_send_that_overlaps_another_run_past_lock_wait_seconds_goes_once_it_ends(self):
+        """In process, LOCK_WAIT_SECONDS patched short: the test holds the send lock for longer than that, as another send's ssh run would, then lets go; the waiting send then goes itself: exit 0, ssh once, the message in sent/, nothing queued.
+
+        SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-9.
+        Must reject a send lock bounded by the command's lock wait: the
+        send would queue behind a run that was ending, and every later
+        send to the target would queue behind it until someone ran tc
+        flush.
+
+        @interacts  one tc card; holds the send lock and lets a timer
+                    thread let it go; loads tc and calls route_and_deliver
+                    with PATH set to the fake's and LOCK_WAIT_SECONDS
+                    patched.
+        @deps       load_tc, send_lock_path, assert_called, outbox; fcntl,
+                    threading, unittest.mock.
+        @complexity O(1): about HOLD_PAST_LOCK_WAIT_SECONDS.
+        @alloc      one TcRoot, one module, one open lock file, one timer
+                    thread, joined before the root closes.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("ssh", 0)
+            root.tc("card", "b", "--ssh", TARGET)
+            lock = send_lock_path(root, TARGET)
+            lock.parent.mkdir(parents=True)
+            tc = load_tc(root)
+            held = open(lock, "a")
+            fcntl.flock(held, fcntl.LOCK_EX)
+            timer = threading.Timer(HOLD_PAST_LOCK_WAIT_SECONDS, held.close)
+            timer.start()
+            try:
+                with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}), \
+                        mock.patch.object(tc, "LOCK_WAIT_SECONDS", SHORT_LOCK_WAIT_SECONDS):
+                    got = tc.route_and_deliver("a", "b", "hi")
+            finally:
+                timer.cancel()
+                timer.join()
+                held.close()
+            seen = assert_called(self, folder, calls)
+            filed = (outbox(root, "b", "sent"), outbox(root, "b"))
+        self.assertEqual(got.exit, 0, got)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(filed, (["000001-from-a.md"], []))
+
+    def test_a_body_of_exactly_the_limit_reaches_the_far_gate_and_lands(self):
+        """Through the loopback fake's real far gate, a body of exactly SEND_BODY_MAX_BYTES with no trailing whitespace: the wire text is that many bytes, the far gate takes it, and the send exits 0.
+
+        SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-5.
+        Must reject a newline added on the wire: the far side would read
+        one byte over the limit and refuse it with 8, filed for good.
+
+        @interacts  writes the loopback wrapper; one tc card, one send of
+                    1 MiB on stdin; the far gate runs under a second
+                    TC_ROOT in the temp folder.
+        @deps       far_gate_ssh, assert_called.
+        @complexity O(MAX_BODY_BYTES).
+        @alloc      one TcRoot, the far mailbox and a 1 MiB string.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("ssh", 0)
+            far = root.base / "far"
+            far.mkdir()
+            env = far_gate_ssh(root, folder, far)
+            root.tc("card", "b", "--ssh", TARGET)
+            code, out, err = root.tc("send", "--from", "a", "--to", "b", stdin="x" * MAX_BODY_BYTES, env=env)
+            seen = assert_called(self, folder, calls)
+            landed = sorted(p.name for p in (far / "mail" / "to-b").glob("*.md"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(seen[0]["stdin"]), MAX_BODY_BYTES)
+        self.assertEqual(landed, [f"000001-from-{FAR_KEY}.md"])
+
+    def test_a_number_past_the_digits_an_origin_id_carries_is_refused_naming_mail_seq(self):
+        """mail/.seq written by hand to 18 nines: the next send takes a 19-digit number, exits 1 with words naming mail/.seq, writes nothing in the outbox and runs no ssh; with mail/.seq set lower, the send reaches the fake.
+
+        SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-6.
+        Must reject an id no far gate would take, sent anyway and filed as
+        refused with words that blame the gate.
+
+        @interacts  one tc card, two writes of mail/.seq by hand, two sends.
+        @deps       assert_called, outbox.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("ssh", 0)
+            root.tc("card", "b", "--ssh", TARGET)
+            seq = root.path / "mail" / ".seq"
+            seq.parent.mkdir(exist_ok=True)
+            seq.write_text("9" * ORIGIN_SEQ_MAX_DIGITS)
+            code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi")
+            not_called = not (folder.parent / "calls.jsonl").exists()
+            written = outbox(root, "b") + outbox(root, "b", "sent") + outbox(root, "b", "refused")
+            seq.write_text("5")
+            good = root.tc("send", "--from", "a", "--to", "b", "hi")
+            reachable = len(assert_called(self, folder, calls))
+        n = 10 ** ORIGIN_SEQ_MAX_DIGITS
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertIn(f"tc send: {seq} reached {n}, {len(str(n))} digits, past the {ORIGIN_SEQ_MAX_DIGITS} an origin "
+                      f"id carries", err)
+        self.assertTrue(not_called, "ssh ran with an id no far gate would take")
+        self.assertEqual(written, [])
+        self.assertEqual(good[0], 0, good)
+        self.assertEqual(reachable, 1)
 
     def test_a_send_past_ssh_send_seconds_keeps_the_message_and_exits_4(self):
         """In process, SSH_SEND_SECONDS patched to 2 s: a fake that records its call and then sleeps is killed, the message stays waiting, exit 4, `no answer in 2 s`.
