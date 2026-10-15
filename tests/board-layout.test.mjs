@@ -16,7 +16,11 @@
  * workers wrap, at a 1180 px window and a 700 px stage); the switch
  * between graph and outline has two breakpoints; the outline is brought up
  * to date in place (a fake document counts its writes) and heads no tree
- * of one; the legend names the quiet wire and the inferred thin line.
+ * of one; the legend names the quiet wire and the inferred thin line; a
+ * down wire whose siblings' wires share its run is drawn after every solid
+ * and dashed one, on a knockout in the canvas's face (createKit on the
+ * fake document); and a tree wire clears both port rings at the widest
+ * node border.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
@@ -835,4 +839,21 @@ test('a relay over w1 to w4 it has mailed, w2 down, at 1152 px: the down wire is
   assert.ok(face && cssRule('.tc-knockout').includes(`stroke: ${face[1].trim()}`), 'the knockout is not the canvas\'s own face');
   assert.match(cssRule('.tc-knockout'), /stroke-width:\s*calc\(var\(--tc-wire-w\) \+ var\(--tc-wire-w-knockout-pad\)\)/);
   assert.match(CSS, /--tc-wire-w-knockout-pad:\s*var\(--tc-wire-w\);/, 'the knockout is not one quiet wire wider than its wire');
+});
+
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// A port ring is placed from its box's padding edge, so its center sits one
+// node border right of and below its port; at 8 px the east ring covered
+// up to 3.25 px of a tree wire. The offset counts the widest border.
+test('a tree wire clears both port rings at the widest node border theme.css sets', () => {
+  const borders = [...CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, sel]) => /^\.tc-node(\[[^\]]*\])?$/.test(sel.trim()))
+    .map(([, , body]) => body.match(/border(?:-width)?:\s*([\d.]+)px/))
+    .filter(Boolean)
+    .map((m) => Number(m[1]));
+  assert.ok(borders.length >= 2, `found ${borders.length} node border widths in theme.css`);
+  const wire = Number(CSS.match(/--tc-wire-w:\s*([\d.]+)px/)[1]);
+  const inner = CONFIG.TREE_WIRE_OFFSET - wire / 2;
+  const ring = CONFIG.PORT_SIZE / 2 + Math.max(...borders);
+  assert.ok(inner > ring, `a tree wire's inner edge is ${inner} px from its port and the east ring reaches ${ring} px`);
 });

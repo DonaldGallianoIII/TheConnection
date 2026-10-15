@@ -1,10 +1,11 @@
 # Handoff: BOARD (P4)
 
-Model:  Claude Opus 5.5 (the BOARD lane agent); fix rounds 1 to 3 by
+Model:  Claude Opus 5.5 (the BOARD lane agent); fix rounds 1 to 4 by
         Claude Opus 5.5 (the BOARD fixer), from
         audits/2026-10-14-1811-full/fixes/round-1.md and round-2.md, a2's
-        direction for the owner in round 2, and
-        audits/2026-10-14-2047-custom/fixes/round-3.md
+        direction for the owner in round 2,
+        audits/2026-10-14-2047-custom/fixes/round-3.md and
+        audits/2026-10-14-2209-quick/fixes/round-4.md
 Status: unreviewed
 Date:   2026-10-14
 Branch: Claude-Development-TheConnection-BOARD, from
@@ -38,12 +39,15 @@ Where:  ~/TheConnection-lanes/board
 | Fix round 3 (b) | `0937669` | Keep the space in titles, head no tree of one, name the quiet wire, add view hysteresis, say stale over the board, patch the outline in place |
 | Fix round 3 (c) | `c6c7609` | Build the feed from the parts it needs so it never waits on nvidia-smi, make the card-read comment true, escape a nested card's name |
 | Fix round 3 (d) | `253ddf1` | Make the browser check use tc join where it can, mask every line, stop its children on any exit, and check native words and the dotted wire |
-| Fix round 3 (e) | the commit that brings this file up to date | Describe the board as it is in the handoff, and drop audit ids and round numbers from shipped comments |
+| Fix round 3 (e) | `fd0739b` | Describe the board as it is in the handoff, and drop audit ids and round numbers from shipped comments |
+| Fix round 4 (a) | `4994610` | Draw dotted and dashed wires over every solid one, on a knockout in the canvas's face |
+| Fix round 4 (b) | the commit that brings this file up to date | Stop the browser check at its next await after a signal, clear both port rings, and make the doc tags and test headers true |
 
 No amend, reset or rebase. Nothing pushed or merged. `tc` and
 `tests/_root.py` were edited in no round. `board/serve.py` was not edited
 in round 2. Round 3 edited one file outside its work set,
-`tests/test_board_leak.py`, as Fix round 3 says.
+`tests/test_board_leak.py`, as Fix round 3 says. Round 4 edited nothing
+outside its work set.
 
 ## What was built
 
@@ -51,9 +55,12 @@ in round 2. Round 3 edited one file outside its work set,
 `load_tc(root)` loads `tc` as a module the C5 way, with `TC_ROOT` set for
 the load only and put back after. `Board(root, clock).feed()` returns C5's
 object: `at`, `machine` (`load1`, `cores`, `mem_avail_pct`), `nodes`,
-`wires`, `links`. The module doc block maps each feed key to the tc key
-that feeds it. The machine keys match tc's one to one, so no C5 field
-lacks a source in tc. Cards come straight from `cards/*.json`, never from
+`wires`, `links`. The module doc block maps each feed key to where it
+comes from: `at`, the listener pids and the mail counts from tc
+(`tc.now_iso()`, `tc.listeners("wait")`, `tc.mailbox_summary()`); the
+machine keys from serve.py's own `machine_now()`, which reads the load
+average and `/proc/meminfo` with tc's `machine_stats` numbers and rounding
+but no GPU query; cards straight from `cards/*.json`, never from
 health. Messages come from file names under `mail/to-*/` and
 `mail/to-*/read/`; ages come from a stat of the file. No body is opened.
 Roles and levels follow C5 step by step: partners, a declared or inferred
@@ -94,12 +101,13 @@ threads and `feed()` runs under one lock. Since round 1, `REQUEST_DEADLINE_S`
 `MAX_CONNECTIONS` (16) are served at once; one past that is closed at once.
 7 tests: the first 5, a trickling client dropped by the deadline, and a
 connection past the cap closed at once. **The server runs in the
-test's own process, on a thread, on a port the OS picks:** the harness in
-this tree has no `start(argv=...)` yet (a P0 fixer adds it on its own
-branch), so no test starts `serve.py` as a child.
+test's own process, on a thread, on a port the OS picks.** This lane
+branch was cut before the harness gained `start(argv=...)`; the dev
+branch's `tests/_root.py` has it, built for B2, so once BOARD merges a
+test can start `serve.py` as a child by its own pid. No test does yet.
 
 **B3, `board/look.js`, `board/theme.css`, `tests/board-patch.test.mjs`,
-`tests/board-layout.test.mjs`.** As the board is now, after fix round 3. A
+`tests/board-layout.test.mjs`.** As the board is now, after fix round 4. A
 pure layer: `layoutLevels(feed, width)` (roots in name order, levels top
 to bottom, no overlap; each parent's children wrap into rows that fit the
 width, and where a row holds one box they indent under their parent; a
@@ -118,8 +126,8 @@ from a parent's out port (bottom middle) to each child's in port (top
 middle), with no words on the board; its words (`b reports to a`, `d
 under b · inferred from mail`) are its hover title, and a feed's
 reports_to links draw nothing of their own. A parent and child's mail
-wire, or native line, runs `TREE_WIRE_OFFSET` (8 px) beside that
-connector, never on it, so the connector never fills a dotted or dashed
+wire, or native line, runs `TREE_WIRE_OFFSET` (12 px since fix round 4,
+8 before) beside that connector, never on it, clear of both port rings, so the connector never fills a dotted or dashed
 wire's gaps; every other pair is routed side to side round the boxes.
 Since fix round 4 the wire layer paints solid wires, then dashed ones
 (flowing mail, native lines), then dotted ones (no listener), each in its
@@ -296,9 +304,60 @@ changed. For the architect to accept or send back.
   parent with many children.
 - Every parent and child pair with mail now draws two lines, the thin
   connector and the mail wire beside it. The tree's shape is as approved.
-- Dev C5 says the feed is built from `health_snapshot()`; it is now built
-  from the parts of it the feed reads. For the architect, with the C5
-  lines synthesis LOW-20 lists.
+- Dev C5 said the feed is built from `health_snapshot()`. The architect
+  amended it on the dev branch at `e3c1333` to the parts of tc's health
+  the feed reads, as built here.
+
+## Fix round 4: what the third review found
+
+The review of round 3 (`audits/2026-10-14-2209-quick`, FIX THEN SHIP)
+found one MEDIUM and LOWs. The look the owner approved is kept.
+
+1. **A dotted wire reads dotted whatever lies along it** (MEDIUM-1;
+   look.js `WIRE_LAYERS`, `wireLayer`, `drawEdge`, `createCanvas`;
+   theme.css `.tc-knockout`, `--tc-wire-w-knockout-pad`). Siblings on one
+   side of a parent share the parent's end of their tree wires, so a quiet
+   sibling's solid wire filled a down worker's dots and the wire read
+   solid. The wire layer now paints three groups in order: solid, dashed
+   (flowing mail, native lines), dotted (no listener). A dotted or dashed
+   wire sits on a knockout: the same run in the canvas's face, one quiet
+   wire wider. So nothing but the canvas shows in its gaps, whatever the
+   shape, and that holds by construction, not by layout. The cost: a solid
+   wire under it is hidden along the shared stretch and shows again where
+   it turns off. The browser check now has two down workers: `d`, as
+   before, and `e2`, whose wire shares a stretch with `a`'s quiet wire to
+   `b` and its flowing wire to `e3`. It reads each down wire's pixels from
+   a screenshot taken with the animations stopped.
+2. **The browser check stops at its next await after a signal** (LOW-1).
+   check() and runView call `halt()` after each await; once a signal has
+   begun cleanup it throws, and nothing more is printed. The exit code
+   stays 128 plus the signal. Two new self-test runs prove it, with a fake
+   browser launch that settles only on SIGTERM, then SIGINT.
+3. **Tree wires clear both port rings** (LOW-2; look.js
+   `TREE_WIRE_OFFSET`, 8 to 12). A ring is placed from its box's padding
+   edge, so its center sits one border right of and below its port. 6 +
+   1.25 + 4 (a doorbell's border) is 11.25, so 12 clears both rings at
+   every border. At 8 the east ring covered up to 3.25 px of the wire.
+4. **Doc tags and words made true** (LOW-3, LOW-4, LOW-6 to LOW-10):
+   look.js's module block (createPoller's three callbacks, outlineView's
+   O(n log n + l + r log r), the outline patched in place); serve.py's
+   opening lines and `@deps` (the feed from its parts, never
+   `health_snapshot()`; `/proc` read here and through tc); B1, B2 and
+   assumption 9 here; the headers of `tests/test_board_feed.py`,
+   `tests/test_board_leak.py` (its stand-in now returns Board.snapshot's
+   four keys) and `tests/test_board_server.py`.
+
+**Where this round differs from its brief.**
+- Item 7 asked that `tests/test_board_feed.py`'s header say its cards are
+  written by `tc join` when the tree's tc has it. They are not: every
+  card there is written by hand, some are codex and ssh cards that a join
+  cannot write, and the file never calls join. The header says that, and
+  why. Moving its claude cards to `tc join` would change the tests, so it
+  is left for the architect.
+- Out of the work set and now stale: `qa/human/board-live.md` lines 35 to
+  37 say the browser check starts five listeners and makes `d` down, and
+  line 48 checks `d`'s wire only. It starts six and makes `d` and `e2`
+  down, and checks both wires' gaps in pixels. For the architect.
 
 ## What was not built
 
@@ -310,6 +369,9 @@ changed. For the architect to accept or send back.
   fake timers in `tests/board-patch.test.mjs`. B4's verify is still the
   human script.
 - No test for `main()` (the printed URL, SIGTERM). Checked by hand only.
+  This lane's harness cannot start a script other than tc; the dev
+  branch's can (`start(argv=...)`), so after the merge such a test is a
+  choice, not a gap the harness forces.
 - The README's board section still names four states and serves the demo
   on port 8765, and since round 2 its look kit list is behind: createCanvas
   takes no HUD words now, and the live board draws routed edges (drawEdge),
@@ -344,8 +406,12 @@ changed. For the architect to accept or send back.
 7. **No card:** `kind` and `account` are null and `route` is `local`.
 8. **`parent` added to each node** for `layoutLevels`: the parent the walk
    used (pause BOARD-3, settled by D15).
-9. **Hand-written cards** in the tests and QA scripts use C1's fields;
-   CARDS' code is not in this tree.
+9. **Cards in the tests and QA scripts.** The unit tests and the human
+   QA scripts write their cards by hand in C1's shape, on any tc (some
+   are codex and ssh cards, which `tc join` cannot write without a real
+   Codex thread or `tc card`). The browser check writes its cards with
+   `tc join` when the tree's tc has it, as the dev branch's tc does since
+   CARDS merged, and by hand otherwise; it says which.
 10. **The leak run's PATH** holds a fake `nvidia-smi` that prints one GPU
     line. Since round 3 feed() never runs it (Board.snapshot takes no GPU
     reading); one direct `tc.machine_stats()` call proves it is there.
@@ -469,6 +535,20 @@ fifteen were run again at `6785fe0` with the lines below.
 | outline | same | the outline drawn on every call | `an unchanged outline was drawn again` |
 | 5 | same | a jump in the outline goes to the graph | diff: the `['outline', 'z']` entry missing |
 
+Fix round 4, each applied by hand at the round's last state, run, seen
+red, and restored byte for byte (a scratch helper compared the file's
+sha256 before and after):
+
+| Item | Test | Mutation | Red line |
+|---|---|---|---|
+| 1 | `a relay over w1 to w4 it has mailed, w2 down, ...` | the knockout never drawn | `the down wire has no knockout right under it` |
+| 1 | browser check | the same | `FAIL  the down worker's wire (mailbox:a>e2) is dotted and shows only the canvas in its gaps (778 px read, longest ink 227 px, longest gap 4 px): ...; painted over it: nothing; knockout: none; ...` (and `mailbox:b>d`: `knockout: none`) |
+| 1 | `a relay over w1 to w4 it has mailed, w2 down, ...` | the dotted layer painted first | `drawn over the down wire: mailbox:a>w1, mailbox:a>w3, mailbox:a>w4` |
+| 1 | browser check | the same | `FAIL  the down worker's wire (mailbox:a>e2) ... (778 px read, longest ink 9 px, longest gap 4 px): ...; painted over it: mailbox:a>b, mailbox:a>docs, ... native:e2>e3; ...` (and `mailbox:b>d` for its paint order) |
+| 2 | browser check `--self-test` | `halt()` does nothing | `FAIL  nothing printed after the signal but the stop line: printed after it: browser: chromium fake (self-test)` (SIGTERM and SIGINT runs) |
+| 3 | `a tree wire clears both port rings at the widest node border ...` | `TREE_WIRE_OFFSET` back to 8 | `a tree wire's inner edge is 6.75 px from its port and the east ring reaches 10 px` |
+| 8 | `test_last_listening_at_is_pruned_past_the_down_window`, with its new stand-in | prune skipped | `AssertionError: 1000 not less than or equal to 101 : last_listening_at reached 1000 names; one window holds 101` |
+
 Fix round 3, each applied by hand, run, seen red, and restored byte for
 byte (a scratch helper compared the file's sha256 before and after):
 
@@ -522,6 +602,24 @@ keep-every-feed mutations were applied again: each red with the line
 shown.
 
 ## Hand runs
+
+Fix round 4: `NODE_PATH=<a Playwright install>/node_modules node
+tests/board-browser-check.mjs`, Playwright 1.63, Chromium 153, on this
+round's last state: cards by hand (this tree's tc has no join), six
+listeners proven, `d` and `e2` made down through the feed, `result: PASS`
+at 1280 x 900 (graph, 7 labels, 23 wires and connectors, 4 headings; the
+down wires read 112 px and 778 px, longest ink run 3 px, longest gap 5
+px) and 390 x 844 (outline), each server and listener stopped by its own
+pid. The same check on a scratch copy of this round's board and check
+beside the dev branch's `tc` at `e3c1333`: `cards: written by tc join`,
+the same rows, `result: PASS`; its 14 cards carry no session id, pid or
+thread id. `node tests/board-browser-check.mjs --self-test`: `self-test:
+PASS` (seven runs against the fake Playwright), nothing left running.
+Both runs' 1280 screenshots were looked at in grayscale, and an earlier
+run of the same drawing code in color too: both down wires read dotted
+along their whole run, `a`'s quiet wire to `b` and its flowing wire to
+`e3` show where they turn off `e2`'s, and the tree wires clear both port
+rings at 12 px.
 
 Fix round 3: `NODE_PATH=<a Playwright install>/node_modules node
 tests/board-browser-check.mjs`, Playwright 1.63, Chromium 153, at
@@ -586,6 +684,11 @@ masked in all output.
   the script.
 
 ## Verify commands and their output
+
+Fix round 4, run in `~/TheConnection-lanes/board` before its last commit:
+`node --test tests/*.test.mjs` 52 pass, 0 fail (50 plus 2 layout tests);
+`python3 -m unittest discover -s tests -p 'test_*.py'` 57 OK.
+`check_voice.py` and `check_american.py` were clean on this file.
 
 Fix round 3, run in `~/TheConnection-lanes/board` before its last commit:
 `node --test tests/*.test.mjs` 50 pass, 0 fail (43 plus 4 layout and 3
@@ -667,9 +770,17 @@ and this file.
   draws the outline, with no wires.
 - **The demo at the window's 1180 px cap** draws `z`'s tree under `a`'s,
   now seen in a screenshot, with `z`'s heading and the roots list.
-- Anything with CARDS' `tc`, but one run: the unit suites ran against
-  this tree's `tc`. The browser check ran once beside the dev branch's
-  `tc` (`1bede2c`) on a scratch copy, `tc join` path included, and passed.
+- Anything with CARDS' `tc`, but the browser check: the unit suites ran
+  against this tree's `tc`. The browser check ran beside the dev
+  branch's `tc` on a scratch copy, `tc join` path included, and passed:
+  once in round 3 (`1bede2c`) and once in round 4 (`e3c1333`).
+- Round 4's pixel check: it reads the dark look only, at 1280 x 900, and
+  leaves out 28 px at each end of a down wire (its arrowhead and the port
+  rings) and any point under a box, a port or a label; there the paint
+  order and the knockout are checked, not pixels. Two dashed wires on one
+  stretch (the later drawn shows) and a native line's knockout were not
+  read in pixels. The Daylight knockout uses the same token as the
+  Daylight canvas, checked as text only.
 - Round 3 in a real browser beyond the check: the stale line and the
   stopped wires (node test and CSS rule only; QA step 22 looks at them),
   the outline patched in place (a fake document in the node test; no

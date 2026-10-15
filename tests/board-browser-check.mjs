@@ -43,12 +43,18 @@
  * (an alarm set before serve.py is exec'd) and each listener at its own
  * --timeout.
  *
+ * After SIGTERM or SIGINT it stops at its next await and prints nothing
+ * past `check stopped by <signal>` but the stop line, and exits 128 plus
+ * the signal.
+ *
  * `--self-test` checks those promises without a browser: it runs this
- * script four times against a fake Playwright that it writes to a temp
+ * script six times against a fake Playwright that it writes to a temp
  * folder (a page load that fails with the URL in its error, a browser close
- * that throws, a page load that hangs until SIGTERM, then SIGINT) and once
- * more killed outright under a short time limit, and fails if any run
- * prints a token or leaves serve.py or a listener alive.
+ * that throws, a page load that hangs until SIGTERM, then SIGINT, and a
+ * browser launch that settles only on SIGTERM, then SIGINT, so the run
+ * resumes after the signal) and once more killed outright under a short
+ * time limit, and fails if any run prints a token, leaves serve.py or a
+ * listener alive, or prints anything after a signal but the stop line.
  *
  * Without Playwright it prints `skipped: playwright not found` and exits
  * 0, so a fork without it is not broken.
@@ -69,7 +75,7 @@
  *             memory, to read the down wires' pixels; listens for SIGTERM
  *             and SIGINT. --self-test writes a
  *             fake playwright module to a temp folder, runs this file as a
- *             child five times, signals or kills three of them, and stops
+ *             child seven times, signals or kills five of them, and stops
  *             anything they left by its pid
  * @deps       Node 18+, Playwright (any recent version; 1.63 on the owner's
  *             machine), python3, ./tc, board/serve.py
@@ -78,7 +84,7 @@
  *             along each of the d = 2 down wires, each tested against c
  *             boxes, ports and labels (tens); decoding one screenshot is
  *             O(P) over its P pixels (about 1280 x 1800); a run takes
- *             seconds (the self-test, five runs without a browser, tens of
+ *             seconds (the self-test, seven runs without a browser, tens of
  *             seconds)
  * @alloc      one browser, one page at a time, four screenshots on disk and
  *             one decoded screenshot per desktop page in memory
@@ -192,7 +198,7 @@ const COVER_PX = 2;
 const LUMA = [0.2126, 0.7152, 0.0722];
 // What this check reads of a PNG (the PNG specification): the 8 byte
 // signature; in each chunk, the type 4 bytes in and the data 8 bytes in,
-// with 12 bytes round the data (length, type, CRC); the IHDR fields'
+// with 12 bytes round the data (length, type, checksum); the IHDR fields'
 // offsets, 8 bits per channel, no interlace, the channels of color types 2
 // (RGB) and 6 (RGBA), and the five row filters.
 const PNG = Object.freeze({
@@ -728,37 +734,47 @@ async function jumpToZ(page) {
 /**
  * Open one view: color (measured and saved; on the desktop one more
  * screenshot, kept in memory, for the down wires' pixels), then grayscale
- * (saved).
+ * (saved). `halt` is called after each await: it throws once a signal has
+ * begun cleanup, so a stopped run goes no further.
  * @complexity two page loads, plus one screenshot decoded in O(P) over its
  *             P pixels on the desktop
  * @alloc      two pages, closed; one decoded screenshot, dropped on return
  */
-async function runView(browser, url, root, view, shots) {
+async function runView(browser, url, root, view, shots, halt) {
   const results = { rows: [], files: [] };
   for (const gray of [false, true]) {
     freshen(root);
     const page = await browser.newPage({ viewport: { width: view.width, height: view.height } });
+    halt();
     const errors = [];
     page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
     page.on('pageerror', (err) => errors.push(String(err)));
     const [base, hash] = url.split('#');
     await page.goto(`${base}${gray ? '?gray=1' : ''}#${hash}`);
+    halt();
     await page.waitForSelector('.tc-node, .tc-row', { timeout: DRAWN_MS });
+    halt();
     await page.evaluate(() => document.fonts.ready);
+    halt();
     await page.waitForTimeout(SETTLE_MS);
+    halt();
     const file = join(shots, `board-${view.label}-${gray ? 'gray' : 'color'}.png`);
     await page.screenshot({ path: file, fullPage: true });
+    halt();
     results.files.push(file);
     if (!gray) {
       const m = await measure(page, NAMES);
+      halt();
       // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
       // The down wires' pixels, from a full-page screenshot kept in memory,
       // taken with the animations stopped so a flowing down wire's dots sit still.
       if (view.expect === 'graph') {
         const shot = decodePng(await page.screenshot({ fullPage: true, animations: 'disabled' }));
+        halt();
         for (const d of m.downs) if (d.drawn) d.dots = readDots(shot, d);
       }
       const jump = await jumpToZ(page);
+      halt();
       results.rows.push(...judge(view, m, errors, jump));
       results.pill = m.pill;
       results.counts = { labels: m.labels.length, wires: m.wires, heads: m.heads.length };
@@ -766,14 +782,18 @@ async function runView(browser, url, root, view, shots) {
       results.rows.push(['grayscale page: no console errors', errors.length === 0, errors.join(' | ')]);
     }
     await page.close();
+    halt();
   }
   return results;
 }
 
 /**
- * The check itself: mailbox, listeners, server, the down worker, then each
- * view. Every child is stopped by its own pid when it ends, when anything
- * throws (a failed browser close included) and on SIGTERM or SIGINT.
+ * The check itself: mailbox, listeners, server, the down workers, then
+ * each view. Every child is stopped by its own pid when it ends, when
+ * anything throws (a failed browser close included) and on SIGTERM or
+ * SIGINT. After a signal, check() stops at its next await (halt() throws
+ * once cleanup has begun, and so does runView after each of its own) and
+ * prints nothing more; the handler's exit code is 128 plus the signal.
  * @complexity see the module block  @alloc see the module block
  */
 async function check(chromium) {
@@ -782,6 +802,13 @@ async function check(chromium) {
   let browser = null;
   let failed = 0;
   let cleaning = null;
+  // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+  // Before the finally only a signal starts cleanup, so a set `cleaning`
+  // there means the run was stopped: halt() ends it at the next await.
+  let signaled = false;
+  const halt = () => {
+    if (cleaning) throw new Error('stopped by a signal');
+  };
   const cleanup = () => {
     if (!cleaning) {
       cleaning = (async () => {
@@ -810,18 +837,23 @@ async function check(chromium) {
     say(`mailbox: ${root} (14 names, ${MAIL.length} messages; left in the temp folder)`);
     say(`cards: ${joined ? 'written by tc join' : 'written by hand in C1\'s shape (this tree\'s tc has no join)'}`);
     const proven = await startListeners(root, children, listenerOf);
+    halt();
     say(`listeners proven by tc health: ${proven.join(' ')}`);
     const url = await startServer(root, children);
+    halt();
     say(`serve.py: ${url} (pid ${children.at(-1).pid}; it ends by itself ${process.env[SERVE_LIMIT_ENV] || SERVE_LIMIT_S} s after start)`);
     const downPids = await makeDown(root, url, listenerOf);
+    halt();
     say(`down workers: ${DOWN.join(', ')} (the feed saw their listeners; pids ${downPids.join(' ')} stopped; tc health shows none; `
       + 'the feed says down)');
     const shots = mkdtempSync(join(tmpdir(), 'tc-board-shots-'));
     browser = await chromium.launch({ headless: true, args: ['--password-store=basic'], handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false });
+    halt();
     say(`browser: chromium ${browser.version()}`);
     const files = [];
     for (const view of VIEWS) {
-      const r = await runView(browser, url, root, view, shots);
+      const r = await runView(browser, url, root, view, shots, halt);
+      halt();
       say(`\n${view.width} x ${view.height}  pill "${r.pill}"  ${JSON.stringify(r.counts, null, SPACES_IN_JSON)}`);
       for (const [name, ok, detail] of r.rows) {
         if (!ok) failed += 1;
@@ -833,21 +865,29 @@ async function check(chromium) {
     for (const f of files) say(`  ${f}`);
   } catch (err) {
     failed += 1;
-    say(`check failed: ${err.message}`);
+    if (!cleaning) say(`check failed: ${err.message}`);
   } finally {
+    signaled = !!cleaning;
     await cleanup();
   }
+  if (signaled) return failed;
   say(failed ? `\nresult: FAIL (${failed})` : '\nresult: PASS');
   return failed;
 }
 
 // A stand-in for Playwright, written by the self-test as a CommonJS module.
 // Its page load fails with the URL in the message and in a call log, as
-// Playwright's goto does, or hangs; its browser close may throw.
+// Playwright's goto does, or hangs; its browser close may throw. In
+// 'launch-on-signal' mode its launch settles only when SIGTERM or SIGINT
+// arrives, after check()'s own handler has begun cleanup, so the run's
+// next step meets a stopping check.
 const FAKE_PLAYWRIGHT = `
 const mode = process.env.${FAKE_MODE_ENV};
 exports.chromium = {
   async launch() {
+    if (mode === 'launch-on-signal') {
+      await new Promise((resolve) => { process.once('SIGTERM', resolve); process.once('SIGINT', resolve); });
+    }
     return {
       version: () => 'fake (self-test)',
       async newPage() {
@@ -889,12 +929,12 @@ function alive(pid) {
 
 /**
  * Run this file once as a child against the fake Playwright, in `mode`;
- * send `signal` once it has a browser (or kill it outright with SIGKILL),
- * and wait for it to end.
+ * send `signal` once its output holds `sendOn` (by default, once it has a
+ * browser), or kill it outright with SIGKILL, and wait for it to end.
  * @complexity one child run  @alloc its output
  * @returns {Promise<{ out, code, signal, pids: number[] }>}
  */
-function selfRun(box, mode, signal, extraEnv = {}) {
+function selfRun(box, mode, signal, extraEnv = {}, sendOn = 'browser: ') {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [HERE], {
       env: envWith({ NODE_PATH: join(box, 'node_modules'), [FAKE_MODE_ENV]: mode, TMPDIR: box, ...extraEnv }),
@@ -905,7 +945,7 @@ function selfRun(box, mode, signal, extraEnv = {}) {
     const ceiling = setTimeout(() => process.kill(child.pid, 'SIGKILL'), SELF_RUN_MS);
     const read = (chunk) => {
       out += chunk;
-      if (signal && !sent && out.includes('browser: ')) {
+      if (signal && !sent && out.includes(sendOn)) {
         sent = true;
         process.kill(child.pid, signal);
       }
@@ -921,9 +961,10 @@ function selfRun(box, mode, signal, extraEnv = {}) {
 }
 
 /**
- * --self-test: every promise about the token and the children, kept with
- * no browser. Five runs of this file against a fake Playwright.
- * @complexity five child runs  @alloc one temp folder, left in place
+ * --self-test: every promise about the token, the children and a stopped
+ * run's output, kept with no browser. Seven runs of this file against a
+ * fake Playwright.
+ * @complexity seven child runs  @alloc one temp folder, left in place
  * @returns {Promise<number>}  how many checks failed
  */
 async function selfTest() {
@@ -943,9 +984,12 @@ async function selfTest() {
     { name: 'SIGINT while a page loads', mode: 'hang', signal: 'SIGINT' },
     { name: 'SIGKILL while a page loads (serve.py ends at its own limit)', mode: 'hang', signal: 'SIGKILL',
       env: { [SERVE_LIMIT_ENV]: String(SELF_SERVE_LIMIT_S) } },
+    // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+    { name: 'SIGTERM while the browser starts', mode: 'launch-on-signal', signal: 'SIGTERM', sendOn: 'down workers: ' },
+    { name: 'SIGINT while the browser starts', mode: 'launch-on-signal', signal: 'SIGINT', sendOn: 'down workers: ' },
   ];
   for (const c of cases) {
-    const run = await selfRun(box, c.mode, c.signal, c.env);
+    const run = await selfRun(box, c.mode, c.signal, c.env, c.sendOn);
     const serve = run.out.match(/serve\.py: .*\(pid (\d+);/);
     if (c.signal === 'SIGKILL') await sleep(SELF_SERVE_LIMIT_S * MS_PER_S + SELF_GRACE_MS);
     const serveAlive = serve ? alive(Number(serve[1])) : true;
@@ -965,6 +1009,13 @@ async function selfTest() {
       report('every listener is gone', leftOver.length === 0, `still alive: ${leftOver.join(' ')}`);
       report('it says it stopped them by pid and ended in failure', run.out.includes('stopped by pid:') && run.code !== 0,
         `exit ${run.code}, ${run.out.includes('stopped by pid:') ? '' : 'no stopped by pid line'}`);
+    }
+    if (c.signal && c.signal !== 'SIGKILL') {
+      // After the signal: the stop line and nothing else, and 128 plus the signal.
+      const said = run.out.split(`check stopped by ${c.signal}`);
+      const after = said.length > 1 ? said[1].split('\n').filter((line) => line.trim() && !line.startsWith('stopped by pid:')) : ['(no stop line)'];
+      report('nothing printed after the signal but the stop line', after.length === 0, `printed after it: ${after.join(' | ')}`);
+      report(`exit code ${SIGNAL_EXIT_BASE} plus ${c.signal}`, run.code === SIGNAL_EXIT_BASE + constants.signals[c.signal], `exit ${run.code ?? run.signal}`);
     }
     // Whatever a run left (a SIGKILL leaves its listeners), stopped by its own pid.
     for (const pid of run.pids.filter(alive)) process.kill(pid, 'SIGTERM');

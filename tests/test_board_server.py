@@ -8,8 +8,9 @@ Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
 
 The server runs in this process, on a thread, on a port the OS picks
-(port 0). tests/_root.py in this tree has no way yet to start a script
-other than tc as a child; a P0 fix adds one on its own branch.
+(port 0). This lane's tests/_root.py cannot start a script other than tc
+as a child; the dev branch's can (start(argv=...), built for BOARD B2), so
+once BOARD merges these tests could start serve.py as a child instead.
 
 @interacts  starts one BoardServer per test on 127.0.0.1 and a free port,
             in a daemon thread, and shuts it down and closes its socket in

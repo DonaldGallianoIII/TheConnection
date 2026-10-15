@@ -202,7 +202,11 @@ class FeedLeakTest(unittest.TestCase):
         listening = {}
 
         def stand_in():
-            """A health snapshot naming only this call's listener, in tc's shape.
+            """A stand-in for Board.snapshot naming only this call's listener.
+
+            It returns Board.snapshot's four keys: time, machine (load1,
+            cores, mem_avail_pct), listeners (this call's one name and
+            pid) and mail (empty).
 
             @interacts  reads `listening`.
             @deps       none.
@@ -210,9 +214,8 @@ class FeedLeakTest(unittest.TestCase):
             @alloc      one small dict, returned.
             """
             return {"time": "2026-10-14T12:00:00-05:00",
-                    "machine": {"load1": 0.0, "cores": 1, "mem_avail_pct": 50.0, "gpus": None},
-                    "sessions": {"claude": 0, "codex": 0}, "listeners": dict(listening),
-                    "watchers": {}, "mail": {}}
+                    "machine": {"load1": 0.0, "cores": 1, "mem_avail_pct": 50.0},
+                    "listeners": dict(listening), "mail": {}}
 
         biggest = 0
         with _root.TcRoot() as root:

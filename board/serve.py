@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 serve.py: the live board's feed (C5) and its server (C6). Loads tc as a
-module and never edits it. feed() builds one JSON object from tc's health
-snapshot, the address cards and the message file names. It never opens a
-message body. The server reads only: it answers GET and HEAD on
-127.0.0.1, gives the feed to a request that carries the token, and serves
-an allow list of the board's own files.
+module and never edits it. feed() builds one JSON object from the parts
+it needs: the machine (machine_now, tc's numbers and rounding read here),
+the listeners and the mail (tc.listeners, tc.mailbox_summary), the
+address cards and the message file names, never from tc.health_snapshot().
+It never opens a message body. The server reads only: it answers GET and
+HEAD on 127.0.0.1, gives the feed to a request that carries the token, and
+serves an allow list of the board's own files.
 
     python3 board/serve.py [--port 8780]
 
@@ -97,7 +99,9 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             so a FIFO never blocks a poll and a symlink never redirects one.
 @deps       python3 stdlib (argparse, collections, heapq, hmac, http.server,
             importlib, io, json, os, pathlib, re, secrets, signal, stat,
-            sys, threading, time, urllib.parse); ../tc; Linux (/proc via tc).
+            sys, threading, time, urllib.parse); ../tc; Linux (/proc:
+            /proc/locks through tc, the load average and /proc/meminfo
+            read here).
 @complexity feed(), per poll: O(k + m log W + n + c^2). The snapshot:
             tc.listeners is O(k + n), k lines in /proc/locks (tens) and n
             names (single digits to tens); tc.mailbox_summary is O(n + m),

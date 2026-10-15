@@ -7,7 +7,11 @@ body mode 000 and the feed still works.
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
 
-Cards are written by hand in C1's shape: CARDS' code is not in this tree.
+Cards are written by hand in C1's shape on every tree, with or without
+CARDS' `tc join`: some are codex and ssh cards, which a join cannot write
+without a real Codex thread (or `tc card`), and writing every card one way
+keeps each test the same on either tc. tests/board-browser-check.mjs is
+the one that writes its cards with `tc join` when the tree's tc has it.
 The main test sends its mail with real `tc send`, between names with no
 card, so the file names the feed parses are tc's own. No test sends to a
 name with a codex or ssh card: once CARDS' router is in tc, that send

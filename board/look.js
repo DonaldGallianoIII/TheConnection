@@ -28,9 +28,10 @@
  *             a click; createFit observes the canvas's stage through the
  *             observer it is given and writes the window's data-view, the
  *             frame's height and the view's size and transform, and its
- *             jump and the kit's reveals scroll the page; createPoller asks for the feed through
- *             the fetch and timers it is given and reports through its two
- *             callbacks
+ *             jump and the kit's reveals scroll the page; createPoller asks
+ *             for the feed through the fetch and timers it is given and
+ *             reports through its three callbacks (onFeed, onConn and
+ *             onStale)
  * @deps       browser DOM and SVG for the drawing functions; the pure layer
  *             needs neither (node --test runs it with no DOM library)
  * @complexity every drawing function is O(1) per call, or O(p) over a run's
@@ -41,14 +42,16 @@
  *             routeAround's search per routed pair, O(g log g) over its g
  *             states (thousands on a real board), and placeLabels; diffBoard
  *             is O(n + e) over two views' nodes and e edges, times their
- *             points; outlineView is O(n log n + r log r); rootsList and
+ *             points; outlineView is O(n log n + l + r log r); rootsList and
  *             pillText are O(n) after the sort; createPoller is O(1) per poll
  * @alloc      one element tree (with one line per badge), one connector
  *             path and one heading per node, one path with its title, one
  *             knockout path and one label with its backing per wire, each
  *             released by its own remove(); one group per wire layer in
- *             the canvas; the outline's
- *             element tree, replaced when the outline changes; one button
+ *             the canvas; the outline's elements, one per group, row,
+ *             badge line and traffic line, each kept from one draw to the
+ *             next and removed when it leaves the outline (createKit's
+ *             drawOutline patches it in place); one button
  *             per root in the roots list, replaced when the roots change.
  *             removeBoard clears the DOM
  *             under a parent and nothing else: a board object from
@@ -150,9 +153,13 @@ export const CONFIG = Object.freeze({
   LAYOUT_LANE: 2 * ROUTE_GUTTER_PX,
   // A parent and child's mail wire, or their native line, runs this far
   // beside their connector, never on it, so the connector never fills the
-  // gaps of its dots or dashes. More than a port ring's half width
-  // (PORT_SIZE / 2) plus half a wire, so it clears both port rings.
-  TREE_WIRE_OFFSET: 8,
+  // gaps of its dots or dashes. It clears both port rings: a ring is placed
+  // from the box's padding edge, so its center sits one node border right
+  // of and below its port, and the wire must pass half a ring (PORT_SIZE /
+  // 2, 6 px), half a wire (1.25 px) and the widest border (4 px, a
+  // doorbell's; theme.css .tc-node). 6 + 1.25 + 4 is 11.25, so 12 leaves
+  // 0.75 px at a doorbell and 3.25 px at the usual 1.5 px border.
+  TREE_WIRE_OFFSET: 12,
   // A routed piece that runs alongside a tree connector, within ROUTE_CLEAR
   // of it, costs this many times its length, so a wire between trees takes
   // the gaps between them and crosses a connector rather than shadowing it.
