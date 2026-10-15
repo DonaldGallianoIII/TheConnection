@@ -1,8 +1,9 @@
 # Handoff: BOARD (P4)
 
-Model:  Claude Opus 5.5 (the BOARD lane agent); fix round 1 by Claude Opus
-        5.5 (the BOARD fixer), from
-        audits/2026-10-14-1811-full/fixes/round-1.md
+Model:  Claude Opus 5.5 (the BOARD lane agent); fix rounds 1 and 2 by
+        Claude Opus 5.5 (the BOARD fixer), from
+        audits/2026-10-14-1811-full/fixes/round-1.md and round-2.md, and
+        a2's direction for the owner in round 2
 Status: unreviewed
 Date:   2026-10-14
 Branch: Claude-Development-TheConnection-BOARD, from
@@ -26,10 +27,16 @@ Where:  ~/TheConnection-lanes/board
 | Fix round 1 (b) | `280a200` | Make the board read at 14 names on a phone: wrap, keep text at 11 px, scroll down |
 | Fix round 1 (c) | `6eafef6` | Poll one request at a time with a timeout, say stale in words, restart on pageshow |
 | Fix round 1 (d) | `a2aa9c2` | Keep hostile files and slow clients from stalling the board's feed and server |
-| Fix round 1 (e) | the commit that brings this file up to date | Make the stale tags true, allow for the writing window in QA, settle the pauses |
+| Fix round 1 (e) | `d86f2f5` | Make the board's stale tags true, allow for the writing window in QA, settle the pauses |
+| Fix round 2 (a) | `94a5dc1` | Make the board fill the screen, move the legend to the footer, wrap the pill and footer |
+| Fix round 2 (b) | `880a304` | Route every wire round the boxes, and keep labels off boxes, wires and each other |
+| Fix round 2 (c) | `bd23031` | Head each tree with its root, list the roots at the top, and draw an outline on a phone |
+| Fix round 2 (d) | `6785fe0` | Add the board's browser check, and bring both QA scripts up to round 2 |
+| Fix round 2 (e) | the commit that brings this file up to date | Describe fix round 2 in the BOARD handoff |
 
-No amend, reset or rebase. Nothing pushed or merged. `tc` and
-`tests/_root.py` were not edited.
+No amend, reset or rebase. Nothing pushed or merged. `tc`,
+`tests/_root.py` and `board/serve.py` were not edited in round 2 (`tc` and
+`tests/_root.py` in no round).
 
 ## What was built
 
@@ -137,17 +144,75 @@ word. **That step is written, not run.** Two checks in
 one level 1 (`b`) laid out side by side, and every state, line kind and
 scripted wire present.
 
+## Fix round 2: the page as the owner reads it
+
+The architect ran round 1's board in headless Chromium with 14 sessions.
+The numbers passed; the screenshots did not read for the owner, who is
+colorblind and reads the board on a phone. Round 2 fixed six items, and
+a2's direction for the owner settled how (where it differed from the
+brief, a2's won).
+
+1. **The board fills the screen** (`theme.css` `.tc-win`, `.tc-canvas`;
+   look.js `createFit`). The window is at least 100dvh less the page's
+   margins; the board's frame grows to the board's height and the page
+   scrolls, never sideways. createFit watches the stage's width and lays
+   nothing out again when only the height changes.
+2. **No wire passes through a box** (look.js routing section, `routeTree`,
+   `routeAround`, `roundedPath`). One rule: every wire and connector is a
+   run of level and upright pieces that never enters a node box. Ports
+   follow the top-down levels (in on top, out on the bottom) and belong to
+   the tree: a parent and child, the tree's thin connector and their mail
+   on top of it, run port to port, turning only in gaps layoutLevels keeps
+   empty (its new `via`). Every other pair joins a side of one box to a
+   side of the other by A* over the lines ROUTE_CLEAR out from every box,
+   port and heading, so two boxes in one row are joined straight across.
+   A piece that shadows a connector costs ROUTE_ALONG_COST times its length.
+3. **No label collides** (look.js `placeLabels`, `drawEdge`). No
+   reports_to words on the board: the tree's connector has none, and the
+   legend names the thin line; its words are in its hover title. A native
+   line has none either. Only a flowing mail wire is labeled, beside its
+   wire, never on it, clear of boxes, port rings, headings, wires and other
+   labels, newest message first; one that cannot clear the wires may sit on
+   one, on an opaque backing in a layer above every wire, and one that fits
+   nowhere keeps its words in the wire's title.
+4. **The legend never covers the board** (look.js `setFooter`,
+   `LEGEND_WORDS`; theme.css `.tc-legend`). It is the footer's first row.
+5. **The second orchestrator is reachable at a glance** (look.js
+   `layoutLevels` heads, `rootsList`, `createRoots`, `createFit.jump`).
+   Each root's tree starts with a heading as wide as the tree
+   (`z · orchestrator · 4 sessions`), and a list at the top
+   (`2 orchestrators: a, z · 2 peers: p1, p2`) brings each tree into view
+   when a name is clicked or tapped.
+6. **Nothing is cut off on a phone** (theme.css `.tc-conn`, `.tc-foot`,
+   the 640 px block). The pill wraps and under 640 px takes a row of its
+   own; the footer's cells wrap. The pill keeps the word `live`: a2 allowed
+   dropping it, and with a row of its own it fits.
+
+a2's phone view (look.js `outlineView`, the kit's `drawOutline`,
+`createFit`): under OUTLINE_BELOW_PX of stage width (about a 600 px phone)
+the page draws an outline instead of the graph: one group per root,
+headed by it; one row per session, indented by level under its parent,
+with its name, role words, state glyph and word, unread count and note;
+then the recent traffic, one line per pair, newest first. No wires. Both
+views come from the same feed.
+
+`tests/board-browser-check.mjs` measures all of this in a real browser;
+see Hand runs.
+
 ## What was not built
 
-- No automated test drives `live.html` in a browser; there is no browser
-  on this machine. Since round 1 the poll loop is look.js `createPoller`,
-  tested on fake timers in `tests/board-patch.test.mjs`; the page's own
-  wiring (its pageshow listener, createFit with a real ResizeObserver) was
-  checked with a fake DOM in a scratch run only. B4's verify is the human
-  script.
+- `node --test` drives no browser. Since round 2,
+  `tests/board-browser-check.mjs` opens `live.html` in headless Chromium
+  (Playwright, which this machine has under `~/CombatSim/node_modules`),
+  but it is a script run by hand, not part of `node --test`, and it skips
+  without Playwright. The poll loop is look.js `createPoller`, tested on
+  fake timers in `tests/board-patch.test.mjs`. B4's verify is still the
+  human script.
 - No test for `main()` (the printed URL, SIGTERM). Checked by hand only.
 - The README's board section still names four states and serves the demo
-  on port 8765. README is the DOCS lane's file, so it was left alone.
+  on port 8765, and since round 2 its look kit list is behind: createCanvas
+  takes no HUD words now, and the live board draws routed edges (drawEdge),
+  not drawWire. README is the DOCS lane's file, so it was left alone.
 - C5 rule 6 says the known limit goes in the README too. It is in
   `serve.py`'s doc block and pinned by a test; the README line is DOCS'.
 
@@ -187,6 +252,18 @@ scripted wire present.
     `tests/test_health.py` already does.
 11. **`qa/human/board-look.md`** now serves the demo with `serve.py` on
     8780, since C6 says 8765 is taken on the owner's machine.
+12. **Round 2: the tree's connector belongs to the child's node view**, not
+    to the edge set. `tests/board-leak.test.mjs`, outside round 2's work
+    set, pins the base feed's edges to `['mailbox:a>b']`; a connector edge
+    would have broken it. As part of the child, the connector comes, goes
+    and moves with it, and diffBoard compares it with the node.
+13. **Round 2: `portPoint` keeps the look kit's side ports.**
+    `tests/board-look.test.mjs`, outside the work set, pins them. The live
+    board's top and bottom ports are `levelPort`, and createNode draws
+    them with `levels`.
+14. **Round 2: OUTLINE_BELOW_PX (560) is the stage's width**, the width
+    createFit observes: about a 600 px viewport less the page's margins,
+    the window's borders and the body's padding.
 
 ## Pauses
 
@@ -271,6 +348,49 @@ byte (a scratch helper compared the file before and after):
 | 13 | `test_a_trickling_client_is_dropped_at_the_deadline` | a timeout per read only | `AssertionError: unexpectedly None : a trickling client held its connection past 3 s` |
 | 13 | `test_a_connection_past_the_cap_is_closed_at_once` | no cap | `AssertionError: None != b'' : a connection past the cap of 2 was held open` |
 
+Fix round 2, each applied by hand to look.js, run, seen red, and restored
+byte for byte (a scratch helper compared the file before and after). All
+fifteen were run again at `6785fe0` with the lines below.
+
+| Item | Test | Mutation | Red line |
+|---|---|---|---|
+| 1 | `createFit takes the canvas size from the ResizeObserver entry, ...` | the frame's height never set | `the frame does not grow to the board` |
+| 1 | same | a height-only resize lays out again | `a height-only resize laid the board out again` |
+| 2 | `no wire or connector enters a node box or a heading, ...` | routeAround ignores every box but its two ends | `mixed at 1152 px: mailbox:a>z enters b` |
+| 2 | same | routeTree skips the gutter for a wrapped child | `mixed at 358 px: mailbox:a>docs enters b` |
+| 2 | `a parent's mail runs down its connector, ...` | a parent and child mail through routeAround | `a's mail to b leaves the connector` |
+| 2 | same | routeAround joins left sides only | `p1 to p2 bends: [...]` (six points) |
+| 3 | `no label overlaps another label, a node box or a heading, ...` | placeLabels skips placed labels | `mixed at 358 px: "a → e1 · #8" is on "a → e3 · #10"` |
+| 3 | same | placeLabels skips node boxes | `mixed at 1152 px: mailbox:p1>p2's label "p2 → p1 · #11" is on p1` |
+| 5 | `the roots list names each root by role, ...` | no plural | diff line `words: '2 orchestrator'`, expected `'2 orchestrators'` |
+| 5 | `each root's tree starts with a heading naming its root, ...` | no heading band | `a at 1152 px: the heading is not over the root's box and port` |
+| outline | `the outline lists every session once, ...` | rows never indent | `b sits at depth 0, level 1` |
+| outline | same | traffic oldest first | `not newest first` |
+| outline | `createFit draws the outline under OUTLINE_BELOW_PX ...` | the breakpoint itself draws the outline | `560 px does not draw the graph` |
+| outline | same | the outline drawn on every call | `an unchanged outline was drawn again` |
+| 5 | same | a jump in the outline goes to the graph | diff: the `['outline', 'z']` entry missing |
+
+The browser check, seen red under hand mutations of the page (theme.css
+or look.js, each restored byte for byte):
+
+| Mutation | FAIL lines |
+|---|---|
+| `.tc-win` back to a fixed `height: 560px` | `every session on screen (14): missing: z, y1, y2, y3, p1, p2` and `window at least the viewport less its margins: window 560 px, viewport 900 less 32 px` at 1280; at 390 `missing: y1, y2, y3` and the window line |
+| `.tc-wire-label` at 10 px | `smallest text at least 11 px: 10.0 px at svg text: a → e1 · #13` |
+| placeLabels skips node boxes | `no label over a label, a box or a heading (7 labels): label "p2 → p1 · #17" on p1; label "p2 → p1 · #17" on p2` |
+| routeAround ignores every box but its two ends | `no wire through a node box (22 wires and connectors): mailbox:a>z through b` |
+| `LAYOUT_COL_GAP: -100` | `no session box over another: b on docs; c on d; docs on e1; e1 on e2; e2 on e3; y1 on y2; y2 on y3` |
+| `.tc-win` with `min-width: 600px` | at 390, `draws the outline view: data-view is graph` and `no sideways scroll: page 495 px in a 390 px viewport` |
+| footer cells `nowrap` with `text-overflow: ellipsis` | `nothing cut off in the pill or the footer: tc-legend tc-legend-outline: ...` |
+
+The first try at the window mutation only failed the height line: a
+session clipped by the window's `overflow: hidden` still counted as on
+screen. The check was changed to count a name cut off by a clipping
+ancestor as missing, and the window mutation then failed both lines, as
+shown. A first try at the sideways mutation (`width: 1180px`) failed
+nothing because the window, a flex item, shrank back to 358 px: the page
+had no sideways scroll to catch.
+
 The first B5 RSS run did not catch the keep-every-feed mutant: with three
 names it grew 1,536 kB and passed. The test's mailbox was grown to 23
 names before B5 was committed; the line above is from that version. After
@@ -281,9 +401,18 @@ shown.
 
 ## Hand runs
 
-Port 8766, a temp `TC_ROOT`, each server stopped by its own pid with
-SIGTERM. Scratch drivers, not in the repo; the token was masked in all
-output.
+Fix round 2: `NODE_PATH=$HOME/CombatSim/node_modules node
+tests/board-browser-check.mjs`, Playwright 1.63, Chromium 153, on the
+round 2 tree: `result: PASS` at 1280 x 900 (graph, 7 labels, 22 wires and
+connectors, 4 headings) and 390 x 844 (outline), each server and listener
+stopped by its own pid. The screenshots were looked at, in color and in
+grayscale. `demo.html` was screenshot at 1280 and 390 by a scratch driver
+(no console errors; graph and outline). Without NODE_PATH the check
+printed `skipped: playwright not found` and exited 0.
+
+Earlier rounds: port 8766, a temp `TC_ROOT`, each server stopped by its
+own pid with SIGTERM. Scratch drivers, not in the repo; the token was
+masked in all output.
 
 - Fix round 1, `serve.py` on 8766: one printed line of the expected shape
   (token 32 characters), `/feed` without the token 401, with it 200 and
@@ -321,6 +450,14 @@ output.
   the script.
 
 ## Verify commands and their output
+
+Fix round 2, run in `~/TheConnection-lanes/board` at `6785fe0`:
+`node --test tests/*.test.mjs` 43 pass, 0 fail (36 plus 3 routing and
+label tests and 4 roots, heading and outline tests); `python3 -m unittest
+discover -s tests -p 'test_*.py'` 55 OK, with the two known
+`ResourceWarning` lines from `tests/test_health.py`; the browser check
+`result: PASS`. `check_voice.py` and `check_american.py` were clean on
+`qa/human/board-live.md`, `qa/human/board-look.md` and this file.
 
 Fix round 1, run in `~/TheConnection-lanes/board` before its last commit:
 `tests.test_board_feed` 21 OK, `tests.test_board_server` 7 OK,
@@ -365,21 +502,29 @@ and this file.
 
 ## Not verified
 
-- **The board in a browser.** No browser here. Layout, fit, fonts, colors,
-  the grayscale pass, reduced motion and phone width are for Donald's
-  human scripts, `qa/human/board-live.md` and `qa/human/board-look.md`,
-  neither of them run, and for the architect's screenshot check at 1280
-  and 390 px. Round 1's 14-name test checks positions and sizes from the
-  layout and theme.css's numbers, not pixels on a screen.
-- **Long wires on a phone.** With one box per row, a wire from a parent to
-  its fifth child crosses the boxes between them, and its label sits at
-  the wire's middle, under those boxes (the wire layer is under the node
-  layer). The arrow at the reader stays in the gap beside it. Not fixed in
-  round 1; the screenshot check will show how much it costs.
-- **The demo at the window's 1180 px cap** draws `z`'s tree under `a`'s:
-  side by side at full text size needs about 1,244 px. Worked out from the
-  layout's numbers (about 592 px tall against an estimated 595 px canvas),
-  not seen.
+- **The board on a real phone and in other browsers.** The browser check
+  is headless Chromium with an emulated viewport: no touch, no phone
+  fonts, no Safari or Firefox. The human scripts,
+  `qa/human/board-live.md` and `qa/human/board-look.md`, are written and
+  not run.
+- **The Daylight look and reduced motion in a browser.** The check opens
+  the dark look only, with motion on. The Daylight pairs are checked as
+  numbers by `tests/board-theme.test.mjs`; the outline's words sit on the
+  card face (`--tc-panel`) so they use pairs that test checks.
+- **Labels in another font.** A label's box is an estimate,
+  LABEL_CHAR_W (7) px per character; JetBrains Mono at 11 px is about
+  6.6. The browser check measures the drawn labels and found no overlap
+  at 1280; a wider fallback font was not tried.
+- **Routes on shapes other than the tested ones.** The node tests check
+  three 14-name shapes at 1152 and 358 px, and the browser check one. A
+  route never enters a box by construction, but how crowded the gaps get
+  on other shapes (many wires between trees through one gap) was not
+  measured. The graph between 560 and about 700 px of stage width (a
+  small tablet) was not looked at.
+- **Long wires on a phone** (round 1's item) no longer arise: a phone
+  draws the outline, with no wires.
+- **The demo at the window's 1180 px cap** draws `z`'s tree under `a`'s,
+  now seen in a screenshot, with `z`'s heading and the roots list.
 - Anything with CARDS' `tc`: these tests ran against this tree's `tc`.
   The cross-lane fix follows CARDS' description of its router; it was not
   run against CARDS' branch.
