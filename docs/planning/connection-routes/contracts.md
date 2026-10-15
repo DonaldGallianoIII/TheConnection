@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D21) the same day, and D22 to D28 on
+        wave 2 rulings (D17 to D21) the same day, and D22 to D29 on
         2026-10-15.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
@@ -366,8 +366,15 @@ For a separate Linux user per account on one machine.
   it, so that trust would certify itself (a member who made ROOT first
   would pass the init user's own first init). A member's rerun on the
   init user's ROOT is refused with words that name that user as the one
-  who ran init and accuse no one, and a member fixes their own entries
-  by hand, with the `chgrp` and `chmod` lines tc prints (D21, D23).
+  who ran init and accuse no one. Then tc fixes the running user's own
+  entries itself (D29): each opened with `O_NOFOLLOW|O_NONBLOCK`, checked
+  with `fstat` to be this user's own regular file or folder, and changed
+  with `fchown` and `fchmod` on that open file, never by path; a link or
+  anything else is skipped and named. It changes nothing else (never the
+  group setting, never `.shared`) and prints what it fixed. tc prints no
+  shell lines to paste: a pasted `chgrp` or `chmod` follows a link, and
+  the owner of the folder holding the entry could swap one in first
+  (D21, D23, D29).
 - **A held lock costs a failed send, never a hang** (D20, D23). `mail/.seq`
   and the inbox locks are group-writable, so a member can hold one. tc
   waits at most `LOCK_WAIT_SECONDS` per command for them, then exits 10
