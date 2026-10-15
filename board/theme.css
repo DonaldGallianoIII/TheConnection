@@ -281,6 +281,10 @@
 .tc-foot > span { min-width: 0; overflow-wrap: anywhere; }
 .tc-foot .tc-sp { flex: 1; }
 .tc-legend { flex: 1 0 100%; }
+/* The window shows the legend for the view it draws (look.js createFit
+ * sets data-view). */
+.tc-win[data-view="outline"] .tc-legend-graph,
+.tc-win:not([data-view="outline"]) .tc-legend-outline { display: none; }
 
 /* ---------- chips and small text ---------- */
 .tc-h { font-family: var(--tc-mono); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--tc-dim); }
@@ -314,6 +318,73 @@
   overflow: hidden;
 }
 .tc-view { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+/* a2's direction: a phone draws the outline instead of the graph. */
+.tc-win[data-view="outline"] .tc-canvas,
+.tc-win:not([data-view="outline"]) .tc-outline { display: none; }
+
+/* Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status:
+ * unreviewed. Item 5: the list of roots at the top, each name a button
+ * that brings its tree into view, and the heading over each tree, a line
+ * of words over a rule as wide as the tree. Words, not color. */
+.tc-roots { font-family: var(--tc-mono); font-size: 11px; line-height: 2; color: var(--tc-muted); }
+.tc-roots[hidden] { display: none; }
+.tc-root-btn {
+  font: inherit;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--tc-text);
+  background: var(--tc-panel);
+  border: 1px solid var(--tc-line);
+  border-radius: 5px;
+  padding: 1px 9px;
+  cursor: pointer;
+}
+.tc-root-btn:focus-visible { outline: 2px solid var(--tc-text); outline-offset: 1px; }
+.tc-head {
+  position: absolute;
+  font-family: var(--tc-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--tc-text);
+  border-bottom: 1px solid var(--tc-line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  scroll-margin-top: 8px;
+}
+.tc-head[hidden] { display: none; }
+
+/* The outline (a2's direction): one row per session, indented under its
+ * parent (look.js sets the indent) with a rule down the left of each
+ * nested row; each tree headed by its root; then the recent traffic. Rows
+ * sit on the node cards' face, so the words keep their checked contrast. */
+.tc-outline {
+  flex: 1 0 auto;
+  background: var(--tc-panel);
+  border: 1px solid var(--tc-line);
+  border-radius: var(--tc-radius);
+  padding: 8px 10px;
+}
+.tc-group + .tc-group, .tc-traffic { margin-top: 12px; }
+.tc-group-head {
+  font-family: var(--tc-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--tc-text);
+  border-bottom: 1px solid var(--tc-line);
+  padding-bottom: 3px;
+  margin-bottom: 4px;
+  scroll-margin-top: 8px;
+}
+.tc-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 3px 0 3px 8px; }
+.tc-row.nested { border-left: 2px solid var(--tc-line); }
+.tc-row-title { font-size: 12px; font-weight: 600; color: var(--tc-text); }
+.tc-row-role { font-size: 11px; font-weight: 500; }
+.tc-row-state { font-family: var(--tc-mono); font-size: 11px; color: var(--tc-muted); }
+.tc-row-note { flex: 1 0 100%; font-size: 11px; color: var(--tc-dim); overflow-wrap: anywhere; }
+.tc-row[data-state="writing"] .tc-row-state { color: var(--tc-cyan); font-weight: 600; }
+.tc-row[data-state="down"] .tc-row-state { color: var(--tc-red); font-weight: 600; }
+.tc-traffic-line { font-family: var(--tc-mono); font-size: 11px; color: var(--tc-text); padding: 2px 0; overflow-wrap: anywhere; }
 .tc-wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
 /* A wire's words are its title, shown on hover (round 2): the line itself
  * takes the pointer; the layer round it does not. */

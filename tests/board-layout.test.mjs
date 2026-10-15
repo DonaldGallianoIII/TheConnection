@@ -27,7 +27,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  layoutLevels, layoutWidth, roleTitle, fitTransform, boardView, createBoard, createFit, levelPort, STATES, CONFIG,
+  layoutLevels, layoutWidth, roleTitle, fitTransform, boardView, createBoard, createFit, levelPort, rootsList, outlineView,
+  STATES, CONFIG,
 } from '../board/look.js';
 
 /** One feed node with the fields the layout reads. @complexity O(1)  @alloc one object */
@@ -181,8 +182,9 @@ const FOURTEEN = {
     ...Array.from({ length: 13 }, (_, i) => n(`w${i + 1}`, 'worker', 'declared', 1, 'hub'))],
   peers: Array.from({ length: 14 }, (_, i) => n(`p${i + 1}`, 'peer', 'inferred', 0, null)),
 };
-// The text drawn inside the board's view, so scaled with it.
-const BOARD_TEXT = ['.tc-node-title', '.tc-node-role', '.tc-node-sub', '.tc-node-note', '.tc-wire-label'];
+// The text drawn inside the board's view, so scaled with it (round 2 adds
+// the headings over the trees).
+const BOARD_TEXT = ['.tc-node-title', '.tc-node-role', '.tc-node-sub', '.tc-node-note', '.tc-wire-label', '.tc-head'];
 const CSS = readFileSync(new URL('../board/theme.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
 
 /**
@@ -373,11 +375,12 @@ function runsOf(view) {
   ];
 }
 
-test('no wire or connector enters a node box, on the 14-name feeds at desktop and phone widths', () => {
+test('no wire or connector enters a node box or a heading, on the 14-name feeds at desktop and phone widths', () => {
   for (const [shape, feed] of Object.entries(ROUTED)) {
     for (const width of ROUTE_WIDTHS) {
       const view = boardView(feed, layoutWidth(width));
       const boxes = Object.values(view.nodes).map(boxOf);
+      const heads = Object.values(view.nodes).filter((v) => v.head).map((v) => ({ ...v.head, id: `${v.id}'s heading` }));
       const runs = runsOf(view);
       assert.ok(runs.length >= feed.links.length, `${shape} at ${width} px draws ${runs.length} runs`);
       for (const run of runs) {
@@ -386,7 +389,7 @@ test('no wire or connector enters a node box, on the 14-name feeds at desktop an
         for (let i = 1; i < run.points.length; i += 1) {
           const [p, q] = [run.points[i - 1], run.points[i]];
           assert.ok(p.x === q.x || p.y === q.y, `${where}: a piece is neither level nor upright`);
-          for (const b of boxes) assert.ok(!pieceEnters(p, q, b), `${where} enters ${b.id}`);
+          for (const b of [...boxes, ...heads]) assert.ok(!pieceEnters(p, q, b), `${where} enters ${b.id}`);
         }
         assert.ok(onEdge(run.points.at(-1), boxOf(view.nodes[run.to])), `${where} does not end on ${run.to}'s edge`);
         if (run.from) assert.ok(onEdge(run.points[0], boxOf(view.nodes[run.from])), `${where} does not start on ${run.from}'s edge`);
@@ -395,12 +398,12 @@ test('no wire or connector enters a node box, on the 14-name feeds at desktop an
   }
 });
 
-test('no label overlaps another label or a node box, on the 14-name feeds at desktop and phone widths', () => {
+test('no label overlaps another label, a node box or a heading, on the 14-name feeds at desktop and phone widths', () => {
   for (const [shape, feed] of Object.entries(ROUTED)) {
     for (const width of ROUTE_WIDTHS) {
       const where = `${shape} at ${width} px`;
       const view = boardView(feed, layoutWidth(width));
-      const boxes = Object.values(view.nodes).map(boxOf);
+      const boxes = [...Object.values(view.nodes).map(boxOf), ...Object.values(view.nodes).filter((v) => v.head).map((v) => ({ ...v.head, id: `${v.id}'s heading` }))];
       const labeled = Object.values(view.edges).filter((e) => e.label);
       assert.equal(labeled.length, feed.links.length, `${where}: a flowing wire has no label words`);
       const placed = labeled.filter((e) => e.at);
@@ -434,4 +437,110 @@ test('a parent\'s mail runs down its connector, port to port; two boxes side by 
   assert.equal(view.nodes.p1.pos.y, view.nodes.p2.pos.y, 'p1 and p2 are not in one row');
   assert.equal(peers.points.length, 2, `p1 to p2 bends: ${JSON.stringify(peers.points)}`);
   assert.equal(peers.points[0].y, peers.points[1].y, 'p1 to p2 is not level');
+});
+
+// Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+// Round 2, item 5: the second orchestrator is reachable at a glance. A
+// list of roots at the top, and a heading over each root's tree.
+
+test('the roots list names each root by role, orchestrators first, in words', () => {
+  assert.deepEqual(rootsList(ROUTED.mixed), [
+    { role: 'orchestrator', words: '2 orchestrators', ids: ['a', 'z'] },
+    { role: 'peer', words: '2 peers', ids: ['p1', 'p2'] },
+  ]);
+  assert.deepEqual(rootsList(ROUTED.star), [{ role: 'orchestrator', words: '1 orchestrator', ids: ['hub'] }]);
+  assert.deepEqual(rootsList({ nodes: [] }), []);
+});
+
+test('each root\'s tree starts with a heading naming its root, over the whole tree, clear of every box', () => {
+  for (const width of [DESK_W, PHONE_W]) {
+    const view = boardView(ROUTED.mixed, layoutWidth(width));
+    const lay = layoutLevels(ROUTED.mixed, layoutWidth(width));
+    const boxes = Object.values(view.nodes).map(boxOf);
+    const sizes = { a: 8, z: 4, p1: 1, p2: 1 };
+    for (const [id, v] of Object.entries(view.nodes)) {
+      const where = `${id} at ${width} px`;
+      if (!lay.roots.includes(id)) {
+        assert.equal(v.head, null, `${where} is not a root but has a heading`);
+        continue;
+      }
+      const words = sizes[id] > 1 ? `${roleTitle(ROUTED.mixed.nodes.find((x) => x.id === id))} · ${sizes[id]} sessions` : view.nodes[id].title;
+      assert.equal(v.head.text, words, `${where}: heading`);
+      assert.ok(v.head.y + v.head.h <= v.pos.y - CONFIG.PORT_SIZE / 2, `${where}: the heading is not over the root's box and port`);
+      for (const b of boxes) assert.ok(!boxesOverlap(v.head, b), `${where}: the heading is on ${b.id}`);
+    }
+    // The tree under each heading: every box of a's tree sits inside a's heading's width.
+    for (const id of ['a', 'b', 'docs', 'c', 'd', 'e1', 'e2', 'e3']) {
+      const p = view.nodes[id].pos;
+      const h = view.nodes.a.head;
+      assert.ok(p.x >= h.x && p.x + CONFIG.NODE_W <= h.x + h.w, `${id} at ${width} px is outside a's heading`);
+    }
+  }
+});
+
+// a2's direction for the phone: the outline view, one row per session,
+// indented by level under its parent, each tree headed by its root, then
+// the recent traffic. The 14-name feed at 358 px.
+
+test('the outline lists every session once, indented by level under its parent, each tree headed by its root', () => {
+  const model = outlineView(ROUTED.mixed);
+  const rows = model.groups.flatMap((g) => g.rows);
+  assert.deepEqual(rows.map((r) => r.id).sort(), ROUTED.mixed.nodes.map((x) => x.id).sort(), 'a session is missing or twice');
+  assert.deepEqual(model.groups.map((g) => g.root), ['a', 'p1', 'p2', 'z']);
+  for (const g of model.groups) {
+    assert.ok(g.heading.startsWith(`${g.root} · `), `group ${g.root} is headed "${g.heading}"`);
+    assert.equal(g.rows[0].id, g.root, `group ${g.root} does not start with its root`);
+  }
+  const level = Object.fromEntries(ROUTED.mixed.nodes.map((x) => [x.id, x.level]));
+  for (const r of rows) assert.equal(r.depth, level[r.id], `${r.id} sits at depth ${r.depth}, level ${level[r.id]}`);
+  // A parent comes before its children, and each child right under its own parent's subtree.
+  const order = rows.map((r) => r.id);
+  for (const x of ROUTED.mixed.nodes.filter((y) => y.parent)) {
+    assert.ok(order.indexOf(x.parent) < order.indexOf(x.id), `${x.id} comes before its parent ${x.parent}`);
+  }
+  assert.deepEqual(order.slice(0, 4), ['a', 'b', 'c', 'd'], 'b\'s children do not follow b');
+  const a = rows.find((r) => r.id === 'a');
+  assert.deepEqual([a.role, a.glyph, a.word, a.unread], [' · orchestrator', STATES.idle.glyph, STATES.idle.word, '']);
+  // The traffic: one line per pair, newest first, with its words.
+  assert.equal(model.traffic.length, ROUTED.mixed.links.length);
+  assert.deepEqual(model.traffic.map((t) => t.seq), [...model.traffic.map((t) => t.seq)].sort((x, y) => y - x), 'not newest first');
+  assert.equal(model.traffic[0].text, 'b → d · #12 · 0 s ago');
+});
+
+test('createFit draws the outline under OUTLINE_BELOW_PX and the graph above it, and jumps to a root in either', () => {
+  let report = null;
+  class FakeObserver {
+    constructor(callback) { report = callback; }
+    observe() {}
+    disconnect() {}
+  }
+  const outlines = [];
+  const revealed = [];
+  const kit = {
+    createNode(v) { return { update() {}, remove() {}, reveal() { revealed.push(['graph', v.id]); } }; },
+    createEdge() { return { update() {}, remove() {} }; },
+    drawOutline(model) { outlines.push(model); },
+    revealOutline(id) { revealed.push(['outline', id]); },
+  };
+  const canvas = { root: {}, frame: { style: {} }, view: { style: {} }, wires: { setAttribute() {} } };
+  const mark = { dataset: {} };
+  const board = createBoard(kit);
+  const fit = createFit(canvas, board, { padding: FIT_PADDING, Observer: FakeObserver, mark });
+  fit.start();
+  fit.draw(ROUTED.mixed);
+  report([{ contentRect: { width: PHONE_W, height: CANVAS_H } }]);
+  assert.equal(fit.view, 'outline');
+  assert.equal(mark.dataset.view, 'outline');
+  assert.equal(board.nodes.size, 0, 'the phone drew the graph');
+  assert.equal(outlines.length, 1);
+  assert.deepEqual(outlines[0], outlineView(ROUTED.mixed));
+  fit.draw(ROUTED.mixed);
+  assert.equal(outlines.length, 1, 'an unchanged outline was drawn again');
+  fit.jump('z');
+  report([{ contentRect: { width: CONFIG.OUTLINE_BELOW_PX, height: CANVAS_H } }]);
+  assert.equal(mark.dataset.view, 'graph', `${CONFIG.OUTLINE_BELOW_PX} px does not draw the graph`);
+  assert.equal(board.nodes.size, ROUTED.mixed.nodes.length);
+  fit.jump('z');
+  assert.deepEqual(revealed, [['outline', 'z'], ['graph', 'z']]);
+  fit.stop();
 });

@@ -5,7 +5,7 @@
     "file": "connection.board",
     "sub": "· TheConnection :: look demo"
   },
-  "legend": "demo · scripted traffic · dashes run toward the reader · arrow marks the reader",
+  "legend": "demo · scripted traffic",
   "footer": [
     "load 6 / 16",
     "mem free 73%",

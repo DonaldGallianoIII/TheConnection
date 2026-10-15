@@ -22,7 +22,11 @@
  * from the back/forward cache starts polling again on pageshow. It only
  * reads; nothing on the page writes to the mailbox. The window is at least
  * the viewport's height, the board's frame grows to the board and the page
- * scrolls down; the legend is the footer's first row (round 2). ?theme=dark or ?theme=daylight picks a
+ * scrolls down; the legend is the footer's first row (round 2). A list of
+ * the roots at the top brings each tree into view, and each tree starts
+ * with a heading naming its root (item 5). Under look.js OUTLINE_BELOW_PX
+ * of width (a phone) the page draws the outline instead of the graph: one
+ * indented row per session and the recent traffic, no wires. ?theme=dark or ?theme=daylight picks a
  * look, the switch flips it, and ?gray=1 draws the page in grayscale, the
  * colorblind check.
  *
@@ -37,7 +41,9 @@
  *             #app with look.js. The poller's timers and its request's
  *             AbortController and one ResizeObserver, all released on
  *             pagehide and made again on a pageshow from the back/forward
- *             cache; two click listeners, released with their buttons
+ *             cache; two click listeners, released with their buttons,
+ *             and one per root in the roots list, released when the list
+ *             is rebuilt
  * @deps       look.js, theme.css; serve.py's /feed (C5, C6)
  * @complexity one poll: O(n log n + l + r), plus look.js routeAround's
  *             search per routed pair, in patchBoard over n nodes, l
@@ -49,8 +55,8 @@
  *             keeps to lay out again on a resize
  */
 import {
-  createWindow, createCanvas, setFooter, createLookSwitch, pickLook, applyLook,
-  createBoard, createKit, createFit, createPoller, pillText, CONN_WORDS, LEGEND_WORDS,
+  createWindow, createCanvas, createRoots, setFooter, createLookSwitch, pickLook, applyLook,
+  createBoard, createKit, createFit, createPoller, pillText, rootsList, CONN_WORDS, LEGEND_WORDS,
 } from './look.js';
 
 // C6 and O7: a wire moves within 3 s of a send, and one feed costs the
@@ -88,21 +94,27 @@ const lookSwitch = createLookSwitch(document, win.title, {
     history.replaceState(null, '', `?${query}${location.hash}`);
   },
 });
+// The roots, at the top: each name brings its tree into view (round 2, item 5).
+const roots = createRoots(document, win.body, (id) => fit.jump(id));
 const canvas = createCanvas(document, win.body);
 const board = createBoard(createKit(document, canvas));
 // The canvas's size comes from the observer's own entry, never a layout
-// read after a patch; a resize lays the last feed out again at the new width.
-const fit = createFit(canvas, board, { padding: FIT_PADDING, Observer: ResizeObserver });
+// read after a patch; a resize lays the last feed out again at the new
+// width, as the graph or, on a phone, the outline (win.root's data-view).
+const fit = createFit(canvas, board, { padding: FIT_PADDING, Observer: ResizeObserver, mark: win.root });
 
 const draw = (feed) => {
   fit.draw(feed);
+  roots.set(rootsList(feed));
   // Listeners by pid, not by state (D15: a listener that sent reads writing).
   const pill = pillText(feed);
   win.setConn(pill.text, pill.state);
   const m = feed.machine;
-  // The legend is the footer's first row, never over the board.
+  // The legend is the footer's first row, never over the board; theme.css
+  // shows the one for the view drawn.
   setFooter(document, win.foot, [
     { legend: 'graph', text: feed.nodes.length ? LEGEND_WORDS.graph : LEGEND_WORDS.empty },
+    { legend: 'outline', text: feed.nodes.length ? LEGEND_WORDS.outline : LEGEND_WORDS.empty },
     { text: `load ${m.load1} / ${m.cores}` }, { text: `mem free ${m.mem_avail_pct}%` }, { spacer: true },
     { text: `${feed.nodes.length} sessions · ${pill.listening} listening` }, { text: `at ${feed.at}` },
   ]);

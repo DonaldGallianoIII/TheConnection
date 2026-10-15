@@ -8,18 +8,23 @@
  * board is never rebuilt. createFit keeps a board laid out to its canvas.
  * Round 2: every wire and connector is routed round the boxes (routeTree,
  * routeAround) and every label is placed clear of boxes and other labels
- * (placeLabels); the routing section states the one rule.
+ * (placeLabels); the routing section states the one rule. Each root's tree
+ * starts with a heading, rootsList and createRoots make the list of roots
+ * at the top of the page, and on a phone createFit draws outlineView's
+ * outline instead of the graph.
  *
  * @interacts  creates elements under the container the caller passes in; uses
  *             theme.css class names; applyLook writes data-theme on <html>;
  *             never touches innerHTML, storage or globals. layoutLevels,
  *             boardView, diffBoard, roleTitle, hueFor, pillText,
  *             layoutWidth, levelPort, routeTree, routeAround, roundedPath,
- *             placeLabels and fitTransform read only their
- *             arguments; patchBoard writes only the board object it is given
- *             and calls only its kit; createFit observes the canvas's stage
- *             through the observer it is given and writes the frame's
- *             height and the view's size and transform; createPoller asks for the feed through
+ *             placeLabels, rootsList, outlineView and fitTransform read
+ *             only their arguments; patchBoard writes only the board object
+ *             it is given and calls only its kit; createRoots calls back on
+ *             a click; createFit observes the canvas's stage through the
+ *             observer it is given and writes the window's data-view, the
+ *             frame's height and the view's size and transform, and its
+ *             jump and the kit's reveals scroll the page; createPoller asks for the feed through
  *             the fetch and timers it is given and reports through its two
  *             callbacks
  * @deps       browser DOM and SVG for the drawing functions; the pure layer
@@ -32,10 +37,14 @@
  *             routeAround's search per routed pair, O(g log g) over its g
  *             states (thousands on a real board), and placeLabels; diffBoard
  *             is O(n + e) over two views' nodes and e edges, times their
- *             points; pillText is O(n); createPoller is O(1) per poll
- * @alloc      one element tree and one connector path per node, one path
- *             with its title and one label with its backing per wire, each
- *             released by its own remove(). removeBoard clears the DOM
+ *             points; outlineView is O(n log n + r log r); rootsList and
+ *             pillText are O(n) after the sort; createPoller is O(1) per poll
+ * @alloc      one element tree, one connector path and one heading per
+ *             node, one path with its title and one label with its backing
+ *             per wire, each released by its own remove(); the outline's
+ *             element tree, replaced when the outline changes; one button
+ *             per root in the roots list, replaced when the roots change.
+ *             removeBoard clears the DOM
  *             under a parent and nothing else: a board object from
  *             createBoard goes with it, since nothing else holds its
  *             handles. That board holds one handle per drawn node and edge,
@@ -87,6 +96,19 @@ export const CONFIG = Object.freeze({
   LAYOUT_ROOT_GAP: 72,
   LAYOUT_INDENT: 32,
   LAYOUT_MARGIN: 24,
+  // Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+  // Item 5: each root's tree starts with a heading naming its root, as wide
+  // as the tree: HEAD_H tall (an 11 px line and its rule), then HEAD_GAP
+  // before the root's box (room for the root's in port ring, which stands
+  // PORT_SIZE / 2 over the box).
+  HEAD_H: 20,
+  HEAD_GAP: 8,
+  // a2's direction: under this stage width (about a 600 px phone, less the
+  // page's two 16 px margins, the window's borders and the body's 8 px
+  // padding) the board draws the outline view instead of the graph. Each
+  // outline row is indented OUTLINE_INDENT px per level under its parent.
+  OUTLINE_BELOW_PX: 560,
+  OUTLINE_INDENT: 16,
   // A message at most this many seconds old flows on its wire. The feed's
   // WRITING_WINDOW_S, so the wire moves while its sender reads as writing.
   FLOW_AGE_S: 10,
@@ -306,7 +328,9 @@ export function setFooter(doc, foot, items) {
 
 /**
  * Canvas: a stage holding the frame the board draws in, which holds the
- * view (a wire layer in SVG and a node layer). The frame grows to the
+ * view (a wire layer in SVG and a node layer), and the outline a phone
+ * draws instead (a2's direction; theme.css shows one of the two by the
+ * window's data-view). The frame grows to the
  * board's laid out height and the page scrolls, never sideways (round 2,
  * item 1); nothing sits over it (the legend is in the footer, item 4).
  * createFit watches the stage, which keeps the width the board may use.
@@ -314,7 +338,7 @@ export function setFooter(doc, foot, items) {
  * is drawn over every wire (round 2).
  * @interacts  appends to parent
  * @complexity O(1)  @alloc one canvas subtree with an arrow marker def
- * @returns {{ root, frame, view, wires, labels }}
+ * @returns {{ root, frame, view, wires, labels, outline }}
  */
 export function createCanvas(doc, parent) {
   const root = el(doc, 'div', 'tc-stage');
@@ -332,9 +356,53 @@ export function createCanvas(doc, parent) {
   wires.append(defs, labels);
   view.append(wires);
   frame.append(view);
-  root.append(frame);
+  const outline = el(doc, 'div', 'tc-outline');
+  root.append(frame, outline);
   parent.append(root);
-  return { root, frame, view, wires, labels };
+  return { root, frame, view, wires, labels, outline };
+}
+
+/**
+ * The list of roots at the top of the page (round 2, item 5):
+ * `2 orchestrators: a, z · 2 peers: p1, p2`, each name a button that calls
+ * onJump(name), which brings that tree into view. set(groups) takes
+ * rootsList's groups and rebuilds the list only when they change; with no
+ * roots it is hidden.
+ * Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+ * @interacts  appends a nav to parent; one click listener per button,
+ *             released with its button when the list is rebuilt
+ * @complexity O(r) per change over r roots  @alloc one nav; one button per root
+ * @returns {{ root, set(groups) }}
+ */
+export function createRoots(doc, parent, onJump) {
+  const root = el(doc, 'nav', 'tc-roots');
+  root.setAttribute('aria-label', 'Roots');
+  root.hidden = true;
+  parent.append(root);
+  let shown = null;
+  return {
+    root,
+    set(groups) {
+      const key = JSON.stringify(groups);
+      if (key === shown) return;
+      shown = key;
+      const parts = [];
+      groups.forEach((g, i) => {
+        if (i) parts.push(doc.createTextNode(' · '));
+        parts.push(el(doc, 'span', 'tc-roots-words', `${g.words}: `));
+        g.ids.forEach((id, j) => {
+          if (j) parts.push(doc.createTextNode(', '));
+          const b = el(doc, 'button', 'tc-root-btn', id);
+          b.type = 'button';
+          b.setAttribute('aria-label', `go to ${id}'s tree`);
+          b.addEventListener('click', () => onJump(id));
+          parts.push(b);
+        });
+      });
+      root.replaceChildren(...parts);
+      root.hidden = !groups.length;
+    },
+  };
 }
 
 /**
@@ -471,6 +539,7 @@ export const LINK_WORDS = Object.freeze({
  * Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
  */
 export const LEGEND_WORDS = Object.freeze({
+  outline: 'outline: each session under the one it reports to · traffic: newest first, arrow toward the reader',
   graph: 'thin line: reports to · dashes, arrow and words: mail now, arrow at the reader · long dash: native, not observed · dotted: no listener',
   empty: 'no sessions yet · send a message or start a listener',
 });
@@ -602,6 +671,10 @@ function treeOf(feed) {
  * keyed with no prototype (or is a Map), so a node named __proto__ lays out
  * like any other.
  *
+ * Round 2 (item 5): each root's tree starts with a band HEAD_H + HEAD_GAP
+ * tall for its heading, as wide as the tree; `heads` says where each
+ * heading goes.
+ *
  * Round 2 (item 2): `via` says where each child's tree wire turns, for
  * routeTree. A child in its parent's first row is reached across `band`,
  * the middle of the LAYOUT_ROW_GAP under the parent, which no box enters.
@@ -615,8 +688,10 @@ function treeOf(feed) {
  * @alloc      the returned maps; six Maps and the row lists for the walks,
  *             freed on return
  * @returns {{ pos: {id: {x, y}}, titles: {id: string}, rows: {id: number}, roots: string[],
- *            kids: Map<string, string[]>, via: {id: {band, gutter}}, extent: {w, h} }}
- *          rows is each node's depth in its tree; gutter is null for a first-row child
+ *            kids: Map<string, string[]>, via: {id: {band, gutter}}, heads: {id: {x, y, w, h}},
+ *            extent: {w, h} }}
+ *          rows is each node's depth in its tree; gutter is null for a first-row child;
+ *          heads is keyed by root
  */
 export function layoutLevels(feed, width = Infinity) {
   const C = CONFIG;
@@ -674,16 +749,21 @@ export function layoutLevels(feed, width = Infinity) {
     ownX.set(id, ind ? 0 : (areaW - C.NODE_W) / 2);
     block.set(id, { w: Math.max(C.NODE_W, ind + areaW), h: y - C.LAYOUT_WRAP_GAP });
   }
-  // Walk 3, top down: root trees into rows, then every box by its block.
+  // Walk 3, top down: root trees into rows, each under its heading, then
+  // every box by its block.
   const pos = nameMap();
   const via = nameMap();
+  const heads = nameMap();
   const origin = new Map();
+  const headBand = C.HEAD_H + C.HEAD_GAP;
   let top = C.LAYOUT_MARGIN;
   let widest = 0;
-  for (const line of packRows(roots.map((r) => ({ id: r, ...block.get(r) })), rootRoom, C.LAYOUT_ROOT_GAP)) {
+  const rootBlocks = roots.map((r) => ({ id: r, w: block.get(r).w, h: block.get(r).h + headBand }));
+  for (const line of packRows(rootBlocks, rootRoom, C.LAYOUT_ROOT_GAP)) {
     let x = C.LAYOUT_MARGIN;
     for (const b of line.items) {
-      origin.set(b.id, { x, y: top });
+      heads[b.id] = { x, y: top, w: b.w, h: C.HEAD_H };
+      origin.set(b.id, { x, y: top + headBand });
       x += b.w + C.LAYOUT_ROOT_GAP;
     }
     widest = Math.max(widest, line.w);
@@ -705,7 +785,7 @@ export function layoutLevels(feed, width = Infinity) {
     : { w: 0, h: 0 };
   const titles = nameMap();
   for (const n of nodes) titles[n.id] = roleTitle(n);
-  return { pos, titles, rows, roots, kids, via, extent };
+  return { pos, titles, rows, roots, kids, via, heads, extent };
 }
 
 /**
@@ -1116,6 +1196,120 @@ function noteFor(n, known) {
   return n.state === 'down' ? `${NOTE_WORDS.lastStatus} ${n.status}` : n.status;
 }
 
+// ---------- roots, headings and the outline (round 2, item 5, and a2's phone view) ----------
+// Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+
+/** Words for the outline and the roots list. Every one is a word, never a color. */
+export const OUTLINE_WORDS = Object.freeze({
+  traffic: 'recent traffic',
+  noTraffic: 'no mail yet',
+  session: 'session',
+  ago: 'ago',
+});
+// Units for a message's age in the traffic list.
+const S_PER_M = 60;
+const S_PER_H = 3600;
+const S_PER_D = 86400;
+// The roots list names roles in this order; any other role comes after, by name.
+const ROOT_ROLE_ORDER = Object.freeze(['orchestrator', 'peer', 'worker']);
+
+/** How many nodes hang in `id`'s tree, itself included. @complexity O(t) over t nodes in it  @alloc one stack */
+function treeSize(kids, id) {
+  let count = 0;
+  for (const stack = [id]; stack.length;) {
+    count += 1;
+    stack.push(...(kids.get(stack.pop()) || []));
+  }
+  return count;
+}
+
+/**
+ * A root's heading: its title, plus how many sessions its tree holds when
+ * that is more than one (`z · orchestrator · 4 sessions`).
+ * @complexity O(1)  @alloc one string
+ */
+function headWords(title, size) {
+  return size > 1 ? `${title} · ${size} ${OUTLINE_WORDS.session}s` : title;
+}
+
+/** A count and a word, plural past one (`2 orchestrators`). @complexity O(1)  @alloc one string */
+function counted(n, word) {
+  return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
+/**
+ * The roots of a feed's tree, grouped by role for the list at the top of
+ * the page (round 2, item 5): `2 orchestrators: a, z · 2 peers: p1, p2`.
+ * Orchestrators first, then peers, then workers, then any other role.
+ * @interacts  none; pure
+ * @complexity O(n log n) over n nodes, for treeOf  @alloc the returned groups
+ * @returns {{ role, words, ids: string[] }[]}  words is the count and role, `2 orchestrators`
+ */
+export function rootsList(feed) {
+  const { known, roots } = treeOf(feed);
+  const byRole = new Map();
+  for (const id of roots) {
+    const role = known.get(id).role || OUTLINE_WORDS.session;
+    if (!byRole.has(role)) byRole.set(role, []);
+    byRole.get(role).push(id);
+  }
+  const rank = (role) => (ROOT_ROLE_ORDER.includes(role) ? ROOT_ROLE_ORDER.indexOf(role) : ROOT_ROLE_ORDER.length);
+  return [...byRole.entries()]
+    .sort(([p], [q]) => (rank(p) - rank(q)) || byName(p, q))
+    .map(([role, ids]) => ({ role, words: counted(ids.length, role), ids }));
+}
+
+/** A message's age in words: `40 s ago`, `2 m ago`, `3 h ago`, `1 d ago`. @complexity O(1)  @alloc one string */
+function agoWords(ageS) {
+  if (ageS < S_PER_M) return `${Math.round(ageS)} s ${OUTLINE_WORDS.ago}`;
+  if (ageS < S_PER_H) return `${Math.floor(ageS / S_PER_M)} m ${OUTLINE_WORDS.ago}`;
+  if (ageS < S_PER_D) return `${Math.floor(ageS / S_PER_H)} h ${OUTLINE_WORDS.ago}`;
+  return `${Math.floor(ageS / S_PER_D)} d ${OUTLINE_WORDS.ago}`;
+}
+
+/**
+ * The outline view of a feed, for a phone (a2's direction): no wires.
+ * One group per root, in name order, headed by headWords; in it one row
+ * per session of that tree, parent before children, each `depth` levels
+ * under its root, with its name, its role words, its state's glyph and
+ * word, its unread count and its note (as boardView's). Then the recent
+ * traffic: one line per pair, its newest message, `a → b · #18 · 2 m ago`,
+ * newest first.
+ * @interacts  none; pure
+ * @complexity O(n log n + r log r) over n nodes and r recent wires  @alloc the returned model
+ * @returns {{ groups: { root, heading, rows: { id, depth, role, state, glyph, word, unread, note }[] }[],
+ *            traffic: { from, to, seq, text }[] }}
+ */
+export function outlineView(feed) {
+  const { known, kids, roots } = treeOf(feed);
+  const groups = roots.map((root) => {
+    const rows = [];
+    for (const stack = [[root, 0]]; stack.length;) {
+      const [id, depth] = stack.pop();
+      const n = known.get(id);
+      const state = STATES[n.state] ? n.state : 'idle';
+      rows.push({
+        id, depth, role: roleTitle(n).slice(String(id).length), state, glyph: STATES[state].glyph, word: STATES[state].word,
+        unread: n.unread > 0 ? `${n.unread} unread` : '', note: noteFor(n, known),
+      });
+      const children = kids.get(id) || [];
+      for (let i = children.length - 1; i >= 0; i -= 1) stack.push([children[i], depth + 1]);
+    }
+    return { root, heading: headWords(roleTitle(known.get(root)), rows.length), rows };
+  });
+  const newest = new Map();
+  for (const w of (feed && feed.wires) || []) {
+    if (w.from === w.to) continue;
+    const key = pairKey(w.from, w.to);
+    if (!newest.has(key) || w.seq > newest.get(key).seq) newest.set(key, w);
+  }
+  const traffic = [...newest.values()].sort((p, q) => q.seq - p.seq).map((w) => ({
+    from: w.from, to: w.to, seq: w.seq,
+    text: `${w.from} → ${w.to} · #${w.seq}${w.age_s == null ? '' : ` · ${agoWords(w.age_s)}`}`,
+  }));
+  return { groups, traffic };
+}
+
 /**
  * What to draw for a C5 feed laid out inside `width` (see layoutLevels):
  * one view per node and per edge, keyed by id. Node: title (roleTitle), pos
@@ -1127,7 +1321,10 @@ function noteFor(n, known) {
  * direction; the legend says what the thin line is); null on a root. It
  * belongs to the child, so it comes and goes and moves with it. It replaces
  * the reports_to hint, so a feed's reports_to links draw nothing of their
- * own; one that names no node is still its node's note.
+ * own; one that names no node is still its node's note. A root's view has
+ * `head`, the heading over its tree (layoutLevels' heads, with headWords'
+ * text: round 2, item 5); any other node's is null. Wires and labels keep
+ * off headings as they do off boxes.
  *
  * Edges, each a run of points (round 2, item 2; the rule is in the
  * routing section above), with `words` for its title, always:
@@ -1163,18 +1360,22 @@ export function boardView(feed, width) {
   for (const n of known.values()) {
     nodes[n.id] = {
       id: n.id, title: lay.titles[n.id], pos: lay.pos[n.id], state: STATES[n.state] ? n.state : 'idle',
-      detail: n.unread > 0 ? `${n.unread} unread` : '', note: noteFor(n, known), connector: null,
+      detail: n.unread > 0 ? `${n.unread} unread` : '', note: noteFor(n, known), connector: null, head: null,
     };
     boxOf[n.id] = { x: lay.pos[n.id].x, y: lay.pos[n.id].y, w: C.NODE_W, h: C.NODE_H };
   }
-  // Wires keep clear of every box and every port's stub; labels keep off
-  // every box and every port ring.
+  for (const root of lay.roots) {
+    nodes[root].head = { ...lay.heads[root], text: headWords(lay.titles[root], treeSize(lay.kids, root)) };
+  }
+  const headBoxes = lay.roots.map((root) => lay.heads[root]);
+  // Wires keep clear of every box, every port's stub and every heading;
+  // labels keep off every box, every port ring and every heading.
   const boxes = Object.values(boxOf);
   const ports = (size) => boxes.flatMap((b) => ['in', 'out'].map((side) => {
     const at = levelPort(b, side);
     return { x: at.x - C.PORT_SIZE / 2, y: side === 'in' ? at.y - size : at.y, w: C.PORT_SIZE, h: size };
   }));
-  const obstacles = [...boxes, ...ports(C.ROUTE_CLEAR)];
+  const obstacles = [...boxes, ...ports(C.ROUTE_CLEAR), ...headBoxes];
   const flowing = new Map();
   for (const w of (feed && feed.wires) || []) {
     if (w.age_s == null || w.age_s > C.FLOW_AGE_S || w.from === w.to) continue;
@@ -1230,7 +1431,7 @@ export function boardView(feed, width) {
       down: l.kind === 'mailbox' && (p.state === 'down' || q.state === 'down'),
     };
   }
-  const spots = placeLabels(edges, [...boxes, ...ports(C.PORT_SIZE / 2)], lay.extent);
+  const spots = placeLabels(edges, [...boxes, ...ports(C.PORT_SIZE / 2), ...headBoxes], lay.extent);
   for (const e of Object.values(edges)) e.at = spots[e.id] || null;
   return { nodes, edges, extent: lay.extent };
 }
@@ -1248,11 +1449,13 @@ function samePoints(p, q) {
   return p.length === q.length && p.every((pt, i) => samePoint(pt, q[i]));
 }
 
-/** True when two node views would draw the same. @complexity O(p) over p connector points  @alloc none */
+/** True when two node views would draw the same, connector and heading too. @complexity O(p) over p connector points  @alloc none */
 function sameNode(p, q) {
   const sameConnector = p.connector === q.connector || (p.connector && q.connector
     && p.connector.words === q.connector.words && samePoints(p.connector.points, q.connector.points));
-  return NODE_FIELDS.every((f) => p[f] === q[f]) && samePoint(p.pos, q.pos) && !!sameConnector;
+  const sameHead = p.head === q.head || (p.head && q.head && p.head.text === q.head.text
+    && samePoint(p.head, q.head) && p.head.w === q.head.w);
+  return NODE_FIELDS.every((f) => p[f] === q[f]) && samePoint(p.pos, q.pos) && !!sameConnector && !!sameHead;
 }
 
 /** True when two edge views would draw the same. @complexity O(p) over p points  @alloc none */
@@ -1372,16 +1575,24 @@ export function drawEdge(doc, canvas, view) {
 /**
  * The DOM kit patchBoard draws through: nodes with createNode (ports on the
  * top and bottom edges), each with its connector from its parent as a thin
- * path under every wire (first in the layer, with its words as a title),
- * and edges with drawEdge, all on `canvas`.
+ * path under every wire (first in the layer, with its words as a title)
+ * and, on a root, the heading over its tree (round 2, item 5); and edges
+ * with drawEdge, all on `canvas`. A node's reveal() scrolls its heading (or
+ * its box) to the top of the view. drawOutline(model) draws outlineView's
+ * model into canvas.outline, replacing what was there, and
+ * revealOutline(id) scrolls root id's group heading to the top.
  * @interacts  see createNode and drawEdge; a node's remove() takes its
- *             connector out too
+ *             connector and heading out too; drawOutline replaces
+ *             canvas.outline's children; the reveals scroll the page
  * @complexity O(1) per node call plus O(p) over p connector points; edges
- *             as drawEdge
- * @alloc      one node subtree and one connector path per node, or one
- *             edge's elements per create
+ *             as drawEdge; drawOutline O(n + t) over n rows and t traffic lines
+ * @alloc      one node subtree, one connector path and one heading per
+ *             node, or one edge's elements per create; drawOutline one
+ *             element tree for the outline, dropping the last, and a map of
+ *             its group headings
  */
 export function createKit(doc, canvas) {
+  let outlineHeads = new Map();
   return {
     createNode(v) {
       const node = createNode(doc, canvas, { ...v, hue: HUES[hueFor(v.id)], levels: true });
@@ -1389,6 +1600,9 @@ export function createKit(doc, canvas) {
       const tip = svg(doc, 'title');
       stem.append(tip);
       canvas.wires.insertBefore(stem, canvas.wires.firstChild ? canvas.wires.firstChild.nextSibling : null);
+      const head = el(doc, 'div', 'tc-head');
+      head.style.height = `${CONFIG.HEAD_H}px`;
+      canvas.view.append(head);
       const handle = {
         node,
         update(n) {
@@ -1399,16 +1613,55 @@ export function createKit(doc, canvas) {
           stem.setAttribute('d', n.connector ? roundedPath(n.connector.points, CONFIG.ROUTE_CLEAR) : '');
           stem.setAttribute('data-edge', `tree:${n.id}`);
           tip.textContent = n.connector ? n.connector.words : '';
+          head.hidden = !n.head;
+          head.textContent = n.head ? n.head.text : '';
+          head.title = head.textContent;
+          if (n.head) {
+            head.style.left = `${n.head.x}px`;
+            head.style.top = `${n.head.y}px`;
+            head.style.width = `${n.head.w}px`;
+          }
         },
+        reveal() { (head.hidden ? node.root : head).scrollIntoView({ block: 'start' }); },
         remove() {
           node.remove();
           stem.remove();
+          head.remove();
         },
       };
       handle.update(v);
       return handle;
     },
     createEdge(v) { return drawEdge(doc, canvas, v); },
+    drawOutline(model) {
+      outlineHeads = new Map();
+      const parts = model.groups.map((g) => {
+        const group = el(doc, 'section', 'tc-group');
+        const head = el(doc, 'div', 'tc-group-head', g.heading);
+        outlineHeads.set(g.root, head);
+        group.append(head);
+        for (const r of g.rows) {
+          const row = el(doc, 'div', r.depth ? 'tc-row nested' : 'tc-row');
+          row.dataset.state = r.state;
+          row.style.marginLeft = `${r.depth * CONFIG.OUTLINE_INDENT}px`;
+          const title = el(doc, 'span', 'tc-row-title');
+          title.append(el(doc, 'span', 'tc-row-name', r.id), el(doc, 'span', 'tc-row-role', r.role));
+          row.append(title, el(doc, 'span', 'tc-row-state', `${r.glyph} ${r.word}${r.unread ? ` · ${r.unread}` : ''}`));
+          if (r.note) row.append(el(doc, 'span', 'tc-row-note', r.note));
+          group.append(row);
+        }
+        return group;
+      });
+      const traffic = el(doc, 'section', 'tc-traffic');
+      traffic.append(el(doc, 'div', 'tc-group-head', OUTLINE_WORDS.traffic));
+      const lines = model.traffic.length ? model.traffic.map((t) => t.text) : [OUTLINE_WORDS.noTraffic];
+      for (const text of lines) traffic.append(el(doc, 'div', 'tc-traffic-line', text));
+      canvas.outline.replaceChildren(...parts, traffic);
+    },
+    revealOutline(id) {
+      const head = outlineHeads.get(id);
+      if (head) head.scrollIntoView({ block: 'start' });
+    },
   };
 }
 
@@ -1431,31 +1684,53 @@ export function fitTransform(width, height, extent, padding) {
 /**
  * Keep a board laid out to its canvas. The stage's width comes from the
  * ResizeObserver's own entry, never from a layout read after a patch, so a
- * poll that changes the board forces no layout (round 1, LOW-4). draw(feed)
- * lays the feed out at that width (layoutLevels wraps it) and patches the
- * board; a resize that changes the width lays the last feed out again, and
- * one that changes only the height (the frame growing) lays out nothing.
- * The frame takes the board's height plus `padding` (round 2, item 1), so
- * the page scrolls down as far as the board goes, never sideways, and the
- * fit never shrinks the board to the frame's height; the view and its wire
- * layer take the board's extent. `Observer` is ResizeObserver on a page; a
- * test passes a fake.
+ * poll that changes the board forces no layout (round 1, LOW-4). The width
+ * picks the view (a2's direction): under OUTLINE_BELOW_PX the outline
+ * (outlineView, drawn by board.kit.drawOutline, only when it changed),
+ * else the graph. `mark`'s data-view names the view drawn, so theme.css
+ * shows that one and its legend. In the graph, draw(feed) lays the feed out
+ * at that width (layoutLevels wraps it) and patches the board; a resize
+ * that changes the width draws the last feed again, and one that changes
+ * only the height (the frame growing) draws nothing. The frame takes the
+ * board's height plus `padding` (round 2, item 1), so the page scrolls down
+ * as far as the board goes, never sideways, and the fit never shrinks the
+ * board to the frame's height; the view and its wire layer take the
+ * board's extent. jump(id) brings root id's tree into view (item 5).
+ * `Observer` is ResizeObserver on a page; a test passes a fake.
  * Model: Claude Opus 5.5 (the BOARD fixer, rounds 1 and 2), 2026-10-14. Status: unreviewed.
  * @interacts  observes canvas.root (the stage) from start() until stop()
  *             (the page calls them on load and pageshow, and on pagehide);
- *             writes canvas.frame's height, canvas.view's transform, width
- *             and height and canvas.wires' width and height; calls
- *             patchBoard, and through it board.kit
- * @complexity one draw or width change: patchBoard's (boardView's routing included)
- * @alloc      one observer for the fit's life; holds the last feed and the
- *             last width, each replaced by the next
- * @returns {{ draw(feed), start(), stop() }}
+ *             writes mark's data-view, canvas.frame's height, canvas.view's
+ *             transform, width and height and canvas.wires' width and
+ *             height; calls patchBoard, and through it board.kit, or
+ *             board.kit.drawOutline; jump calls a node handle's reveal or
+ *             board.kit.revealOutline
+ * @complexity one draw or width change: patchBoard's (boardView's routing
+ *             included), or outlineView's O(n log n + r log r)
+ * @alloc      one observer for the fit's life; holds the last feed, the
+ *             last width and the last outline drawn (as a string), each
+ *             replaced by the next
+ * @returns {{ draw(feed), start(), stop(), jump(id), view }}  view: 'graph' | 'outline' | null
  */
-export function createFit(canvas, board, { padding, Observer }) {
+export function createFit(canvas, board, { padding, Observer, mark }) {
   let width = null;
   let feed = null;
+  let view = null;
+  let drawnOutline = null;
   const apply = () => {
     if (width === null) return;
+    view = width < CONFIG.OUTLINE_BELOW_PX ? 'outline' : 'graph';
+    if (mark) mark.dataset.view = view;
+    if (view === 'outline') {
+      if (!feed) return;
+      const model = outlineView(feed);
+      const key = JSON.stringify(model);
+      if (key !== drawnOutline) {
+        drawnOutline = key;
+        board.kit.drawOutline(model);
+      }
+      return;
+    }
     if (feed) patchBoard(board, feed, layoutWidth(width));
     const { extent } = board.view;
     const height = extent.h + padding;
@@ -1480,6 +1755,11 @@ export function createFit(canvas, board, { padding, Observer }) {
     },
     start() { observer.observe(canvas.root); },
     stop() { observer.disconnect(); },
+    jump(id) {
+      if (view === 'outline') board.kit.revealOutline(id);
+      else if (board.nodes.has(id)) board.nodes.get(id).reveal();
+    },
+    get view() { return view; },
   };
 }
 
