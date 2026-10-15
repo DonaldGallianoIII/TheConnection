@@ -266,6 +266,15 @@ stops trying that target, so its mail stays in order; on a far refusal,
 moves the file to `outbox/refused/` with the far stderr beside it. Prints
 one line per file. Exit 0 when nothing is left to send, 4 when anything is.
 
+**Each sender's queue is their own** (D22). On a shared mailbox (C4),
+ssh runs as the Linux user who ran `tc send`, with that user's keys, and
+the far gate labels mail by key, never by `--from`. So `tc flush` sends
+only the outbox files the running user owns, and "queue order first"
+counts only the sender's own waiting files for that target. Flush says
+how many files for a target belong to other members, and that each
+member flushes their own. Order holds per sender per target. One
+member's dead queue never holds up another member's mail.
+
 **Inbound** (`tc gate`): for `~/.ssh/authorized_keys` on the receiving
 machine, **one key per sending name**:
 
@@ -375,6 +384,11 @@ For a separate Linux user per account on one machine.
      everyone's tc uses.
   The two-user cases are Donald's human QA (`qa/human/route-shared.md`),
   including a member trying to rewrite `.shared` and being refused.
+- **The outbox is per sender** (D22). `outbox/` is sticky like the other
+  shared folders, so a member cannot move another member's queued file,
+  and a file sent with the wrong user's key would arrive labeled with
+  that key's name. Each member's `tc flush` sends only their own files
+  (C3).
 - `tc health` says `mailbox shared with group <g>` or `mailbox private`.
 
 ## C5. The board feed
