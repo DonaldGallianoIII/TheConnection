@@ -68,7 +68,10 @@ inbox (moved aside, still pinned) holds after the act.
             SSH_ORIGINAL_COMMAND, CODEX_THREAD_ID, sys.stdin,
             resource.setrlimit (a no-op, so the wait never caps this
             process) or tc's gpu_stats (no nvidia-smi run) patched; loads
-            board/serve.py and calls scan_messages for the board row; the
+            board/serve.py and calls scan_messages for the board row, and
+            since P3 fix round 1c (Claude Opus 5.5, unreviewed: round 1a's
+            MEDIUM) file_age and file_time on each message while the
+            scan's folders are held open, as feed() holds them; the
             swap renames one folder in the root and makes a link or moves
             a folder in; lstats every entry of the far end before and
             after. Writes nothing outside the root's temp folder. (P3 fix
@@ -322,6 +325,24 @@ def run_in_process(call):
     return Ran(code, out.getvalue(), err.getvalue(), value)
 
 
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): round 1a's MEDIUM, row (j) dates too.
+def board_scan_and_dates(mail):
+    """The board's scan of `mail` and the age and time feed() gives each message, with the scan's folders held open in between as feed() holds them: (messages, unreadable, {file name: (file_age, file_time)}).
+
+    @interacts  see serve.scan_messages, serve.file_age and
+                serve.file_time; reads the clock.
+    @deps       serve; contextlib, os, time.
+    @complexity O(m) over m messages (one or two).
+    @alloc      the scan's lists and one dict, returned.
+    """
+    now = time.time()
+    with contextlib.ExitStack() as held:
+        messages, unreadable = serve.scan_messages(mail, held)
+        dates = {os.path.basename(msg.path): (serve.file_age(msg.path, now), serve.file_time(msg.path))
+                 for msg in messages}
+    return messages, unreadable, dates
+
+
 def text_stdin(text):
     """A sys.stdin stand-in holding `text` as UTF-8 bytes, as the gate reads it (sys.stdin.buffer).
 
@@ -424,7 +445,7 @@ class InboxPinnedTest(UmaskTestCase):
                                                                       reports_to=None)),
             "a codex send's ring decision": lambda: tc.cmd_send(argparse.Namespace(sender=SENDER, to=OWNER,
                                                                                    message=SENT_TEXT, origin=None)),
-            "the board's scan": lambda: serve.scan_messages(root.path / "mail"),
+            "the board's scan": lambda: board_scan_and_dates(root.path / "mail"),
         }
         return commands[row.label]
 
@@ -495,10 +516,16 @@ class InboxPinnedTest(UmaskTestCase):
             self.assertIn(f"sent #2 to {OWNER}: {box / '000002-from-ben.md'}", ran.out)
             self.assertEqual(files_in(real), ["000002-from-ben.md"], "the message did not land in the real inbox")
         else:
-            messages, unreadable = ran.value
+            messages, unreadable, dates = ran.value
             self.assertEqual(sorted((m.to, m.seq, m.sender, m.read) for m in messages),
                              [(OWNER, 1, SENDER, False)], "the board's scan is not the real inbox's")
             self.assertEqual((ran.code, unreadable), (0, set()))
+            # P3 fix round 1c (Claude Opus 5.5, unreviewed): round 1a's MEDIUM, the times shown are the real inbox's.
+            age, when = dates.get("000001-from-ben.md", (None, None))
+            self.assertLessEqual(abs((age if age is not None else 0) - REAL_AGE_SECONDS), AGE_SLACK_SECONDS,
+                                 f"the board's age of the message is not the real inbox's: {dates}")
+            self.assertLessEqual(abs(time.time() - REAL_AGE_SECONDS - (when or 0)), AGE_SLACK_SECONDS,
+                                 f"the board's time of the message is not the real inbox's: {dates}")
 
     def test_a_member_swapping_its_inbox_mid_command_never_leads_tc_outside(self):
         """For every row of ROWS and both kinds of swap (a link to a folder outside the mailbox, another real folder moved in), made by the folder's owner just after tc first looked at it: the far end keeps its tree, nothing printed quotes a planted file or names its sender, and every count, age and landing is the real folder's.

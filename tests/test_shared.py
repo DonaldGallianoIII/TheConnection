@@ -4512,9 +4512,12 @@ class HealthSaysWhatItCannotSeeTest(UmaskTestCase):
     def test_an_inbox_tc_cannot_list_is_unknown_with_the_reason_never_0(self):
         """mail/to-b at no access: tc health --json gives b unread null and a reason, c still 1; tc health says `unread unknown` for b.
 
-        Must reject a count from a listing pathlib's glob gave up on in
-        silence (b would read 0 unread, as a 3770 inbox does for a board
-        run outside the group).
+        Must reject a count from a listing that gave up in silence (b
+        would read 0 unread, as a 3770 inbox does for a board run outside
+        the group). P3 fix round 1c (Claude Opus 5.5, unreviewed): round
+        1a's note. The listing guarded is message_files' listing of the
+        inbox in its open descriptor (open_inbox), no longer pathlib's
+        glob of its path.
 
         @interacts  see health_with_inbox_mode.
         @deps       health_with_inbox_mode; json; NO_ACCESS_MODE,
@@ -4538,10 +4541,14 @@ class HealthSaysWhatItCannotSeeTest(UmaskTestCase):
         """mail/to-b readable without search (each lstat in it is refused): tc health --json and tc health exit 0, and b's count is unknown with the reason.
 
         From BOARD's review: an owner who gives their inbox group read
-        without group search makes message_files' lstat raise
+        without group search makes every look inside it raise
         PermissionError for every member, and tc health (and the board's
-        feed) die with a traceback. Must reject an lstat that catches
-        only FileNotFoundError.
+        feed) died with a traceback. Must reject a look that catches only
+        FileNotFoundError. P3 fix round 1c (Claude Opus 5.5, unreviewed):
+        round 1a's note. The looks guarded are the open of read/ by its
+        name in the inbox's descriptor (open_inbox, pin_folder) and
+        message_files' stat of each name in the open inbox, no longer an
+        lstat of each path.
 
         @interacts  see health_with_inbox_mode.
         @deps       health_with_inbox_mode; json; READ_NO_SEARCH_MODE,
@@ -4593,7 +4600,13 @@ class CommandsSayWhatTheyCannotSeeTest(UmaskTestCase):
     (SHARED fix round 4, Claude Opus 5.5, unreviewed: LOW-4 of
     audits/2026-10-15-0102-quick). One user stands in for a member by
     taking access away from an inbox it owns. Skipped as root, who
-    searches and lists any folder.
+    searches and lists any folder. P3 fix round 1c (Claude Opus 5.5,
+    unreviewed): round 1a's note. Since round 1a (D35) the guard these
+    tests hold is the pinned inbox, not check_inbox or an lstat of each
+    path: pinned_inbox opens the inbox and its read/ once, by name, and
+    refuse_bad_inbox refuses what it cannot open or look at, with
+    check_inbox's words; message_files lists and stats each name in the
+    open folder. check_inbox now serves tc join's claim_inbox alone.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase; errno, os.
@@ -4604,8 +4617,12 @@ class CommandsSayWhatTheyCannotSeeTest(UmaskTestCase):
     def test_an_inbox_without_search_stops_send_read_peek_and_wait_with_words(self):
         """mail/to-b readable without search, so its read/ cannot be looked at: a send to b, tc read b, tc peek b and tc wait b each exit 1 with words naming read/, never a traceback; nothing lands or moves, and mail/.seq is unchanged.
 
-        Must reject a check_inbox whose lstat of read/ catches only
-        FileNotFoundError: each of the four dies with PermissionError.
+        Must reject a look at read/ that catches only FileNotFoundError:
+        each of the four dies with PermissionError. P3 fix round 1c
+        (Claude Opus 5.5, unreviewed): round 1a's note. That look is the
+        open of read/ by its name in the open inbox (pinned_inbox), whose
+        refusal (refuse_bad_inbox) keeps check_inbox's words; it was
+        check_inbox's lstat before round 1a.
 
         @interacts  one send; mail/to-b chmodded by hand and back; four tc
                     runs; lists the inbox and reads mail/.seq.
@@ -4676,12 +4693,15 @@ class CommandsSayWhatTheyCannotSeeTest(UmaskTestCase):
 
     # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-4.
     def test_log_says_it_could_not_look_at_a_read_folder_never_mailbox_empty(self):
-        """b has read its one message, then mail/to-b is set readable without search, so lstat cannot reach its read/: tc log exits 1, says it could not look at mail/to-b/read, with the reason, and never says `mailbox empty`.
+        """b has read its one message, then mail/to-b is set readable without search, so tc cannot reach its read/: tc log exits 1, says it could not look at mail/to-b/read, with the reason, and never says `mailbox empty`.
 
-        Must reject a log that drops a read/ it cannot lstat without a
-        word (real_folder and os.path.islink both answer False on the
-        error): it prints `mailbox empty` and exits 0 while read/ holds
-        the history.
+        Must reject a log that drops a read/ it cannot reach without a
+        word (round 4's real_folder and os.path.islink both answered False
+        on the error): it prints `mailbox empty` and exits 0 while read/
+        holds the history. P3 fix round 1c (Claude Opus 5.5, unreviewed):
+        round 1a's note. Since round 1a the reach guarded is the open of
+        read/ by its name in the open inbox (cmd_log, open_inbox); both
+        functions named above are gone.
 
         @interacts  one send and one read; mail/to-b chmodded by hand and
                     back; one tc log.
