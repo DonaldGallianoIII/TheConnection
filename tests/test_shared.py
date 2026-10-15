@@ -10,7 +10,11 @@ landing, and a file already there reopened without O_CREAT. And D19
 (SHARED fix round 1, Claude Opus 5.5, unreviewed): a link or FIFO planted
 as a message never printed and left in place, a FIFO at a lock's name
 refused within FIFO_REFUSE_SECONDS, and no listener or count taken
-through a link.
+through a link. And D20 (the same round): inboxes owned by their
+recipient at 3770, message, card and status files at 0640, a send to a
+name nobody joined refused, an inbox not its card owner's refused, the
+ring marker rewritten in place; then make_folder, init and the refusals'
+words from the audit's MEDIUM-4 and LOW-1 to LOW-8.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -20,13 +24,18 @@ tested with the running user's own groups: the primary group, and a
 supplementary group when the user has one (os.getgroups()). The
 supplementary group is the sharper test. A folder made without setgid, or
 a top folder left without its chown, takes the primary group, not g, and
-fails there. The second-user walk-through is the owner's human QA (D4,
-route-shared.md).
+fails there. A user with no named supplementary group gets that run as a
+skipped subtest with its reason (groups_to_test), never a silent absence.
+One user cannot prove another user's refusals either: the D20 tests prove
+the modes, the owners and the checks tc makes, and patch what lstat
+reports where a second owner is needed. The second-user walk-through is
+the owner's human QA (D4, qa/human/route-shared.md).
 
 @interacts  runs ../tc through tests/_root.py under a throwaway TC_ROOT.
-            Sets this process's umask to CHILD_UMASK for each test and puts
-            the old one back after; children inherit it, so a tc that never
-            sets its own umask writes PRIVATE_FILE_MODE and fails. Reads
+            Every class inherits UmaskTestCase, which sets this process's
+            umask to CHILD_UMASK for each test and puts the old one back
+            after; children inherit it, so a tc that never sets its own
+            umask writes PRIVATE_FILE_MODE and fails. Reads
             the group database and this process's groups. Stats every entry
             under the root. The H1 tests write nothing by hand; the D17
             tests make folders, symlinks, message files and link targets by
@@ -35,10 +44,16 @@ route-shared.md).
             once, with os.open wrapped to record its flags. The D19 tests
             make FIFOs and links by hand, hold an flock on one lock file in
             this process, and load tc in process to call show() (stdout
-            captured), listeners() and unread_count().
-@deps       python3 stdlib (contextlib, fcntl, grp, importlib, io, json, os,
-            pathlib, stat, subprocess, sys, unittest, unittest.mock);
-            tests/_root.py.
+            captured), listeners() and unread_count(). The D20 and init
+            tests make cards, folders and FIFOs by hand, chmod or chown
+            entries they own (ROOT and its temp folder put back before the
+            root is removed), and load tc in process to run deliver_local,
+            unread, claim_inbox, make_folder, cmd_init, cmd_read,
+            write_card and health_snapshot with os.lstat, os.fchown,
+            os.fchmod, os.rename, Path.rename or share_entry wrapped.
+@deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
+            importlib, io, json, os, pathlib, stat, subprocess, sys,
+            unittest, unittest.mock); tests/_root.py.
 @complexity O(1) per test: a handful of tc runs over a root of a few dozen
             entries, once per group tested (one or two).
 @alloc      one TcRoot per test and group, removed when its context exits.
@@ -74,7 +89,7 @@ import _root  # noqa: E402  (needs the path line above)
 CHILD_UMASK = 0o022
 # Written out here, not read from tc, so a change in tc fails these tests
 # instead of moving them. C4: folders 2775 (setgid).
-FOLDER_MODE = 0o2775
+SHARED_FOLDER_MODE = 0o2775
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, written out for the
 # same reason. The files every member writes, directly in mail/ (mail/.seq,
 # the locks, the ring marker): 0664.
@@ -86,7 +101,7 @@ SHARED_INBOX_MODE = 0o3770
 # What a file gets under CHILD_UMASK: the mode C4 must never leave behind.
 PRIVATE_FILE_MODE = 0o644
 # The folders C4 shares, by name under the root.
-SHARED_FOLDERS = ("mail", "status", "cards", "outbox")
+SHARED_FOLDER_NAMES = ("mail", "status", "cards", "outbox")
 # Row 1 of the exit table: refused with words.
 EXIT_REFUSED = 1
 # Row 2: a wait that timed out. A wait with --timeout 0 makes its lock and
@@ -95,9 +110,9 @@ EXIT_TIMEOUT = 2
 # A group name no machine has, for the refusal of a group that does not exist.
 NO_SUCH_GROUP = "tc-test-no-such-group"
 # SHARED D17 (Claude Opus 5.5, unreviewed): no planted links.
-# mail/, status/, cards/ and outbox/ themselves: FOLDER_MODE plus the sticky
-# bit. Written out here for the same reason as FOLDER_MODE.
-TOP_FOLDER_MODE = 0o3775
+# mail/, status/, cards/ and outbox/ themselves: SHARED_FOLDER_MODE plus
+# the sticky bit. Written out for the same reason as SHARED_FOLDER_MODE.
+SHARED_TOP_FOLDER_MODE = 0o3775
 # What tc says when it refuses a symlink at a file it opens by name.
 LINK_WORDS = "is a symlink, which tc never follows"
 # What tc says when it refuses a symlink at an inbox or its read/.
@@ -169,10 +184,15 @@ REMOVED_WORDS = "removed it again"
 READ_ONLY_FOLDER_MODE = 0o555
 NO_ACCESS_MODE = 0o000
 OWNER_FOLDER_MODE = 0o700
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1. Why
+# the supplementary run is skipped when the user has no such group.
+NO_SUPPLEMENTARY_REASON = ("the running user has no named supplementary group, so the supplementary run "
+                           "(where a folder left without its chown or setgid lands in the wrong group) "
+                           "is skipped")
 
 
-def groups_to_test():
-    """The groups to share with: [("primary", name, gid)], plus ("supplementary", ...) when the user has one.
+def user_groups():
+    """The running user's groups to share with: [("primary", name, gid)], plus ("supplementary", ...) when the user has one.
 
     The supplementary group is the first of os.getgroups(), in number
     order, that is not the effective group and has a name.
@@ -193,6 +213,61 @@ def groups_to_test():
     return found
 
 
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1.
+def groups_to_test(case):
+    """user_groups() for a test that loops over them; with no supplementary group, a skipped subtest on `case` that says why.
+
+    The supplementary run is the one that catches a folder left without
+    its chown or setgid, so its absence is a skip with a reason in the
+    test's output, never a silent pass.
+
+    @interacts  reads this process's groups and the group database; may
+                record one skipped subtest on `case`.
+    @deps       user_groups; NO_SUPPLEMENTARY_REASON.
+    @complexity O(s) over s supplementary groups (a handful).
+    @alloc      one short list, returned.
+    """
+    found = user_groups()
+    if len(found) == 1:
+        with case.subTest(group="supplementary"):
+            case.skipTest(NO_SUPPLEMENTARY_REASON)
+    return found
+
+
+def primary_group():
+    """("primary", name, gid): the running user's effective group, for a test that needs one group only.
+
+    @interacts  reads this process's groups and the group database.
+    @deps       user_groups.
+    @complexity O(s) over s supplementary groups (a handful).
+    @alloc      one tuple, returned.
+    """
+    return user_groups()[0]
+
+
+class UmaskTestCase(unittest.TestCase):
+    """A TestCase whose every test runs with this process's umask at CHILD_UMASK, put back after (the audit's LOW-10).
+
+    Every class in this file inherits it, so the module block's umask
+    claim holds for every test.
+
+    @interacts  sets this process's umask (and so every child's).
+    @deps       os; CHILD_UMASK.
+    @complexity O(1) per test.
+    @alloc      none.
+    """
+
+    def setUp(self):
+        """Set this process's umask to CHILD_UMASK; the cleanup puts the old one back.
+
+        @interacts  sets the umask of this process (and so of every child).
+        @deps       os.
+        @complexity O(1).
+        @alloc      none.
+        """
+        self.addCleanup(os.umask, os.umask(CHILD_UMASK))
+
+
 def foreign_group():
     """The name of a group this machine has and the running user is not in, or None.
 
@@ -208,7 +283,7 @@ def foreign_group():
     return None
 
 
-def tree(path, under=SHARED_FOLDERS):
+def tree(path, under=SHARED_FOLDER_NAMES):
     """Every entry under the named folders of `path`: {relative path: (kind, mode, gid)}.
 
     kind is "folder", "file" or "other", from lstat, so a link is never
@@ -239,14 +314,14 @@ def shared_as(path, kind, gid):
 
     A file directly in mail/ (mail/.seq, a lock, the ring marker):
     SHARED_WRITABLE_FILE_MODE; any other file (a message, a card, a
-    status): SHARED_OWNED_FILE_MODE (D20). A folder: TOP_FOLDER_MODE
-    (sticky, D17) when it is one of SHARED_FOLDERS itself,
+    status): SHARED_OWNED_FILE_MODE (D20). A folder: SHARED_TOP_FOLDER_MODE
+    (sticky, D17) when it is one of SHARED_FOLDER_NAMES itself,
     SHARED_INBOX_MODE for mail/to-<name> and its read/ (D20), else
-    FOLDER_MODE.
+    SHARED_FOLDER_MODE.
 
     @interacts  none.
-    @deps       SHARED_FOLDERS, TOP_FOLDER_MODE, SHARED_INBOX_MODE,
-                FOLDER_MODE, SHARED_WRITABLE_FILE_MODE,
+    @deps       SHARED_FOLDER_NAMES, SHARED_TOP_FOLDER_MODE, SHARED_INBOX_MODE,
+                SHARED_FOLDER_MODE, SHARED_WRITABLE_FILE_MODE,
                 SHARED_OWNED_FILE_MODE.
     @complexity O(1).
     @alloc      the split path and one tuple, returned.
@@ -255,30 +330,20 @@ def shared_as(path, kind, gid):
     if kind != "folder":
         writable = len(parts) == 2 and parts[0] == "mail"
         return (kind, SHARED_WRITABLE_FILE_MODE if writable else SHARED_OWNED_FILE_MODE, gid)
-    if path in SHARED_FOLDERS:
-        return (kind, TOP_FOLDER_MODE, gid)
+    if path in SHARED_FOLDER_NAMES:
+        return (kind, SHARED_TOP_FOLDER_MODE, gid)
     inbox = parts[0] == "mail" and len(parts) in (2, 3) and parts[1].startswith("to-") and parts[2:] in ([], ["read"])
-    return (kind, SHARED_INBOX_MODE if inbox else FOLDER_MODE, gid)
+    return (kind, SHARED_INBOX_MODE if inbox else SHARED_FOLDER_MODE, gid)
 
 
-class SharedTest(unittest.TestCase):
+class SharedTest(UmaskTestCase):
     """`tc init --shared`, the umask, D16's later folders, and the health line.
 
     @interacts  see the module block.
-    @deps       _root.TcRoot.
+    @deps       _root.TcRoot, UmaskTestCase.
     @complexity O(1) per test.
     @alloc      one TcRoot per test and group.
     """
-
-    def setUp(self):
-        """Set this process's umask to CHILD_UMASK; the cleanup puts the old one back.
-
-        @interacts  sets the umask of this process (and so of every child).
-        @deps       os.
-        @complexity O(1).
-        @alloc      none.
-        """
-        self.addCleanup(os.umask, os.umask(CHILD_UMASK))
 
     def test_init_shares_every_folder_and_file_already_there(self):
         """After init, every entry has group g and its mode (shared_as: the four 3775, inboxes 3770, mail/ files 0664, the rest 0640); so has a message sent after.
@@ -295,7 +360,7 @@ class SharedTest(unittest.TestCase):
         @complexity O(1) per group.
         @alloc      one TcRoot per group.
         """
-        for label, name, gid in groups_to_test():
+        for label, name, gid in groups_to_test(self):
             with self.subTest(group=label), _root.TcRoot() as root:
                 root.tc("send", "--from", "a", "--to", "b", "before")
                 root.tc("status", "b", "busy")
@@ -356,7 +421,7 @@ class SharedTest(unittest.TestCase):
         @complexity O(1).
         @alloc      one TcRoot.
         """
-        label, name, gid = groups_to_test()[-1]
+        label, name, gid = groups_to_test(self)[-1]
         with _root.TcRoot() as root:
             private_text = root.tc("health")
             private_json = root.tc("health", "--json")
@@ -390,11 +455,11 @@ class SharedTest(unittest.TestCase):
         @complexity O(1) per group.
         @alloc      one TcRoot per group.
         """
-        for label, name, gid in groups_to_test():
+        for label, name, gid in groups_to_test(self):
             with self.subTest(group=label), _root.TcRoot() as root:
                 code, out, err = root.tc("init", "--shared", "--group", name)
                 self.assertEqual(code, 0, f"tc init exited {code}: {err}")
-                self.assertEqual(tree(root.path), {top: ("folder", TOP_FOLDER_MODE, gid) for top in SHARED_FOLDERS},
+                self.assertEqual(tree(root.path), {top: ("folder", SHARED_TOP_FOLDER_MODE, gid) for top in SHARED_FOLDER_NAMES},
                                  "init did not make the four top folders (D19)")
                 runs = [root.tc("join", "b", env={"CLAUDECODE": "1"}),
                         root.tc("send", "--from", "a", "--to", "b", "hi"),
@@ -471,14 +536,14 @@ def load_tc(root):
             os.environ["TC_ROOT"] = old
 
 
-class NoPlantedLinksTest(unittest.TestCase):
+class NoPlantedLinksTest(UmaskTestCase):
     """D17: the sticky folders, planted file links, planted inbox links, and reopening without O_CREAT.
 
     The link checks hold whether or not the mailbox is shared, so only the
     sticky test runs init.
 
     @interacts  see the module block.
-    @deps       _root.TcRoot, plant, landed, load_tc.
+    @deps       _root.TcRoot, UmaskTestCase, plant, landed, load_tc.
     @complexity O(1) per test.
     @alloc      one TcRoot per case.
     """
@@ -497,7 +562,7 @@ class NoPlantedLinksTest(unittest.TestCase):
         @complexity O(1) per group.
         @alloc      one TcRoot per group.
         """
-        for label, name, gid in groups_to_test():
+        for label, name, gid in groups_to_test(self):
             with self.subTest(group=label):
                 with _root.TcRoot() as root:
                     root.tc("send", "--from", "a", "--to", "b", "before")
@@ -511,11 +576,11 @@ class NoPlantedLinksTest(unittest.TestCase):
                 for run in runs:
                     self.assertEqual(run[0], 0, run[2])
                 self.assertEqual(folders, {
-                    "mail": (TOP_FOLDER_MODE, gid), "outbox": (TOP_FOLDER_MODE, gid),
-                    "cards": (TOP_FOLDER_MODE, gid), "status": (TOP_FOLDER_MODE, gid),
+                    "mail": (SHARED_TOP_FOLDER_MODE, gid), "outbox": (SHARED_TOP_FOLDER_MODE, gid),
+                    "cards": (SHARED_TOP_FOLDER_MODE, gid), "status": (SHARED_TOP_FOLDER_MODE, gid),
                     "mail/to-b": (SHARED_INBOX_MODE, gid), "mail/to-b/read": (SHARED_INBOX_MODE, gid),
                     "mail/to-c": (SHARED_INBOX_MODE, gid), "mail/to-c/read": (SHARED_INBOX_MODE, gid),
-                    "outbox/sent": (FOLDER_MODE, gid)})
+                    "outbox/sent": (SHARED_FOLDER_MODE, gid)})
 
     def test_a_link_at_a_file_tc_opens_by_name_is_refused_and_its_target_unchanged(self):
         """A symlink at a wait, watch or inbox lock, mail/.seq or status/x.md: exit 1, the words, the target as it was, no mail.
@@ -691,13 +756,13 @@ class NoPlantedLinksTest(unittest.TestCase):
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19 and the audit's MEDIUM-5 and LOW-9.
-class RegularFilesOnlyTest(unittest.TestCase):
+class RegularFilesOnlyTest(UmaskTestCase):
     """D19: messages only from regular files, a FIFO at a lock's name refused, and no listener or count taken through a link.
 
     None of this needs a shared mailbox: the checks hold either way.
 
     @interacts  see the module block.
-    @deps       _root.TcRoot, plant, landed, load_tc.
+    @deps       _root.TcRoot, UmaskTestCase, plant, landed, load_tc.
     @complexity O(1) per test.
     @alloc      one TcRoot per case.
     """
@@ -902,7 +967,7 @@ def owner_patched_lstat(path_to_patch):
     return lstat
 
 
-class NobodyTouchesAnotherMembersMailTest(unittest.TestCase):
+class NobodyTouchesAnotherMembersMailTest(UmaskTestCase):
     """D20: inboxes owned by their recipient at 3770, 0640 files, sends refused to names nobody joined, inbox and card owners matched, the marker rewritten in place.
 
     One Linux user cannot prove another user's refusals (the kernel's
@@ -911,8 +976,8 @@ class NobodyTouchesAnotherMembersMailTest(unittest.TestCase):
     qa/human/route-shared.md.
 
     @interacts  see the module block.
-    @deps       _root.TcRoot, groups_to_test, tree, load_tc, marker_seen,
-                owner_patched_lstat.
+    @deps       _root.TcRoot, UmaskTestCase, groups_to_test, primary_group,
+                tree, load_tc, marker_seen, owner_patched_lstat.
     @complexity O(1) per test.
     @alloc      one TcRoot per test and group.
     """
@@ -931,7 +996,7 @@ class NobodyTouchesAnotherMembersMailTest(unittest.TestCase):
         @complexity O(1) per group.
         @alloc      one TcRoot per group.
         """
-        for label, name, gid in groups_to_test():
+        for label, name, gid in groups_to_test(self):
             with self.subTest(group=label), _root.TcRoot() as root:
                 runs = [root.tc("init", "--shared", "--group", name),
                         root.tc("join", "x", env={"CLAUDECODE": "1"}),
@@ -956,11 +1021,11 @@ class NobodyTouchesAnotherMembersMailTest(unittest.TestCase):
         own the recipient's inbox, and could chmod or empty it).
 
         @interacts  two roots: init and a send in one, a send in the other.
-        @deps       _root.TcRoot.tc, groups_to_test, tree.
+        @deps       _root.TcRoot.tc, primary_group, tree.
         @complexity O(1).
         @alloc      two TcRoots.
         """
-        label, name, gid = groups_to_test()[0]
+        label, name, gid = primary_group()
         with _root.TcRoot() as root:
             root.tc("init", "--shared", "--group", name)
             code, out, err = root.tc("send", "--from", "a", "--to", "c", "hi")
@@ -980,11 +1045,11 @@ class NobodyTouchesAnotherMembersMailTest(unittest.TestCase):
         Must reject a send that makes c's inbox as the sender.
 
         @interacts  a join, init, a refused send, a rejoin, a send.
-        @deps       _root.TcRoot.tc, groups_to_test.
+        @deps       _root.TcRoot.tc, primary_group.
         @complexity O(1).
         @alloc      one TcRoot.
         """
-        label, name, gid = groups_to_test()[0]
+        label, name, gid = primary_group()
         with _root.TcRoot() as root:
             root.tc("join", "c", env={"CLAUDECODE": "1"})
             root.tc("init", "--shared", "--group", name)
@@ -1008,13 +1073,13 @@ class NobodyTouchesAnotherMembersMailTest(unittest.TestCase):
         @interacts  init, a join and a send; loads tc in process and runs
                     deliver_local and unread with os.lstat wrapped and
                     stderr captured.
-        @deps       _root.TcRoot.tc, groups_to_test, load_tc,
+        @deps       _root.TcRoot.tc, primary_group, load_tc,
                     owner_patched_lstat; contextlib, io, unittest.mock;
                     tc.deliver_local, tc.unread.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
-        label, name, gid = groups_to_test()[0]
+        label, name, gid = primary_group()
         with _root.TcRoot() as root:
             root.tc("init", "--shared", "--group", name)
             root.tc("join", "b", env={"CLAUDECODE": "1"})
@@ -1042,13 +1107,13 @@ class NobodyTouchesAnotherMembersMailTest(unittest.TestCase):
         @interacts  init; one card file and one folder made by hand; loads
                     tc in process and runs claim_inbox twice with os.lstat
                     wrapped and stderr captured.
-        @deps       _root.TcRoot.tc, groups_to_test, load_tc,
+        @deps       _root.TcRoot.tc, primary_group, load_tc,
                     owner_patched_lstat; contextlib, io, unittest.mock;
                     tc.claim_inbox.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
-        label, name, gid = groups_to_test()[0]
+        label, name, gid = primary_group()
         with _root.TcRoot() as root:
             root.tc("init", "--shared", "--group", name)
             (root.path / "cards").mkdir(exist_ok=True)
@@ -1078,12 +1143,12 @@ class NobodyTouchesAnotherMembersMailTest(unittest.TestCase):
 
         @interacts  init, a codex join, two sends, a read, a rejoin; a fake
                     codex that fails once, then queues.
-        @deps       _root.TcRoot.tc, _root.TcRoot.fake_bin, groups_to_test,
+        @deps       _root.TcRoot.tc, _root.TcRoot.fake_bin, primary_group,
                     marker_seen.
         @complexity O(1).
         @alloc      one TcRoot.
         """
-        label, name, gid = groups_to_test()[0]
+        label, name, gid = primary_group()
         codex = {"CODEX_THREAD_ID": THREAD, "CLAUDECODE": None}
         with _root.TcRoot() as root:
             folder, calls = root.fake_bin("codex", [CODEX_FAILS, CODEX_QUEUED])
@@ -1114,13 +1179,13 @@ class NobodyTouchesAnotherMembersMailTest(unittest.TestCase):
         which one user cannot make. Skipped as root, who may write it.
 
         @interacts  init, two status posts; one chmod by hand.
-        @deps       _root.TcRoot.tc, groups_to_test.
+        @deps       _root.TcRoot.tc, primary_group.
         @complexity O(1).
         @alloc      one TcRoot.
         """
         if os.geteuid() == 0:
             self.skipTest("root may write a read-only file")
-        label, name, gid = groups_to_test()[0]
+        label, name, gid = primary_group()
         with _root.TcRoot() as root:
             root.tc("init", "--shared", "--group", name)
             root.tc("status", "x", "first")
@@ -1195,24 +1260,17 @@ def run_init(tc, group):
     return code, out.getvalue(), err.getvalue()
 
 
-class InitAndRefusalsTest(unittest.TestCase):
+class InitAndRefusalsTest(UmaskTestCase):
     """make_folder never leaves a folder in the wrong group; init reruns cleanly, walks what it cannot change and says the real state; the refusals' words; health never raises.
 
+    In-process init sets this process's umask; UmaskTestCase puts it back.
+
     @interacts  see the module block.
-    @deps       _root.TcRoot, groups_to_test, tree, load_tc, run_init.
+    @deps       _root.TcRoot, UmaskTestCase, primary_group, user_groups,
+                load_tc, run_init.
     @complexity O(1) per test.
     @alloc      one TcRoot per test.
     """
-
-    def setUp(self):
-        """Set this process's umask to CHILD_UMASK; the cleanup puts the old one back (in-process init sets its own).
-
-        @interacts  sets the umask of this process (and so of every child).
-        @deps       os.
-        @complexity O(1).
-        @alloc      none.
-        """
-        self.addCleanup(os.umask, os.umask(CHILD_UMASK))
 
     def test_make_folder_removes_a_folder_it_cannot_share_and_refuses(self):
         """In process, with fchown refused: make_folder(outbox/sent) exits 1 with words and leaves no outbox/sent.
@@ -1222,12 +1280,12 @@ class InitAndRefusalsTest(unittest.TestCase):
 
         @interacts  init; loads tc in process and runs make_folder with
                     os.fchown replaced and stderr captured.
-        @deps       _root.TcRoot.tc, groups_to_test, load_tc; contextlib,
+        @deps       _root.TcRoot.tc, primary_group, load_tc; contextlib,
                     errno, io, unittest.mock; tc.make_folder.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
-        label, name, gid = groups_to_test()[0]
+        label, name, gid = primary_group()
 
         def refused(fd, uid, gid):
             raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
@@ -1251,11 +1309,11 @@ class InitAndRefusalsTest(unittest.TestCase):
         group; skipped with a reason without one.
 
         @interacts  init; one chown by hand; one status post.
-        @deps       _root.TcRoot.tc, groups_to_test.
+        @deps       _root.TcRoot.tc, user_groups.
         @complexity O(1).
         @alloc      one TcRoot.
         """
-        found = groups_to_test()
+        found = user_groups()
         if len(found) < 2:
             self.skipTest("the running user has no named supplementary group, so no folder can be "
                           "put in a group other than the one shared")
@@ -1280,12 +1338,12 @@ class InitAndRefusalsTest(unittest.TestCase):
         @interacts  a join, a send, a status; loads tc in process and runs
                     cmd_init twice, the second time with os.fchown and
                     os.fchmod wrapped to count calls.
-        @deps       _root.TcRoot.tc, groups_to_test, load_tc, run_init;
+        @deps       _root.TcRoot.tc, primary_group, load_tc, run_init;
                     unittest.mock.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
-        label, name, gid = groups_to_test()[0]
+        label, name, gid = primary_group()
         with _root.TcRoot() as root:
             root.tc("join", "b", env={"CLAUDECODE": "1"})
             root.tc("send", "--from", "a", "--to", "b", "hi")
@@ -1308,12 +1366,12 @@ class InitAndRefusalsTest(unittest.TestCase):
 
         @interacts  a send; loads tc in process and runs cmd_init with
                     share_entry wrapped to refuse mail/.
-        @deps       _root.TcRoot.tc, groups_to_test, load_tc, run_init;
+        @deps       _root.TcRoot.tc, primary_group, load_tc, run_init;
                     unittest.mock; tc.share_entry.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
-        label, name, gid = groups_to_test()[0]
+        label, name, gid = primary_group()
         with _root.TcRoot() as root:
             root.tc("send", "--from", "a", "--to", "b", "hi")
             tc = load_tc(root)
@@ -1342,13 +1400,13 @@ class InitAndRefusalsTest(unittest.TestCase):
         @interacts  three roots: sends and statuses, init, a FIFO made by
                     hand, a hand-written .shared; ROOT chmodded read-only
                     and back.
-        @deps       _root.TcRoot.tc, groups_to_test.
+        @deps       _root.TcRoot.tc, primary_group.
         @complexity O(1).
         @alloc      three TcRoots.
         """
         if os.geteuid() == 0:
             self.skipTest("root may write a read-only folder")
-        label, name, gid = groups_to_test()[0]
+        label, name, gid = primary_group()
         runs = {}
         for case in ("shared", "private", "other"):
             with _root.TcRoot() as root:
@@ -1435,7 +1493,7 @@ class InitAndRefusalsTest(unittest.TestCase):
         with _root.TcRoot() as root:
             root.base.chmod(NO_ACCESS_MODE)
             try:
-                unreachable = root.tc("init", "--shared", "--group", groups_to_test()[0][1])
+                unreachable = root.tc("init", "--shared", "--group", primary_group()[1])
             finally:
                 root.base.chmod(OWNER_FOLDER_MODE)
         self.assertEqual(locked[0], EXIT_REFUSED, locked[2])
@@ -1463,6 +1521,37 @@ class InitAndRefusalsTest(unittest.TestCase):
             snap = tc.health_snapshot()
         self.assertIsNone(snap["shared_group"])
         self.assertIn("names no group", snap["shared_problem"])
+
+
+
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1.
+class GroupsToTestTest(UmaskTestCase):
+    """groups_to_test() never lets the supplementary run vanish silently.
+
+    @interacts  see the module block.
+    @deps       UmaskTestCase, groups_to_test; contextlib, unittest.mock.
+    @complexity O(1).
+    @alloc      one mock.
+    """
+
+    def test_a_missing_supplementary_group_is_a_skip_with_a_reason(self):
+        """With os.getgroups() reporting the primary group alone: groups_to_test returns it alone and skips the supplementary subtest with NO_SUPPLEMENTARY_REASON.
+
+        Must reject a helper that returns the primary group with no skip
+        (the supplementary subtest would vanish, LOW-1).
+
+        @interacts  calls groups_to_test with a mock case and os.getgroups
+                    patched; reads the group database.
+        @deps       groups_to_test; contextlib, unittest.mock.
+        @complexity O(1).
+        @alloc      one mock.
+        """
+        case = mock.Mock()
+        case.subTest.return_value = contextlib.nullcontext()
+        with mock.patch.object(os, "getgroups", return_value=[os.getegid()]):
+            found = groups_to_test(case)
+        self.assertEqual([label for label, name, gid in found], ["primary"])
+        case.skipTest.assert_called_once_with(NO_SUPPLEMENTARY_REASON)
 
 
 if __name__ == "__main__":

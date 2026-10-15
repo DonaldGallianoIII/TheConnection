@@ -14,7 +14,7 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   mail/.seq                                message counter (flock guarded)
   mail/.watch-<name>.lock                  held by `tc watch <name>` while it runs
   mail/.box-<name>.lock                    the inbox lock: send, read, card, codex join (D14)
-  mail/.ring-pending-<name>                a codex ring's state: owed and why, or clear (D14, D16, D20)
+  mail/.ring-pending-<name>                ring owed and why, or clear (D14, D16, D20)
   cards/<name>.json                        one address card per name (C1)
   .shared                                  the group a shared mailbox is shared with (C4)
 
@@ -35,9 +35,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             marker stay 0664 and are never removed (the marker is
             rewritten, D20). A send to a name with no card and no inbox,
             or to an inbox its card's owner does not own, is refused,
-            exit 1 (D20). `init` reads the group database and sets the
-            group and mode of every folder and file under those four,
-            then writes .shared. Shared
+            exit 1 (D20). `init` reads the group database, makes the four
+            when missing (D19), sets the group and mode of every folder
+            and file under them that is not right yet, then writes .shared
+            unless it already names the group. Shared
             or not, the locks, mail/.seq, status files and the ring marker
             are opened without following a symlink, and an inbox or its
             read/ is lstat()ed before use: a link at any of them is
@@ -900,6 +901,7 @@ def claim_inbox(name):
         make_folder(box / "read")
 
 
+# SHARED H1 (Claude Opus 5.5, unreviewed): tc init --shared (C4, D19, D20).
 def cmd_init(args):
     """`tc init --shared --group <g>`: share this mailbox with group g (C4).
 
@@ -1111,9 +1113,10 @@ def unread(name, shared=None):
 def next_seq():
     """The next message number: mail/.seq read, raised by one and written back under its flock.
 
-    @interacts  makes mail/ when missing (make_folder); opens mail/.seq
-                through open_by_name, creating it when missing and refusing
-                a symlink there (exit 1, D17), and holds its flock while it
+    @interacts  reads ROOT/.shared and makes mail/ when missing
+                (make_folder); opens mail/.seq through open_by_name,
+                creating it when missing and refusing a symlink or a FIFO
+                there (exit 1, D17, D19), and holds its flock while it
                 reads and rewrites the number.
     @deps       make_folder, open_by_name; fcntl, os.
     @complexity O(1).
@@ -1148,11 +1151,12 @@ def inbox_lock(name, how=fcntl.LOCK_EX):
     until it is released, and `tc read` prints after it is released, so a
     reader stalled on its stdout never blocks a send.
 
-    @interacts  makes mail/ (make_folder, D16); opens mail/.box-<name>.lock
-                through open_by_name, creating it empty (append mode, so it
-                never truncates what is there) and refusing a symlink there
-                (exit 1, D17), and holds the flock until the block ends; the
-                kernel drops it if the process dies.
+    @interacts  reads ROOT/.shared and makes mail/ (make_folder, D16);
+                opens mail/.box-<name>.lock through open_by_name, creating
+                it empty (append mode, so it never truncates what is there)
+                and refusing a symlink or a FIFO there (exit 1, D17, D19),
+                and holds the flock until the block ends; the kernel drops
+                it if the process dies.
     @deps       make_folder, open_by_name; contextlib, fcntl, os.
     @complexity O(1), plus however long another holder keeps it.
     @alloc      one open file for the block; mail/.box-<name>.lock, made on
@@ -2780,11 +2784,13 @@ def cmd_watch(args):
     """`tc watch <name>`: heartbeat or alert that wakes the session <name>.
 
     @interacts  checks the name first (C0, exit 6, nothing written); caps
-                its own address space; makes mail/ (make_folder) and holds
-                mail/.watch-<name>.lock (flock) until it exits, opened
-                through open_by_name, which refuses a symlink there (exit 1,
-                D17); reads /proc and runs nvidia-smi each poll (see
-                machine_stats, listeners); prints a HEARTBEAT or ALERT line.
+                its own address space; reads ROOT/.shared and makes mail/
+                (make_folder) and holds mail/.watch-<name>.lock (flock)
+                until it exits, opened through open_by_name, which refuses
+                a symlink or a FIFO there (exit 1, D17, D19); reads /proc
+                and lstats each wait lock every poll (see machine_stats,
+                listeners) and runs nvidia-smi; prints a HEARTBEAT or ALERT
+                line.
     @deps       require_names, make_folder, open_by_name, machine_stats,
                 listeners, session_counts, _breaches; fcntl, os, resource.
     @complexity O(k + n) per poll: k lines in /proc/locks and n wait lock
