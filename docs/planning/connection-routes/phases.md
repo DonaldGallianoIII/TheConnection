@@ -236,11 +236,13 @@ key behind `tc gate` can deliver mail and nothing else.
   the remote command is exactly `~/TheConnection/tc send --from a --to b`
   (the `~/` bare); a remote path with a space is quoted after the bare
   `~/`; a hand-made card whose path is `~bob/tc`: exit 6 and the fake is
-  never called (D13). Fake exiting 255: exit 4, one file in
-  `outbox/`, stderr names `tc flush`. Fake exiting 7: exit 7, its stderr
-  printed, `outbox/` empty. With one message already queued for the
-  target, a new send does not call ssh at all (assert the recording is
-  empty) and is queued behind it, exit 4. Must reject: the body on the
+  never called (D13). Fake exiting 0: exit 0, the message in
+  `outbox/to-b/sent/` (D25), its `--origin` id on the fake's argv. Fake
+  exiting 255, or 10 (D23): exit 4, one file waiting in `outbox/to-b/`,
+  stderr names `tc flush`. Fake exiting 7: exit 7, its stderr printed,
+  the file in `outbox/to-b/refused/`, nothing waiting. With one message
+  already waiting for the target, a new send does not call ssh at all
+  (assert the recording is empty) and is queued behind it, exit 4. Must reject: the body on the
   command line; a remote command built by string joining without
   `shlex.join` (input: a remote tc path containing a quote; the fake must
   receive it quoted as one word); a refusal queued for retry.
@@ -249,10 +251,12 @@ key behind `tc gate` can deliver mail and nothing else.
 ### S2. `tc flush` (C3)
 - **Files:** `tc`, `tests/test_flush.py`.
 - **Test:** three outbox files for one target, fake ssh exiting 255 on the
-  second: the first moves to `outbox/sent/`, the second and third stay,
-  exit 4. Fake fixed, flush again: all sent in seq order, exit 0. A file
-  the far side refuses (fake exiting 6) moves to `outbox/refused/` with its
-  stderr beside it. Must reject: a flush that skips a failure and sends the
+  second: the first moves to `outbox/to-b/sent/`, the second and third
+  stay, exit 4. Fake fixed, flush again: all sent in seq order, exit 0. A
+  file the far side refuses (fake exiting 6) moves to
+  `outbox/to-b/refused/` with its stderr beside it. A far 10 stops the
+  target like 255 (D23). Under D22, a file another user owns is left
+  alone and counted in words. Must reject: a flush that skips a failure and sends the
   third first.
 - **Verify:** `python3 -m unittest tests.test_flush -v`.
 
@@ -273,6 +277,9 @@ key behind `tc gate` can deliver mail and nothing else.
   to a name with an ssh card exits 7 with the not-a-local-name words and
   ssh is never called; `tc send` and the gate both call
   `route_and_deliver` (patch it to record and assert both callers).
+  D25: a gated send whose `--origin` id the gate already filed exits 0
+  with `already delivered` and writes nothing; a bad id shape is refused,
+  exit 7 (or a recorded follow-up if the lane defers origin ids).
   Must reject: a gate that runs anything else. Two checks: in process,
   patch `subprocess.*`, `os.system`, `os.spawn*`, `os.exec*`,
   `os.posix_spawn*` and `os.fork` to raise; and out of process, run the

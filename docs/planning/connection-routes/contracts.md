@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D21) the same day, and D22 to D24 on
+        wave 2 rulings (D17 to D21) the same day, and D22 to D26 on
         2026-10-15.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
@@ -249,27 +249,46 @@ subprocess.run(argv, input=body, text=True, capture_output=True,
 - `SSH_CONNECT_SECONDS = 10`, `SSH_SEND_SECONDS = 30`,
   `SSH_CONNECT_FAILED = 255` (ssh's own exit for a connection failure).
 - The body goes on stdin, never on the command line.
-- **Queue order first.** If `outbox/` already holds mail for this target,
-  the new message is queued behind it without trying: exit 4, words
-  `<target> has <n> waiting in the outbox; queued behind them. Run: tc
-  flush`. While a target has a queue, `tc flush` is its only sender.
-- Exit 0: words `sent over ssh to <target>: <remote stdout>`, exit 0.
-- Exit 255 or a timeout (the connection failed): write the message to
-  `outbox/NNNNNN-from-<sender>-to-<to>.md` (same seq counter, same header
-  as a message), words to stderr `could not reach <target> (<reason>); kept
-  in outbox: <path>. Run: tc flush`, exit 4.
+- **Every ssh send leaves a record** (D25). The outbox copies `mail/`'s
+  layout: `outbox/to-<to>/NNNNNN-from-<sender>.md`, with `sent/` and
+  `refused/` under each `to-<to>/`, so it parses exactly like an inbox
+  and a name holding `-` never reads two ways. `deliver_ssh` first
+  publishes the message there (same seq counter, same header as a
+  message, the same no-replace publish as local mail), then sends it,
+  then moves it to `sent/` on exit 0. A crash between the send and the
+  move means `tc flush` sends it again: a duplicate, never a loss.
+- **Origin ids make that duplicate harmless** (D25). Each ssh message
+  carries an origin id: the sender's name, this mailbox's outbox number,
+  and a random token made once per mailbox (never the hostname). It
+  travels as `--origin <id>` on the remote command, checked against a
+  fixed pattern. The far gate files each id it delivers and answers an id
+  it has already filed with exit 0 and the words `already delivered`, so
+  a flush retry never delivers twice. If the SSH lane cannot finish this
+  in its first pass, it records it as a follow-up and builds the rest.
+- **Queue order first.** If `outbox/` already holds mail waiting for this
+  target (files directly in an `outbox/to-<to>/` whose card points at
+  it), the new message is published behind it without trying: exit 4,
+  words `<target> has <n> waiting in the outbox; queued behind them. Run:
+  tc flush`. While a target has a queue, `tc flush` is its only sender.
+- Exit 0: the file moves to `sent/`; words `sent over ssh to <target>:
+  <remote stdout>`, exit 0.
+- Exit 255 or a timeout (the connection failed): the message stays where
+  it was published; words to stderr `could not reach <target> (<reason>);
+  kept in outbox: <path>. Run: tc flush`, exit 4.
 - **A far 10 is busy, not a refusal** (D23): the far tc could not get a
   lock in time and wrote nothing. Treat it like exit 255: keep the
   message in `outbox/`, exit 4, and `tc flush` retries it.
 - **Any other non-zero is the far `tc`'s answer** (6 bad name, 7 refused,
-  8 too large): print its stderr, exit with its code, queue nothing. A
-  refusal retried forever helps nobody.
+  8 too large): the file moves to `refused/` with the far stderr beside
+  it, tc prints that stderr and exits with its code, and nothing retries
+  it. A refusal retried forever helps nobody.
 
-**`tc flush [--to <name>]`**: tries each outbox file in seq order; on
-success moves it to `outbox/sent/`; on a connection failure for a target,
-stops trying that target, so its mail stays in order; on a far refusal,
-moves the file to `outbox/refused/` with the far stderr beside it. Prints
-one line per file. Exit 0 when nothing is left to send, 4 when anything is.
+**`tc flush [--to <name>]`**: tries each waiting outbox file in seq
+order; on success moves it to its `sent/`; on a connection failure or a
+far 10 for a target, stops trying that target, so its mail stays in
+order; on a far refusal, moves the file to its `refused/` with the far
+stderr beside it. Prints one line per file. Exit 0 when nothing is left
+to send, 4 when anything is.
 
 **Each sender's queue is their own** (D22). On a shared mailbox (C4),
 ssh runs as the Linux user who ran `tc send`, with that user's keys, and
@@ -291,7 +310,8 @@ command="/home/you/TheConnection/tc gate --as homebox-b",no-pty,no-port-forwardi
 `shlex.split`, and allows exactly two shapes, ignoring only the first word
 (the far side's path to its own tc):
 
-- `<any> send --from <name> --to <name>`, both names valid under C0. The
+- `<any> send --from <name> --to <name> [--origin <id>]`, both names
+  valid under C0 and the id matching its fixed pattern (D25). The
   far side's `--from` is **ignored**: the message is delivered as from the
   `--as` name, **through the router** (C2) with the inbox lock and
   `header_note = "via ssh gate, key <as>"`, so a gated message to a codex
