@@ -24,13 +24,16 @@ it watched is reachable.
             lock (outbox/<login>/.send-<key>.lock) themselves and read
             /proc/locks to see a child blocked on it. Some make folders,
             a link or a file by hand in outbox/ and rename them (SSH fix
-            round 1, Claude Opus 5.5, unreviewed: D32's branches). Four
+            round 1, Claude Opus 5.5, unreviewed: D32's branches). Five
             tests write a loopback wrapper `ssh` in the root's temp
             folder that runs the fake and then this branch's own `tc
             gate` under a second TC_ROOT there, as a far machine would;
             one writes mail/.seq by hand, one plants a file in the far
             mailbox; one (P3 fix round 1c, Claude Opus 5.5, unreviewed:
-            D36 (4)) starts that far gate through FAILING_GATE_BOOT,
+            the audit's REC-7) opens two harness roots, one per machine,
+            each side's wrapper running the other side's gate under the
+            other root; one (P3 fix round 1c: D36 (4)) starts that far
+            gate through FAILING_GATE_BOOT,
             which makes each create of a .tmp there fail with a passing
             errno and runs tc in the same process. One test's wrapper
             prints past tc's output cap on stdout after the fake. Six
@@ -153,6 +156,12 @@ NONCE_SEED = 25
 FAR_LOCK_WAITS = 3
 # The far mailbox name the loopback fake's gate delivers as (its --as).
 FAR_KEY = "home-a"
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): REC-7. The round trip's
+# far name, which is also its return key's --as, and the target the far
+# side's card for home-a names. Made up for the test; the loopback fake
+# never reads either target.
+ROUND_TRIP_FAR = "far-b"
+RETURN_TARGET = "u@home"
 # The send lock's name: the start of the target's sha256 in hex (tc's
 # SEND_LOCK_KEY_CHARS, written here), in the user's own outbox branch.
 SEND_LOCK_KEY_CHARS = 16
@@ -1014,6 +1023,66 @@ class SshRouteTest(unittest.TestCase):
         self.assertEqual(args[1:], ("a", "b", "hi", "a note"))
         self.assertEqual(args[0]["route"], "ssh")
         self.assertEqual(kwargs, {"deadline": 12345.0})
+
+
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): the audit's REC-7, the P3
+# goal's "mail crosses to a second machine and back", in the suite.
+class RoundTripTest(unittest.TestCase):
+    """Two mailboxes, each its own harness root, stand for two machines; each side's `ssh` is the loopback fake (far_gate_ssh), which runs the other side's real `tc gate` under the other root.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, far_gate_ssh.
+    @complexity O(1): two sends, each through one real gate.
+    @alloc      two TcRoots.
+    """
+
+    def test_a_message_crosses_to_a_second_mailbox_and_the_reply_comes_back(self):
+        """home-a sends to far-b through the key home-a: the far inbox holds it as from the key, with the gate's note, by content; far-b, in that same far mailbox, sends back to home-a through its own return key, far-b: the near inbox holds the reply as from far-b, by content. Each fake asserted called; nothing waits in either outbox.
+
+        Must reject a route that only goes one way: a reply's card, gate
+        or key that never lands in the near inbox, or a far landing under
+        the far --from instead of the key.
+
+        @interacts  two TcRoots; per side one tc join, one tc card, one
+                    send through the loopback fake into the other side's
+                    real gate.
+        @deps       far_gate_ssh, assert_called, outbox; _root.TcRoot.
+        @complexity O(1).
+        @alloc      two TcRoots.
+        """
+        there, back = "hello far-b, from home-a", "hello home-a, from far-b"
+        with _root.TcRoot() as near, _root.TcRoot() as far:
+            near.tc("join", FAR_KEY)
+            far.tc("join", ROUND_TRIP_FAR)
+            out_fake, out_calls = near.fake_bin("ssh", 0)
+            near.tc("card", ROUND_TRIP_FAR, "--ssh", TARGET)
+            sent = near.tc("send", "--from", FAR_KEY, "--to", ROUND_TRIP_FAR, there,
+                           env=far_gate_ssh(near, out_fake, far.path, key=FAR_KEY))
+            assert_called(self, out_fake, out_calls)
+            far_box = far.path / "mail" / f"to-{ROUND_TRIP_FAR}"
+            landed = {p.name: p.read_text() for p in far_box.glob("*.md")}
+            back_fake, back_calls = far.fake_bin("ssh", 0)
+            far.tc("card", FAR_KEY, "--ssh", RETURN_TARGET)
+            replied = far.tc("send", "--from", ROUND_TRIP_FAR, "--to", FAR_KEY, back,
+                             env=far_gate_ssh(far, back_fake, near.path, key=ROUND_TRIP_FAR))
+            assert_called(self, back_fake, back_calls)
+            near_box = near.path / "mail" / f"to-{FAR_KEY}"
+            came_back = {p.name: p.read_text() for p in near_box.glob("*.md")}
+            waiting = (outbox(near, ROUND_TRIP_FAR), outbox(far, FAR_KEY))
+        self.assertEqual(sent, (0, f"{SENT_WORDS.format(target=TARGET)}: sent #1 to {ROUND_TRIP_FAR}: "
+                                   f"{far_box / f'000001-from-{FAR_KEY}.md'}\n", ""))
+        self.assertEqual(list(landed), [f"000001-from-{FAR_KEY}.md"], "the far inbox does not hold the message")
+        far_header, _, far_body = landed[f"000001-from-{FAR_KEY}.md"].partition("\n\n")
+        self.assertTrue(far_header.startswith(f"# #1 from {FAR_KEY} to {ROUND_TRIP_FAR}, "), far_header)
+        self.assertTrue(far_header.endswith(f", via ssh gate, key {FAR_KEY}"), far_header)
+        self.assertEqual(far_body, f"{there}\n")
+        self.assertEqual(replied[0], 0, replied)
+        self.assertEqual(list(came_back), [f"000002-from-{ROUND_TRIP_FAR}.md"], "the reply did not come back")
+        near_header, _, near_body = came_back[f"000002-from-{ROUND_TRIP_FAR}.md"].partition("\n\n")
+        self.assertTrue(near_header.startswith(f"# #2 from {ROUND_TRIP_FAR} to {FAR_KEY}, "), near_header)
+        self.assertTrue(near_header.endswith(f", via ssh gate, key {ROUND_TRIP_FAR}"), near_header)
+        self.assertEqual(near_body, f"{back}\n")
+        self.assertEqual(waiting, ([], []), "a message still waits in an outbox")
 
 
 class OriginIdTest(unittest.TestCase):
