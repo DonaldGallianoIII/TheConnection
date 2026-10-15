@@ -62,7 +62,9 @@ was taken. And round 7 (SHARED fix round 7, Claude Opus 5.5,
 unreviewed): a folder on the way that a member swaps for a link after
 init's walk listed it, in a member's rerun and in the init user's own
 init, is named and never entered, and the folder the link leads to,
-with all in it, keeps its stat.
+with all in it, keeps its stat; and a send out of numbers whose every
+try met a .tmp name says what it found and never that mail/.seq was
+not behind, even with the counter set back.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -147,7 +149,9 @@ the owner's human QA (D4, qa/human/route-shared.md).
             os.fchown renames one inbox folder aside and links the
             outside folder at its name; and they run cmd_init in process
             with os.lstat wrapped (a call by name in a folder's
-            descriptor is matched by the file it finds).
+            descriptor is matched by the file it finds); and one writes
+            mail/.seq back by hand and plants a .tmp name in an inbox
+            for each of PLANTED_NAMES numbers from 1.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
             importlib, io, json, os, pathlib, pwd, re, stat, subprocess,
             sys, time, unittest, unittest.mock); tests/_root.py.
@@ -404,7 +408,10 @@ LOG_CANNOT_LOOK_WORDS = "tc log: tc could not look at {path} ({why}); the mail i
 ALL_TAKEN_WORDS = ("tc send: {tries} message numbers in a row were taken in {box}, the last by {last} ({why}); "
                    "nothing sent. Each try moved mail/.seq on, so the next send starts past them.\n")
 BEHIND_WHY = "mail/.seq was behind the names there: set back, or names planted ahead of it"
-TMP_AHEAD_WHY = "each by a .tmp name planted ahead; mail/.seq was not behind"
+# SHARED fix round 7 (Claude Opus 5.5, unreviewed): the audit's LOW-1
+# (audits/2026-10-15-0408-quick). When no try found a message's name
+# taken: what tc found, and no word on whether mail/.seq was behind.
+TMP_TAKEN_WHY = "each by a .tmp name already there, so no try got as far as the message's own name"
 # SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's DEBT-1
 # (audits/2026-10-15-0201-quick). The text of a file a member plants in
 # an inbox at the next message's .tmp name.
@@ -2351,7 +2358,10 @@ class NoLostMailNoHangTest(UmaskTestCase):
     fix round 6 (Claude Opus 5.5, unreviewed): the member plants a .tmp
     name for every number a send could take, and the words name the last
     .tmp and blame no set-back counter (LOW-2,
-    audits/2026-10-15-0300-quick).
+    audits/2026-10-15-0300-quick). SHARED fix round 7 (Claude Opus 5.5,
+    unreviewed): with the counter set back and a .tmp at each of its
+    numbers, the words never say mail/.seq was not behind (LOW-1,
+    audits/2026-10-15-0408-quick).
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, contents,
@@ -2831,18 +2841,20 @@ class NoLostMailNoHangTest(UmaskTestCase):
 
     # SHARED fix round 6 (Claude Opus 5.5, unreviewed): the audit's LOW-2 (audits/2026-10-15-0300-quick).
     def test_a_send_that_finds_every_tmp_name_taken_names_the_tmp_and_blames_no_set_back(self):
-        """A first send to b, then a file planted in b's inbox at the .tmp name of each of the PLANTED_NAMES numbers past the counter: the next send exits 10, names the last planted .tmp, says each number was taken by a .tmp planted ahead and mail/.seq was not behind, and lands nothing; each planted file is unchanged, and the send after it lands as the number past them.
+        """A first send to b, then a file planted in b's inbox at the .tmp name of each of the PLANTED_NAMES numbers past the counter: the next send exits 10, names the last planted .tmp, says each number was taken by a .tmp name already there and no try got as far as the message's own name, and lands nothing; each planted file is unchanged, and the send after it lands as the number past them.
 
         A member who reads mail/.seq plants the names a send will make its
         .tmp at, and never touches the counter. Must reject words that
         name the number's .md (not there) and blame a set-back mail/.seq.
         Also the bound round 5 left untested: a run of planted .tmp names
-        to PUBLISH_MAX_TRIES ends in exit 10.
+        to PUBLISH_MAX_TRIES ends in exit 10. SHARED fix round 7 (Claude
+        Opus 5.5, unreviewed): the words no longer say mail/.seq was not
+        behind (the audit's LOW-1; the set-back case is the next test).
 
         @interacts  three sends; PLANTED_NAMES files written by hand in
                     the inbox, read back; lists the inbox.
         @deps       _root.TcRoot.tc; PLANTED_NAMES, PLANTED_TMP_TEXT,
-                    ALL_TAKEN_WORDS, TMP_AHEAD_WHY, EXIT_BUSY.
+                    ALL_TAKEN_WORDS, TMP_TAKEN_WHY, EXIT_BUSY.
         @complexity O(PLANTED_NAMES) files, three tc runs.
         @alloc      one TcRoot, PLANTED_NAMES small files.
         """
@@ -2859,12 +2871,52 @@ class NoLostMailNoHangTest(UmaskTestCase):
         self.assertEqual(first[0], 0, first[2])
         self.assertEqual(code, EXIT_BUSY, err)
         self.assertEqual(err, ALL_TAKEN_WORDS.format(tries=PLANTED_NAMES, box=box,
-                                                     last=f"{PLANTED_NAMES + 1:06d}-from-a.tmp", why=TMP_AHEAD_WHY))
+                                                     last=f"{PLANTED_NAMES + 1:06d}-from-a.tmp", why=TMP_TAKEN_WHY))
         self.assertNotIn("set back", err)
         self.assertEqual(kept, {PLANTED_TMP_TEXT}, "a send changed a planted .tmp")
         self.assertEqual(unread, ["000001-from-a.md"], "a refused send landed a message")
         self.assertEqual(after[0], 0, after[2])
         self.assertIn(f"sent #{PLANTED_NAMES + 2} to b", after[1])
+
+    # SHARED fix round 7 (Claude Opus 5.5, unreviewed): the audit's LOW-1 (audits/2026-10-15-0408-quick).
+    def test_a_set_back_counter_with_tmp_names_at_its_numbers_is_never_called_not_behind(self):
+        """A first send to b, unread as #1; mail/.seq set back to 0 and a file planted in b's inbox at the .tmp name of each of the PLANTED_NAMES numbers from 1: the next send exits 10, names the last planted .tmp, says what it found (TMP_TAKEN_WHY) and never that mail/.seq was not behind, and lands nothing; #1 and each planted file are unchanged.
+
+        The synthesis's case: the counter is behind (#1 is there at the
+        first number it gives), but each try meets its .tmp first and
+        stops before os.link, where #1 would show. Round 6's words said
+        "mail/.seq was not behind" here. Must reject any claim about the
+        counter that no try checked.
+
+        @interacts  two sends; mail/.seq written by hand; PLANTED_NAMES
+                    files written by hand in the inbox, read back; reads
+                    #1 before and after.
+        @deps       _root.TcRoot.tc; PLANTED_NAMES, PLANTED_TMP_TEXT,
+                    ALL_TAKEN_WORDS, TMP_TAKEN_WHY, EXIT_BUSY.
+        @complexity O(PLANTED_NAMES) files, two tc runs.
+        @alloc      one TcRoot, PLANTED_NAMES small files.
+        """
+        with _root.TcRoot() as root:
+            first = root.tc("send", "--from", "a", "--to", "b", "first")
+            box = root.path / "mail" / "to-b"
+            one = box / "000001-from-a.md"
+            before = one.read_bytes()
+            (root.path / "mail" / ".seq").write_text("0")
+            planted = [box / f"{n:06d}-from-a.tmp" for n in range(1, PLANTED_NAMES + 1)]
+            for path in planted:
+                path.write_text(PLANTED_TMP_TEXT)
+            code, out, err = root.tc("send", "--from", "a", "--to", "b", "second")
+            kept = {path.read_text() for path in planted}
+            after = one.read_bytes()
+            unread = sorted(p.name for p in box.glob("*.md"))
+        self.assertEqual(first[0], 0, first[2])
+        self.assertEqual(code, EXIT_BUSY, err)
+        self.assertNotIn("not behind", err, "words about mail/.seq that no try checked")
+        self.assertEqual(err, ALL_TAKEN_WORDS.format(tries=PLANTED_NAMES, box=box,
+                                                     last=f"{PLANTED_NAMES:06d}-from-a.tmp", why=TMP_TAKEN_WHY))
+        self.assertEqual(kept, {PLANTED_TMP_TEXT}, "a send changed a planted .tmp")
+        self.assertEqual(after, before, "a send changed #1")
+        self.assertEqual(unread, ["000001-from-a.md"], "a refused send landed a message")
 
     # SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's DEBT-1 (audits/2026-10-15-0201-quick).
     def test_a_planted_tmp_at_the_next_number_takes_the_number_after(self):

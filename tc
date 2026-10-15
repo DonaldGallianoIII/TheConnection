@@ -102,8 +102,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             stat, subprocess, time, datetime, os, sys); Linux only (flock,
             RLIMIT_AS, O_NOFOLLOW, O_NONBLOCK, /proc). nvidia-smi optional; the codex CLI for the codex route.
 @complexity send O(b), b body bytes up to SEND_BODY_MAX_BYTES, once per
-            publish try (one, unless mail/.seq was set back; at most
-            PUBLISH_MAX_TRIES); status O(1). A command's flocks on
+            publish try (one in an honest mailbox; at most
+            PUBLISH_MAX_TRIES, reached by a set-back mail/.seq or by
+            names planted ahead of it, .tmp names among them, round 7);
+            status O(1). A command's flocks on
             mail/.seq and its inbox lock wait at most LOCK_WAIT_SECONDS in
             all; each ring marker write at most LOCK_WAIT_SECONDS (a codex
             send may wait on the marker twice).
@@ -438,6 +440,13 @@ MESSAGE_SUFFIX = ".md"
 # 5.5, unreviewed). A .tmp name already taken counts as a taken number
 # too (SHARED fix round 5, Claude Opus 5.5, unreviewed: DEBT-1).
 PUBLISH_MAX_TRIES = 100
+# SHARED fix round 7 (Claude Opus 5.5, unreviewed): the audit's LOW-1
+# (audits/2026-10-15-0408-quick). Why a send out of tries found every
+# number taken, when no try found a message's name taken: each try met a
+# .tmp name already there and stopped before os.link, where a message at
+# the number's own name would show, so tc cannot say whether mail/.seq
+# was behind, and says only what it found.
+TMP_TAKEN_WHY = "each by a .tmp name already there, so no try got as far as the message's own name"
 # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-3.
 # What os.link fails with on a filesystem that has no hard links (vfat,
 # exFAT, some FUSE mounts): EPERM from Linux's vfs_link, or "not
@@ -3283,8 +3292,21 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
     taken: the .tmp, read/<name> or the message's own name. They say
     mail/.seq was behind (set back, or names planted ahead of it) only
     when some try found a message's name taken, in the inbox or read/;
-    when every try found a .tmp, they say so, and that the counter was
-    not behind.
+    when every try found a .tmp, they say so.
+
+    SHARED fix round 7 (Claude Opus 5.5, unreviewed): the audit's LOW-1
+    and LOW-2 (audits/2026-10-15-0408-quick). The words would say
+    mail/.seq was not behind only when a try reached os.link and found
+    the message's name free of a read message, and such a try publishes
+    (a taken name there means behind), so out of tries they never say it.
+    A try that finds its .tmp taken stops before os.link, where a message
+    at the number's own name would show; when every try did, the words
+    say each .tmp name was already there and no try got as far as the
+    message's own name (TMP_TAKEN_WHY), and no more. Round 6 said the
+    counter was not behind there, which a set-back mail/.seq with .tmp
+    names planted at the same numbers made false. The bound,
+    PUBLISH_MAX_TRIES, is reached by a set-back mail/.seq or by names
+    planted ahead of it, .tmp names among them (@complexity).
 
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): under a shared
     mailbox (D20), before a number is taken: an inbox not owned by its
@@ -3313,12 +3335,14 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
     @deps       mailbox_share, check_inbox, lock_deadline, next_seq, inbox,
                 now_iso, write_new_file, Delivery; os; ROOT, CARDS,
                 SEQ_WIDTH, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE,
-                PUBLISH_MAX_TRIES, NO_HARD_LINK_ERRNOS, EXIT_REFUSED,
-                EXIT_BUSY.
+                PUBLISH_MAX_TRIES, NO_HARD_LINK_ERRNOS, TMP_TAKEN_WHY,
+                EXIT_REFUSED, EXIT_BUSY.
     @complexity O(b) over b bytes of body, once per try: one try in an
-                honest mailbox, at most PUBLISH_MAX_TRIES when mail/.seq
-                was set back; plus waiting for mail/.seq until `deadline`
-                at most, all tries together.
+                honest mailbox, at most PUBLISH_MAX_TRIES, a bound reached
+                by a set-back mail/.seq or by names planted ahead of it
+                (a message's name in the inbox or read/, or a .tmp name),
+                round 7, the audit's LOW-2; plus waiting for mail/.seq
+                until `deadline` at most, all tries together.
     @alloc      the message text while written; one message file, kept;
                 at most one .tmp per try, removed before the next; the
                 last taken name, one short string.
@@ -3379,7 +3403,7 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
         taken, behind = path.name, True  # a message in the inbox has this name
     else:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): DEBT-3, busy, not refused (dev exit row 10)
         why = ("mail/.seq was behind the names there: set back, or names planted ahead of it" if behind
-               else "each by a .tmp name planted ahead; mail/.seq was not behind")  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): LOW-2
+               else TMP_TAKEN_WHY)  # SHARED fix round 7 (Claude Opus 5.5, unreviewed): LOW-1, what tc knows and no more
         return Delivery(EXIT_BUSY, f"tc send: {PUBLISH_MAX_TRIES} message numbers in a row were taken in "
                                       f"{box}, the last by {taken} ({why}); nothing sent. Each try moved "
                                       f"mail/.seq on, so the next send starts past them.", warnings)
