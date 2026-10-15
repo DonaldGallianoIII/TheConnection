@@ -47,8 +47,9 @@ user's own init, naming that member, and a member's rerun on the init
 user's ROOT is refused with no charge and the chgrp and chmod lines for
 that member's own entries; a folder in the wrong group and an entry
 init skips get the same lines, which run as printed; tc read names as
-not moved a file a hard link kept in the inbox, never as read; and a
-cut by-hand name made of dots keeps its .md.
+not moved a file a hard link kept in the inbox, never as read; a cut
+by-hand name made of dots keeps its .md; and a file planted at the next
+message's .tmp name sends the send to the number after, untouched.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -116,9 +117,10 @@ the owner's human QA (D4, qa/human/route-shared.md).
             cmd_init in process with os.geteuid replaced (and os.lstat
             wrapped), and run the chgrp and chmod lines tc prints
             through /bin/sh on entries this user owns under the root;
-            plant a name of dots and md in an inbox and its read/; and
-            run cmd_read in process with Path.rename replaced by a hard
-            link at its target.
+            plant a name of dots and md in an inbox and its read/; plant
+            a file at a .tmp name in an inbox; and run cmd_read in
+            process with Path.rename replaced by a hard link at its
+            target.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
             importlib, io, json, os, pathlib, pwd, re, shlex, stat,
             subprocess, sys, time, unittest, unittest.mock);
@@ -373,6 +375,10 @@ LOG_CANNOT_LOOK_WORDS = "tc log: tc could not look at {path} ({why}); the mail i
 ALL_TAKEN_WORDS = ("tc send: {tries} message numbers in a row were taken in {box}, the last {last} (mail/.seq "
                    "may have been set back); nothing sent. Each try moved mail/.seq on, so the next send starts "
                    "past them.\n")
+# SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's DEBT-1
+# (audits/2026-10-15-0201-quick). The text of a file a member plants in
+# an inbox at the next message's .tmp name.
+PLANTED_TMP_TEXT = "planted by hand at the next number's .tmp name\n"
 # The texts of the file a member plants in an inbox under a read
 # message's name, and of one planted straight into read/ at the first
 # by-hand name.
@@ -2253,8 +2259,9 @@ class NoLostMailNoHangTest(UmaskTestCase):
     lock while a card turns codex (LOW-3); and plants a name for every
     number a send could take, which exits 10 (DEBT-3). SHARED fix round 5
     (Claude Opus 5.5, unreviewed): the member plants a name of dots and
-    `md` (LOW-2), and links an inbox file at the name tc read moves it
-    to, so the rename does nothing (LOW-1; audits/2026-10-15-0201-quick).
+    `md` (LOW-2), links an inbox file at the name tc read moves it to, so
+    the rename does nothing (LOW-1), and plants a file at the next
+    message's .tmp name (DEBT-1; audits/2026-10-15-0201-quick).
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, contents,
@@ -2729,6 +2736,36 @@ class NoLostMailNoHangTest(UmaskTestCase):
         self.assertEqual(unread, ["000001-from-a.md"], "a refused send left a message or a .tmp")
         self.assertEqual(after[0], 0, after[2])
         self.assertIn(f"sent #{PLANTED_NAMES + 2} to b", after[1])
+
+    # SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's DEBT-1 (audits/2026-10-15-0201-quick).
+    def test_a_planted_tmp_at_the_next_number_takes_the_number_after(self):
+        """A first send to b, then a file planted in b's inbox at the next message's .tmp name: the next send exits 0 and lands as the number after, and the planted file is still there, unchanged byte for byte.
+
+        A member reads the group's mail/.seq and plants the name a send
+        will make its .tmp at. Must reject the old exit 1: one planted
+        file refused the send, and the ssh route would file a far 1 as
+        final (C3), where a taken .tmp is a taken number like any other
+        (PUBLISH_MAX_TRIES, then exit 10).
+
+        @interacts  two sends; one file written by hand in the inbox; reads
+                    it back and lists the inbox.
+        @deps       _root.TcRoot.tc; PLANTED_TMP_TEXT.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            first = root.tc("send", "--from", "a", "--to", "b", "first")
+            box = root.path / "mail" / "to-b"
+            planted = box / "000002-from-a.tmp"
+            planted.write_text(PLANTED_TMP_TEXT)
+            code, out, err = root.tc("send", "--from", "a", "--to", "b", "second")
+            kept = planted.read_bytes()
+            names = sorted(p.name for p in box.iterdir() if p.name != "read")
+        self.assertEqual(first[0], 0, first[2])
+        self.assertEqual(code, 0, err)
+        self.assertIn("sent #3 to b", out)
+        self.assertEqual(kept, PLANTED_TMP_TEXT.encode(), "the send changed the planted file")
+        self.assertEqual(names, ["000001-from-a.md", "000002-from-a.tmp", "000003-from-a.md"])
 
     # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-2.
     def test_one_sends_waits_on_mail_seq_share_one_deadline(self):

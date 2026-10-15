@@ -10,9 +10,10 @@ Status: unreviewed. Fix round 1 done (audit
         `fixes/round-3.md`, the SHARED fixer, Claude Opus 5.5). Fix
         round 4 done (audit `audits/2026-10-15-0102-quick`, brief
         `fixes/round-4.md`, the SHARED fixer, Claude Opus 5.5). Fix
-        round 5 done but for its item 5, which waits on its work set
-        (audit `audits/2026-10-15-0201-quick`, brief `fixes/round-5.md`,
-        the SHARED fixer, Claude Opus 5.5).
+        round 5 done (audit `audits/2026-10-15-0201-quick`, brief
+        `fixes/round-5.md`, its item 5 under the work set the architect
+        amended to add one router test; the SHARED fixer, Claude Opus
+        5.5).
 Date:   2026-10-14; rounds 3 to 5 2026-10-15
 Branch: Claude-Development-TheConnection-SHARED, from
         Claude-Development-TheConnection at c8708e5 (after P0, P1 and P2
@@ -53,15 +54,19 @@ Where:  ~/TheConnection-lanes/shared
 | Round 4 (c) | `d4ae2f1` | Start K3's block ceiling before its spawns, fix QA steps 15, 30 and 31, and bring the tags and this handoff up to round 4 |
 | Round 5 (a) | `33f2bbd` | Init's walk trusts no .shared owner again; on the init user's ROOT it names who ran init and prints the member's fix lines |
 | Round 5 (b) | `707c73c` | Never claim a read for a file a hard link kept in the inbox, and keep .md on a by-hand name made of dots |
-| Round 5 (c) | the last commit of round 5 | Test K3's deadline before a finished child, say how busy leaves today, say a ring can be one fewer, and bring this handoff up to round 5 |
+| Round 5 (c) | `334c4df` | Test K3's deadline before a finished child, say how busy leaves today, say a ring can be one fewer, and bring this handoff up to round 5 |
+| Round 5 (d) | the last commit of round 5 | A send whose .tmp name is taken takes the next number, as a taken message name does |
 
-Round 5's three commits change `tc`, `tests/test_shared.py`,
+Round 5's four commits change `tc`, `tests/test_shared.py`,
 `qa/human/route-shared.md` and this file, plus one change to CORE's
 `tests/test_mailbox.py` (K3's `wait_until_blocked` tests its deadline
-before a finished child, item 4), as the brief allows. Commit (a)
-holds item 1 with its QA steps and the handoff lines it undid, (b)
-items 2 and 3, (c) items 4, 6 and 7 and the rest of this file. Item 5
-is not built: see "Not in this round". Existing tests changed: round
+before a finished child, item 4), as the brief allows, and one test in
+CARDS' `tests/test_router.py` (item 5, as the architect amended the
+work set). Commit (a) holds item 1 with its QA steps and the handoff
+lines it undid, (b) items 2 and 3, (c) items 4, 6 and 7 and the rest of
+this file, (d) item 5 and its lines here. Item 5 came last because the
+brief's work set left out the router test it changes; the architect
+added that one test. Existing tests changed: round
 4's `test_the_walk_trusts_the_owner_of_an_existing_shared_and_nobody_else`
 is gone (its "shared" case asserted the trust round 5 takes back, and
 its third-user case cannot be reached once ROOT is refused first);
@@ -70,7 +75,13 @@ replaces the walk again, as in round 3; the wrong-group and
 skipped-entry tests assert the printed lines and run them; the
 long-name test adds a dots case. No other test in the tree asserts the
 old remedy words (grep of `tests/` for `can fix it with`, `init again`
-and `skipped;`).
+and `skipped;`). In commit (d), `tests/test_router.py`'s
+`test_a_link_planted_at_the_message_tmp_is_refused` is renamed
+`test_a_link_planted_at_the_message_tmp_is_never_written_through`, to
+say what it now proves: the link is never written through, and the send
+lands at the number after, exit 0, where it asserted exit 1. No other
+test in the tree, and no file on the dev branch at `8bdf363`, names the
+old test (grep).
 
 Round 4's three commits change `tc`, `tests/test_shared.py`,
 `qa/human/route-shared.md` and this file, plus one change to CORE's
@@ -570,10 +581,19 @@ carries a `SHARED fix round 5 (Claude Opus 5.5, unreviewed)` comment.
   one more ring. A member who holds the ring marker through a failed
   ring leaves it `clear`, so the next send may not ring: one fewer, which
   that send's warning says. Both now say so.
-- A planted `.tmp` (item 5, DEBT-1) is not built. See "Not in this
-  round".
+- A planted `.tmp` takes the next number (item 5, DEBT-1, commit d).
+  `write_new_file` makes a message's `.tmp` with `O_EXCL` and
+  `O_NOFOLLOW`, so a file or link a member planted at the next number's
+  `.tmp` name (readable from the group's `mail/.seq`) raised
+  `FileExistsError`, and the send refused at once, exit 1, which the ssh
+  route would file as final (C3). `deliver_local` now takes that as a
+  taken number and tries the next, as it does for a taken message name:
+  under the same `PUBLISH_MAX_TRIES` and the same one deadline, nothing
+  written through the planted entry, which is left as it is, and out of
+  tries exit 10 with the words unchanged. Any other failure to make the
+  `.tmp` still refuses, exit 1.
 
-**Tests.** `tests/test_shared.py`, 65 tests in eleven classes (63
+**Tests.** `tests/test_shared.py`, 66 tests in eleven classes (63
 before round 5, 56
 before round 4, 48 in ten before round 3, 39 in seven before round 2), each on
 `tests/_root.py`. Every class inherits `UmaskTestCase`, so each test
@@ -583,7 +603,7 @@ fails. `SharedTest` (H1, 4), `NoPlantedLinksTest` (D17, 5),
 `NobodyTouchesAnotherMembersMailTest` (D20, 8), `InitAndRefusalsTest`
 (init, make_folder and the refusals' words, 8),
 `SharedIsTheInitUsersAndDeliveryNeedsACardTest` (D21, 8),
-`NoLostMailNoHangTest` (rounds 2 to 5, 11), `RootAndClaimTest` (rounds 2
+`NoLostMailNoHangTest` (rounds 2 to 5, 12), `RootAndClaimTest` (rounds 2
 to 5, 9), `HealthSaysWhatItCannotSeeTest` (round 2, 3),
 `CommandsSayWhatTheyCannotSeeTest` (rounds 3 and 4, 3) and
 `GroupsToTestTest` (1). Round 4 adds seven: the by-hand words for a
@@ -592,11 +612,12 @@ filesystem's limit woken at most once, a card that turns codex under a
 held lock, a send out of numbers, the walk's trust of the `.shared`
 owner (with a patched `os.geteuid` for the member), a ROOT that links to
 its own folder, and `tc log` over a `read/` it cannot see. Round 5
-takes out the trust test and adds three: a member who made ROOT first
+takes out the trust test and adds four: a member who made ROOT first
 stops the init user's init, a member's rerun on the init user's ROOT
 is refused with no charge and that member's fix lines (a patched
-`os.geteuid` and `os.lstat`), and a rename a hard link turned into
-nothing (a patched `Path.rename` that links instead). The long-name
+`os.geteuid` and `os.lstat`), a rename a hard link turned into
+nothing (a patched `Path.rename` that links instead), and a file
+planted at the next message's `.tmp` name (commit d). The long-name
 test adds a case of dots and `md`, and the wrong-group and
 skipped-entry tests run the lines tc prints through `/bin/sh`. The lock
 test runs its eight cases at once (round 3 added "codex
@@ -666,6 +687,9 @@ Node 22). Each command's result line:
 | Round 5 (c) | `python3 -m unittest tests.test_shared -v` | `Ran 65 tests`, `OK` |
 | Round 5 (c) | `python3 -m unittest tests.test_mailbox -v` | `Ran 8 tests`, `OK` |
 | Round 5 (c) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 173 tests`, `OK` |
+| Round 5 (d) | `python3 -m unittest tests.test_shared -v` | `Ran 66 tests`, `OK` |
+| Round 5 (d) | `python3 -m unittest tests.test_router -v` | `Ran 15 tests`, `OK` |
+| Round 5 (d) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 174 tests`, `OK` |
 | each | `node --test tests/*.test.mjs` | `# tests 8`, `# pass 8`, `# fail 0` |
 
 The base, `c8708e5`, ran 108 Python tests and 8 Node tests, all passing.
@@ -837,6 +861,7 @@ red line is the assertion line alone.
 | 1 (a) | the `.shared` owner trusted again (`marker_owner` added to the owners `swap_words` takes) | `test_a_member_who_made_root_first_stops_the_init_users_own_init` | `AssertionError: 0 != 1 :` (and the same in `test_a_members_rerun_on_the_init_users_root_is_refused_with_no_charge_and_their_fixes`) |
 | 2 (b) | no check after the rename (`left = None`) | `test_a_rename_a_hard_link_turned_into_nothing_is_never_claimed_as_read` | `AssertionError: SystemExit not raised` |
 | 3 (b) | `os.path.splitext` back in `by_hand_name` | `test_a_planted_name_at_the_length_limit_moves_and_wakes_tc_wait_at_most_once`, case `dots only` | `AssertionError: False is not true : by-hand-1-.....` (245 dots, no `.md`) |
+| 5 (d) | today's exit 1 back (no `except FileExistsError: continue` in `deliver_local`) | `test_a_planted_tmp_at_the_next_number_takes_the_number_after` | `AssertionError: 1 != 0 : tc send: could not create .../root/mail/to-b/000002-from-a.tmp (File exists); nothing sent` (and `1 != 0 : exited 1: ...` the same in `test_a_link_planted_at_the_message_tmp_is_never_written_through`) |
 
 ## Assumptions
 
@@ -1142,14 +1167,15 @@ for ssh; both machines need a tc with both exit-10 cases) are the SSH
 lane's, and REC-3 (D23's row names only a held lock) the architect's.
 
 Item 5 of the brief (DEBT-1: a planted `.tmp` at the next number takes
-the next number, as a taken final name does) is not built. A link
-planted at a message's `.tmp` raises the same `FileExistsError` as a
-planted file, so the change would send it to the next number too, and
-CARDS' `tests/test_router.py:359`
-(`test_a_link_planted_at_the_message_tmp_is_refused`) asserts exit 1,
-`tc send: could not create <link> (File exists); nothing sent`, and no
-second message. That file is outside this round's work set, so the item
-waits for a brief that adds it.
+the next number, as a taken final name does) came last, in commit (d).
+A link planted at a message's `.tmp` raises the same `FileExistsError`
+as a planted file, so it now takes the next number too, and CARDS'
+`tests/test_router.py:359` asserted exit 1 for it. That file was
+outside the brief's work set. The fixer stopped there and asked; the
+architect added that one test to the work set. It is renamed
+`test_a_link_planted_at_the_message_tmp_is_never_written_through` and
+asserts the send at the number after, exit 0, the link still a link,
+and its target unchanged byte for byte.
 
 For the SSH lane (round 5, item 6, the audit's LOW-4): a busy refusal
 leaves `tc` two ways today. A lock held past `LOCK_WAIT_SECONDS` exits
@@ -1246,4 +1272,6 @@ thread and to `ITIMER_REAL`) stays a stated limit (assumption 20).
   has no test of its own: the second walk runs the same rule. The fix
   lines ran here only on entries this user owns, through `/bin/sh`;
   their quoting of a name that needs quotes is shlex's, not tested
-  with such a name. Item 5 is not built.
+  with such a name. Item 5's bound (a run of planted `.tmp` names to
+  `PUBLISH_MAX_TRIES`, then exit 10) has no test of its own; it shares
+  the loop and the for-else with the out-of-numbers test.

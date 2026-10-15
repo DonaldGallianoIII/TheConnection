@@ -68,7 +68,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             lock for a listener's (D19). Shared or not (SHARED fix round
             2, D20): a message is published by a hard link from its .tmp,
             which never replaces a file, and a name already taken in the
-            inbox or its read/ (mail/.seq set back) takes the next number,
+            inbox or its read/ (mail/.seq set back), or a .tmp name
+            already taken (round 5), takes the next number,
             up to PUBLISH_MAX_TRIES, then refuses, exit 10 (busy, round
             4). tc read never replaces a file in
             read/ either: an inbox file whose name read/ already holds
@@ -386,7 +387,8 @@ MESSAGE_SUFFIX = ".md"
 # tried. An honest mailbox never collides; 100 rides past a counter set
 # back over a long run of one sender's mail to one recipient. A send that
 # finds every one taken exits 10, busy (SHARED fix round 4, Claude Opus
-# 5.5, unreviewed).
+# 5.5, unreviewed). A .tmp name already taken counts as a taken number
+# too (SHARED fix round 5, Claude Opus 5.5, unreviewed: DEBT-1).
 PUBLISH_MAX_TRIES = 100
 # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-3.
 # What os.link fails with on a filesystem that has no hard links (vfat,
@@ -1839,7 +1841,9 @@ def write_new_file(path, text, mode=NEW_FILE_MODE):
     NEW_FILE_FLAGS fail on anything already at that name and never follow
     a link, so a link planted at a .tmp name is refused, not written
     through. Raises OSError (FileExistsError for a planted link or file);
-    the caller refuses with words. The umask applies to `mode`, and the
+    the caller refuses with words, but for a message's .tmp, where
+    deliver_local takes FileExistsError as a taken number and tries the
+    next (SHARED fix round 5, Claude Opus 5.5, unreviewed). The umask applies to `mode`, and the
     text is encoded as Path.write_text would. SHARED fix round 1 (Claude
     Opus 5.5, unreviewed): a message or card under a shared mailbox passes
     SHARED_OWNED_FILE_MODE (D20 item 2); the umask cannot add bits to it.
@@ -2974,9 +2978,10 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
     is the record of a join. It looks for cards/<to>.json on disk, not at
     `card`, because the gate (C3) calls this directly with no card in
     hand. `header_note`, when given, ends the header line after a comma
-    (the gate's, C3). The .tmp is made by write_new_file: a file or link
-    already at its name refuses the send (Delivery exit 1, words naming
-    it, nothing written through it; the number is used). An inbox or
+    (the gate's, C3). The .tmp is made by write_new_file, so nothing is
+    ever written through a file or link already at its name; since SHARED
+    fix round 5 such a name takes the next number (below), where before
+    it refused the send, exit 1. An inbox or
     read/ that is a symlink refuses it before a number is taken (exit 1,
     check_inbox, D17), and so does a symlink at mail/.seq (next_seq).
 
@@ -3009,6 +3014,16 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
     (cmd_send, deliver_codex); None takes one at the first number. A
     route call with C2's arguments alone works as before.
 
+    SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's DEBT-1.
+    A .tmp name already taken (a file or a link a member planted at the
+    next number, readable from the group's mail/.seq) takes the next
+    number too, as a taken message name does: under the same
+    PUBLISH_MAX_TRIES and the same deadline, the planted entry left as
+    it is and nothing written through it, and out of tries Delivery exit
+    10. Before, one planted entry refused the send, exit 1, which the ssh
+    route would file as final (C3). Any other failure to make the .tmp
+    still refuses, exit 1.
+
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): under a shared
     mailbox (D20), before a number is taken: an inbox not owned by its
     card's owner refuses the send (exit 1, check_inbox, item 4); a name
@@ -3029,7 +3044,8 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
                 one deadline; held past it, exit 10); private only:
                 makes mail/to-<to>/read/; per try lstats
                 read/NNNNNN-from-<sender>.md, creates
-                NNNNNN-from-<sender>.tmp in mail/to-<to>/, links it to
+                NNNNNN-from-<sender>.tmp in mail/to-<to>/ (a name already
+                taken there: the next number), links it to
                 NNNNNN-from-<sender>.md there and removes the .tmp's name;
                 stats cards/<to>.json. Every name taken: Delivery exit 10.
     @deps       mailbox_share, check_inbox, lock_deadline, next_seq, inbox,
@@ -3042,7 +3058,7 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
                 was set back; plus waiting for mail/.seq until `deadline`
                 at most, all tries together.
     @alloc      the message text while written; one message file, kept;
-                one .tmp per try, removed before the next.
+                at most one .tmp per try, removed before the next.
     """
     share = mailbox_share()  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20
     box_st, _ = check_inbox(to, share is not None)  # SHARED D17 (Claude Opus 5.5, unreviewed): before a number is taken
@@ -3071,6 +3087,8 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None):
         header = f"# #{n} from {sender} to {to}, {now_iso()}" + (f", {header_note}" if header_note else "")
         try:  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a planted link is refused
             write_new_file(tmp, f"{header}\n\n{body.rstrip()}\n", mode)
+        except FileExistsError:  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): DEBT-1, a taken .tmp takes the next number
+            continue
         except OSError as err:
             return Delivery(EXIT_REFUSED, f"tc send: could not create {tmp} ({err.strerror}); nothing sent", [])
         try:

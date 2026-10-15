@@ -18,7 +18,8 @@ Status: unreviewed
             tc the same way to read LOCK_WAIT_SECONDS (SHARED fix round 3,
             Claude Opus 5.5, unreviewed). One plants a symlink at a message's .tmp
             name, pointing at a file in the harness's temp folder, which
-            the send must refuse to write through.
+            the send must never write through; since SHARED fix round 5
+            (Claude Opus 5.5, unreviewed) the send takes the next number.
 @deps       python3 stdlib (argparse, contextlib, fcntl, importlib, io,
             json, os, pathlib, subprocess, sys, unittest); tests/_root.py;
             FINISH_CEILING_SECONDS and wait_until_blocked from
@@ -355,16 +356,24 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(got.exit, 0)
         self.assertEqual(got.warnings, [], "a joined name got the new-inbox warning")
 
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a link at a message's .tmp is refused.
-    def test_a_link_planted_at_the_message_tmp_is_refused(self):
-        """A link at the next message's .tmp name: the send exits 1 with words, and nothing is written through it.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a link at a message's .tmp is never written through.
+    # SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's DEBT-1, renamed from
+    # test_a_link_planted_at_the_message_tmp_is_refused: the taken .tmp now takes the next number.
+    def test_a_link_planted_at_the_message_tmp_is_never_written_through(self):
+        """A link at the next message's .tmp name: the send never writes through it; it lands at the number after, exit 0, and the link is still a link to its target, unchanged byte for byte.
 
         Must reject a .tmp written with Path.write_text, which follows the
-        link and writes the message into the file it points at.
+        link and writes the message into the file it points at. SHARED fix
+        round 5 (Claude Opus 5.5, unreviewed): the audit's DEBT-1
+        (audits/2026-10-15-0201-quick). Must also reject the old exit 1:
+        one planted name refused the send, and the ssh route would file a
+        far 1 as final (C3). A taken .tmp takes the next number, as a
+        taken message name does.
 
         @interacts  two sends; one symlink and one file planted in the temp
-                    folder, outside TC_ROOT's mailbox.
-        @deps       _root.TcRoot.tc.
+                    folder, outside TC_ROOT's mailbox; reads the link and
+                    its target and lists the inbox.
+        @deps       _root.TcRoot.tc; os.
         @complexity O(1).
         @alloc      one TcRoot.
         """
@@ -375,14 +384,18 @@ class RouterTest(unittest.TestCase):
             link = root.path / "mail" / "to-b" / "000002-from-a.tmp"
             link.symlink_to(outside)
             code, out, err = root.tc("send", "--from", "a", "--to", "b", "two")
-            kept = outside.read_text()
-            still_a_link = link.is_symlink()
-            landed = sorted(p.name for p in (root.path / "mail" / "to-b").glob("*.md"))
-        self.assertEqual(code, EXIT_REFUSED, f"exited {code}: {err}")
-        self.assertEqual(err, f"tc send: could not create {link} (File exists); nothing sent\n")
-        self.assertEqual(kept, "untouched\n", "the send wrote through the planted link")
-        self.assertTrue(still_a_link)
-        self.assertEqual(landed, ["000001-from-a.md"])
+            kept = outside.read_bytes()
+            still_a_link = link.is_symlink() and os.readlink(link) == str(outside)
+            box = root.path / "mail" / "to-b"
+            landed = sorted(p.name for p in box.glob("*.md"))
+            third = (box / "000003-from-a.md").read_text() if (box / "000003-from-a.md").exists() else ""
+        self.assertEqual(code, 0, f"exited {code}: {err}")
+        self.assertEqual(err, "")
+        self.assertIn("sent #3 to b", out)
+        self.assertEqual(kept, b"untouched\n", "the send wrote through the planted link")
+        self.assertTrue(still_a_link, "the planted link was replaced or moved")
+        self.assertEqual(landed, ["000001-from-a.md", "000003-from-a.md"])
+        self.assertIn("two", third)
 
     def test_a_local_card_delivers_where_to_says_and_reports_to_routes_nothing(self):
         """b joins as a Claude reporting to a; mail from c to b lands in to-b only (No hub, D7).
