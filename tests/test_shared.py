@@ -347,6 +347,25 @@ LOCK_WAIT_SECONDS = 3
 LOCK_REFUSE_MARGIN_SECONDS = 3
 # What tc says when a lock is held past LOCK_WAIT_SECONDS; {what} says whose.
 LOCK_HELD_WORDS = "another process is holding {what}'s lock"
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), the busy refusal
+# names the holder, its user and pid, and on a private mailbox asks that
+# user to let it go (a shared one also names the user who ran init); or,
+# when /proc/locks names nobody by the time tc looks, says so.
+HELD_BY_WORDS = ("tc: another process is holding {what}'s lock: {user} (pid {pid}); try again. If it stays held, "
+                 "ask {user} to let it go.\n")
+LET_GO_WORDS = ("tc: another process held {what}'s lock past {seconds} s, and /proc/locks names no holder now "
+                "(it let go, or the process that took it has ended); try again\n")
+
+
+def running_login():
+    """The running user's login, as tc names a holder (user_name).
+
+    @interacts  reads this process's user id and the user database.
+    @deps       os, pwd.
+    @complexity O(1).
+    @alloc      one short string, returned.
+    """
+    return pwd.getpwuid(os.geteuid()).pw_name
 # The number a member sets mail/.seq back to, so the next send's number
 # names a message already there.
 SET_BACK_SEQ = 5
@@ -2584,7 +2603,7 @@ class NoLostMailNoHangTest(UmaskTestCase):
                 self.assertEqual(history, ["000001-from-a.md", "000002-from-a.md"])
 
     def test_a_held_lock_makes_each_command_fail_within_the_bound_and_write_nothing(self):
-        """This process holds mail/.seq or a name's inbox lock (LOCK_EX), one root per case: send, read, a codex join, tc card and a codex send (on its inbox lock, and on mail/.seq) each exit 10 (busy, D23) within LOCK_WAIT_SECONDS plus the margin, say whose lock, and change nothing; a codex send with the ring marker held lands, rings once, and says the marker could not be cleared within two waits.
+        """This process holds mail/.seq or a name's inbox lock (LOCK_EX), one root per case: send, read, a codex join, tc card and a codex send (on its inbox lock, and on mail/.seq) each exit 10 (busy, D23) within LOCK_WAIT_SECONDS plus the margin, say whose lock, name its holder (the running user and this process's pid), and change nothing; a codex send with the ring marker held lands, rings once, and says the marker could not be cleared within two waits.
 
         The cases run at once, so the test costs about two waits, not
         eight. Each child runs under a timeout, so a tc that waits on the
@@ -2592,15 +2611,18 @@ class NoLostMailNoHangTest(UmaskTestCase):
         a plain blocking flock on mail/.seq, the inbox lock or the marker
         (D20: a member who holds one hangs every other member's command
         for as long as it likes), and a held lock that exits 1, which
-        reads as a final refusal (SHARED fix round 3, D23).
+        reads as a final refusal (SHARED fix round 3, D23). P3 fix round 1b
+        (Claude Opus 5.5, unreviewed): D35 (3), the audit's REC-4 (test-
+        strategist). Must reject busy words that do not name the holder's
+        user and pid, the stuck member's only lead to whom to ask.
 
         @interacts  per case, a root: sends, a codex join and a fake codex
                     as setup; one lock file opened and flocked here; the
                     whole root read before and after; one background tc.
-        @deps       _root.TcRoot.tc, start, fake_bin, contents;
-                    contextlib, fcntl, subprocess, time; LOCK_WAIT_SECONDS,
-                    LOCK_REFUSE_MARGIN_SECONDS, LOCK_HELD_WORDS, THREAD,
-                    EXIT_BUSY.
+        @deps       _root.TcRoot.tc, start, fake_bin, contents,
+                    running_login; contextlib, fcntl, os, subprocess, time;
+                    LOCK_WAIT_SECONDS, LOCK_REFUSE_MARGIN_SECONDS,
+                    LOCK_HELD_WORDS, HELD_BY_WORDS, THREAD, EXIT_BUSY.
         @complexity O(1): eight children at once, each at most
                     LOCK_WAIT_SECONDS of waiting (the marker case two).
         @alloc      eight TcRoots, eight open lock files and eight
@@ -2662,7 +2684,7 @@ class NoLostMailNoHangTest(UmaskTestCase):
                                      "a marker write went through a lock this test held")
                     continue
                 self.assertEqual(code, EXIT_BUSY, err)  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23
-                self.assertEqual(err, f"tc: {LOCK_HELD_WORDS.format(what=what)}; try again\n")
+                self.assertEqual(err, HELD_BY_WORDS.format(what=what, user=running_login(), pid=os.getpid()))  # P3 fix round 1b (Claude Opus 5.5, unreviewed): REC-4
                 self.assertEqual(after, before, "a refused command changed the root")
                 self.assertEqual(rang, 0, "a refused codex send rang")
 
@@ -2890,9 +2912,9 @@ class NoLostMailNoHangTest(UmaskTestCase):
                     hand; a fake codex, asserted never called; lists the
                     inboxes. The harness kills the send by its pid.
         @deps       _root.TcRoot.start, fake_bin, lock_waiters, landed;
-                    fcntl, json, subprocess, time; THREAD,
-                    CARD_CHANGE_HOLD_SECONDS, FLIP_SLACK_SECONDS,
-                    LOCK_WAIT_SECONDS, LOCK_HELD_WORDS, EXIT_BUSY.
+                    running_login; fcntl, json, os, subprocess, time;
+                    THREAD, CARD_CHANGE_HOLD_SECONDS, FLIP_SLACK_SECONDS,
+                    LOCK_WAIT_SECONDS, HELD_BY_WORDS, EXIT_BUSY.
         @complexity O(1): about LOCK_WAIT_SECONDS of waiting, at most
                     _root.LOCK_CEILING_SECONDS to see the first wait.
         @alloc      one TcRoot, one open lock file, one child.
@@ -2929,7 +2951,7 @@ class NoLostMailNoHangTest(UmaskTestCase):
             rang = calls()
             mail = landed(root)
         self.assertEqual(proc.returncode, EXIT_BUSY, err)
-        self.assertEqual(err, f"tc: {LOCK_HELD_WORDS.format(what='c')}; try again\n")
+        self.assertEqual(err, HELD_BY_WORDS.format(what="c", user=running_login(), pid=os.getpid()))  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3)
         self.assertEqual(mail, [], "a refused send landed a message")
         self.assertEqual(rang, [], f"a refused send rang ({record})")
 
@@ -3092,9 +3114,10 @@ class NoLostMailNoHangTest(UmaskTestCase):
                     send under a timeout; lists the inbox. The harness kills
                     both children by pid.
         @deps       _root.TcRoot.tc, start, _root.flock_holders; subprocess,
-                    sys, time; SEQ_HOLDER, HOLD_UNDER_BOUND_SECONDS,
-                    PLANTED_NAMES, LOCK_WAIT_SECONDS,
-                    LOCK_REFUSE_MARGIN_SECONDS, LOCK_HELD_WORDS, EXIT_BUSY.
+                    sys, time, running_login; SEQ_HOLDER,
+                    HOLD_UNDER_BOUND_SECONDS, PLANTED_NAMES,
+                    LOCK_WAIT_SECONDS, LOCK_REFUSE_MARGIN_SECONDS,
+                    HELD_BY_WORDS, LET_GO_WORDS, EXIT_BUSY.
         @complexity O(1): about one LOCK_WAIT_SECONDS of waiting, at most
                     _root.LOCK_CEILING_SECONDS to prove the hold.
         @alloc      one TcRoot, two children, PLANTED_NAMES empty files.
@@ -3120,7 +3143,10 @@ class NoLostMailNoHangTest(UmaskTestCase):
             unread = sorted(p.name for p in box.iterdir() if p.name != "read")
         self.assertEqual(planted, PLANTED_NAMES, "the member's loop did not plant every name")
         self.assertEqual(proc.returncode, EXIT_BUSY, err)
-        self.assertEqual(err, f"tc: {LOCK_HELD_WORDS.format(what=seq)}; try again\n")
+        # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3). The member lets go and takes it again on each
+        # turn, so at the send's last look it holds it (named) or has just let go (said).
+        self.assertIn(err, (HELD_BY_WORDS.format(what=seq, user=running_login(), pid=member.pid),
+                            LET_GO_WORDS.format(what=seq, seconds=LOCK_WAIT_SECONDS)))
         self.assertEqual(unread, ["000001-from-a.md"], "a refused send left a message or a .tmp")
 
     # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-3.

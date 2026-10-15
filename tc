@@ -157,7 +157,12 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             nothing) is named as not moved, never as read (round 5). One command waits at most LOCK_WAIT_SECONDS in all
             for the flocks on mail/.seq and its inbox lock (one deadline,
             a one-shot SIGALRM timer), and then refuses, exit 10 (busy,
-            D23); each ring marker write waits as long for the marker's
+            D23), naming each holder /proc/locks shows, its user and
+            pid, and whom to ask (P3 fix round 1b, Claude Opus 5.5,
+            unreviewed: D35 (3)); `health` lists any wait, watch or
+            inbox lock held by a process whose user is not the name's
+            owner (shared only; the gate's health leaves it out); each
+            ring marker write waits as long for the marker's
             flock, and then says so.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
             grp, hashlib, json, pathlib, pwd, re, resource, secrets,
@@ -579,6 +584,23 @@ MESSAGE_READ_MAX_BYTES = SEND_BODY_MAX_BYTES + MESSAGE_HEADER_MAX_BYTES
 LOCK_WAIT_SECONDS = 3
 # The words for a lock held past LOCK_WAIT_SECONDS; {what} says whose.
 LOCK_HELD_WORDS = "another process is holding {what}'s lock"
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), the holder is
+# named. A command refused on mail/.seq or an inbox lock held past
+# LOCK_WAIT_SECONDS names each holder /proc/locks shows (its Linux user and
+# pid) and what the stuck member can do: ask that user to let it go, and on
+# a shared mailbox ask the user who ran init to act (busy_words).
+LOCK_HOLDER_WORDS = "{user} (pid {pid})"
+LOCK_HELD_BY_WORDS = "tc: {held}: {holders}; try again. If it stays held, ask {ask} to let it go{init}."
+LOCK_ASK_INIT_WORDS = ", or ask the user who ran init ({init}) to act"
+# A holder whose process tc could not look at (it ended, or /proc hides
+# other users' processes), and whom to ask when no holder's user is known.
+UNKNOWN_HOLDER_WORDS = "a user tc could not look up"
+UNKNOWN_ASK_WORDS = "whoever runs pid {pid}"
+# When /proc/locks names no holder by the time tc looks: it let go in
+# between, or the process that took it has ended while another holds it
+# still (/proc/locks drops such a lock). tc says so rather than guess.
+LOCK_LET_GO_WORDS = ("tc: another process held {what}'s lock past {seconds} s, and /proc/locks names no holder "
+                     "now (it let go, or the process that took it has ended); try again")
 # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23. Row 10 of the
 # exit table, busy: another process held mail/.seq or an inbox lock past
 # LOCK_WAIT_SECONDS, nothing was written, and the same command may run
@@ -3018,6 +3040,48 @@ def flock_within(f, how, deadline=None):
     return True
 
 
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), a busy refusal names the holder.
+def busy_words(what, f):
+    """The refusal for a lock not granted within the command's bound: `what` names the lock (mail/.seq's path, or an inbox's name), `f` is its open file. Words, one line.
+
+    Each holder /proc/locks shows for the file is named with its Linux
+    user (process_uid) and pid, and the words say what the stuck member
+    can do: ask that user to let it go and, on a shared mailbox (or one
+    whose .shared tc cannot read), ask the user who ran init to act
+    (init_user_name). When /proc/locks names no holder by the time tc
+    looks (it let go in between, or the process that took it has ended
+    while another holds it still), the words say so rather than guess
+    (LOCK_LET_GO_WORDS). This process holds no flock on `f` by then:
+    flock_within let go of any it was granted too late.
+
+    @interacts  fstats `f`; reads /proc/locks, stats /proc/<pid> of each
+                holder, reads the user database and ROOT/.shared, and on a
+                shared mailbox lstats ROOT/.shared or outbox/ for the init
+                user. Writes nothing.
+    @deps       _flock_holders, _lock_key, process_uid, user_name,
+                shared_group, init_user_name; os; LOCK_HELD_WORDS,
+                LOCK_HOLDER_WORDS, LOCK_HELD_BY_WORDS, LOCK_ASK_INIT_WORDS,
+                UNKNOWN_HOLDER_WORDS, UNKNOWN_ASK_WORDS, LOCK_LET_GO_WORDS,
+                LOCK_WAIT_SECONDS.
+    @complexity O(k + h) over k lines in /proc/locks (tens) and h holders
+                of this file (one, or a few senders holding it shared).
+    @alloc      the words, returned.
+    """
+    holders = [(pid, process_uid(pid)) for pid in _flock_holders().get(_lock_key(os.fstat(f.fileno())), [])]
+    if not holders:
+        return LOCK_LET_GO_WORDS.format(what=what, seconds=LOCK_WAIT_SECONDS)
+    named = ", ".join(LOCK_HOLDER_WORDS.format(user=UNKNOWN_HOLDER_WORDS if uid is None else user_name(uid), pid=pid)
+                      for pid, uid in holders)
+    users = sorted({user_name(uid) for _, uid in holders if uid is not None})
+    ask = " or ".join(users) if users else UNKNOWN_ASK_WORDS.format(pid=holders[0][0])
+    try:
+        shared = shared_group() is not None
+    except ValueError:
+        shared = True
+    init = LOCK_ASK_INIT_WORDS.format(init=init_user_name()) if shared else ""
+    return LOCK_HELD_BY_WORDS.format(held=LOCK_HELD_WORDS.format(what=what), holders=named, ask=ask, init=init)
+
+
 def next_seq(deadline=None):
     """The next message number: mail/.seq read, raised by one and written back under its flock.
 
@@ -3030,17 +3094,20 @@ def next_seq(deadline=None):
                 `deadline`, the command's lock_deadline (flock_within;
                 None: LOCK_WAIT_SECONDS from now, SHARED fix round 3),
                 then refuses, exit 10 (EXIT_BUSY, D23), `tc: another
-                process is holding <ROOT>/mail/.seq's lock; try again`,
-                with nothing written (D20).
-    @deps       make_folder, open_by_name, flock_within, refuse; fcntl, os;
-                LOCK_HELD_WORDS, EXIT_BUSY.
-    @complexity O(1), plus waiting until `deadline` at most.
+                process is holding <ROOT>/mail/.seq's lock: <user> (pid
+                <pid>); try again. ...` naming each holder and whom to ask
+                (busy_words; P3 fix round 1b, Claude Opus 5.5, unreviewed:
+                D35 (3)), with nothing written (D20).
+    @deps       make_folder, open_by_name, flock_within, busy_words,
+                refuse; fcntl, os; EXIT_BUSY.
+    @complexity O(1), plus waiting until `deadline` at most; a refusal
+                adds busy_words' read of /proc/locks.
     @alloc      one open file, closed on return.
     """
     make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
     with open(open_by_name(SEQ_FILE, os.O_RDWR | os.O_APPEND), "a+") as f:  # SHARED D17 (Claude Opus 5.5, unreviewed)
         if not flock_within(f, fcntl.LOCK_EX, deadline):  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20
-            refuse(f"tc: {LOCK_HELD_WORDS.format(what=SEQ_FILE)}; try again", EXIT_BUSY)  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23
+            refuse(busy_words(SEQ_FILE, f), EXIT_BUSY)  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), the holder named
         f.seek(0)
         n = int(f.read().strip() or 0) + 1
         f.seek(0)
@@ -3072,7 +3139,9 @@ def inbox_lock(name, how=fcntl.LOCK_EX, deadline=None):
     is 0664 under a shared mailbox, so any member may hold its flock on
     purpose. The wait is bounded (flock_within): past `deadline` the
     command refuses, exit 10 (EXIT_BUSY, D23, SHARED fix round 3), `tc:
-    another process is holding <name>'s lock; try again`, before the block
+    another process is holding <name>'s lock: <user> (pid <pid>); try
+    again. ...`, naming each holder and whom to ask (busy_words; P3 fix
+    round 1b, Claude Opus 5.5, unreviewed: D35 (3)), before the block
     runs, so nothing is written. Send, read, card, a codex join and the
     codex route all come through here. `deadline` is the command's
     lock_deadline, which a send passes on to next_seq (one deadline per
@@ -3084,17 +3153,20 @@ def inbox_lock(name, how=fcntl.LOCK_EX, deadline=None):
                 and refusing a symlink or a FIFO there (exit 1, D17, D19),
                 and holds the flock until the block ends; the kernel drops
                 it if the process dies. Waits for it no later than
-                `deadline`, then writes one line to stderr and exits 10.
-    @deps       make_folder, open_by_name, flock_within, refuse;
-                contextlib, fcntl, os; LOCK_HELD_WORDS, EXIT_BUSY.
-    @complexity O(1), plus waiting until `deadline` at most.
+                `deadline`, then names its holders (busy_words: /proc/locks,
+                each holder's /proc/<pid>, the user database, .shared),
+                writes one line to stderr and exits 10.
+    @deps       make_folder, open_by_name, flock_within, busy_words,
+                refuse; contextlib, fcntl, os; EXIT_BUSY.
+    @complexity O(1), plus waiting until `deadline` at most; a refusal
+                adds busy_words' read of /proc/locks.
     @alloc      one open file for the block; mail/.box-<name>.lock, made on
                 first use and kept (nothing removes it).
     """
     make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
     with open(open_by_name(MAIL / f".box-{name}.lock", os.O_WRONLY | os.O_APPEND), "a") as lock:  # SHARED D17 (Claude Opus 5.5, unreviewed)
         if not flock_within(lock, how, deadline):  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20
-            refuse(f"tc: {LOCK_HELD_WORDS.format(what=name)}; try again", EXIT_BUSY)  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D23
+            refuse(busy_words(name, lock), EXIT_BUSY)  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), the holder named
         yield
 
 
@@ -6998,8 +7070,11 @@ def cmd_gate(args):
     body is refused, exit 1. A health shape prints `tc health --json`'s
     snapshot without its `cards` key and without a GPU query (D16, D18),
     and without its `squatted` key (SSH fix round 1, Claude Opus 5.5,
-    unreviewed: paths that name this machine's users). Anything else:
-    `tc gate: refused`, exit 7, nothing written.
+    unreviewed: paths that name this machine's users), and without its
+    `held_by_others` key (P3 fix round 1b, Claude Opus 5.5, unreviewed:
+    D35 (3)'s line naming who holds a lock stays home; round 1c makes
+    this an allow list, D36 (5)). Anything else: `tc gate: refused`, exit
+    7, nothing written.
 
     It starts no shell and no program but the codex ring, reached through
     the router for a card that says codex (D18): an argv list, a checked
@@ -7029,7 +7104,7 @@ def cmd_gate(args):
     if command is None:
         refuse(GATE_REFUSED_WORDS, EXIT_GATE_REFUSED)
     if command.shape == "health":
-        print(json.dumps(health_snapshot(cards=False, gpu=False, branches=False), indent=2))
+        print(json.dumps(health_snapshot(cards=False, gpu=False, branches=False, held=False), indent=2))  # P3 fix round 1b (Claude Opus 5.5, unreviewed): held
         return
     body = read_body(None)
     if not body.strip():
@@ -7288,6 +7363,87 @@ def listeners(kind="wait", shared=None):
     return dict(sorted(out.items()))
 
 
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), tc health lists a
+# lock held by someone other than its name's owner.
+def held_by_others(shared):
+    """Each wait, watch or inbox lock held by a process whose Linux user is not the name's owner: a list of {"name", "lock", "path", "pid", "user", "owner"}, in name order, for tc health. [] on a private mailbox (`shared` False), which has one user, so it never fires.
+
+    A name's owner is the owner of cards/<name>.json, or with no card the
+    owner of its inbox; a name with neither is left out. Its wait and
+    watch locks are lstat()ed by name in its inbox, opened once in
+    mail/'s descriptor (pin_folder), and its inbox lock by name in
+    mail/'s; each that is a regular file is looked up in /proc/locks, and
+    each holder whose process tc can see (process_uid) and is not the
+    owner's is listed: a member holding another member's inbox lock (D20
+    lets any member, for a send's moment), or a file someone planted at
+    a wait or watch lock's name and holds. lock is "wait", "watch" or
+    "inbox"; user and owner are logins (user_name). The gate's health
+    leaves this out (health_snapshot's `held`).
+
+    @interacts  reads /proc/locks; opens and lists mail/, opens each inbox
+                by name, lstats each lock by name; lstats cards/<name>.json;
+                stats /proc/<pid> of each holder; reads the user database.
+                Writes nothing.
+    @deps       open_mail, pin_folder, unpin, _flock_holders, _lock_key,
+                process_uid, user_name; os, stat; MAIL, CARDS,
+                WAKE_LOCK_KINDS, WAKE_LOCK_NAME, NOT_PINNED.
+    @complexity O(k + n log n + h) over k lines in /proc/locks (tens), n
+                entries in mail/ (inboxes and inbox locks, a few dozen),
+                and h holders of their locks: three lstats per name.
+    @alloc      the holder map, the names of mail/ and one dict per lock
+                held by someone else, returned; one inbox descriptor at a
+                time.
+    """
+    found = []
+    if not shared:
+        return found
+    holders = _flock_holders()
+    try:
+        mail_fd = open_mail()
+    except OSError:
+        mail_fd = None
+    if mail_fd is None:
+        return found
+    try:
+        try:
+            entries = os.listdir(mail_fd)
+        except OSError:
+            entries = []
+        boxes = {entry[len("to-"):] for entry in entries if entry.startswith("to-")}
+        inbox_locks = {entry[len(".box-"):-len(".lock")] for entry in entries
+                       if entry.startswith(".box-") and entry.endswith(".lock") and len(entry) > len(".box-.lock")}
+        for name in sorted(boxes | inbox_locks):
+            box = pin_folder(mail_fd, f"to-{name}", MAIL / f"to-{name}") if name in boxes else NOT_PINNED
+            try:
+                try:
+                    owner = os.lstat(CARDS / f"{name}.json").st_uid
+                except OSError:
+                    owner = box.st.st_uid if box.st is not None else None
+                if owner is None:
+                    continue
+                places = [(kind, box.fd, WAKE_LOCK_NAME.format(kind=kind), MAIL / f"to-{name}") for kind in WAKE_LOCK_KINDS
+                          if box.fd is not None]
+                if name in inbox_locks:
+                    places.append(("inbox", mail_fd, f".box-{name}.lock", MAIL))
+                for lock, folder_fd, lock_name, folder in places:
+                    try:
+                        st = os.stat(lock_name, dir_fd=folder_fd, follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if not stat.S_ISREG(st.st_mode):
+                        continue
+                    for pid in holders.get(_lock_key(st), []):
+                        uid = process_uid(pid)
+                        if uid is not None and uid != owner:
+                            found.append({"name": name, "lock": lock, "path": str(folder / lock_name), "pid": pid,
+                                          "user": user_name(uid), "owner": user_name(owner)})
+            finally:
+                unpin(box)
+    finally:
+        os.close(mail_fd)
+    return found
+
+
 def _age(seconds):
     if seconds is None:
         return None
@@ -7429,8 +7585,15 @@ def cards_summary():
     return out
 
 
-def health_snapshot(cards=True, gpu=True, branches=True):
+def health_snapshot(cards=True, gpu=True, branches=True, held=True):
     """One snapshot of the machine, sessions, listeners, watchers, mail and cards.
+
+    P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3).
+    `held_by_others` lists each wait, watch or inbox lock held by a
+    process whose user is not the name's owner (held_by_others; [] on a
+    private mailbox). The gate passes `held` False and the key is left
+    out: until round 1c makes the gate's health an allow list (D36 (5)),
+    this projection drops it, so who holds what never reaches a far key.
 
     SSH S3 (Claude Opus 5.5, unreviewed): the gate's `health --json`
     passes both False. `cards` False leaves the `cards` key out, so a far
@@ -7469,18 +7632,21 @@ def health_snapshot(cards=True, gpu=True, branches=True):
 
     @interacts  reads /proc, mail/ and each inbox in it, status/, cards/ (only when `cards`)
                 and ROOT/.shared; lists outbox/ and mail/.origins/ (only
-                when `branches`); may run nvidia-smi (machine_stats, only
+                when `branches`); on a shared mailbox lstats each name's
+                locks and card and stats each holder's /proc/<pid> (only
+                when `held`); may run nvidia-smi (machine_stats, only
                 when `gpu`). Writes nothing.
     @deps       now_iso, machine_stats, session_counts, listeners,
                 mailbox_summary, cards_summary, squatted_branches,
-                shared_group.
-    @complexity O(p + k + n log n + M + m log m + c + e): p processes, k
-                lines in /proc/locks, n mailbox names, M names in every
-                inbox and read/ and the m message files among them
-                (mailbox_summary lists each folder in its descriptor,
-                sorts its message names and stats each one: hundreds to
-                thousands, growing with the history), c cards, e entries
-                in outbox/ and mail/.origins/ (one per member each).
+                held_by_others, shared_group.
+    @complexity O(p + k + n log n + M + m log m + c + e + h): p
+                processes, k lines in /proc/locks, n mailbox names, M
+                names in every inbox and read/ and the m message files
+                among them (mailbox_summary lists each folder in its
+                descriptor, sorts its message names and stats each one:
+                hundreds to thousands, growing with the history), c cards,
+                e entries in outbox/ and mail/.origins/ (one per member
+                each), h holders of the names' locks (held_by_others).
     @alloc      one dict, returned.
     """
     try:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): LOW-8, a field, never a raise
@@ -7495,6 +7661,8 @@ def health_snapshot(cards=True, gpu=True, branches=True):
         snap["cards"] = cards_summary()
     if branches:  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 1, never for the gate
         snap["squatted"] = squatted_branches()
+    if held:  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), never for the gate
+        snap["held_by_others"] = held_by_others(shared)
     snap["shared_group"], snap["shared_problem"] = group, problem  # SHARED H1 (Claude Opus 5.5, unreviewed): C4
     return snap
 
@@ -7541,6 +7709,11 @@ def cmd_health(args):
     `squatted` line per branch that is not its member's own, naming what
     is there and the one command the user who ran init runs.
 
+    P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3). One `held`
+    line per wait, watch or inbox lock held by someone other than its
+    name's owner, naming the lock, the holder's user and pid, and the
+    owner (held_by_others); never on a private mailbox.
+
     @interacts  see health_snapshot; prints to stdout.
     @deps       health_snapshot, describe_card, printable, _who, _age,
                 _gpu_text; json.
@@ -7577,6 +7750,9 @@ def cmd_health(args):
     print("mail       " + ("\n           ".join(rows) if rows else "empty"))
     for squat in snap["squatted"]:  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 1
         print(f"squatted   {printable(squat['path'])}: {printable(squat['why'])}; {printable(squat['fix'])}")
+    for hold in snap["held_by_others"]:  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3)
+        print(f"held       {printable(hold['path'])}: {printable(hold['name'])}'s {hold['lock']} lock, held by "
+              f"{printable(hold['user'])} (pid {hold['pid']}), not by its owner {printable(hold['owner'])}")
     group, problem = snap["shared_group"], snap["shared_problem"]  # SHARED H1 (Claude Opus 5.5, unreviewed): C4
     if group is not None:
         print(f"mailbox shared with group {printable(group)}")

@@ -6,7 +6,10 @@ name is moved aside and never followed, a listener started before the
 change still counts on a private mailbox until it re-arms and never on a
 shared one, only a name's owner listens for it on a shared mailbox, a
 private mailbox keeps its wait exactly, and tc wait and tc watch close
-their lock file on every way out.
+their lock file on every way out. And D35 (3): a busy refusal names the
+holder, its user and pid, and whom to ask, and tc health lists a lock
+held by someone other than its name's owner, while the gate's health
+never does.
 
 Model:  Claude Opus 5.5 (the P3 fixer, round 1b), 2026-10-15
 Status: unreviewed
@@ -15,7 +18,9 @@ One Linux user plays every part. Where a second owner is needed (D36's
 refusal of anyone but a name's owner), tc runs in process and os.lstat
 and os.fstat report the card and the inbox as another user's
 (test_shared.owner_patched_lstat and owner_patched_fstat), as the SHARED
-suites do; the second-user walk is qa/human/route-shared.md.
+suites do; where a lock's holder must be another member, os.stat reports
+that holder's /proc/<pid> as another user's (holder_patched_stat). The
+second-user walk is qa/human/route-shared.md.
 
 @interacts  runs ../tc through tests/_root.py under a throwaway TC_ROOT
             (init, joins, sends, waits, watches, health); makes inboxes,
@@ -23,12 +28,14 @@ suites do; the second-user walk is qa/human/route-shared.md.
             own (python3 -c HOLD_SCRIPT, which opens a lock file and holds
             its flock until the harness kills it by its pid) and reads
             /proc/locks to prove a listener; loads tc as a module (TC_ROOT
-            set for the load and put back) and runs cmd_wait and cmd_watch
-            in process with os.lstat and os.fstat patched, or with
+            set for the load and put back) and runs cmd_wait, cmd_watch,
+            cmd_read, cmd_health, cmd_gate and health_snapshot in process
+            with os.lstat, os.fstat or os.stat patched, or with
             resource.setrlimit made a no-op (so a wait never caps this
-            process), tc's gpu_stats, unread or machine_stats replaced,
-            stdout and stderr captured, and warnings recorded; reads
-            /proc/self/fd. Writes nothing outside the root's temp folder.
+            process), tc's gpu_stats, unread, machine_stats or
+            flock_within replaced, SSH_ORIGINAL_COMMAND set, stdout and
+            stderr captured, and warnings recorded; reads /proc/self/fd.
+            Writes nothing outside the root's temp folder.
 @deps       python3 stdlib (argparse, contextlib, fcntl, gc, io, json, os,
             pathlib, pwd, stat, subprocess, sys, time, unittest,
             unittest.mock, warnings); tests/_root.py; UmaskTestCase,
@@ -138,6 +145,25 @@ LOCK_CEILING_SECONDS = _root.LOCK_CEILING_SECONDS
 LOCK_POLL_SECONDS = _root.LOCK_POLL_SECONDS
 # What a link planted at a lock's name leads to, outside TC_ROOT.
 TARGET_TEXT = "a file outside the mailbox; tc must not touch it\n"
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), item 3. A busy
+# refusal (exit 10) names each holder and whom to ask; on a shared mailbox
+# the user who ran init as well; and says so when /proc/locks names nobody.
+EXIT_BUSY = 10
+HELD_BY_WORDS = ("tc: another process is holding {what}'s lock: {user} (pid {pid}); try again. If it stays held, "
+                 "ask {user} to let it go{init}.\n")
+ASK_INIT_WORDS = ", or ask the user who ran init ({init}) to act"
+LET_GO_WORDS = ("tc: another process held {what}'s lock past {seconds} s, and /proc/locks names no holder now "
+                "(it let go, or the process that took it has ended); try again\n")
+LOCK_WAIT_SECONDS = 3
+# How much higher than the running user's id a holder's process is
+# reported, so the holder is another member and never the init user
+# (whom as_member style patching reports one higher).
+HOLDER_UID_STEP = 2
+# tc health's line for a lock someone else holds, and the gate's command
+# for its health.
+HELD_LINE_WORDS = "held       {path}: {name}'s {lock} lock, held by {user} (pid {pid}), not by its owner {owner}"
+GATE_HEALTH = "/x/tc health --json"
+GATE_KEY = "farkey"
 
 
 def login(uid):
@@ -250,6 +276,27 @@ def lock_fds(path):
             continue
         count += (st.st_dev, st.st_ino) == (want.st_dev, want.st_ino)
     return count
+
+
+def holder_patched_stat(pids, uid):
+    """An os.stat that reports /proc/<pid> for each of `pids` as owned by user `uid`, and everything else as it is: how a holder's process is made another member's, as the SHARED suites patch a file's owner.
+
+    @interacts  none until called; then stats what it is given.
+    @deps       os, stat.
+    @complexity O(1) per call.
+    @alloc      one stat result per call.
+    """
+    real = os.stat
+    procs = {f"/proc/{pid}" for pid in pids}
+
+    def patched(path, *args, **kwargs):
+        st = real(path, *args, **kwargs)
+        if not isinstance(path, int) and os.fspath(path) in procs:
+            fields = list(st[:stat.ST_CTIME + 1])
+            fields[stat.ST_UID] = uid
+            return os.stat_result(fields)
+        return st
+    return patched
 
 
 def wait_args(name, timeout):
@@ -528,6 +575,114 @@ class OnlyTheOwnerListensTest(UmaskTestCase):
         self.assertEqual(read[0], 0, read)
         self.assertEqual(timed_out[0], EXIT_TIMEOUT, timed_out)
         self.assertTrue(timed_out[1].startswith(f"TIMEOUT: no mail for {NEW_NAME}"), timed_out)
+
+
+class HolderNamedTest(UmaskTestCase):
+    """D35 (3), item 3 of round 1b: a busy refusal names the holder, and tc health lists a lock held by someone other than its name's owner.
+
+    The extended held-lock test (test_shared.py, NoLostMailNoHangTest,
+    the audit's REC-4) checks the words for each command that waits; this
+    class checks the words' two forms and the health line.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, UmaskTestCase, primary_group, load_tc, hold,
+                holder_patched_stat, run_in_process, login.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per case.
+    """
+
+    def test_a_busy_refusal_names_the_holder_and_on_a_shared_mailbox_the_init_user(self):
+        """A child holds b's inbox lock: tc read b exits 10, naming the running user and the child's pid and asking that user to let it go, and on a shared mailbox the user who ran init to act; with nobody holding it by the time tc looks, the words say so.
+
+        Must reject words that name no holder or the wrong pid, words
+        that ask the init user on a private mailbox (nobody ran init
+        there), and words that guess a holder when /proc/locks names
+        none.
+
+        @interacts  per mailbox: an init and a join when shared, a send,
+                    one child holding the inbox lock, one tc read; then
+                    loads tc and runs cmd_read in process with tc's
+                    flock_within made to give up.
+        @deps       hold, primary_group, load_tc, run_in_process, login;
+                    _root.TcRoot.tc; unittest.mock.
+        @complexity O(1): about LOCK_WAIT_SECONDS per refused read.
+        @alloc      two TcRoots and one module.
+        """
+        _, group, _ = primary_group()
+        mine = login(os.geteuid())
+        seen = {}
+        for shared in (False, True):
+            with _root.TcRoot() as root:
+                if shared:
+                    self.assertEqual(root.tc("init", "--shared", "--group", group)[0], 0)
+                    self.assertEqual(root.tc("join", "b", env={"CLAUDECODE": "1"})[0], 0)
+                self.assertEqual(root.tc("send", "--from", "a", "--to", "b", "hi")[0], 0)
+                holder = hold(root, root.path / "mail" / ".box-b.lock")
+                seen[shared] = (root.tc("read", "b"), holder.pid)
+        with _root.TcRoot() as root:
+            self.assertEqual(root.tc("send", "--from", "a", "--to", "b", "hi")[0], 0)
+            tc = load_tc(root)
+            with mock.patch.object(tc, "flock_within", lambda *args, **kwargs: False):
+                let_go = run_in_process(lambda: tc.cmd_read(argparse.Namespace(name="b")))
+        for shared, (ran, pid) in seen.items():
+            with self.subTest(shared=shared):
+                init = ASK_INIT_WORDS.format(init=mine) if shared else ""
+                self.assertEqual(ran, (EXIT_BUSY, "", HELD_BY_WORDS.format(what="b", user=mine, pid=pid, init=init)))
+        self.assertEqual(let_go, (EXIT_BUSY, "", LET_GO_WORDS.format(what="b", seconds=LOCK_WAIT_SECONDS)))
+
+    def test_health_lists_a_lock_held_by_someone_not_its_names_owner_and_the_gate_never_does(self):
+        """Shared, ann joined: one child holds ann's inbox lock and another a file it planted at her watch lock's name, each reported as another member's: tc health --json lists both under held_by_others and tc health prints a held line for each; the gate's health --json has no such key; on a private mailbox the same holds list nothing.
+
+        Must reject a health that names nobody for a lock a stranger
+        holds (the stuck member learns of it only from a failed command),
+        a gate that hands that line to a far key (round 1c's allow list
+        comes later; until then the gate's projection drops it), and a
+        private mailbox that ever reports one (one user).
+
+        @interacts  per mailbox: an init and a join when shared, a send,
+                    two children holding locks; loads tc and runs
+                    health_snapshot, cmd_health and cmd_gate in process
+                    with os.stat reporting the children's /proc/<pid> as
+                    another member's, and tc's gpu_stats replaced.
+        @deps       hold, holder_patched_stat, primary_group, load_tc,
+                    run_in_process, login; _root.TcRoot.tc; json,
+                    unittest.mock.
+        @complexity O(1).
+        @alloc      two TcRoots and two modules.
+        """
+        _, group, _ = primary_group()
+        other = login(os.geteuid() + HOLDER_UID_STEP)
+        got = {}
+        for shared in (False, True):
+            with _root.TcRoot() as root:
+                name = OWNER if shared else "b"
+                if shared:
+                    self.assertEqual(root.tc("init", "--shared", "--group", group)[0], 0)
+                    self.assertEqual(root.tc("join", OWNER, env={"CLAUDECODE": "1"})[0], 0)
+                self.assertEqual(root.tc("send", "--from", "a", "--to", name, "hi")[0], 0)
+                box_lock = root.path / "mail" / f".box-{name}.lock"
+                planted = root.path / "mail" / f"to-{name}" / LOCK_NAME.format(kind="watch")
+                holders = [hold(root, box_lock), hold(root, planted)]
+                tc = load_tc(root)
+                with mock.patch.object(os, "stat", holder_patched_stat([p.pid for p in holders],
+                                                                       os.geteuid() + HOLDER_UID_STEP)), \
+                        mock.patch.object(tc, "gpu_stats", lambda: None), \
+                        mock.patch.dict(os.environ, {"SSH_ORIGINAL_COMMAND": GATE_HEALTH}):
+                    snap = tc.health_snapshot()
+                    text = run_in_process(lambda: tc.cmd_health(argparse.Namespace(json=False)))
+                    gate = run_in_process(lambda: tc.cmd_gate(argparse.Namespace(as_name=GATE_KEY)))
+                got[shared] = (snap["held_by_others"], text, json.loads(gate[1]), [p.pid for p in holders],
+                               box_lock, planted)
+        private, _, _, _, _, _ = got[False]
+        self.assertEqual(private, [], "a private mailbox reported a lock held by someone else")
+        held, text, gated, (box_pid, watch_pid), box_lock, planted = got[True]
+        mine = login(os.geteuid())
+        want = [{"name": OWNER, "lock": "watch", "path": str(planted), "pid": watch_pid, "user": other, "owner": mine},
+                {"name": OWNER, "lock": "inbox", "path": str(box_lock), "pid": box_pid, "user": other, "owner": mine}]
+        self.assertEqual(held, want)
+        for entry in want:
+            self.assertIn(HELD_LINE_WORDS.format(**entry) + "\n", text[1])
+        self.assertNotIn("held_by_others", gated, "the gate's health handed a far key who holds which lock")
 
 
 class LockFileClosedTest(UmaskTestCase):
