@@ -129,8 +129,8 @@ Commands:
   is already waiting (sent before the join, or rung to a thread that has
   since died), writes `mail/.ring-pending-<name>` so the next send rings
   the new thread, and prints `<n> unread waiting for <name>: run tc read
-  <name>` (D16). With nothing waiting, it removes any old marker, so an
-  old thread's backoff never delays the new thread's first ring.
+  <name>` (D16). With nothing waiting, it sets any old marker to clear,
+  so an old thread's backoff never delays the new thread's first ring.
 - `tc card <name> --ssh user@host [--remote-tc PATH] [--account L]
   [--reports-to N] [--force]` writes a card for a name that lives on another machine. If
   `mail/to-<name>/` holds unread mail here, refused with words naming the
@@ -181,7 +181,10 @@ route <route> is not built yet; nothing sent`, exit 1, nothing written.
   1. Under the inbox lock `mail/.box-<to>.lock` (flock): count unread,
      check for the marker `mail/.ring-pending-<to>`, deliver through
      `deliver_local`, and decide to ring when the count was 0 **or** the
-     marker exists. Release the lock.
+     marker says pending or timed out. Release the lock. The marker is a
+     file that, once made, is never removed: its contents carry its state
+     (pending, timed out, or clear), in both private and shared mode
+     (D20).
   2. Outside the lock, ring:
      `codex queue --thread <thread_id> --message "MAIL: <n> unread for <to>. Run: TC_ROOT=<root> <tc path> read <to>, act on it, reply with TC_ROOT=<root> <tc path> send --from <to> --to <sender>."`
      (root and path quoted with `shlex.quote`). The marker is written
@@ -189,7 +192,7 @@ route <route> is not built yet; nothing sent`, exit 1, nothing written.
      with stdin from `/dev/null` and a timeout of `CODEX_RING_SECONDS`
      (30). The ring never runs under the lock, so a slow ring cannot
      block a `tc read`.
-  3. Exit 0: remove the marker, and add the word line `rang codex <to>
+  3. Exit 0: set the marker to clear, and add the word line `rang codex <to>
      (queued; delivered when its turn ends or the session is resumed)`.
      Any other exit: keep the marker and add the warning `ring failed for
      <to>: <first stderr line>; the mail is in its inbox; the next send to

@@ -133,7 +133,7 @@ docs/planning/connection-routes/   the plan: 00-index, contracts, phases, decisi
 mail/to-<name>/NNNNNN-from-X.md    unread messages (gitignored)
 mail/to-<name>/read/               read messages, kept as history
 mail/.box-<name>.lock              the inbox lock: send's count plus write, read's glob plus rename, tc card's check plus write (D14)
-mail/.ring-pending-<name>          a failed codex ring; the next send rings again (D14)
+mail/.ring-pending-<name>          the codex ring's state: pending, timed out or clear; never removed (D14, D16, D20)
 cards/<name>.json                  one address card per name: kind, account, route (gitignored)
 status/<name>.md                   each side's latest status (gitignored)
 ```
