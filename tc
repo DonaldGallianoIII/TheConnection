@@ -54,9 +54,12 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             and mode of every folder and file under them that is not right
             yet (both walks reach each entry by its name in its own
             folder's descriptor and enter each folder through its
-            parent's, os.fwalk, so no path below the four is resolved and
+            parent's, so no path below the four is resolved and
             a folder swapped for a link on the way is named and never
-            entered: round 7, the audit's HIGH-1), then writes .shared at
+            entered: round 7, the audit's HIGH-1; tc's own stack walk,
+            which never opens a link, names a folder past WALK_MAX_DEPTH
+            or one it may list but not search and leaves it: round 8),
+            then writes .shared at
             0644, owner-write only (D21),
             unless it already names the group; then its owner's rerun
             sets it to 0644, and another member's says one line when it
@@ -321,12 +324,27 @@ ENTRY_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 # that is something other than a folder.
 LINK_WHY = "a symlink, which tc never follows"
 NOT_A_FOLDER_WHY = "not a folder"
-# Why it skips a folder it found, and could open then, but did not enter
-# (os.fwalk found another entry at its name, or none, or could not open
-# it; or a top changed between its lstat and its open): nothing under it
-# is looked at.
+# Why it skips a folder it found and then did not enter (by the time the
+# walk opened it by its name, a link, another entry or nothing had that
+# name; or a top changed between its lstat and its open): nothing under
+# it is looked at.
 NOT_ENTERED_WHY = ("a folder when tc first looked, but by the time tc came to enter it a link or another entry "
                    "had its name, or it was gone or would not open; tc looked at nothing under it")
+# SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1
+# (audits/2026-10-15-0840-quick). How many folders deep the walk enters,
+# counting the top (mail/, status/, cards/ or outbox/) as one. A real
+# mailbox is three deep: mail/to-<x>/read, and the ssh route's
+# outbox/to-<x>/sent and refused/ (C3). Eight leaves room for folders
+# made by hand and bounds what one walk holds at once: one descriptor and
+# one list of names per level. Any member may make folders under the four
+# to any depth, so a folder past it is named and not entered, never a
+# traceback.
+WALK_MAX_DEPTH = 8
+TOO_DEEP_WHY = (f"{WALK_MAX_DEPTH + 1} folders deep, counting its top as one, past the {WALK_MAX_DEPTH} the "
+                f"walk enters; tc looked at nothing under it")
+# Why it skips a folder this user may list but not search (read without
+# x): no name in it can be looked at (the audit's LOW-1).
+NO_SEARCH_WHY = "this user may list it but not search (x) it; tc looked at nothing under it"
 # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D21, ROOT never
 # group-writable. .shared and mail/ live directly in ROOT, and in a folder
 # its group may write (without the sticky bit) any member may rename
@@ -890,46 +908,29 @@ def walk_pinned(top):
     (the audit's HIGH-1). Here no path below `top` is ever resolved.
     `top` itself is lstat()ed, opened with FOLDER_FLAGS (O_NOFOLLOW,
     O_DIRECTORY) by its path under ROOT, and kept only when fstat on that
-    descriptor finds the folder the lstat found. os.fwalk, with
-    follow_symlinks false, then lists each folder through its descriptor
-    and enters each subfolder by its name in its parent's descriptor,
-    only when fstat finds the folder its lstat found there, so a link
-    swapped in on the way is never entered. Each entry is lstat()ed by
-    its name in its folder's descriptor, never followed.
+    descriptor finds the folder the lstat found. walk_below then walks
+    every folder under it through descriptors (SHARED fix round 8, Claude
+    Opus 5.5, unreviewed: the audit's MEDIUM-1, tc's own stack walk in
+    place of os.fwalk, which recursed one frame per level).
 
     path: the entry's path, for the words and for the mode its place
     gets; nothing opens it. entry: what share_entry opens, the top's own
     descriptor or (its folder's descriptor, its name), valid until the
-    caller asks for the next; None with a why. found: the lstat result,
-    or None when lstat could not reach the entry (gone, or out of reach).
-    why: None, or why the walk could not reach it: a top that is a link
-    (LINK_WHY), something other than a folder (NOT_A_FOLDER_WHY), or
-    changed between its lstat and its open (NOT_ENTERED_WHY), or that
-    lstat cannot reach; or, after the rest of the top's walk, a folder
-    the walk listed and could open then, but did not enter
-    (NOT_ENTERED_WHY: a link, another entry or nothing at its name by
-    then). A folder this user cannot open when it is listed is not
-    expected to be entered, so it is not named twice (its own open says
-    why, or another user's is passed over, as before). Only the path to
-    `top` itself is resolved by name, as every command resolves it: ROOT
-    and the folders above it are not pinned here.
+    caller asks for the next; None with a why. found: the lstat result;
+    None only with a why. why: None, or why the walk could not reach it:
+    a top that is a link (LINK_WHY), something other than a folder
+    (NOT_A_FOLDER_WHY), or changed between its lstat and its open
+    (NOT_ENTERED_WHY), or that lstat cannot reach; or walk_below's whys.
+    Only the path to `top` itself is resolved by name, as every command
+    resolves it: ROOT and the folders above it are not pinned here.
 
-    @interacts  lstats `top` and opens it; lists each folder under it and
-                opens each subfolder through its parent's descriptor
-                (os.fwalk); lstats each entry by its name, and opens and
-                closes each subfolder once when it is listed, to see it
-                can be entered (can_enter). Writes nothing.
-    @deps       can_enter; os, errno, stat, pathlib; FOLDER_FLAGS,
-                LINK_WHY, NOT_A_FOLDER_WHY, NOT_ENTERED_WHY.
-    @complexity O(f) over f entries under `top` (hundreds to thousands
-                under mail/: read/ is the history): one lstat each, plus
-                for each folder one listing, an open and close to probe
-                it (can_enter), and os.fwalk's own lstat, open and fstat.
-    @alloc      the listings of the folders from `top` down to the one
-                being walked (at most three deep, mail/to-<x>/read), one
-                descriptor each, closed as the walk leaves it; the set of
-                folders listed and not yet entered (at most every folder
-                under `top`: a few per inbox).
+    @interacts  lstats `top` and opens it; walk_below's below it. Writes
+                nothing.
+    @deps       walk_below; os, errno, stat; FOLDER_FLAGS, LINK_WHY,
+                NOT_A_FOLDER_WHY, NOT_ENTERED_WHY.
+    @complexity O(f) over f entries under `top`, as walk_below.
+    @alloc      the top's descriptor, closed on every path out; as
+                walk_below.
     """
     try:
         st = os.lstat(top)
@@ -956,42 +957,117 @@ def walk_pinned(top):
             yield top, None, st, NOT_ENTERED_WHY
             return
         yield top, fd, st, None
-        unentered = set()
-        for here, folders, files, dir_fd in os.fwalk(".", dir_fd=fd, follow_symlinks=False):
-            at = top / here
-            unentered.discard(at)
-            for n, name in enumerate(folders + files):
-                path = at / name
-                try:
-                    found = os.lstat(name, dir_fd=dir_fd)
-                except OSError:
-                    found = None
-                if (n < len(folders) and found is not None and stat.S_ISDIR(found.st_mode)
-                        and can_enter(dir_fd, name)):
-                    unentered.add(path)
-                yield path, (dir_fd, name), found, None
-        for path in sorted(unentered):
-            yield path, None, None, NOT_ENTERED_WHY
+        yield from walk_below(top, fd)
     finally:
         os.close(fd)
 
 
-def can_enter(dir_fd, name):
-    """True when the folder `name` in the folder open at `dir_fd` opens with FOLDER_FLAGS now: a real folder this user may open.
+# SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1,
+# LOW-1 and LOW-2 (audits/2026-10-15-0840-quick), tc's own walk.
+def walk_below(top, fd):
+    """Every entry under the folder open at `fd` (its path `top`), each reached by its name in its own folder's descriptor, never by a path: yield (path, entry, found, why), one at a time.
 
-    walk_pinned's test, when a folder is listed, of whether os.fwalk will
-    enter it, so a folder it then does not enter is one that changed.
+    An explicit stack, one frame per folder from `top` down to the one
+    being walked, so a deep nest costs no recursion: os.fwalk's frame
+    per level ended init in a RecursionError traceback about 1000 deep
+    (the audit's MEDIUM-1). Each folder is listed with os.scandir on its
+    own descriptor, and each name in it lstat()ed by that name in that
+    descriptor (dir_fd), never followed. An entry is yielded as it is
+    listed. Each subfolder is entered after its folder's listing, by its
+    name in its parent's descriptor with FOLDER_FLAGS (O_NOFOLLOW,
+    O_DIRECTORY), and only when fstat finds the folder its lstat found.
+    So a link is never opened, not even to compare (the audit's LOW-2):
+    only names whose lstat found a folder are opened, and a link swapped
+    in after that fails O_NOFOLLOW.
 
-    @interacts  opens and closes one folder by its name in `dir_fd`.
-    @deps       os; FOLDER_FLAGS.
-    @complexity O(1).
-    @alloc      one descriptor, closed before return.
+    path, entry and found as walk_pinned: entry is (this folder's
+    descriptor, the name), valid until the caller asks for the next, or
+    None with a why; found is the lstat result, None only with a why. A
+    name gone by its lstat is passed over. why is None, or: a folder
+    whose lstat found something else, or nothing, by the time the walk
+    came to enter it (NOT_ENTERED_WHY, or its open's own words); a folder
+    WALK_MAX_DEPTH folders below `top`, counting `top` as one
+    (TOO_DEEP_WHY), never entered; a folder this user may list but not
+    search (NO_SEARCH_WHY, the audit's LOW-1), named once and left; one
+    that would not list, or a name lstat could not reach, with its
+    error's words. A folder this user may not open is passed over here
+    without a word: share_entry's open of it, at its listing, names it
+    (in a member's walk only when it is the member's own; another user's
+    is theirs).
+
+    @interacts  lists each folder under `top` (os.scandir on its
+                descriptor), lstats each entry by its name there, and
+                opens and fstats each subfolder by its name in its
+                parent's descriptor. Writes nothing.
+    @deps       os, errno, stat, pathlib; FOLDER_FLAGS, WALK_MAX_DEPTH,
+                NOT_ENTERED_WHY, TOO_DEEP_WHY, NO_SEARCH_WHY.
+    @complexity O(f) over f entries under `top` (hundreds to thousands
+                under mail/: read/ is the history): one lstat each, plus
+                one listing, one open and one fstat per folder entered.
+    @alloc      one frame per folder from `top` down to the one being
+                walked, at most WALK_MAX_DEPTH: its descriptor (`top`'s
+                is the caller's, never closed here; every other one is
+                closed when the walk leaves its folder, and on every way
+                out of the walk, a refusal included) and the subfolders
+                not yet entered; one folder's list of names while it is
+                listed.
     """
+    frames = [(top, fd, 1, None)]  # (path, descriptor, depth, subfolders left to enter), top down
     try:
-        os.close(os.open(name, FOLDER_FLAGS, dir_fd=dir_fd))
-    except OSError:
-        return False
-    return True
+        while frames:
+            at, held, depth, pending = frames[-1]
+            if pending is None:
+                pending = []
+                frames[-1] = (at, held, depth, pending)
+                try:
+                    with os.scandir(held) as listing:
+                        names = [entry.name for entry in listing]
+                except OSError as err:
+                    yield at, None, None, err.strerror
+                    continue
+                for name in names:
+                    try:
+                        found = os.lstat(name, dir_fd=held)
+                    except FileNotFoundError:
+                        continue  # gone since the listing: nothing to change
+                    except PermissionError:
+                        pending.clear()
+                        yield at, None, None, NO_SEARCH_WHY
+                        break
+                    except OSError as err:
+                        yield at / name, None, None, err.strerror
+                        continue
+                    if stat.S_ISDIR(found.st_mode):
+                        pending.append((name, found))
+                    yield at / name, (held, name), found, None
+                pending.reverse()  # entered in listing order
+                continue
+            if not pending:
+                frames.pop()
+                if frames:  # `top`'s own descriptor is the caller's
+                    os.close(held)
+                continue
+            name, found = pending.pop()
+            path = at / name
+            if depth >= WALK_MAX_DEPTH:
+                yield path, None, found, TOO_DEEP_WHY
+                continue
+            try:
+                inner = os.open(name, FOLDER_FLAGS, dir_fd=held)
+            except PermissionError:
+                continue  # not this user's to open: see the block
+            except OSError as err:
+                gone = err.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR)
+                yield path, None, found, NOT_ENTERED_WHY if gone else err.strerror
+                continue
+            frames.append((path, inner, depth + 1, None))
+            if not os.path.samestat(found, os.fstat(inner)):
+                frames.pop()
+                os.close(inner)
+                yield path, None, found, NOT_ENTERED_WHY
+    finally:
+        for _, held, _, _ in frames[1:]:
+            os.close(held)
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-3 and
@@ -1485,8 +1561,9 @@ def fix_own_entries(group, gid):
     Every folder on the way is pinned, not just the entry's own name:
     the walk is walk_pinned's, which reaches each entry by its name in
     its own folder's descriptor and enters each folder through its
-    parent's (os.fwalk), so no path below the four is resolved. A top
-    that is a link or not a folder is named and not entered; a link is
+    parent's (walk_below, round 8), so no path below the four is
+    resolved. A top that is a link or not a folder is named and not
+    entered; a link is
     listed and never entered; a folder swapped for a link, or for
     anything else, after the walk listed it is named and never entered.
     So no link, and no folder swapped on the way, leads this walk out of
@@ -1521,8 +1598,6 @@ def fix_own_entries(group, gid):
     for top in (ROOT / name for name in SHARED_FOLDER_NAMES):
         for path, entry, found, why in walk_pinned(top):  # SHARED fix round 7 (Claude Opus 5.5, unreviewed): HIGH-1
             if why is None:
-                if found is None:
-                    continue  # gone, or out of reach: nothing tc could change
                 if (stat.S_ISDIR(found.st_mode) or stat.S_ISREG(found.st_mode)) and found.st_uid != me:
                     continue  # another user's folder or file: theirs to fix
                 kind, why, changed = share_entry(entry, path, gid, me)

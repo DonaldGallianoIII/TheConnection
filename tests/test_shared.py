@@ -64,7 +64,11 @@ init's walk listed it, in a member's rerun and in the init user's own
 init, is named and never entered, and the folder the link leads to,
 with all in it, keeps its stat; and a send out of numbers whose every
 try met a .tmp name says what it found and never that mail/.seq was
-not behind, even with the counter set back.
+not behind, even with the counter set back. And round 8 (SHARED fix
+round 8, Claude Opus 5.5, unreviewed): init's own stack walk, in both
+walks, names a folder past WALK_MAX_DEPTH and a top it may list but
+not search, never a traceback, and never opens a link (an os.open
+spy).
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -151,8 +155,14 @@ the owner's human QA (D4, qa/human/route-shared.md).
             with os.lstat wrapped (a call by name in a folder's
             descriptor is matched by the file it finds); and one writes
             mail/.seq back by hand and plants a .tmp name in an inbox
-            for each of PLANTED_NAMES numbers from 1.
-@deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
+            for each of PLANTED_NAMES numbers from 1. The round 8 tests
+            make a nest of folders under status/, chmod status/ to read
+            without search and back, and plant links to a folder and a
+            file outside TC_ROOT; they set this process's umask back to
+            CHILD_UMASK between walks, and run cmd_init in process with
+            os.lstat wrapped (as_member) and os.open wrapped to record
+            each call (open_spy).
+@deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl, grp,
             importlib, io, json, os, pathlib, pwd, re, stat, subprocess,
             sys, time, unittest, unittest.mock); tests/_root.py.
 @complexity O(1) per test: a handful of tc runs over a root of a few dozen
@@ -161,6 +171,7 @@ the owner's human QA (D4, qa/human/route-shared.md).
 """
 
 import argparse
+import collections
 import contextlib
 import errno
 import fcntl
@@ -481,6 +492,18 @@ SWAP_TRIGGER = "000006-from-carol.md"
 FOLDER_ASIDE_SUFFIX = ".aside"
 # Init's last line when nothing it skipped is a folder or a file.
 SKIPPED_BY_HAND_WORDS = "tc init: {n} skipped, each named above; its owner fixes each by hand."
+# SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1,
+# LOW-1 and LOW-2 (audits/2026-10-15-0840-quick), init's own stack walk.
+# Written out, not read from tc, for the same reason as
+# SHARED_FOLDER_MODE. How many folders deep the walk enters, counting the
+# top as one, and why it names a folder past that.
+WALK_MAX_DEPTH = 8
+TOO_DEEP_WHY = (f"{WALK_MAX_DEPTH + 1} folders deep, counting its top as one, past the {WALK_MAX_DEPTH} the "
+                f"walk enters; tc looked at nothing under it")
+# Why the walk names a folder this user may list but not search.
+NO_SEARCH_WHY = "this user may list it but not search (x) it; tc looked at nothing under it"
+# The name of every folder in a nest a member makes under status/.
+NEST_FOLDER = "d"
 # SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's LOW-1. What
 # tc read says for an inbox file still there after its rename: a hard link
 # made at the target first turns rename(2) into nothing.
@@ -3752,6 +3775,240 @@ class RootAndClaimTest(UmaskTestCase):
         self.assertEqual(stop.exception.code, EXIT_REFUSED)
         self.assertIn(TAKEN_INBOX_WORDS, said.getvalue())
         self.assertEqual(inside, [], "the losing join made read/ inside the other joiner's inbox")
+
+
+# SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, LOW-1 and LOW-2 (audits/2026-10-15-0840-quick).
+@contextlib.contextmanager
+def as_member(root_path, *others):
+    """While entered, the running user plays a member on the init user's ROOT: os.lstat reports ROOT, its .shared and each of `others` as another user's (owner_patched_lstat).
+
+    @interacts  patches os.lstat while entered.
+    @deps       owner_patched_lstat; unittest.mock, os.
+    @complexity O(1).
+    @alloc      the patch, undone on exit.
+    """
+    with mock.patch.object(os, "lstat", owner_patched_lstat(root_path, root_path / ".shared", *others)):
+        yield
+
+
+# One os.open call as open_spy records it: what it was asked to open, whether
+# lstat found a link at that name just before, its flags, and whether it
+# returned a descriptor.
+OpenSeen = collections.namedtuple("OpenSeen", "path dir_fd was_link flags opened")
+
+
+def open_spy(seen):
+    """An os.open that records each call in `seen` (OpenSeen) and then opens as os.open does.
+
+    The link test lstats the name first, by the same path and dir_fd,
+    with the real os.lstat, so a call that names a link is known whatever
+    its flags.
+
+    @interacts  none until called; then lstats and opens what it is asked
+                to, and appends to `seen`.
+    @deps       os, stat; OpenSeen.
+    @complexity O(1) per call.
+    @alloc      one OpenSeen per call, kept in `seen`.
+    """
+    real_open, real_lstat = os.open, os.lstat
+
+    def spy(path, flags, mode=0o777, *, dir_fd=None):
+        try:
+            was_link = stat.S_ISLNK(real_lstat(path, dir_fd=dir_fd).st_mode)
+        except OSError:
+            was_link = False
+        try:
+            fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        except OSError:
+            seen.append(OpenSeen(path, dir_fd, was_link, flags, False))
+            raise
+        seen.append(OpenSeen(path, dir_fd, was_link, flags, True))
+        return fd
+    return spy
+
+
+class InitWalkTest(UmaskTestCase):
+    """Round 8: init's own stack walk under the four, in both walks (the init user's own init and a member's rerun on the init user's ROOT).
+
+    The audit's MEDIUM-1 (audits/2026-10-15-0840-quick): os.fwalk recursed
+    one frame per folder level, so a deep nest any member may make ended
+    every init in a RecursionError traceback; tc's own walk has a stack
+    and enters at most WALK_MAX_DEPTH folders deep, and names the folder
+    past it. LOW-1: a top this user may list but not search is named,
+    never a traceback. LOW-2: os.fwalk opened a link's target before it
+    compared; tc's walk never opens a link (an os.open spy). The member
+    is the running user, with ROOT and its .shared reported as the init
+    user's (as_member).
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, UmaskTestCase, user_groups, primary_group,
+                load_tc, run_init, as_member, open_spy, stat_seen.
+    @complexity O(1) per test: a handful of tc runs over a root of a few
+                dozen entries.
+    @alloc      one TcRoot per test and walk.
+    """
+
+    def test_a_nest_past_walk_max_depth_is_named_and_never_a_traceback(self):
+        """A nest of NEST_FOLDER folders under status/, WALK_MAX_DEPTH + 1 of them, made by hand: in the init user's own init and in a member's rerun, init names the folder WALK_MAX_DEPTH + 1 deep (counting status/ as one) with TOO_DEEP_WHY, exits 1 with its usual last line, and never looks under it; the init user's init writes .shared and shares every folder down to it.
+
+        os.fwalk recursed one generator frame per level, so a nest about
+        1000 deep ended every init in a RecursionError traceback, exit 1,
+        before .shared was written (the audit's MEDIUM-1). The nest here
+        is short, so the run stays quick: a walk with no depth cap enters
+        the named folder, changes the one under it and names nothing, and
+        this test goes red. Must reject a walk without its cap.
+
+        @interacts  per walk: a status post (and, for the member, init
+                    first); the nest made by hand; loads tc in process
+                    and runs cmd_init (as_member for the member); lstats
+                    the nest and reads .shared.
+        @deps       _root.TcRoot.tc, user_groups, load_tc, run_init,
+                    as_member, stat_seen; RAN_INIT_WORDS, FIXES_OWN_WORDS,
+                    FIXED_WORDS, SKIPPED_WORDS, TOO_DEEP_WHY,
+                    FIXED_COUNT_WORDS, SKIPPED_BY_HAND_WORDS,
+                    SHARED_FOLDER_MODE, NEST_FOLDER, WALK_MAX_DEPTH,
+                    CHILD_UMASK.
+        @complexity O(WALK_MAX_DEPTH) per walk, two walks.
+        @alloc      one TcRoot and one module per walk.
+        """
+        found = user_groups()
+        _, name, gid = found[-1]
+        for walk in ("the init user's own init", "a member's rerun"):
+            os.umask(CHILD_UMASK)  # an in-process init before this one set its own
+            with self.subTest(walk=walk), _root.TcRoot() as root:
+                if walk == "a member's rerun":
+                    self.assertEqual(root.tc("init", "--shared", "--group", name)[0], 0)
+                self.assertEqual(root.tc("status", "b", "busy")[0], 0)
+                status = root.path / "status"
+                nest = [status.joinpath(*[NEST_FOLDER] * k) for k in range(1, WALK_MAX_DEPTH + 2)]
+                nest[-1].mkdir(parents=True)
+                deep, under = nest[-2], nest[-1]  # WALK_MAX_DEPTH + 1 deep, counting status/, and the one below
+                untouched = stat_seen(under)
+                tc = load_tc(root)
+                if walk == "a member's rerun":
+                    init_user = tc.user_name(os.getuid() + 1)
+                    with as_member(root.path):
+                        code, out, err = run_init(tc, name)
+                else:
+                    code, out, err = run_init(tc, name)
+                walked = [(stat.S_IMODE(os.lstat(p).st_mode), os.lstat(p).st_gid) for p in nest[:-1]]
+                left = stat_seen(under)
+                marker = (root.path / ".shared").read_text()
+                self.assertEqual(code, EXIT_REFUSED, err)
+                skip = SKIPPED_WORDS.format(path=deep, why=TOO_DEEP_WHY)
+                if walk == "a member's rerun":
+                    fixes = "".join(f"{FIXED_WORDS.format(path=p, group=name, mode=SHARED_FOLDER_MODE)}\n"
+                                    for p in nest[:-1])
+                    self.assertEqual(err, f"{RAN_INIT_WORDS.format(root=root.path, owner=init_user)}{FIXES_OWN_WORDS}\n"
+                                          f"{fixes}{skip}\n"
+                                          f"{FIXED_COUNT_WORDS.format(fixed=WALK_MAX_DEPTH, skipped=1)}\n")
+                else:
+                    self.assertEqual(err, f"{skip}\n{SKIPPED_BY_HAND_WORDS.format(n=1)}\n")
+                self.assertEqual(walked, [(SHARED_FOLDER_MODE, gid)] * WALK_MAX_DEPTH,
+                                 "a folder down to the cap was not shared")
+                self.assertEqual(left, untouched, "the walk looked under the folder past its cap")
+                self.assertEqual(marker, f"{name}\n")
+
+    def test_a_top_this_user_may_list_but_not_search_is_named_never_a_traceback(self):
+        """A member's rerun on the init user's ROOT, status/ (the init user's, by lstat) set to READ_NO_SEARCH_MODE with b's status file in it: init names status/ with NO_SEARCH_WHY, fixes nothing, and exits 1 with the count line.
+
+        os.fwalk resolved "." from the top's descriptor outside any try,
+        which needs search, so this run ended in a PermissionError
+        traceback (the audit's LOW-1). Only the member's rerun can meet
+        it: the init user's own walk fixes the top before it lists it.
+        Must reject a traceback and a walk that names nothing. Skipped
+        as root, who searches any folder.
+
+        @interacts  init and a status post; status/ chmodded by hand and
+                    put back; loads tc in process and runs cmd_init
+                    (as_member).
+        @deps       _root.TcRoot.tc, primary_group, load_tc, run_init,
+                    as_member; RAN_INIT_WORDS, FIXES_OWN_WORDS,
+                    SKIPPED_WORDS, NO_SEARCH_WHY, FIXED_COUNT_WORDS,
+                    READ_NO_SEARCH_MODE.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root searches any folder")
+        label, name, gid = primary_group()
+        with _root.TcRoot() as root:
+            setup = [root.tc("init", "--shared", "--group", name), root.tc("status", "b", "busy")]
+            status = root.path / "status"
+            mode = stat.S_IMODE(os.lstat(status).st_mode)
+            tc = load_tc(root)
+            init_user = tc.user_name(os.getuid() + 1)
+            try:
+                status.chmod(READ_NO_SEARCH_MODE)
+                with as_member(root.path, status):
+                    code, out, err = run_init(tc, name)
+            finally:
+                status.chmod(mode)
+        for run in setup:
+            self.assertEqual(run[0], 0, run[2])
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertEqual(err, f"{RAN_INIT_WORDS.format(root=root.path, owner=init_user)}{FIXES_OWN_WORDS}\n"
+                              f"{SKIPPED_WORDS.format(path=status, why=NO_SEARCH_WHY)}\n"
+                              f"{FIXED_COUNT_WORDS.format(fixed=0, skipped=1)}\n")
+
+    def test_no_link_is_ever_opened_by_either_walk(self):
+        """Links to a folder and to a file outside the root, planted in b's inbox, its read/ and status/: in the init user's own init and in a member's rerun, an os.open spy finds no call that named a link and returned a descriptor, every call that named one carried O_NOFOLLOW, init names each link, and what they lead to keeps its stat.
+
+        os.fwalk took a link to a folder into its folders (DirEntry.is_dir
+        follows), then opened the name without O_NOFOLLOW before it
+        compared, on every init (the audit's LOW-2): an open can act on a
+        device or an automount path. Must reject any open that follows a
+        link.
+
+        @interacts  per walk: init, a join, a send, a status; a folder, a
+                    file and three links made by hand; loads tc in process
+                    and runs cmd_init with os.open spied (and as_member
+                    for the member); lstats the link targets.
+        @deps       _root.TcRoot.tc, primary_group, load_tc, run_init,
+                    as_member, open_spy, stat_seen; SKIPPED_WORDS,
+                    SKIPPED_LINK_WHY, CHILD_UMASK.
+        @complexity O(1) per walk, two walks.
+        @alloc      one TcRoot and one module per walk.
+        """
+        label, name, gid = primary_group()
+        for walk in ("the init user's own init", "a member's rerun"):
+            os.umask(CHILD_UMASK)  # an in-process init before this one set its own
+            with self.subTest(walk=walk), _root.TcRoot() as root:
+                setup = [root.tc("init", "--shared", "--group", name),
+                         root.tc("join", "b", env={"CLAUDECODE": "1"}),
+                         root.tc("send", "--from", "a", "--to", "b", "hi"),
+                         root.tc("status", "b", "busy")]
+                folder, file = root.base / "outside-folder", root.base / "outside-file"
+                folder.mkdir()
+                (folder / "notes").write_text("the running user's own notes, outside the mailbox\n")
+                file.write_text("the running user's own file, outside the mailbox\n")
+                box = root.path / "mail" / "to-b"
+                links = {box / "linked-file": file, box / "read" / "linked-folder": folder,
+                         root.path / "status" / "linked-folder": folder}
+                for link, target in links.items():
+                    link.symlink_to(target, target_is_directory=target.is_dir())
+                targets = [folder, folder / "notes", file]
+                seen_before = [stat_seen(p) for p in targets]
+                tc = load_tc(root)
+                calls = []
+                with mock.patch.object(os, "open", open_spy(calls)):
+                    if walk == "a member's rerun":
+                        with as_member(root.path):
+                            code, out, err = run_init(tc, name)
+                    else:
+                        code, out, err = run_init(tc, name)
+                seen_after = [stat_seen(p) for p in targets]
+                for run in setup:
+                    self.assertEqual(run[0], 0, run[2])
+                at_links = [call for call in calls if call.was_link]
+                self.assertTrue(at_links, "no open named a link: the test reached none")
+                self.assertEqual([call for call in at_links if call.opened], [], "an open followed a link")
+                self.assertEqual([call for call in at_links if not call.flags & os.O_NOFOLLOW], [],
+                                 "an open named a link without O_NOFOLLOW")
+                for link in links:
+                    self.assertIn(SKIPPED_WORDS.format(path=link, why=SKIPPED_LINK_WHY), err)
+                self.assertEqual(code, EXIT_REFUSED, err)
+                self.assertEqual(seen_after, seen_before, "a link's target changed")
 
 
 class HealthSaysWhatItCannotSeeTest(UmaskTestCase):
