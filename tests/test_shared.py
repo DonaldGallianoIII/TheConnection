@@ -44,7 +44,9 @@ route-shared.md).
 @alloc      one TcRoot per test and group, removed when its context exits.
 """
 
+import argparse
 import contextlib
+import errno
 import fcntl
 import grp
 import importlib.machinery
@@ -71,9 +73,16 @@ import _root  # noqa: E402  (needs the path line above)
 # its own umask under a shared mailbox writes files at PRIVATE_FILE_MODE.
 CHILD_UMASK = 0o022
 # Written out here, not read from tc, so a change in tc fails these tests
-# instead of moving them. C4: folders 2775 (setgid), files 0664.
+# instead of moving them. C4: folders 2775 (setgid).
 FOLDER_MODE = 0o2775
-FILE_MODE = 0o664
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, written out for the
+# same reason. The files every member writes, directly in mail/ (mail/.seq,
+# the locks, the ring marker): 0664.
+SHARED_WRITABLE_FILE_MODE = 0o664
+# Messages, cards and status files: 0640, never group-writable.
+SHARED_OWNED_FILE_MODE = 0o640
+# An inbox and its read/, owned by the recipient: setgid, sticky, no other.
+SHARED_INBOX_MODE = 0o3770
 # What a file gets under CHILD_UMASK: the mode C4 must never leave behind.
 PRIVATE_FILE_MODE = 0o644
 # The folders C4 shares, by name under the root.
@@ -117,6 +126,29 @@ FIFO_REFUSE_SECONDS = 2
 ONE_POLL_SECONDS = "1"
 # The body of the real message beside each planted entry.
 REAL_TEXT = "real mail from a"
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, nobody touches
+# another member's mail.
+# C4's words for a send to a name with no card and no inbox (D20 item 3).
+NOBODY_WORDS = "tc send: nobody has joined as {name} on this shared mailbox"
+# What tc says for a card with no inbox, and what it asks of the owner.
+NO_INBOX_WORDS = "has a card but no inbox on this shared mailbox"
+REJOIN_WORDS = "rejoin (tc join {name}"
+# What tc says for an inbox whose owner is not its card's owner (item 4).
+OWNER_WORDS = "under a shared mailbox an inbox belongs to the owner of its card"
+# What tc join says for a card or an inbox another user owns.
+TAKEN_CARD_WORDS = "under a shared mailbox only its owner can replace it"
+TAKEN_INBOX_WORDS = "under a shared mailbox an inbox belongs to its recipient"
+# What tc read says for a message it may not move into read/.
+NOT_MOVED_WORDS = "not moved to read/"
+# What tc says for a file this user may not open to write.
+MAY_NOT_OPEN_WORDS = "and this user may not open it"
+# A status file its owner may read and not write: owner and group read.
+READ_ONLY_FILE_MODE = 0o440
+# The fake codex's exit codes: a ring that fails, then one that is queued.
+CODEX_FAILS, CODEX_QUEUED = 1, 0
+# The ring marker's first line after a failed ring, and once nothing is owed.
+FAILED_STATE = "failed"
+CLEAR_STATE = "clear"
 
 
 def groups_to_test():
@@ -183,19 +215,30 @@ def tree(path, under=SHARED_FOLDERS):
 
 
 def shared_as(path, kind, gid):
-    """The (kind, mode, gid) C4 and D17 want for the `kind` entry at relative `path`, shared with `gid`.
+    """The (kind, mode, gid) C4, D17 and D20 want for the `kind` entry at relative `path`, shared with `gid`.
 
-    A file: FILE_MODE. A folder: TOP_FOLDER_MODE (sticky, D17) when it is
-    one of SHARED_FOLDERS itself, else FOLDER_MODE.
+    A file directly in mail/ (mail/.seq, a lock, the ring marker):
+    SHARED_WRITABLE_FILE_MODE; any other file (a message, a card, a
+    status): SHARED_OWNED_FILE_MODE (D20). A folder: TOP_FOLDER_MODE
+    (sticky, D17) when it is one of SHARED_FOLDERS itself,
+    SHARED_INBOX_MODE for mail/to-<name> and its read/ (D20), else
+    FOLDER_MODE.
 
     @interacts  none.
-    @deps       SHARED_FOLDERS, TOP_FOLDER_MODE, FOLDER_MODE, FILE_MODE.
+    @deps       SHARED_FOLDERS, TOP_FOLDER_MODE, SHARED_INBOX_MODE,
+                FOLDER_MODE, SHARED_WRITABLE_FILE_MODE,
+                SHARED_OWNED_FILE_MODE.
     @complexity O(1).
-    @alloc      one tuple, returned.
+    @alloc      the split path and one tuple, returned.
     """
+    parts = path.split("/")
     if kind != "folder":
-        return (kind, FILE_MODE, gid)
-    return (kind, TOP_FOLDER_MODE if path in SHARED_FOLDERS else FOLDER_MODE, gid)
+        writable = len(parts) == 2 and parts[0] == "mail"
+        return (kind, SHARED_WRITABLE_FILE_MODE if writable else SHARED_OWNED_FILE_MODE, gid)
+    if path in SHARED_FOLDERS:
+        return (kind, TOP_FOLDER_MODE, gid)
+    inbox = parts[0] == "mail" and len(parts) in (2, 3) and parts[1].startswith("to-") and parts[2:] in ([], ["read"])
+    return (kind, SHARED_INBOX_MODE if inbox else FOLDER_MODE, gid)
 
 
 class SharedTest(unittest.TestCase):
@@ -218,7 +261,7 @@ class SharedTest(unittest.TestCase):
         self.addCleanup(os.umask, os.umask(CHILD_UMASK))
 
     def test_init_shares_every_folder_and_file_already_there(self):
-        """After init, every folder is 2775 (3775 for the four) and every file 0664, all in group g; so is a message sent after.
+        """After init, every entry has group g and its mode (shared_as: the four 3775, inboxes 3770, mail/ files 0664, the rest 0640); so has a message sent after.
 
         Before init the root holds an inbox with its read/, a message,
         mail/.seq, an inbox lock, a status file and a card, all written
@@ -309,7 +352,7 @@ class SharedTest(unittest.TestCase):
         self.assertEqual(json.loads(shared_json[1])["shared_group"], name)
 
     def test_folders_made_after_init_get_the_group_and_setgid(self):
-        """Init on an empty root, then a join, a send, a status and a wait: each new folder 2775 (3775 for the four) in g, each file 0664 in g (D16).
+        """Init on an empty root, then a join, a send, a status and a wait: each new folder and file in g at its mode (shared_as) (D16, D20).
 
         cards/ comes from the first join, mail/, the inbox and its read/
         from the first send, status/ from the first status, and the wait
@@ -415,14 +458,15 @@ class NoPlantedLinksTest(unittest.TestCase):
     """
 
     def test_the_shared_folders_carry_the_sticky_bit(self):
-        """After init, mail/, outbox/ (made by hand, as the ssh route will) and the later cards/ and status/ are 3775; inboxes, read/ and outbox/sent/ are 2775.
+        """After init, mail/, outbox/ (made by hand, as the ssh route will) and the later cards/ and status/ are 3775; inboxes and read/ are 3770 (D20); outbox/sent/ is 2775.
 
         Must reject a top folder without the sticky bit (a member could
         delete or swap another user's inbox, card or lock), and an inbox
-        with it (tc read could not move mail another user wrote).
+        without it or open to other users (D20: a member could delete or
+        rename another member's unread mail).
 
         @interacts  per group: a send, one folder pair made by hand, init,
-                    a join, a status and a second send.
+                    two joins, a status and a second send.
         @deps       _root.TcRoot.tc, groups_to_test, tree.
         @complexity O(1) per group.
         @alloc      one TcRoot per group.
@@ -434,6 +478,7 @@ class NoPlantedLinksTest(unittest.TestCase):
                     (root.path / "outbox" / "sent").mkdir(parents=True)
                     code, out, err = root.tc("init", "--shared", "--group", name)
                     runs = [root.tc("join", "b", env={"CLAUDECODE": "1"}), root.tc("status", "b", "busy"),
+                            root.tc("join", "c", env={"CLAUDECODE": "1"}),
                             root.tc("send", "--from", "a", "--to", "c", "after")]
                     folders = {p: (m, g) for p, (k, m, g) in tree(root.path).items() if k == "folder"}
                 self.assertEqual(code, 0, err)
@@ -442,8 +487,8 @@ class NoPlantedLinksTest(unittest.TestCase):
                 self.assertEqual(folders, {
                     "mail": (TOP_FOLDER_MODE, gid), "outbox": (TOP_FOLDER_MODE, gid),
                     "cards": (TOP_FOLDER_MODE, gid), "status": (TOP_FOLDER_MODE, gid),
-                    "mail/to-b": (FOLDER_MODE, gid), "mail/to-b/read": (FOLDER_MODE, gid),
-                    "mail/to-c": (FOLDER_MODE, gid), "mail/to-c/read": (FOLDER_MODE, gid),
+                    "mail/to-b": (SHARED_INBOX_MODE, gid), "mail/to-b/read": (SHARED_INBOX_MODE, gid),
+                    "mail/to-c": (SHARED_INBOX_MODE, gid), "mail/to-c/read": (SHARED_INBOX_MODE, gid),
                     "outbox/sent": (FOLDER_MODE, gid)})
 
     def test_a_link_at_a_file_tc_opens_by_name_is_refused_and_its_target_unchanged(self):
@@ -692,16 +737,19 @@ class RegularFilesOnlyTest(unittest.TestCase):
         self.assertEqual([p.name for p, why in unshown], ["000099-from-z.md"])
 
     def test_a_fifo_at_a_lock_seq_or_status_is_refused_within_2_s(self):
-        """A FIFO at the wait, watch or inbox lock, mail/.seq or status/x.md: exit 1 within FIFO_REFUSE_SECONDS, the words, the FIFO left, no mail.
+        """A FIFO at the wait, watch or inbox lock, mail/.seq, status/x.md or a codex name's ring marker: exit 1 within FIFO_REFUSE_SECONDS, the words, the FIFO left, no mail.
 
-        One fresh root per case. Must reject an open without O_NONBLOCK
-        (the wait, watch, inbox lock and status opens block forever) and
-        one without the S_ISREG check (mail/.seq opens, then the send
-        fails with a traceback, not words).
+        One fresh root per case; the ring marker case joins x as codex
+        first. Must reject an open without O_NONBLOCK (the wait, watch,
+        inbox lock and status opens block forever), one without the
+        S_ISREG check (mail/.seq opens, then the send fails with a
+        traceback, not words), and a marker check that lets a FIFO
+        through (the send lands, then tries to write the FIFO).
 
-        @interacts  per case: one FIFO made by hand, then one tc run.
+        @interacts  per case: one FIFO made by hand (after a codex join for
+                    the marker), then one tc run.
         @deps       _root.TcRoot.tc, landed.
-        @complexity O(1) per case, five cases.
+        @complexity O(1) per case, six cases.
         @alloc      one TcRoot per case.
         """
         send = ["send", "--from", "a", "--to", "x", "hi"]
@@ -712,10 +760,13 @@ class RegularFilesOnlyTest(unittest.TestCase):
             ("inbox lock", "mail/.box-x.lock", send),
             ("mail/.seq", "mail/.seq", send),
             ("status/x.md, post", "status/x.md", ["status", "x", "busy"]),
+            ("ring marker", "mail/.ring-pending-x", send),
         ]
         for label, at, argv in cases:
             with self.subTest(case=label):
                 with _root.TcRoot() as root:
+                    if at.startswith("mail/.ring-pending-"):
+                        root.tc("join", "x", env={"CODEX_THREAD_ID": THREAD})
                     fifo = root.path / at
                     fifo.parent.mkdir(parents=True, exist_ok=True)
                     os.mkfifo(fifo)
@@ -783,6 +834,316 @@ class RegularFilesOnlyTest(unittest.TestCase):
         self.assertEqual(sorted(mail), ["x"], "tc health counted a linked inbox")
         self.assertEqual(mail["x"]["unread"], 1, "tc health counted a planted link as mail")
         self.assertEqual(counts, {"x": 1, "z": 0})
+
+
+
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20.
+def marker_seen(marker):
+    """(first line, inode) of the ring marker at `marker`, or (None, None) when nothing is there.
+
+    @interacts  lstats and reads `marker`.
+    @deps       os, pathlib.
+    @complexity O(1): one short file.
+    @alloc      the file's text, freed on return; one tuple, returned.
+    """
+    try:
+        return marker.read_text().partition("\n")[0], os.lstat(marker).st_ino
+    except FileNotFoundError:
+        return None, None
+
+
+def owner_patched_lstat(path_to_patch):
+    """An os.lstat that reports `path_to_patch` as owned by another user (its uid plus one), and every other path as it is.
+
+    One Linux user cannot make a file another user owns, so the D20
+    owner check is shown by what tc's lstat reports (phases.md H1: "a card
+    file whose recorded owner is patched").
+
+    @interacts  none until called; then lstats the path it is given.
+    @deps       os, stat, pathlib.
+    @complexity O(1) per call.
+    @alloc      one stat result per call.
+    """
+    real = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        st = real(path, *args, **kwargs)
+        if pathlib.Path(path) == path_to_patch:
+            fields = list(st[:stat.ST_CTIME + 1])
+            fields[stat.ST_UID] = st.st_uid + 1
+            return os.stat_result(fields)
+        return st
+    return lstat
+
+
+class NobodyTouchesAnotherMembersMailTest(unittest.TestCase):
+    """D20: inboxes owned by their recipient at 3770, 0640 files, sends refused to names nobody joined, inbox and card owners matched, the marker rewritten in place.
+
+    One Linux user cannot prove another user's refusals (the kernel's
+    sticky and mode checks): these tests prove the modes, the owners and
+    the checks tc makes. The two-user walk-through is
+    qa/human/route-shared.md.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, groups_to_test, tree, load_tc, marker_seen,
+                owner_patched_lstat.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per test and group.
+    """
+
+    def test_join_makes_the_inbox_as_the_joiner_and_new_files_are_0640(self):
+        """Under shared mode, tc join x makes mail/to-x/ and read/ owned by this user at 3770 in g; a message, the card and a status are 0640, .seq and the lock 0664.
+
+        Must reject an inbox made 2775 (any member could delete or rename
+        unread mail), one open to other users, a message, card or status
+        made group-writable (any member could rewrite it), and .seq or a
+        lock that is not group-writable (other members could not send).
+
+        @interacts  per group: init, a join, a send, a status; lstats the
+                    entries.
+        @deps       _root.TcRoot.tc, groups_to_test, tree.
+        @complexity O(1) per group.
+        @alloc      one TcRoot per group.
+        """
+        for label, name, gid in groups_to_test():
+            with self.subTest(group=label), _root.TcRoot() as root:
+                runs = [root.tc("init", "--shared", "--group", name),
+                        root.tc("join", "x", env={"CLAUDECODE": "1"}),
+                        root.tc("send", "--from", "a", "--to", "x", "hi"),
+                        root.tc("status", "x", "busy")]
+                made = tree(root.path)
+                owners = {p: os.lstat(root.path / p).st_uid for p in ("mail/to-x", "mail/to-x/read")}
+                for run in runs:
+                    self.assertEqual(run[0], 0, run[2])
+                for path in ("mail/to-x", "mail/to-x/read"):
+                    self.assertEqual(made[path], ("folder", SHARED_INBOX_MODE, gid), path)
+                self.assertEqual(owners, {"mail/to-x": os.getuid(), "mail/to-x/read": os.getuid()})
+                for path in ("mail/to-x/000001-from-a.md", "cards/x.json", "status/x.md"):
+                    self.assertEqual(made[path], ("file", SHARED_OWNED_FILE_MODE, gid), path)
+                for path in ("mail/.seq", "mail/.box-x.lock"):
+                    self.assertEqual(made[path], ("file", SHARED_WRITABLE_FILE_MODE, gid), path)
+
+    def test_a_send_to_a_name_nobody_joined_is_refused_and_makes_no_folder(self):
+        """Shared: a send to c, with no card and no inbox, exits 1 with C4's words, makes no mail/to-c and takes no number. Private: the same send lands, with O1's warning.
+
+        Must reject a shared send that makes the inbox (the sender would
+        own the recipient's inbox, and could chmod or empty it).
+
+        @interacts  two roots: init and a send in one, a send in the other.
+        @deps       _root.TcRoot.tc, groups_to_test, tree.
+        @complexity O(1).
+        @alloc      two TcRoots.
+        """
+        label, name, gid = groups_to_test()[0]
+        with _root.TcRoot() as root:
+            root.tc("init", "--shared", "--group", name)
+            code, out, err = root.tc("send", "--from", "a", "--to", "c", "hi")
+            made = tree(root.path)
+        with _root.TcRoot() as private:
+            control = private.tc("send", "--from", "a", "--to", "c", "hi")
+        self.assertEqual(code, EXIT_REFUSED, f"exited {code}: {err}")
+        self.assertIn(NOBODY_WORDS.format(name="c"), err)
+        self.assertEqual([p for p in made if p.startswith("mail/to-c")], [], "a refused send made an inbox")
+        self.assertNotIn("mail/.seq", made, "a refused send took a number")
+        self.assertEqual(control[0], 0, control[2])
+        self.assertIn("new inbox: nobody has joined as c", control[2])
+
+    def test_a_card_with_no_inbox_is_refused_until_its_owner_rejoins(self):
+        """c joins while the mailbox is private (a card, no inbox), then init: a send to c exits 1 and asks c's owner to rejoin; after tc join c it lands.
+
+        Must reject a send that makes c's inbox as the sender.
+
+        @interacts  a join, init, a refused send, a rejoin, a send.
+        @deps       _root.TcRoot.tc, groups_to_test.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        label, name, gid = groups_to_test()[0]
+        with _root.TcRoot() as root:
+            root.tc("join", "c", env={"CLAUDECODE": "1"})
+            root.tc("init", "--shared", "--group", name)
+            refused = root.tc("send", "--from", "a", "--to", "c", "hi")
+            boxed = (root.path / "mail" / "to-c").exists()
+            rejoined = root.tc("join", "c", env={"CLAUDECODE": "1"})
+            sent = root.tc("send", "--from", "a", "--to", "c", "hi")
+        self.assertEqual(refused[0], EXIT_REFUSED, refused[2])
+        self.assertIn(NO_INBOX_WORDS, refused[2])
+        self.assertIn(REJOIN_WORDS.format(name="c"), refused[2])
+        self.assertFalse(boxed, "a refused send made c's inbox")
+        self.assertEqual(rejoined[0], 0, rejoined[2])
+        self.assertEqual(sent[0], 0, sent[2])
+
+    def test_an_inbox_whose_owner_is_not_its_cards_owner_is_refused(self):
+        """In process, with lstat reporting cards/b.json as another user's: a send to b and b's wait poll exit 1 with the words, and nothing lands.
+
+        Must reject a check that compares nothing (the send would land in
+        an inbox its recipient does not control).
+
+        @interacts  init, a join and a send; loads tc in process and runs
+                    deliver_local and unread with os.lstat wrapped and
+                    stderr captured.
+        @deps       _root.TcRoot.tc, groups_to_test, load_tc,
+                    owner_patched_lstat; contextlib, io, unittest.mock;
+                    tc.deliver_local, tc.unread.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        label, name, gid = groups_to_test()[0]
+        with _root.TcRoot() as root:
+            root.tc("init", "--shared", "--group", name)
+            root.tc("join", "b", env={"CLAUDECODE": "1"})
+            root.tc("send", "--from", "a", "--to", "b", "first")
+            tc = load_tc(root)
+            stops, said = [], io.StringIO()
+            with mock.patch.object(os, "lstat", owner_patched_lstat(root.path / "cards" / "b.json")), \
+                    contextlib.redirect_stderr(said):
+                for call in (lambda: tc.deliver_local(None, "a", "b", "second"), lambda: tc.unread("b", True)):
+                    with self.assertRaises(SystemExit) as stop:
+                        call()
+                    stops.append(stop.exception.code)
+            mail = landed(root)
+        self.assertEqual(stops, [EXIT_REFUSED, EXIT_REFUSED])
+        self.assertIn(OWNER_WORDS, said.getvalue())
+        self.assertEqual(mail, ["mail/to-b/000001-from-a.md"])
+
+    def test_join_refuses_a_name_whose_card_or_inbox_another_user_owns(self):
+        """In process, with lstat reporting cards/c.json, then mail/to-d, as another user's: claim_inbox exits 1 with words and makes nothing.
+
+        Must reject a join that makes the inbox anyway: the name's inbox
+        and card would then belong to two users, and item 4 would refuse
+        every send to it.
+
+        @interacts  init; one card file and one folder made by hand; loads
+                    tc in process and runs claim_inbox twice with os.lstat
+                    wrapped and stderr captured.
+        @deps       _root.TcRoot.tc, groups_to_test, load_tc,
+                    owner_patched_lstat; contextlib, io, unittest.mock;
+                    tc.claim_inbox.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        label, name, gid = groups_to_test()[0]
+        with _root.TcRoot() as root:
+            root.tc("init", "--shared", "--group", name)
+            (root.path / "cards").mkdir(exist_ok=True)
+            (root.path / "cards" / "c.json").write_text("{}\n")
+            (root.path / "mail").mkdir(exist_ok=True)
+            (root.path / "mail" / "to-d").mkdir()
+            tc = load_tc(root)
+            stops, said = [], io.StringIO()
+            for who, at in (("c", root.path / "cards" / "c.json"), ("d", root.path / "mail" / "to-d")):
+                with mock.patch.object(os, "lstat", owner_patched_lstat(at)), contextlib.redirect_stderr(said):
+                    with self.assertRaises(SystemExit) as stop:
+                        tc.claim_inbox(who)
+                stops.append(stop.exception.code)
+            made = [os.path.lexists(root.path / "mail" / "to-c"),
+                    os.path.lexists(root.path / "mail" / "to-d" / "read")]
+        self.assertEqual(stops, [EXIT_REFUSED, EXIT_REFUSED])
+        self.assertIn(TAKEN_CARD_WORDS, said.getvalue())
+        self.assertIn(TAKEN_INBOX_WORDS, said.getvalue())
+        self.assertEqual(made, [False, False], "a refused join made a folder")
+
+    def test_the_ring_marker_is_cleared_by_rewriting_never_unlinked(self):
+        """Shared: a failed ring leaves the marker `failed`; a rejoin with nothing unread rewrites it `clear`; a ring that exits 0 leaves it `clear`. One inode throughout, 0664 in g, no .tmp.
+
+        Must reject a marker removed (unlink) or replaced (a .tmp renamed
+        over it): under the sticky mail/ only its owner could do either,
+        and the inode would change.
+
+        @interacts  init, a codex join, two sends, a read, a rejoin; a fake
+                    codex that fails once, then queues.
+        @deps       _root.TcRoot.tc, _root.TcRoot.fake_bin, groups_to_test,
+                    marker_seen.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        label, name, gid = groups_to_test()[0]
+        codex = {"CODEX_THREAD_ID": THREAD, "CLAUDECODE": None}
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("codex", [CODEX_FAILS, CODEX_QUEUED])
+            marker = root.path / "mail" / ".ring-pending-x"
+            runs = [root.tc("init", "--shared", "--group", name), root.tc("join", "x", env=codex),
+                    root.tc("send", "--from", "a", "--to", "x", "one")]
+            seen = [marker_seen(marker)]
+            runs += [root.tc("read", "x"), root.tc("join", "x", env=codex)]
+            seen.append(marker_seen(marker))
+            runs.append(root.tc("send", "--from", "a", "--to", "x", "two"))
+            seen.append(marker_seen(marker))
+            self.assertTrue((folder.parent / "calls.jsonl").exists(), "the fake codex never ran")
+            rang = len(calls())
+            st = os.lstat(marker)
+            left = sorted(p.name for p in marker.parent.glob(".ring-pending-x.*"))
+        for run in runs:
+            self.assertEqual(run[0], 0, run[2])
+        inode = seen[0][1]
+        self.assertEqual(seen, [(FAILED_STATE, inode), (CLEAR_STATE, inode), (CLEAR_STATE, inode)])
+        self.assertEqual(rang, 2)
+        self.assertEqual((stat.S_IMODE(st.st_mode), st.st_gid), (SHARED_WRITABLE_FILE_MODE, gid))
+        self.assertEqual(left, [], "a marker write left a .tmp behind")
+
+    def test_a_status_post_over_a_file_this_user_may_not_write_is_refused_with_words(self):
+        """Shared: status/x.md made read-only for its owner, then tc status x: exit 1, words naming the owner, no traceback, the file as it was.
+
+        Stands in for another member's 0640 status file (D20 item 2),
+        which one user cannot make. Skipped as root, who may write it.
+
+        @interacts  init, two status posts; one chmod by hand.
+        @deps       _root.TcRoot.tc, groups_to_test.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root may write a read-only file")
+        label, name, gid = groups_to_test()[0]
+        with _root.TcRoot() as root:
+            root.tc("init", "--shared", "--group", name)
+            root.tc("status", "x", "first")
+            status = root.path / "status" / "x.md"
+            status.chmod(READ_ONLY_FILE_MODE)
+            code, out, err = root.tc("status", "x", "second")
+            after = status.read_text()
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertIn(MAY_NOT_OPEN_WORDS, err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("first", after)
+
+    def test_a_read_that_may_not_move_a_message_names_it_and_leaves_it_unread(self):
+        """In process, with one rename refused (EPERM, as the sticky inbox refuses a non-owner): tc read moves the rest, names that one, exits 1.
+
+        Must reject a traceback on the refused rename (a member running tc
+        read on another member's inbox).
+
+        @interacts  three sends; loads tc in process and runs cmd_read with
+                    Path.rename wrapped and stdout and stderr captured.
+        @deps       _root.TcRoot.tc, load_tc; argparse, contextlib, errno,
+                    io, unittest.mock; tc.cmd_read.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            for sender in ("a", "c", "d"):
+                root.tc("send", "--from", sender, "--to", "b", f"from {sender}")
+            tc = load_tc(root)
+            real = pathlib.Path.rename
+
+            def rename(path, target):
+                if path.name == "000002-from-c.md":
+                    raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), str(path))
+                return real(path, target)
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(pathlib.Path, "rename", rename), contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as stop:
+                    tc.cmd_read(argparse.Namespace(name="b"))
+            box = root.path / "mail" / "to-b"
+            unread = sorted(p.name for p in box.glob("*.md"))
+            moved = sorted(p.name for p in (box / "read").glob("*.md"))
+        self.assertEqual(stop.exception.code, EXIT_REFUSED)
+        self.assertIn(f"000002-from-c.md {NOT_MOVED_WORDS}", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertEqual(unread, ["000002-from-c.md"])
+        self.assertEqual(moved, ["000001-from-a.md", "000003-from-d.md"])
+        self.assertIn("from a", out.getvalue())
 
 
 if __name__ == "__main__":

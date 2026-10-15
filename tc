@@ -14,7 +14,7 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   mail/.seq                                message counter (flock guarded)
   mail/.watch-<name>.lock                  held by `tc watch <name>` while it runs
   mail/.box-<name>.lock                    the inbox lock: send, read, card, codex join (D14)
-  mail/.ring-pending-<name>                a codex ring owed, and why (D14, D16)
+  mail/.ring-pending-<name>                a codex ring's state: owed and why, or clear (D14, D16, D20)
   cards/<name>.json                        one address card per name (C1)
   .shared                                  the group a shared mailbox is shared with (C4)
 
@@ -28,9 +28,16 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             ring times out. While ROOT/.shared exists (C4) every command
             runs under umask 002 and every folder tc makes gets the group
             it names and mode 2775 (make_folder, D16), or 3775 (sticky,
-            D17) for mail/, status/, cards/ and outbox/ themselves; `init`
-            reads the group database and sets the group and mode of every
-            folder and file under those four, then writes .shared. Shared
+            D17) for mail/, status/, cards/ and outbox/ themselves, or
+            3770 for an inbox and its read/, which only `join` makes, as
+            the recipient (D20). Messages, cards and status files are made
+            0640, never group-writable; mail/.seq, the locks and the ring
+            marker stay 0664 and are never removed (the marker is
+            rewritten, D20). A send to a name with no card and no inbox,
+            or to an inbox its card's owner does not own, is refused,
+            exit 1 (D20). `init` reads the group database and sets the
+            group and mode of every folder and file under those four,
+            then writes .shared. Shared
             or not, the locks, mail/.seq, status files and the ring marker
             are opened without following a symlink, and an inbox or its
             read/ is lstat()ed before use: a link at any of them is
@@ -42,8 +49,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             and health leave it out; health and watch never take a linked
             lock for a listener's (D19).
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
-            grp, json, pathlib, re, resource, shlex, shutil, signal, stat,
-            subprocess, time, datetime, os, sys); Linux only (flock,
+            grp, json, pathlib, pwd, re, resource, shlex, shutil, signal,
+            stat, subprocess, time, datetime, os, sys); Linux only (flock,
             RLIMIT_AS, O_NOFOLLOW, O_NONBLOCK, /proc). nvidia-smi optional; the codex CLI for the codex route.
 @complexity send O(b), b body bytes up to SEND_BODY_MAX_BYTES; status O(1).
             read/peek/wait-poll O(u), u unread messages in one inbox,
@@ -57,13 +64,17 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             heartbeat. join O(1), or O(u) for a codex card's unread count;
             card O(u) for its unread count; cards O(c). init O(f) over f
             folders and files under the shared folders (hundreds to
-            thousands; read/ is the history). Every command reads .shared
-            once, O(1).
+            thousands; read/ is the history). .shared is read once in main
+            (set_shared_umask) and once more by each step that depends on
+            it: read, peek, wait (once, not per poll), a status post, card,
+            send and health read it twice in all, join three times, and
+            make_folder once more per folder it makes. Each read is one
+            small file, O(1).
 @alloc      one file per message, kept forever (read/ is the history); one
             card per name, replaced on a rejoin; one inbox lock file per
             name (mail/.box-<name>.lock), kept; one ring marker per codex
-            name (mail/.ring-pending-<name>), kept until a ring exits 0;
-            ROOT/.shared, written by init and kept.
+            name (mail/.ring-pending-<name>), kept: rewritten, never
+            removed (D20); ROOT/.shared, written by init and kept.
             Nothing held in memory past one command. `wait` measured flat at
             13 MB RSS over 200k polls; it also hard-caps itself at
             WAIT_MEMORY_CAP_BYTES so a runaway dies alone. `wait` holds
@@ -81,6 +92,7 @@ import grp
 import json
 import os
 import pathlib
+import pwd
 import re
 import resource
 import shlex
@@ -177,13 +189,18 @@ NEW_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 NEW_FILE_MODE = 0o666
 # Phase fix round 1 (Claude Opus 5.5, unreviewed): D16, the ring marker's
 # states and the backoff after a ring that timed out.
-# The first line of mail/.ring-pending-<name> says why a ring is owed. Only
-# RING_TIMED_OUT holds later rings back. codex's own words go on the second
+# The first line of mail/.ring-pending-<name> says why a ring is owed, or
+# that none is (RING_CLEAR, below). Only RING_TIMED_OUT holds later rings back. codex's own words go on the second
 # line, so nothing codex prints can pass for a state.
 RING_JOINED = "joined with unread mail"
 RING_RINGING = "ringing"
 RING_FAILED = "failed"
 RING_TIMED_OUT = "timed out"
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 5. The marker
+# is never removed: a ring that exits 0, or a codex join with nothing
+# waiting, rewrites its first line to this, and nothing is owed. The other
+# words above are its pending states, and RING_TIMED_OUT its backoff.
+RING_CLEAR = "clear"
 # After a ring times out, sends to that name skip the ring for this long. A
 # hung `codex queue` would otherwise cost every send its full
 # CODEX_RING_SECONDS (ten sends, 300 s of the senders' time). Five minutes
@@ -207,21 +224,34 @@ SHARED_MARKER_READ_MAX_BYTES = 4096
 # The folders a shared mailbox shares, by name under ROOT (C4). outbox/ is
 # the ssh route's (C3); init reaches it whenever it is there.
 SHARED_FOLDER_NAMES = ("mail", "status", "cards", "outbox")
-# The umask while .shared exists: every file and lock tc makes is
-# group-writable (0664), so another user in the group can write it too.
+# The umask while .shared exists: the locks, mail/.seq and the ring
+# marker tc makes are group-writable (0664), so every member can take a
+# lock, a number or ring. Message, card and status files pass
+# SHARED_OWNED_FILE_MODE to os.open instead, and the umask cannot add bits.
 SHARED_UMASK = 0o002
 # A shared folder: owner and group read, write and enter it, and setgid,
 # so whatever is made inside takes the folder's group, not the maker's.
 SHARED_FOLDER_MODE = 0o2775
-# A file init finds under the shared folders: owner and group read and
-# write it, the mode the umask gives every file made after init.
-SHARED_FILE_MODE = 0o664
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, nobody touches
+# another member's mail.
+# The files every member must write, directly in mail/: mail/.seq, the
+# locks and the ring marker. Owner and group read and write them. The
+# worst a member can do through one is make a send fail or ring once more.
+SHARED_WRITABLE_FILE_MODE = 0o664
+# Message, card and status files (D20 item 2): the owner reads and writes,
+# the group only reads, so no member rewrites another's file in place.
+SHARED_OWNED_FILE_MODE = 0o640
+# An inbox and its read/ (D20 item 1), owned by the recipient: setgid,
+# sticky, group read, write and enter, nothing for other users. Under
+# sticky only a file's owner or the folder's can delete or rename it, so
+# senders cannot touch each other's mail, and the recipient's tc read
+# still moves all of it into read/.
+SHARED_INBOX_MODE = 0o3770
 # SHARED D17 (Claude Opus 5.5, unreviewed): no planted links.
 # mail/, status/, cards/ and outbox/ themselves: SHARED_FOLDER_MODE plus the
 # sticky bit, so in them only an entry's owner (or the folder's) may delete
 # or rename it, as in /tmp: no member removes or swaps another user's inbox,
-# card, lock or status. Not on an inbox or its read/, where `tc read` moves
-# mail that other users wrote.
+# card, lock or status. An inbox and its read/ take SHARED_INBOX_MODE.
 SHARED_TOP_FOLDER_MODE = 0o3775
 # The most of one status file `tc status` shows. A status is one argument
 # word, which Linux caps at 128 KiB; 1 MiB is far past that and bounds what
@@ -363,6 +393,55 @@ def set_shared_umask(fn):
         os.umask(SHARED_UMASK)
 
 
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, what a command
+# needs to know about sharing, and whose a file is.
+# A shared mailbox's group, by name and number. A private mailbox has none.
+Share = collections.namedtuple("Share", "group gid")
+
+
+def mailbox_share():
+    """Share(group, gid) when ROOT/.shared names a group, None when the mailbox is private.
+
+    Refuses (exit 1, words) a .shared that is unreadable or names a group
+    this machine lacks: tc never guesses which group a mailbox is shared
+    with, and nothing is written before the refusal.
+
+    @interacts  reads ROOT/.shared (shared_group) and, when it names a
+                group, the group database; on a refusal one line to stderr
+                and exit 1.
+    @deps       shared_group, refuse, printable; grp; SHARED_MARKER_NAME,
+                EXIT_REFUSED.
+    @complexity O(1): one small file and one group lookup.
+    @alloc      one Share, returned.
+    """
+    try:
+        group = shared_group()
+    except ValueError as problem:
+        refuse(f"tc: {problem}; nothing done. Run tc init --shared --group <g> to rewrite it.",
+               EXIT_REFUSED)
+    if group is None:
+        return None
+    try:
+        return Share(group, grp.getgrnam(group).gr_gid)
+    except KeyError:
+        refuse(f"tc: {ROOT / SHARED_MARKER_NAME} names group {printable(group)}, which this "
+               f"machine does not have; nothing written", EXIT_REFUSED)
+
+
+def user_name(uid):
+    """The login name of user number `uid`, or the number as text when the machine has no such user.
+
+    @interacts  reads the user database.
+    @deps       pwd.
+    @complexity O(1): one lookup.
+    @alloc      one short string, returned.
+    """
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return str(uid)
+
+
 def make_folder(path):
     """Make the folder `path`, and any missing folder above it. Every folder tc makes is made here.
 
@@ -424,7 +503,9 @@ def share_entry(path, gid):
     """Give one folder or file that init found group `gid` and its shared mode. (kind, why).
 
     A folder's mode comes from shared_folder_mode (sticky for the four
-    shared folders themselves, D17); a file's is SHARED_FILE_MODE.
+    shared folders themselves, D17; SHARED_INBOX_MODE for an inbox and its
+    read/, D20); a file's from shared_file_mode (SHARED_WRITABLE_FILE_MODE
+    directly in mail/, else SHARED_OWNED_FILE_MODE, D20).
 
     kind is "folder" or "file" when set, else None; why is None, or the
     words for a skip. Nothing at the name is (None, None). The entry is
@@ -435,7 +516,7 @@ def share_entry(path, gid):
     user owns).
 
     @interacts  opens and fstats `path`; sets its group and mode.
-    @deps       shared_folder_mode; os, stat, errno; SHARED_FILE_MODE.
+    @deps       shared_folder_mode, shared_file_mode; os, stat, errno.
     @complexity O(1).
     @alloc      one descriptor, closed before return.
     """
@@ -450,7 +531,7 @@ def share_entry(path, gid):
         if stat.S_ISDIR(mode):
             kind, want = "folder", shared_folder_mode(path)
         elif stat.S_ISREG(mode):
-            kind, want = "file", SHARED_FILE_MODE
+            kind, want = "file", shared_file_mode(path)
         else:
             return None, "not a regular file or a folder"
         os.fchown(fd, -1, gid)
@@ -465,19 +546,46 @@ def share_entry(path, gid):
 # SHARED D17 (Claude Opus 5.5, unreviewed): the sticky folders, opens that never
 # follow a link, and the inbox folder checked before use.
 def shared_folder_mode(path):
-    """The mode a shared folder gets: SHARED_TOP_FOLDER_MODE for mail/, status/, cards/ and outbox/ themselves, else SHARED_FOLDER_MODE.
+    """The mode a shared folder gets: SHARED_TOP_FOLDER_MODE for the four, SHARED_INBOX_MODE for an inbox and its read/, else SHARED_FOLDER_MODE.
 
-    The sticky bit goes on the four only (D17). An inbox and its read/
-    stay without it: `tc read` renames mail other users wrote out of the
-    inbox, which a sticky inbox would refuse.
+    The sticky bit goes on mail/, status/, cards/ and outbox/ themselves
+    (D17). SHARED fix round 1 (Claude Opus 5.5, unreviewed): an inbox
+    (mail/to-<name>) and its read/ take SHARED_INBOX_MODE, sticky with no
+    access for other users (D20 item 1). Under sticky the recipient, who
+    owns the inbox, still moves every message into read/, and no sender
+    can touch another's.
 
     @interacts  none; path work only.
-    @deps       pathlib; ROOT, SHARED_FOLDER_NAMES, SHARED_TOP_FOLDER_MODE,
+    @deps       pathlib; ROOT, MAIL, SHARED_FOLDER_NAMES,
+                SHARED_TOP_FOLDER_MODE, SHARED_INBOX_MODE,
                 SHARED_FOLDER_MODE.
-    @complexity O(1): four names.
+    @complexity O(1): a few name comparisons.
+    @alloc      the parent paths it compares, freed on return.
+    """
+    if path.parent == ROOT and path.name in SHARED_FOLDER_NAMES:
+        return SHARED_TOP_FOLDER_MODE
+    box = path.parent if path.name == "read" else path
+    if box.parent == MAIL and box.name.startswith("to-"):
+        return SHARED_INBOX_MODE
+    return SHARED_FOLDER_MODE
+
+
+def shared_file_mode(path):
+    """The mode init gives a file under the shared folders: SHARED_WRITABLE_FILE_MODE directly in mail/, else SHARED_OWNED_FILE_MODE.
+
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 items 2 and 5.
+    The files directly in mail/ are the ones every member must write
+    (mail/.seq, the locks, the ring marker); messages live one level
+    down, in an inbox or its read/. Cards, status files and messages are
+    never group-writable.
+
+    @interacts  none; path work only.
+    @deps       pathlib; MAIL, SHARED_WRITABLE_FILE_MODE,
+                SHARED_OWNED_FILE_MODE.
+    @complexity O(1).
     @alloc      none.
     """
-    return SHARED_TOP_FOLDER_MODE if path in [ROOT / name for name in SHARED_FOLDER_NAMES] else SHARED_FOLDER_MODE
+    return SHARED_WRITABLE_FILE_MODE if path.parent == MAIL else SHARED_OWNED_FILE_MODE
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, a FIFO at a lock's
@@ -529,11 +637,16 @@ def open_by_name(path, flags, mode=NEW_FILE_MODE):
     D19): the wait, watch and inbox locks, mail/.seq and
     status/<name>.md. A symlink at the name, dangling or not, is refused,
     and so is a FIFO, at once instead of hanging tc; nothing is read or
-    written through either.
+    written through either. SHARED fix round 1 (Claude Opus 5.5,
+    unreviewed): a file this user may not open (another member's status
+    file, 0640 under D20) is refused with words naming its owner, never a
+    traceback.
 
-    @interacts  see open_regular; on a refusal, one line to stderr and
-                exit 1.
-    @deps       open_regular, refuse; errno; NEW_FILE_MODE, EXIT_REFUSED.
+    @interacts  see open_regular; on a refusal, lstats the name for its
+                owner, reads the user database, writes one line to stderr
+                and exits 1.
+    @deps       open_regular, refuse, user_name; errno, os; NEW_FILE_MODE,
+                EXIT_REFUSED.
     @complexity O(1): at most three open calls and one fstat.
     @alloc      one descriptor, returned; the caller closes it.
     """
@@ -546,36 +659,108 @@ def open_by_name(path, flags, mode=NEW_FILE_MODE):
             problem = "is a symlink, which tc never follows"
         elif err.errno in (errno.ENXIO, errno.EISDIR):  # a FIFO with no reader, a folder
             problem = "is not a regular file, which tc never opens"
+        elif err.errno == errno.EACCES:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20
+            try:
+                owner = user_name(os.lstat(path).st_uid)
+            except OSError:
+                owner = "another user"
+            problem = (f"belongs to {owner}, and this user may not open it ({err.strerror}); under a "
+                       f"shared mailbox only its owner writes it")
         else:
             raise
     refuse(f"tc: {path} {problem}; nothing written through it", EXIT_REFUSED)
 
 
-def check_inbox(name):
-    """Refuse (exit 1) when mail/to-<name>, or its read/, is there and is not a real folder (D17).
+def check_inbox(name, shared):
+    """Refuse (exit 1) a bad mail/to-<name> or read/: a link or not a folder (D17), or, when `shared`, not its card owner's (D20). (box, read/) lstat results.
 
     Checked with lstat before tc uses an inbox (send, read, peek, wait),
     so a symlink planted at an inbox's name, or at its read/, is refused
     and no mail is written, moved or read through it. Nothing at the name
-    passes: the inbox is made later, through make_folder.
+    passes: each result is None for what is not there.
 
-    @interacts  lstats mail/to-<name> and mail/to-<name>/read; on a bad
-                one, one line to stderr and exit 1.
-    @deps       refuse; os, stat; MAIL, EXIT_REFUSED.
-    @complexity O(1).
-    @alloc      none.
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 4. Under a
+    shared mailbox an inbox, or its read/, whose owner differs from the
+    owner of cards/<name>.json is refused with words: an old inbox, or one
+    a sender made before D20, sits in a folder its recipient does not
+    control, and tc never guesses which owner is right. With no card
+    there, nothing is compared.
+
+    @interacts  lstats mail/to-<name>, its read/ and, when `shared` and the
+                inbox is there, cards/<name>.json; reads the user database
+                for the words; on a bad one, one line to stderr and exit 1.
+    @deps       refuse, user_name; os, stat; MAIL, CARDS, EXIT_REFUSED.
+    @complexity O(1): at most three lstat calls.
+    @alloc      up to three stat results; the two for the inbox returned.
     """
     box = MAIL / f"to-{name}"
+    found = []
     for path in (box, box / "read"):
         try:
-            mode = os.lstat(path).st_mode
+            st = os.lstat(path)
         except FileNotFoundError:
-            return
-        if stat.S_ISLNK(mode):
+            break
+        if stat.S_ISLNK(st.st_mode):
             refuse(f"tc: {path} is a symlink, not a real folder; tc never follows it, so nothing "
                    f"was read or written there", EXIT_REFUSED)
-        if not stat.S_ISDIR(mode):
+        if not stat.S_ISDIR(st.st_mode):
             refuse(f"tc: {path} is not a folder; nothing was read or written there", EXIT_REFUSED)
+        found.append(st)
+    box_st, read_st = (found + [None, None])[:2]
+    if shared and box_st is not None:
+        card = CARDS / f"{name}.json"
+        try:
+            card_uid = os.lstat(card).st_uid
+        except FileNotFoundError:
+            card_uid = None
+        for path, st in ((box, box_st), (box / "read", read_st)):
+            if card_uid is not None and st is not None and st.st_uid != card_uid:
+                refuse(f"tc: {path} belongs to {user_name(st.st_uid)}, but its card {card} belongs to "
+                       f"{user_name(card_uid)}; under a shared mailbox an inbox belongs to the owner of "
+                       f"its card, and tc never guesses which one is right. Nothing was read or written "
+                       f"there.", EXIT_REFUSED)
+    return box_st, read_st
+
+
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 1, tc join makes the inbox.
+def claim_inbox(name):
+    """Under a shared mailbox, make mail/to-<name>/ and its read/ as this user, the recipient (D20 item 1); refuse a name another user holds.
+
+    tc join calls it before it writes anything. Refused (exit 1, words,
+    nothing made or written): a card at cards/<name>.json that another
+    user owns (under the sticky cards/ only its owner can replace it), or
+    an inbox or read/ there that another user owns. An inbox this user
+    already owns is kept as it is, and a missing read/ is made. A folder
+    made here gets group g and SHARED_INBOX_MODE (make_folder).
+
+    @interacts  lstats cards/<name>.json, mail/to-<name> and its read/
+                (check_inbox); reads this process's user id and the user
+                database; makes the missing folders (make_folder); on a
+                refusal one line to stderr and exit 1.
+    @deps       check_inbox, make_folder, refuse, user_name; os; MAIL,
+                CARDS, EXIT_REFUSED.
+    @complexity O(1): three lstat calls and at most two new folders.
+    @alloc      the stat results, freed on return.
+    """
+    me = os.geteuid()
+    card = CARDS / f"{name}.json"
+    try:
+        owner = os.lstat(card).st_uid
+    except FileNotFoundError:
+        owner = me
+    if owner != me:
+        refuse(f"tc join: {card} belongs to {user_name(owner)}; under a shared mailbox only its owner "
+               f"can replace it. No card written; pick another name, or ask {user_name(owner)}.",
+               EXIT_REFUSED)
+    box = MAIL / f"to-{name}"
+    box_st, read_st = check_inbox(name, False)
+    for path, st in ((box, box_st), (box / "read", read_st)):
+        if st is not None and st.st_uid != me:
+            refuse(f"tc join: {path} belongs to {user_name(st.st_uid)}; under a shared mailbox an inbox "
+                   f"belongs to its recipient, so {name} is taken here. No card written; pick another "
+                   f"name, or ask {user_name(st.st_uid)}.", EXIT_REFUSED)
+    if read_st is None:
+        make_folder(box / "read")
 
 
 def cmd_init(args):
@@ -585,10 +770,13 @@ def cmd_init(args):
     the running user is not in: os.getgroups(), plus the effective group,
     which on some systems getgroups() leaves out. Then sets group g and
     SHARED_TOP_FOLDER_MODE (sticky, D17) on mail/, status/, cards/ and
-    outbox/ (those that exist), SHARED_FOLDER_MODE on every folder under
-    them, and group g and SHARED_FILE_MODE on every file already under
-    them (mail/.seq and the lock files included). Folders made later get
-    the same from make_folder (D16).
+    outbox/ (those that exist), and on every folder and file already under
+    them group g and the mode for its kind (share_entry): SHARED_INBOX_MODE
+    for an inbox and its read/, SHARED_FOLDER_MODE for any other folder,
+    SHARED_WRITABLE_FILE_MODE for mail/.seq, the locks and the ring marker,
+    SHARED_OWNED_FILE_MODE for every message, card and status file (D20).
+    It cannot change who owns an entry. Folders made later get the same
+    from make_folder (D16).
     Last, it writes ROOT/.shared holding g, through a .tmp and a rename.
     An entry it cannot change (a link, a FIFO, one another user owns) is
     named on stderr, and init exits 1 once the rest is done.
@@ -646,21 +834,27 @@ def cmd_init(args):
                EXIT_REFUSED)
 
 
-def inbox(name):
-    """mail/to-<name>/, made with its read/ when missing (through make_folder, D16).
+def inbox(name, shared):
+    """mail/to-<name>/, checked; in a private mailbox made with its read/ when missing (through make_folder, D16).
 
     Refuses (exit 1) an inbox or read/ that is a symlink or not a folder
     (check_inbox, D17), so every send, read, peek and wait poll is checked.
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): when `shared`, an
+    inbox whose owner is not its card's owner is refused too, and nothing
+    is made: only tc join makes an inbox there, as its recipient (D20).
+    The path is returned whether or not the folder is there.
 
-    @interacts  lstats mail/to-<name> and its read/ (check_inbox); makes
-                mail/, mail/to-<name>/ and its read/ when missing.
+    @interacts  lstats mail/to-<name>, its read/ and, when `shared`, the
+                card (check_inbox); private only: makes mail/,
+                mail/to-<name>/ and its read/ when read/ is missing.
     @deps       check_inbox, make_folder.
     @complexity O(1).
     @alloc      the path, returned.
     """
     box = MAIL / f"to-{name}"
-    check_inbox(name)  # SHARED D17 (Claude Opus 5.5, unreviewed)
-    make_folder(box / "read")  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
+    box_st, read_st = check_inbox(name, shared)  # SHARED D17 (Claude Opus 5.5, unreviewed)
+    if not shared and read_st is None:
+        make_folder(box / "read")  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
     return box
 
 
@@ -710,30 +904,37 @@ def message_files(folder):
     return messages, skipped
 
 
-def inbox_messages(name):
+def inbox_messages(name, shared=None):
     """The unread mail in mail/to-<name>/ as (paths, skipped): the regular files, by name, and (path, why) for each other *.md entry.
 
     Goes through inbox(), so a linked inbox or read/ refuses (exit 1,
-    check_inbox) and a missing one is made.
+    check_inbox), and in a private mailbox a missing one is made; in a
+    shared one a missing inbox holds nothing. `shared` None means look it
+    up here (mailbox_share); a caller that polls passes what it found once.
 
-    @interacts  see inbox and message_files.
-    @deps       inbox, message_files.
+    @interacts  reads ROOT/.shared when `shared` is None; see inbox and
+                message_files.
+    @deps       mailbox_share, inbox, message_files.
     @complexity O(u) over u *.md entries in the inbox (single digits).
     @alloc      two lists, returned.
     """
-    messages, skipped = message_files(inbox(name))
+    if shared is None:
+        shared = mailbox_share() is not None
+    messages, skipped = message_files(inbox(name, shared))
     return [path for path, _ in messages], skipped
 
 
-def unread(name):
+def unread(name, shared=None):
     """The unread messages in mail/to-<name>/: each *.md there that is a regular file, by name (D19).
+
+    `shared` as in inbox_messages.
 
     @interacts  see inbox_messages.
     @deps       inbox_messages.
     @complexity O(u) over u *.md entries in the inbox (single digits).
     @alloc      one list of paths, returned.
     """
-    return inbox_messages(name)[0]
+    return inbox_messages(name, shared)[0]
 
 
 def next_seq():
@@ -793,15 +994,17 @@ def inbox_lock(name, how=fcntl.LOCK_EX):
 
 
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a link planted at a .tmp name is refused.
-def write_new_file(path, text):
-    """Create `path`, which must not exist yet, and write `text` into it.
+def write_new_file(path, text, mode=NEW_FILE_MODE):
+    """Create `path`, which must not exist yet, at `mode`, and write `text` into it.
 
-    For every .tmp tc renames into place (a message, a card, the ring
-    marker). NEW_FILE_FLAGS fail on anything already at that name and never
-    follow a link, so a link planted at a .tmp name is refused, not written
+    For every .tmp tc renames into place (a message, a card, .shared).
+    NEW_FILE_FLAGS fail on anything already at that name and never follow
+    a link, so a link planted at a .tmp name is refused, not written
     through. Raises OSError (FileExistsError for a planted link or file);
-    the caller refuses with words. The umask applies to NEW_FILE_MODE, and
-    the text is encoded as Path.write_text would.
+    the caller refuses with words. The umask applies to `mode`, and the
+    text is encoded as Path.write_text would. SHARED fix round 1 (Claude
+    Opus 5.5, unreviewed): a message or card under a shared mailbox passes
+    SHARED_OWNED_FILE_MODE (D20 item 2); the umask cannot add bits to it.
 
     @interacts  creates and writes one file; nothing else.
     @deps       os; NEW_FILE_FLAGS, NEW_FILE_MODE.
@@ -809,7 +1012,7 @@ def write_new_file(path, text):
     @alloc      the encoded text while written; one descriptor, closed on
                 return.
     """
-    with open(os.open(path, NEW_FILE_FLAGS, NEW_FILE_MODE), "w") as f:
+    with open(os.open(path, NEW_FILE_FLAGS, mode), "w") as f:
         f.write(text)
 
 
@@ -911,20 +1114,26 @@ def cmd_read(args):
     Only regular files move (D19). A symlink, a FIFO or a folder named
     like a message is left in place, named on stderr and never read; so is
     a moved file read_regular_file will not read. Either makes the read
-    exit 1 after it prints the rest.
+    exit 1 after it prints the rest. SHARED fix round 1 (Claude Opus 5.5,
+    unreviewed): so does a message the rename may not move. Under a shared
+    mailbox (D20) only the inbox's owner moves another member's mail, so a
+    read run by anyone else moves only that user's own messages and names
+    the rest, left unread, never a traceback.
 
     @interacts  checks the name first (C0, exit 6, nothing written); a name
                 with no inbox gets `no unread mail` and nothing is created
-                (O2); else holds mail/.box-<name>.lock alone from its glob to
-                its last rename (D14), refuses an inbox or read/ that is a
-                symlink (exit 1, nothing moved: check_inbox, D17), makes
+                (O2); else reads ROOT/.shared (mailbox_share), holds
+                mail/.box-<name>.lock alone from its glob to its last rename
+                (D14), refuses an inbox or read/ that is a symlink, or under
+                a shared mailbox not its card owner's (exit 1, nothing
+                moved: check_inbox, D17, D20), in a private mailbox makes
                 mail/to-<name>/read/ if missing, lstats each *.md entry and
                 renames each regular file into read/; then, with the lock
                 released, reads each moved file (read_regular_file) and
-                prints to stdout, and names each one it will not show on
-                stderr.
-    @deps       require_names, inbox_lock, inbox_messages, show,
-                refuse_lines, printable.
+                prints to stdout, and names each one it will not show or
+                could not move on stderr.
+    @deps       require_names, mailbox_share, inbox_lock, inbox_messages,
+                show, refuse_lines, printable.
     @complexity O(u) over u *.md entries in the inbox (single digits).
     @alloc      the lists of paths and each file's text while printed; one
                 open lock file while the lock is held.
@@ -938,16 +1147,22 @@ def cmd_read(args):
     # ring for mail this read did not print.
     # Phase fix round 1 (Claude Opus 5.5, unreviewed): print after the
     # release, so a stalled stdout holds no lock.
+    shared = mailbox_share() is not None  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20
     with inbox_lock(args.name):
-        messages, skipped = inbox_messages(args.name)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19
-        moved = []
+        messages, skipped = inbox_messages(args.name, shared)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19
+        moved, stuck = [], []
         for p in messages:
-            p.rename(p.parent / "read" / p.name)
+            try:
+                p.rename(p.parent / "read" / p.name)
+            except OSError as err:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, not this user's to move
+                stuck.append((p, err.strerror))
+                continue
             moved.append(p.parent / "read" / p.name)
     if not moved:
         print(f"no unread mail for {args.name}")
     unshown = show(moved)
     refuse_lines([f"tc read: {printable(p)} not shown and left in place ({why})" for p, why in skipped]
+                 + [f"tc read: {printable(p)} not moved to read/ ({why}); left unread" for p, why in stuck]
                  + [f"tc read: {printable(p)} not shown ({why})" for p, why in unshown])
 
 
@@ -960,11 +1175,13 @@ def cmd_peek(args):
 
     @interacts  checks the name first (C0, exit 6, nothing written); a name
                 with no inbox gets `no unread mail` and nothing is created
-                (O2); else refuses an inbox or read/ that is a symlink
-                (exit 1, nothing read: check_inbox, D17), makes
-                mail/to-<name>/read/ if missing, lstats each *.md entry and
-                reads each regular file (read_regular_file); prints to
-                stdout, and names each one it will not show on stderr.
+                (O2); else reads ROOT/.shared (inbox_messages), refuses an
+                inbox or read/ that is a symlink, or under a shared mailbox
+                not its card owner's (exit 1, nothing read: check_inbox,
+                D17, D20), in a private mailbox makes mail/to-<name>/read/
+                if missing, lstats each *.md entry and reads each regular
+                file (read_regular_file); prints to stdout, and names each
+                one it will not show on stderr.
     @deps       require_names, inbox_messages, show, refuse_lines,
                 printable.
     @complexity O(u) over u *.md entries in the inbox (single digits).
@@ -974,7 +1191,7 @@ def cmd_peek(args):
     if not (MAIL / f"to-{args.name}").is_dir():  # CARDS R3 (Claude Opus 5.5, unreviewed): O2
         print(f"no unread mail for {args.name}")
         return
-    msgs, skipped = inbox_messages(args.name)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19
+    msgs, skipped = inbox_messages(args.name)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, D20
     print(f"{len(msgs)} unread for {args.name}")
     unshown = show(msgs)
     refuse_lines([f"tc peek: {printable(p)} not shown ({why})" for p, why in skipped + unshown])
@@ -989,14 +1206,20 @@ def cmd_wait(args):
     @interacts  checks the name first (C0, exit 6, nothing written); caps
                 its own address space; makes mail/ (make_folder) and holds
                 mail/.wait-<name>.lock (flock) until it exits, opened
-                through open_by_name, which refuses a symlink there (exit 1,
-                D17); makes mail/to-<name>/read/ on the first poll, and a
-                linked inbox refuses there (exit 1, check_inbox); prints one
-                line.
-    @deps       require_names, make_folder, open_by_name, unread,
-                keepalive_seconds; fcntl, os, resource.
-    @complexity O(u) per poll over u unread messages; one poll every
-                POLL_SECONDS until the timeout.
+                through open_by_name, which refuses a symlink or a FIFO
+                there (exit 1, D17, D19); reads ROOT/.shared once
+                (mailbox_share); in a private mailbox makes
+                mail/to-<name>/read/ on the first poll; a linked inbox, or
+                under a shared mailbox one not its card owner's, refuses
+                there (exit 1, check_inbox); prints one line. Under a shared
+                mailbox it makes no inbox: a name nobody joined polls as no
+                mail (D20).
+    @deps       require_names, make_folder, open_by_name, mailbox_share,
+                unread, keepalive_seconds; fcntl, os, resource.
+    @complexity O(u) per poll over u *.md entries in the inbox (single
+                digits): two lstat calls for the inbox and read/, one for
+                the card when shared, one per entry; no .shared read per
+                poll. One poll every POLL_SECONDS until the timeout.
     @alloc      one open lock file for its lifetime; flat at about 13 MB.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
@@ -1010,9 +1233,10 @@ def cmd_wait(args):
         sys.exit(EXIT_ALREADY_LISTENING)
     timeout = args.timeout if args.timeout is not None else (
         keepalive_seconds() if args.keepalive else DEFAULT_WAIT_SECONDS)
+    shared = mailbox_share() is not None  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): read once, not per poll
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        msgs = unread(args.name)
+        msgs = unread(args.name, shared)
         if msgs:
             print(f"MAIL: {len(msgs)} unread for {args.name}. Run: tc read {args.name}")
             return
@@ -1033,15 +1257,22 @@ def cmd_status(args):
     1) and nothing is written through it. Showing reads each file through
     read_regular_file: a link, a FIFO, a file over STATUS_READ_MAX_BYTES or
     one not in UTF-8 is named on stderr instead of shown, and the command
-    exits 1 after showing the rest.
+    exits 1 after showing the rest. SHARED fix round 1 (Claude Opus 5.5,
+    unreviewed): under a shared mailbox a new status file is made
+    SHARED_OWNED_FILE_MODE (0640, D20 item 2), so no member rewrites
+    another's; a post over one this user may not write is refused with
+    words (open_by_name).
 
     @interacts  checks the name first when one is given (C0, exit 6,
-                nothing written); makes status/ (make_folder); writes
+                nothing written); makes status/ (make_folder); when posting
+                reads ROOT/.shared (mailbox_share) and writes
                 status/<name>.md whole (open_by_name), or reads every status
                 file (read_regular_file); prints to stdout, and to stderr
                 for a file it will not show.
-    @deps       require_names, make_folder, open_by_name, read_regular_file,
-                refuse, now_iso; os; STATUS_READ_MAX_BYTES.
+    @deps       require_names, make_folder, mailbox_share, open_by_name,
+                read_regular_file, refuse, now_iso; os;
+                STATUS_READ_MAX_BYTES, SHARED_OWNED_FILE_MODE,
+                NEW_FILE_MODE.
     @complexity O(s) over s status files when showing (single digits),
                 each read up to STATUS_READ_MAX_BYTES.
     @alloc      each file's text while printed; one descriptor while
@@ -1063,7 +1294,9 @@ def cmd_status(args):
             refuse("\n".join(unshown), EXIT_REFUSED)
         return
     # SHARED D17 (Claude Opus 5.5, unreviewed): a link at status/<name>.md is refused.
-    with open(open_by_name(STATUS / f"{args.name}.md", os.O_WRONLY | os.O_TRUNC), "w") as f:
+    # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 2, made 0640 when shared.
+    mode = SHARED_OWNED_FILE_MODE if mailbox_share() is not None else NEW_FILE_MODE
+    with open(open_by_name(STATUS / f"{args.name}.md", os.O_WRONLY | os.O_TRUNC, mode), "w") as f:
         f.write(f"## {args.name} status, {now_iso()}\n\n{args.text}\n")
     print(f"status posted for {args.name}")
 
@@ -1195,21 +1428,25 @@ def write_card(card):
     The .tmp name carries this process's pid, so two joins of one name at
     once never write into the same file. It is made by write_new_file, so
     a file or link already at that name is refused (exit 1, no card
-    written), never written through.
+    written), never written through. SHARED fix round 1 (Claude Opus 5.5,
+    unreviewed): under a shared mailbox it is made SHARED_OWNED_FILE_MODE
+    (0640, D20 item 2), so no member rewrites another's card in place.
 
-    @interacts  makes cards/ (make_folder); creates
-                cards/<name>.json.<pid>.tmp and renames it to
-                cards/<name>.json, replacing any card there; on a .tmp it
-                cannot make, one line to stderr and exit 1.
-    @deps       make_folder, write_new_file, refuse; json, os, pathlib.
+    @interacts  makes cards/ (make_folder); reads ROOT/.shared
+                (mailbox_share); creates cards/<name>.json.<pid>.tmp and
+                renames it to cards/<name>.json, replacing any card there;
+                on a .tmp it cannot make, one line to stderr and exit 1.
+    @deps       make_folder, mailbox_share, write_new_file, refuse; json,
+                os, pathlib; SHARED_OWNED_FILE_MODE, NEW_FILE_MODE.
     @complexity O(1): eleven fields.
     @alloc      one JSON string, freed on return; one card file, kept.
     """
     make_folder(CARDS)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
     path = CARDS / f"{card['name']}.json"
     tmp = CARDS / f"{card['name']}.json.{os.getpid()}.tmp"
+    mode = SHARED_OWNED_FILE_MODE if mailbox_share() is not None else NEW_FILE_MODE  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20
     try:
-        write_new_file(tmp, json.dumps(card, indent=2) + "\n")
+        write_new_file(tmp, json.dumps(card, indent=2) + "\n", mode)
     except OSError as err:
         refuse(f"tc: could not create {tmp} ({err.strerror}); no card written", EXIT_REFUSED)
     tmp.rename(path)  # atomic, so a reader never sees half a card
@@ -1352,30 +1589,41 @@ def cmd_join(args):
     unread mail waiting, the join writes the ring marker, and the next
     send rings this thread whatever the count; it also prints `<n> unread
     waiting for <name>: run tc read <name>` so this session can read now.
-    With none waiting it removes any marker, since nothing is owed, so an
-    old thread's backoff never holds back this thread's first ring. A
-    symlink at the marker's name refuses the join (exit 1, no card
-    written, D17).
+    With none waiting it rewrites any marker as RING_CLEAR (D20 item 5:
+    never removed), since nothing is owed, so an old thread's backoff
+    never holds back this thread's first ring. A symlink, a FIFO or
+    anything else that is not a regular file at the marker's name refuses
+    the join (exit 1, no card written, D17, D19).
+
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): under a shared
+    mailbox the join first makes the name's inbox and its read/ as the
+    joining user (claim_inbox, D20 item 1), or refuses with words a name
+    whose card or inbox another user owns, before anything is written.
 
     @interacts  checks both names (C0, exit 6) and a self-report (exit 6);
                 refuses a CODEX_THREAD_ID that is not a thread id (exit 1,
-                D14) and --kind codex with no CODEX_THREAD_ID (exit 1); then
-                writes cards/<name>.json through write_card, replacing any
-                card there and resetting joined_at. For a codex card, holds
-                mail/.box-<name>.lock alone (making mail/) while it lstats
-                mail/.ring-pending-<name> (a symlink: exit 1), writes the
-                card, counts mail/to-<name>/*.md and writes or removes the
-                marker. Prints one line, plus the waiting line; a marker it
-                cannot write or remove is said on stderr.
+                D14) and --kind codex with no CODEX_THREAD_ID (exit 1);
+                reads ROOT/.shared (mailbox_share) and, when shared, makes
+                the inbox (claim_inbox); then writes cards/<name>.json
+                through write_card, replacing any card there and resetting
+                joined_at. For a codex card, holds mail/.box-<name>.lock
+                alone (making mail/) while it lstats
+                mail/.ring-pending-<name> (not a regular file: exit 1),
+                writes the card, counts mail/to-<name>/*.md and writes or
+                clears the marker in place. Prints one line, plus the
+                waiting line; a marker it cannot write or clear is said on
+                stderr.
     @deps       require_names, refuse_self_report, refuse, account_label,
-                write_card, describe_card, now_iso, THREAD_ID_PATTERN,
-                inbox_lock, unread_count, write_ring_marker, RING_JOINED;
+                mailbox_share, claim_inbox, write_card, describe_card,
+                now_iso, THREAD_ID_PATTERN, inbox_lock, ring_marker_problem,
+                unread_count, write_ring_marker, RING_JOINED, RING_CLEAR;
                 os, sys.
     @complexity O(1), plus O(t) over t characters of CODEX_THREAD_ID; a
                 codex card adds O(u) over u unread messages (single digits).
-    @alloc      one card dict, freed on exit; one card file, kept; for a
-                codex card one open lock file, and the marker file, kept
-                until a ring exits 0.
+    @alloc      one card dict, freed on exit; one card file, kept; under a
+                shared mailbox the inbox and its read/ when missing, kept;
+                for a codex card one open lock file, and the marker file,
+                kept (never removed, D20).
     """
     require_names(args.name, args.reports_to)
     refuse_self_report(args.name, args.reports_to)
@@ -1411,6 +1659,8 @@ def cmd_join(args):
         "reports_to": args.reports_to,
         "joined_at": now_iso(),
     }
+    if mailbox_share() is not None:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 1
+        claim_inbox(args.name)
     if card["route"] != "codex":
         write_card(card)
         print(f"joined as {describe_card(card)}")
@@ -1419,25 +1669,23 @@ def cmd_join(args):
     # a codex join leaves the ring marker, so the next send rings this thread.
     marker = MAIL / f".ring-pending-{args.name}"
     with inbox_lock(args.name):
-        if marker.is_symlink():  # SHARED D17 (Claude Opus 5.5, unreviewed): a planted link
-            refuse(f"tc join: {marker} is a symlink, which tc never follows; no card written",
-                   EXIT_REFUSED)
+        bad = ring_marker_problem(marker)  # SHARED D17 (Claude Opus 5.5, unreviewed): a planted link; D19 a FIFO
+        if bad is not None:
+            refuse(f"tc join: {marker} {bad}; no card written", EXIT_REFUSED)
         write_card(card)
         waiting = unread_count(args.name)
         if waiting:
             problem = write_ring_marker(args.name, RING_JOINED, f"tc join found {waiting} unread")
+        elif os.path.lexists(marker):  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, cleared, never removed
+            problem = write_ring_marker(args.name, RING_CLEAR, "tc join found nothing unread")
         else:
-            try:
-                marker.unlink(missing_ok=True)
-                problem = None
-            except OSError as err:
-                problem = err
+            problem = None
     print(f"joined as {describe_card(card)}")
     if waiting:
         print(f"{waiting} unread waiting for {args.name}: run tc read {args.name}")
     if problem is not None:
-        print(f"tc join: {marker} could not be {'written' if waiting else 'removed'} "
-              f"({problem.strerror}), so the next send to {args.name} may not ring it",
+        print(f"tc join: {marker} could not be {'written' if waiting else 'cleared'} "
+              f"({problem}), so the next send to {args.name} may not ring it",
               file=sys.stderr)
 
 
@@ -1637,23 +1885,46 @@ def deliver_local(card, sender, to, body, header_note=None):
     read/ that is a symlink refuses it before a number is taken (exit 1,
     check_inbox, D17), and so does a symlink at mail/.seq (next_seq).
 
-    @interacts  lstats mail/to-<to> and its read/ (check_inbox); takes the
-                mail/.seq flock (next_seq); makes mail/to-<to>/read/; stats
-                cards/<to>.json; creates NNNNNN-from-<sender>.tmp and
-                renames it to .md in mail/to-<to>/.
-    @deps       check_inbox, next_seq, inbox, now_iso, write_new_file,
-                Delivery, CARDS.
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): under a shared
+    mailbox (D20), before a number is taken: an inbox not owned by its
+    card's owner refuses the send (exit 1, check_inbox, item 4); a name
+    with no card and no inbox is refused, Delivery exit 1, `tc send:
+    nobody has joined as <to> on this shared mailbox`, and one with a
+    card but no inbox is refused with words telling its owner to rejoin
+    (item 3). Nothing is made either way: only tc join makes an inbox, as
+    its recipient, so no sender ever owns another's inbox. The message is
+    made SHARED_OWNED_FILE_MODE (0640, item 2). O1's deliver plus warning
+    stays for a private mailbox.
+
+    @interacts  reads ROOT/.shared (mailbox_share); lstats mail/to-<to>,
+                its read/ and, when shared, cards/<to>.json (check_inbox);
+                takes the mail/.seq flock (next_seq); private only: makes
+                mail/to-<to>/read/; stats cards/<to>.json; creates
+                NNNNNN-from-<sender>.tmp and renames it to .md in
+                mail/to-<to>/.
+    @deps       mailbox_share, check_inbox, next_seq, inbox, now_iso,
+                write_new_file, Delivery, CARDS, SHARED_OWNED_FILE_MODE,
+                NEW_FILE_MODE.
     @complexity O(b) over b bytes of body.
     @alloc      the message text while written; one message file, kept.
     """
-    check_inbox(to)  # SHARED D17 (Claude Opus 5.5, unreviewed): before a number is taken
-    box_existed = (MAIL / f"to-{to}").is_dir()
+    share = mailbox_share()  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20
+    box_st, _ = check_inbox(to, share is not None)  # SHARED D17 (Claude Opus 5.5, unreviewed): before a number is taken
+    box_existed = box_st is not None
+    if share is not None and not box_existed:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 3
+        if os.path.lexists(CARDS / f"{to}.json"):
+            return Delivery(EXIT_REFUSED, f"tc send: {to} has a card but no inbox on this shared mailbox; "
+                                          f"nothing sent. Ask {to}'s owner to rejoin (tc join {to}, run as "
+                                          f"that Linux user), which makes the inbox.", [])
+        return Delivery(EXIT_REFUSED, f"tc send: nobody has joined as {to} on this shared mailbox", [])
     n = next_seq()
-    path = inbox(to) / f"{n:0{SEQ_WIDTH}d}-from-{sender}.md"
+    box = MAIL / f"to-{to}" if share is not None else inbox(to, False)
+    path = box / f"{n:0{SEQ_WIDTH}d}-from-{sender}.md"
     tmp = path.with_suffix(".tmp")
     header = f"# #{n} from {sender} to {to}, {now_iso()}" + (f", {header_note}" if header_note else "")
+    mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 2
     try:  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a planted link is refused
-        write_new_file(tmp, f"{header}\n\n{body.rstrip()}\n")
+        write_new_file(tmp, f"{header}\n\n{body.rstrip()}\n", mode)
     except OSError as err:
         return Delivery(EXIT_REFUSED, f"tc send: could not create {tmp} ({err.strerror}); nothing sent", [])
     tmp.rename(path)  # atomic, so a waiter never reads a half-written file
@@ -1695,28 +1966,80 @@ def clock_words(seconds):
     return datetime.datetime.fromtimestamp(seconds).strftime(CLOCK_FORMAT)
 
 
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 5, the
+# marker's state lives in its contents; it is rewritten, never removed.
 def write_ring_marker(name, state, detail):
-    """Write mail/.ring-pending-<name> whole. None when written, else the OSError.
+    """Rewrite mail/.ring-pending-<name> in place: `state` on the first line, the time and `detail` on the second. None when written, else why, in words.
 
-    The first line is `state` (one of the RING_* words), the second the
-    time and `detail`. A new .tmp made by write_new_file (a planted link
-    is refused), then a rename over any marker there, so a reader never
-    sees half of one.
+    D20 item 5: the marker is never removed or renamed over, only
+    rewritten, so under a shared mailbox (sticky mail/, where only its
+    owner could remove or replace it) every member can still set its
+    state, and no .tmp is ever left behind. It is opened through
+    open_regular: no link followed, a FIFO refused at once, made at
+    NEW_FILE_MODE when missing (group-writable under SHARED_UMASK). Its
+    own flock is held while it is truncated and written, so two writers
+    never mix lines. A reader that catches it mid-rewrite sees it empty
+    or cut short, which reads as owed: one more ring at worst.
 
-    @interacts  creates mail/.ring-pending-<name>.<pid>.tmp and renames it
-                to mail/.ring-pending-<name>.
-    @deps       write_new_file, now_iso; os.
+    @interacts  opens mail/.ring-pending-<name> (making it when missing),
+                holds its flock, truncates and writes it.
+    @deps       open_regular, now_iso; fcntl, os; MAIL.
     @complexity O(d) over d characters of `detail`.
-    @alloc      the text, freed on return; the marker file, kept until a
-                ring exits 0.
+    @alloc      the text, freed on return; one descriptor, closed on
+                return; the marker file, kept (never removed).
     """
-    tmp = MAIL / f".ring-pending-{name}.{os.getpid()}.tmp"
     try:
-        write_new_file(tmp, f"{state}\n{now_iso()} {detail}\n")
-        tmp.rename(MAIL / f".ring-pending-{name}")  # atomic, like a message
+        fd = open_regular(MAIL / f".ring-pending-{name}", os.O_WRONLY)
+    except (OSError, ValueError) as err:
+        return err.strerror if isinstance(err, OSError) and err.strerror else str(err)
+    try:
+        with open(fd, "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            f.truncate(0)
+            f.write(f"{state}\n{now_iso()} {detail}\n")
     except OSError as err:
-        return err
+        return err.strerror
     return None
+
+
+def ring_marker_problem(marker):
+    """Words when something that is not a regular file sits at the ring marker's name (D17, D19); None when it is one, or nothing is there.
+
+    @interacts  lstats `marker`. Writes nothing.
+    @deps       os, stat.
+    @complexity O(1).
+    @alloc      none.
+    """
+    try:
+        mode = os.lstat(marker).st_mode
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(mode):
+        return "is a symlink, which tc never follows"
+    if not stat.S_ISREG(mode):
+        return "is not a regular file, which tc never opens"
+    return None
+
+
+def ring_owed(marker):
+    """True when the marker says a ring is owed: there and not RING_CLEAR on its first line, or there and unreadable (D14, D20).
+
+    Nothing at the name owes nothing. A marker read_regular_file will not
+    read owes a ring, as D14 has it: the send rings rather than lose a
+    wake.
+
+    @interacts  reads `marker` through read_regular_file. Writes nothing.
+    @deps       read_regular_file; RING_CLEAR, RING_MARKER_READ_MAX_BYTES.
+    @complexity O(1): one short file.
+    @alloc      the marker's text, freed on return.
+    """
+    try:
+        state = read_regular_file(marker, RING_MARKER_READ_MAX_BYTES).partition("\n")[0]
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    return state != RING_CLEAR
 
 
 def ring_backoff(marker):
@@ -1761,8 +2084,9 @@ def deliver_codex(card, sender, to, body, header_note=None):
     Under mail/.box-<to>.lock, held alone (D14): count unread, read the
     marker mail/.ring-pending-<to>, deliver, and decide. A ring is owed
     when the inbox held no unread mail before this send (one ring per
-    batch) or the marker is there: an earlier ring failed, a sender died
-    while it rang, or `tc join` found mail waiting (D16). The ring is held
+    batch) or the marker says one is owed (ring_owed: there and not
+    RING_CLEAR): an earlier ring failed, a sender died while it rang, or
+    `tc join` found mail waiting (D16). The ring is held
     instead when the marker says the last ring timed out under
     RING_BACKOFF_SECONDS ago (D16): the marker is kept as it is, and the
     warning says when a send rings again. When a ring is owed, the marker
@@ -1773,7 +2097,9 @@ def deliver_codex(card, sender, to, body, header_note=None):
     wake from being lost; do not "fix" it back.
 
     The ring runs after the lock is released, so a slow ring never holds
-    up `tc read`. A ring that exits 0 removes the marker. A timeout
+    up `tc read`. A ring that exits 0 rewrites the marker as RING_CLEAR;
+    it is never removed (D20 item 5, SHARED fix round 1, Claude Opus 5.5,
+    unreviewed). A timeout
     rewrites it as RING_TIMED_OUT, which starts the backoff; every other
     failure rewrites it as RING_FAILED, and the next send rings again:
     codex exiting non-zero, codex missing, or a card whose thread_id is
@@ -1785,7 +2111,8 @@ def deliver_codex(card, sender, to, body, header_note=None):
 
     A symlink at the marker's name is refused (D17): Delivery exit 1,
     words, nothing sent and nothing rung, so no member can point the
-    marker at a file another user's send would then replace or read.
+    marker at a file another user's send would then replace or read. So
+    is a FIFO or anything else that is not a regular file (D19).
 
     @interacts  holds mail/.box-<to>.lock while it lstats the marker,
                 counts mail/to-<to>/*.md (before and after), reads and
@@ -1793,25 +2120,27 @@ def deliver_codex(card, sender, to, body, header_note=None):
                 deliver_local and, when a ring is owed, the marker
                 (write_ring_marker). Then rings through
                 ring_codex (one `codex queue` run, at most
-                CODEX_RING_SECONDS) and removes the marker on exit 0, or
-                rewrites it. Reads the clock through wall_clock.
-    @deps       inbox_lock, unread_count, deliver_local, ring_backoff,
-                write_ring_marker, ring_codex, clock_words, wall_clock,
-                Delivery; RING_RINGING, RING_FAILED, RING_TIMED_OUT,
+                CODEX_RING_SECONDS) and rewrites the marker: RING_CLEAR on
+                exit 0, else the failure. Reads the clock through
+                wall_clock.
+    @deps       inbox_lock, ring_marker_problem, unread_count, ring_owed,
+                deliver_local, ring_backoff, write_ring_marker, ring_codex,
+                clock_words, wall_clock, Delivery; RING_RINGING,
+                RING_FAILED, RING_TIMED_OUT, RING_CLEAR,
                 RING_BACKOFF_SECONDS, EXIT_REFUSED.
     @complexity O(u + b) over u unread messages (counted twice) and b
                 bytes of body, plus one codex run of at most
                 CODEX_RING_SECONDS; no run while a backoff holds.
     @alloc      the ring's words, freed on return; one message file, kept;
-                the marker file, kept until a ring exits 0.
+                the marker file, kept (never removed, D20).
     """
     marker = MAIL / f".ring-pending-{to}"
     with inbox_lock(to):
-        if marker.is_symlink():  # SHARED D17 (Claude Opus 5.5, unreviewed): a planted link
-            return Delivery(EXIT_REFUSED, f"tc send: {marker} is a symlink, which tc never follows; "
-                                          f"nothing sent", [])
+        bad = ring_marker_problem(marker)  # SHARED D17 (Claude Opus 5.5, unreviewed): a planted link; D19 a FIFO
+        if bad is not None:
+            return Delivery(EXIT_REFUSED, f"tc send: {marker} {bad}; nothing sent", [])
         waiting = unread_count(to)
-        owed = marker.exists()
+        owed = ring_owed(marker)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, the state, not the file
         held = ring_backoff(marker) if owed else None
         landed = deliver_local(card, sender, to, body, header_note)
         count = unread_count(to)
@@ -1830,16 +2159,15 @@ def deliver_codex(card, sender, to, body, header_note=None):
     failure = ring_codex(card, sender, to, count)
     if failure is None:
         words.append(f"rang codex {to} (queued; delivered when its turn ends or the session is resumed)")
-        try:
-            marker.unlink(missing_ok=True)
-        except OSError as err:
-            warnings.append(f"rang codex {to}, but {marker} could not be removed ({err.strerror}); "
-                            f"the next send to {to} rings again")
+        problem = write_ring_marker(to, RING_CLEAR, f"a send from {sender} rang")  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20
+        if problem is not None:
+            warnings.append(f"rang codex {to}, but {marker} could not be cleared ({problem}); "
+                            f"the next send to {to} may ring again")
         return Delivery(landed.exit, "\n".join(words), warnings)
     problem = write_ring_marker(to, RING_TIMED_OUT if failure.timed_out else RING_FAILED, failure.reason)
     if problem is not None:
         warnings.append(f"ring failed for {to}: {failure.reason}; the mail is in its inbox; {marker} could "
-                        f"not be written ({problem.strerror}), so a later send may not ring")
+                        f"not be written ({problem}), so a later send may not ring")
     elif failure.timed_out:
         try:
             stamp = marker.stat().st_mtime
