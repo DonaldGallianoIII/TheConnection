@@ -79,7 +79,13 @@ follow-up became D28 (`8bdf363`), built by `95cc3c8`, which keeps the
 first poll that found no listener so the wake has an upper bound. All
 reached the dev branch with the P4FIX merge, `eb3e187`.
 
-**Times hit:** 1.
+**Times hit:** 1. A second instance, older than this entry, was found on
+2026-10-15 by the first review to check `tc` against it (SHARED's round 6
+re-review): `tc watch --names` prints `LISTENER DOWN` and exits 5 when a
+watched `tc wait` exits 0 on mail, since it compares only the locks held
+at its start with the locks held now. Not yet fixed. The planned follow-up
+in D28 (`tc wait` writes its exit reason into its lock file) is the fix
+for both the board and `tc watch`.
 
 **Tier when hit:** MEDIUM. The board's one alarm fired on every normal
 delivery, so it could not mark a real failure. Nothing is lost: mail
