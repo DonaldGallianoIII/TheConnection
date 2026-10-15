@@ -26,17 +26,20 @@ Where:  ~/TheConnection-lanes/shared
 | Round 1, extra | `cc1b826` | Never say "no unread mail" when tc read could not move what is there |
 | Round 1 (e) | `b36d4fc` | Bring the SHARED handoff and both pauses up to D19 and D20, and add route-shared QA |
 | D21 | `f04944d` | Build D21: .shared is the init user's alone, and a shared send needs a card |
-| D21, second | the commit that changes this file | Refuse another member's init before it changes anything, settle .shared at 0644, and date status files by lstat |
+| D21, second | `e9f27eb` | Refuse another member's init before it changes anything, settle .shared at 0644, and date status files by lstat |
+| D21, third | the commit that changes this file | Refuse a member's init over an unreadable .shared before it changes anything, and name another user's 0664 .shared |
 
 The extra commit is one the brief did not list: writing step 13 of
-`route-shared.md` (step 16 since the D21 round) showed that a read which
+`route-shared.md` (step 18 since the D21 round) showed that a read which
 could move nothing still printed `no unread mail`. No amend, reset or
 rebase. Nothing pushed or merged.
 
-The two D21 commits change `tc`, `tests/test_shared.py`,
+The three D21 commits change `tc`, `tests/test_shared.py`,
 `qa/human/route-shared.md` and this file, nothing else. The second
 builds the architect's yes to both D21 decisions this handoff asked for,
-and two items from BOARD's review that land in SHARED's `tc`.
+and two items from BOARD's review that land in SHARED's `tc`. The third
+builds the architect's yes to the open question the second left: an
+unreadable `.shared` another user owns, and another user's 0664 one.
 
 Round 1 changed `tc`, `tests/test_shared.py`,
 `tests/test_codex_route.py`, this file, `pauses/SHARED-1.md`,
@@ -171,18 +174,27 @@ until D21 ruled on them.
   this user owns it at another mode (0664, as init wrote it before D21)
   sets it to 0644 through an `O_NOFOLLOW` descriptor
   (`settle_marker_mode`, the second D21 commit, at the architect's yes).
-  Another user's `.shared` is left as it is.
-- When `.shared` names another group and another user owns it, init
-  refuses first, before it makes, walks or changes anything: one line,
-  `tc init: may not change <ROOT>/.shared; the mailbox stays shared with
-  group <h>; only the user who ran init (<owner>) can change the group.
-  Nothing changed.`, exit 1 (the second D21 commit, at the architect's
-  yes). A member's inbox, card and `mail/.seq` keep their group.
-  `init_user_words` builds the D21 line from `lstat`.
-- The same D21 line ends the old refusal after the walk when init may
-  not replace a `.shared` another user owns for another reason (an
-  unreadable one). `.shared`'s own owner, refused by a read-only ROOT,
-  gets the old words with no such line.
+  Another user's `.shared` is left as it is. When the group or anyone
+  else may write it, the member's rerun says one line on stderr,
+  `tc init: <ROOT>/.shared is 0664; ask <owner> to rerun init to tighten
+  it`, and still exits 0 (the third D21 commit).
+- When another user owns `.shared` (`marker_other_owner`, from `lstat`)
+  and init would rewrite it, init refuses first, before the umask, the
+  folders it makes and the walk, exit 1. A member's inbox, card and
+  `mail/.seq` keep their mode and group. Two cases, one line each:
+  - it names another group (the second D21 commit): `tc init: may not
+    change <ROOT>/.shared; the mailbox stays shared with group <h>; only
+    the user who ran init (<owner>) can change the group. Nothing
+    changed.`
+  - it cannot be read (the third D21 commit): `tc init: <ROOT>/.shared
+    is owned by <owner> and unreadable to you; only the user who ran
+    init (<owner>) can change the group. Nothing changed.`
+  `INIT_USER_WORDS` holds the D21 line, so both say it the same way.
+- So the refusal after the walk, when `.shared` cannot be written, is
+  only ever about a `.shared` this user owns, or none, and carries no
+  D21 line. The first D21 commit added the line there; the third took it
+  out, since no other user's `.shared` reaches that point. Its own
+  owner, refused by a read-only ROOT, gets the old words.
 - Under a shared mailbox, a local send to a name with no card is
   refused, exit 1, with exactly `tc send: nobody has joined as <name>
   on this shared mailbox`, whether or not `mail/to-<name>/` is there.
@@ -207,21 +219,22 @@ until D21 ruled on them.
   unreadable, and `tc watch` does not call `health_snapshot`, so the
   block does not claim either.
 
-**Tests.** `tests/test_shared.py`, 37 tests in seven classes, each on
+**Tests.** `tests/test_shared.py`, 39 tests in seven classes, each on
 `tests/_root.py`. Every class inherits `UmaskTestCase`, so each test
 runs under umask 022 and a tc that never sets its own writes 0644 and
 fails. `SharedTest` (H1, 4), `NoPlantedLinksTest` (D17, 5),
 `RegularFilesOnlyTest` (D19 and the status age, 5),
 `NobodyTouchesAnotherMembersMailTest` (D20, 8), `InitAndRefusalsTest`
 (init, make_folder and the refusals' words, 8),
-`SharedIsTheInitUsersAndDeliveryNeedsACardTest` (D21, 6) and
+`SharedIsTheInitUsersAndDeliveryNeedsACardTest` (D21, 8) and
 `GroupsToTestTest` (1). The mode tests run once with the
 user's primary group and once with a supplementary group; a user with no
 named supplementary group gets that run as a skipped subtest with its
 reason, never a silent absence. One user cannot prove another user's
 refusals, so the tests prove the modes, the owners and the checks tc
-makes: an owner that differs is what a patched `os.lstat` reports, and
-an EPERM rename is injected. The cross-user proof is
+makes: an owner that differs is what a patched `os.lstat` reports (or,
+for a member's rerun, a patched `os.geteuid`), and an EPERM rename is
+injected. The cross-user proof is
 `qa/human/route-shared.md`, for Donald.
 
 ## Verify
@@ -242,6 +255,8 @@ Node 22). Each command's result line:
 | D21 | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 142 tests`, `OK` |
 | D21, second | `python3 -m unittest tests.test_shared -v` | `Ran 37 tests`, `OK` |
 | D21, second | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 145 tests`, `OK` |
+| D21, third | `python3 -m unittest tests.test_shared -v` | `Ran 39 tests`, `OK` |
+| D21, third | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 147 tests`, `OK` |
 | each | `node --test tests/*.test.mjs` | `# tests 8`, `# pass 8`, `# fail 0` |
 
 The base, `c8708e5`, ran 108 Python tests and 8 Node tests, all passing.
@@ -322,6 +337,18 @@ reworked test, whose other-owner case is now an unreadable `.shared`.
 | `Path.exists()` back in `mailbox_summary` | `test_a_status_link_into_an_unreadable_folder_leaves_health_answering` | `1 != 0 : Traceback (most recent call last): ... PermissionError: [Errno 13] Permission denied: '.../status/b.md'` |
 | no D21 words after the walk | `test_another_members_init_may_not_change_the_group_and_says_who_can` | `'.../.shared stays unreadable, so tc refuses every command but init; only the user who ran init (<user>) can change the group' not found in 'tc init: could not make .../status: ...'` |
 
+The third D21 commit, on its own code. The fourth row above no longer
+applies: the third commit takes the D21 line out of the refusal after
+the walk, and that test is now
+`test_shareds_own_owner_refused_after_the_walk_is_never_told_to_ask_anyone`.
+416 is 0640 and 420 is 0644.
+
+| Mutation | Test | Red |
+|---|---|---|
+| walk first, then refuse (both pre-walk refusals moved after the walk) | `test_a_members_init_over_an_unreadable_shared_another_user_owns_changes_nothing` | `{'mai[330 chars]e', 416, <gid>), 'mail/to-b/read': ('folder', 2[57 chars]...)} != {'mai[330 chars]e', 420, <gid>), 'mail/to-b/read': ('folder', 2[57 chars]...)}` |
+| the same, on the other-group case | `test_a_members_init_with_another_group_after_joining_changes_nothing` | `{'mai[16 chars]045, <gid2>), 'outbox': ('folder', 2045, <gid2>), ...} != {'mai[16 chars]045, <gid1>), ...}` |
+| no line for another user's 0664 `.shared` (extra) | `test_a_members_same_group_rerun_leaves_another_users_0664_shared_and_says_so` | `'' != 'tc init: .../.shar[56 chars]it\n'` |
+
 ## Assumptions
 
 1. **Sticky on the four and on every inbox.** D17 put it on `mail/`,
@@ -369,16 +396,23 @@ reworked test, whose other-owner case is now an unreadable `.shared`.
 16. **Another member's rerun of init with the same group is not
     refused** (the D21 round). `.shared` already names g, so init leaves
     it alone (not rewritten, its mode not touched) and fixes only what
-    that member owns. A 0664 `.shared` stays so until its owner reruns.
+    that member owns. A group- or world-writable `.shared` stays so until
+    its owner reruns; the member's rerun says one line about it and still
+    exits 0.
 17. **The D21 words go only where another user owns `.shared`**, found
-    with `lstat`: before the walk, when it names another group; after
-    it, on a permission error replacing it. Its own owner, refused by a
-    read-only ROOT, keeps the old words, and a `.shared` that is gone or
-    out of reach names no owner.
-18. **The pre-walk refusal covers only a `.shared` that names a group**,
-    as the architect's ruling says. An unreadable `.shared` another user
-    owns still gets the walk, then the refusal with the D21 line (see
-    "Spotted, not fixed").
+    with `lstat`, and only before the walk: when it names another group,
+    or cannot be read. Its own owner, refused by a read-only ROOT, keeps
+    the old words, and a `.shared` that is gone or out of reach names no
+    owner.
+18. **"Unreadable to you" covers every unreadable `.shared`**, as the
+    architect's words do: no read access, two lines, a link, too big, not
+    UTF-8. When the folders above ROOT are what stops this user, `lstat`
+    cannot reach `.shared` either, so no owner is named and init refuses
+    on search access as before.
+19. **The line about another user's writable `.shared` is advice, not a
+    skip.** It names the mode and the owner whose rerun tightens it, and
+    leaves the exit code alone. A `.shared` at 0640 or tighter (not
+    writable by the group) gets no line.
 
 ## Pauses
 
@@ -395,7 +429,8 @@ taking mail) are built in the D21 round, under "What was built". So are
 the two the first D21 commit added (another member's init regrouping
 that member's own entries before `.shared` refused it, and a pre-D21
 0664 `.shared` kept on a same-group rerun), in the second D21 commit at
-the architect's yes.
+the architect's yes, and the one the second added (an unreadable
+`.shared` another user owns still walked first), in the third.
 
 1. **A rejoin keeps an inbox the joiner owns at whatever mode it has**
    (2775 from before D20). Each owner reruns init to fix their own
@@ -417,14 +452,7 @@ the architect's yes.
    REC-19) are DOCS's.
 5. **For the merge with BOARD.** `health_snapshot()` has two keys more
    than at `c8708e5`: `shared_group` and `shared_problem`.
-6. **An unreadable `.shared` another user owns still gets the walk
-   first** (the second D21 commit). The pre-walk refusal needs a
-   `.shared` that names a group. When it is unreadable (two lines, a
-   link), a member's init still moves what that member owns into the
-   group asked for, then is refused with the D21 line. Rarer than the
-   case now fixed, since every other command already refuses on an
-   unreadable `.shared`. Ask whether the pre-walk refusal should cover it.
-7. **For the architect: `tc watch` and `health_snapshot`.** The ask was
+6. **For the architect: `tc watch` and `health_snapshot`.** The ask was
    to say `health_snapshot` stops raising so that `tc health` and `tc
    watch` keep answering. `tc watch` never calls it (only `cmd_health`
    does), and `main()` refuses `tc health` on a `.shared` already
@@ -444,9 +472,11 @@ the architect's yes.
 - The D21 cross-user cases: the kernel refusing ben's write or chmod of
   ann's `.shared`, ben's init words with a real second owner (the test
   shows them with a patched `os.lstat` and a read-only ROOT), and a
-  card-less inbox another user made, and a joined member's init leaving
-  that member's entries as they were. `route-shared.md` steps 6, 7, 13
-  and 20 walk them; not run.
+  card-less inbox another user made, a joined member's init leaving
+  that member's entries as they were (another group, or a `.shared` ann
+  made unreadable), and the line a member's rerun says about ann's 0664
+  `.shared`. `route-shared.md` steps 6, 7, 13 to 15 and 22 walk them;
+  not run.
 - `test_a_members_init_with_another_group_after_joining_changes_nothing`
   needs a supplementary group and skips with its reason without one. It
   ran here.

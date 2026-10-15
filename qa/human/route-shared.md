@@ -1,7 +1,8 @@
 # QA: the shared mailbox, two Linux users in one group (C4, D19, D20, D21)
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
-        steps (6, 7, 13 and 20) added by the SHARED fixer, Claude Opus 5.5
+        steps (6, 7, 13 to 15, and 22) added by the SHARED fixer, Claude
+        Opus 5.5
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
@@ -105,14 +106,30 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
       `-rw-rw-r--` on `.seq`.
     - As ann: `tc send --from ann --to ben "after ben's init"` lands. As
       ben: `tc read ben` prints it.
+14. As ann: `chmod 600 /srv/tc-shared/.shared`, so ben cannot read it.
+    As ben: `tc init --shared --group tcshare`.
+    - It prints one line, `tc init: /srv/tc-shared/.shared is owned by
+      ann and unreadable to you; only the user who ran init (ann) can
+      change the group. Nothing changed.`, and exits 1. No `skipped`
+      lines.
+    - The three `ls` commands from step 13 print the same lines.
+    - As ann: `chmod 644 /srv/tc-shared/.shared`, to put it back.
+15. As ann: `chmod g+w /srv/tc-shared/.shared`, as init left it before
+    D21. As ben: `tc init --shared --group tcshare`.
+    - It exits 0 and says, on stderr, `tc init: /srv/tc-shared/.shared
+      is 0664; ask ann to rerun init to tighten it`.
+    - `ls -l /srv/tc-shared/.shared` still shows `-rw-rw-r--`, owner
+      `ann`: ben's init leaves ann's file as it is.
+    - As ann: `tc init --shared --group tcshare`. `ls -l` now shows
+      `-rw-r--r--`.
 
 ## Nobody touches another member's unread mail (D20)
 
-14. As ann: `tc send --from ann --to ann "ann's own note, do not touch"`.
+16. As ann: `tc send --from ann --to ann "ann's own note, do not touch"`.
     Note the file it names, below `M`:
     `M=/srv/tc-shared/mail/to-ann/00000N-from-ann.md` (N from the
     output). It is ann's unread mail, written by ann, in ann's inbox.
-15. As ben, try each of these. Each is refused, and the file is unchanged:
+17. As ben, try each of these. Each is refused, and the file is unchanged:
     - `rm $M`: `rm: cannot remove ...: Operation not permitted`.
     - `mv $M /srv/tc-shared/mail/to-ann/renamed.md`: `Operation not
       permitted`.
@@ -127,25 +144,25 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
       works, since ben owns it.
     - `mv /srv/tc-shared/mail/to-ann /srv/tc-shared/mail/to-gone`:
       `Operation not permitted` (the sticky `mail/`; ann owns `to-ann`).
-16. As ben: `tc read ann`.
+18. As ben: `tc read ann`.
     - It prints `tc read: <M> not moved to read/ (Operation not
       permitted); left unread` on stderr, nothing on stdout, and exits 1,
       with no traceback. `$M` is still in `mail/to-ann/`.
-17. As ben: `tc status ann "hijacked"`, after ann has run
+19. As ben: `tc status ann "hijacked"`, after ann has run
     `tc status ann "busy"` once.
     - It exits 1 with `tc: /srv/tc-shared/status/ann.md belongs to ann,
       and this user may not open it (Permission denied); under a shared
       mailbox only its owner writes it; nothing written through it`.
       `tc status` still shows ann's `busy`.
-18. As ben: `tc join ann`.
+20. As ben: `tc join ann`.
     - It exits 1 with `tc join: /srv/tc-shared/cards/ann.json belongs to
       ann; under a shared mailbox only its owner can replace it. No card
       written; pick another name, or ask ann.` No `.tmp` is left in
       `cards/`.
-19. As ben: `tc send --from ben --to nobody "hi"`.
+21. As ben: `tc send --from ben --to nobody "hi"`.
     - It exits 1 with `tc send: nobody has joined as nobody on this
       shared mailbox`, and `ls /srv/tc-shared/mail` shows no `to-nobody`.
-20. As ben: `mkdir /srv/tc-shared/mail/to-ghost`, an inbox nobody joined
+22. As ben: `mkdir /srv/tc-shared/mail/to-ghost`, an inbox nobody joined
     (any member may make a folder in `mail/`). As ann: `cat
     /srv/tc-shared/mail/.seq`, then `tc send --from ann --to ghost "hi"`,
     then `cat /srv/tc-shared/mail/.seq` again.
@@ -156,7 +173,7 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
       `cat`s print the same number.
     - As ben: `rmdir /srv/tc-shared/mail/to-ghost`. It works: ben owns
       it.
-21. As ann: `tc read ann`.
+23. As ann: `tc read ann`.
     - It prints `ann's own note, do not touch`, unchanged.
 
 What D20 does not stop, by design: a member may still change or remove a
@@ -168,17 +185,17 @@ fail or ring once more, never read, lose or alter mail.
 
 ## A planted link is never printed (D19)
 
-22. As ben: `ln -s /home/ann/.profile
+24. As ben: `ln -s /home/ann/.profile
     /srv/tc-shared/mail/to-ann/000099-from-ben.md` (any file only ann can
     read will do).
-23. As ann: `tc peek ann`, then `tc read ann`, then `tc log`.
+25. As ann: `tc peek ann`, then `tc read ann`, then `tc log`.
     - None of them prints a line of the linked file. Each names
       `000099-from-ben.md not shown (it is a symlink, which tc never
       follows)` on stderr and exits 1 after printing the rest. `tc read`
       says `left in place` and leaves the link in `mail/to-ann/`.
-24. As ann: `rm /srv/tc-shared/mail/to-ann/000099-from-ben.md`.
+26. As ann: `rm /srv/tc-shared/mail/to-ann/000099-from-ben.md`.
     - It works: ann owns her inbox. ben could also remove his own link.
 
 ## Afterward
 
-25. The mailbox and the group stay until you remove them yourself.
+27. The mailbox and the group stay until you remove them yourself.

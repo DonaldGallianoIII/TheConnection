@@ -40,9 +40,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             and mode of every folder and file under them that is not right
             yet, then writes .shared at 0644, owner-write only (D21),
             unless it already names the group; then its owner's rerun
-            sets it to 0644. When .shared names another group and
-            another user owns it, init refuses before it changes
-            anything (D21). Shared
+            sets it to 0644, and another member's says one line when it
+            is writable. When another user owns .shared and it names
+            another group or cannot be read, init refuses before it
+            changes anything (D21). Shared
             or not, the locks, mail/.seq, status files and the ring marker
             are opened without following a symlink, and an inbox or its
             read/ is lstat()ed before use: a link at any of them is
@@ -234,6 +235,9 @@ SHARED_MARKER_READ_MAX_BYTES = 4096
 # other member can change which group everyone's tc uses. Init's umask
 # (SHARED_UMASK) takes no bit from it, so a rewrite on a rerun is 0644 too.
 SHARED_MARKER_MODE = 0o644
+# D21's words for who may change a shared mailbox's group, with the
+# login name of the user who owns .shared.
+INIT_USER_WORDS = "only the user who ran init ({owner}) can change the group"
 # The folders a shared mailbox shares, by name under ROOT (C4). outbox/ is
 # the ssh route's (C3); init reaches it whenever it is there.
 SHARED_FOLDER_NAMES = ("mail", "status", "cards", "outbox")
@@ -911,41 +915,45 @@ def claim_inbox(name):
 
 
 # SHARED D21 (Claude Opus 5.5, unreviewed): .shared belongs to the user who ran init.
-def init_user_words(marker):
-    """D21's words for a .shared at `marker` that another user owns: `; only the user who ran init (<owner>) can change the group`, else "".
+def marker_other_owner(marker):
+    """The login name of the user who owns the .shared at `marker` when that is another user, else None.
 
-    "" when this user owns it, and when nothing at `marker` can be
+    None when this user owns it, and when nothing at `marker` can be
     lstat()ed (gone, or out of reach), since there is no owner to name.
+    A link is lstat()ed, never followed: its own owner is the one named.
 
     @interacts  lstats `marker`; reads the user database when another
                 user owns it.
     @deps       user_name; os.
     @complexity O(1): one lstat and at most one user lookup.
-    @alloc      one string, returned.
+    @alloc      one string or none, returned.
     """
     try:
         owner = os.lstat(marker).st_uid
     except OSError:
-        return ""
-    if owner == os.geteuid():
-        return ""
-    return f"; only the user who ran init ({user_name(owner)}) can change the group"
+        return None
+    return None if owner == os.geteuid() else user_name(owner)
 
 
 def settle_marker_mode(marker):
-    """Set the .shared at `marker` to SHARED_MARKER_MODE when this user owns it at another mode (D21); leave anyone else's alone.
+    """Set the .shared at `marker` to SHARED_MARKER_MODE when this user owns it at another mode (D21); name another user's group- or world-writable one.
 
     For init's rerun with the group .shared already names, so a .shared
     written before D21 (0664) is made owner-write only by its owner. It
     is opened with O_NOFOLLOW and O_NONBLOCK and changed through that
-    descriptor, never through a link. Another user's .shared, or anything
-    that is not a regular file, is left as it is. A change that fails is
-    refused (exit 1, words); the rest of init is done by then.
+    descriptor, never through a link. Another user's .shared is left as
+    it is; when the group or anyone else may write it, one line on
+    stderr says so and names whose rerun tightens it, and init's exit
+    code is not changed by it. Anything that is not a regular file is
+    left alone. A change that fails is refused (exit 1, words); the rest
+    of init is done by then.
 
     @interacts  opens and fstats `marker` and, when it is this user's at
-                another mode, fchmods it; on a failure one line to stderr
-                and exit 1.
-    @deps       refuse; os, stat; SHARED_MARKER_MODE, EXIT_REFUSED.
+                another mode, fchmods it; for another user's writable one
+                reads the user database and writes one line to stderr;
+                on a failure one line to stderr and exit 1.
+    @deps       refuse, user_name; os, stat, sys; SHARED_MARKER_MODE,
+                EXIT_REFUSED.
     @complexity O(1).
     @alloc      one descriptor, closed before return.
     """
@@ -953,9 +961,13 @@ def settle_marker_mode(marker):
         fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
             st = os.fstat(fd)
-            if (stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid()
-                    and stat.S_IMODE(st.st_mode) != SHARED_MARKER_MODE):
-                os.fchmod(fd, SHARED_MARKER_MODE)
+            mode = stat.S_IMODE(st.st_mode)
+            if stat.S_ISREG(st.st_mode) and mode != SHARED_MARKER_MODE:
+                if st.st_uid == os.geteuid():
+                    os.fchmod(fd, SHARED_MARKER_MODE)
+                elif mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    print(f"tc init: {marker} is {mode:04o}; ask {user_name(st.st_uid)} to rerun init to "
+                          f"tighten it", file=sys.stderr)
         finally:
             os.close(fd)
     except OSError as err:
@@ -986,13 +998,15 @@ def cmd_init(args):
     SHARED_MARKER_MODE (0644), so only the user who ran init can rewrite
     it. tc never makes it group-writable. A rerun that finds it naming g
     does not rewrite it, and when this user owns it at another mode (0664
-    from before D21) sets it to SHARED_MARKER_MODE (settle_marker_mode).
-    When .shared names another group and another user owns it, init
-    refuses first, before it makes, walks or changes anything: exit 1,
-    the mailbox stays shared with that group, and only the user who ran
-    init, named, can change the group (init_user_words). The same words
-    end the refusal when init may not replace a .shared another user
-    owns for any other reason (an unreadable one).
+    from before D21) sets it to SHARED_MARKER_MODE (settle_marker_mode);
+    when another user owns it and the group may write it, one line names
+    whose rerun tightens it. When another user owns .shared
+    (marker_other_owner) and init would rewrite it, because it names
+    another group or cannot be read, init refuses first, before the
+    umask, the folders it makes and the walk: exit 1, nothing changed,
+    and INIT_USER_WORDS names who can change the group. So the refusal
+    after the walk, when .shared cannot be written, is only ever about a
+    .shared this user owns, or none.
 
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19 and the audit's
     LOW-2 to LOW-4 and LOW-7. Init first makes ROOT (it is not shared:
@@ -1008,23 +1022,22 @@ def cmd_init(args):
     the group .shared names, or .shared still unreadable.
 
     @interacts  reads the group database and this process's groups;
-                reads ROOT/.shared (shared_group) and, when it names
-                another group, lstats it for its owner (init_user_words);
-                sets its umask (SHARED_UMASK); makes ROOT and its missing
-                parents, and each missing top folder; walks the four
-                folders and opens, fstats and changes each entry
-                (shared_entries); when .shared names g, opens it and sets
-                its mode if this user owns it (settle_marker_mode); else
+                reads ROOT/.shared (shared_group) and, unless it names g,
+                lstats it for its owner and reads the user database
+                (marker_other_owner); sets its umask (SHARED_UMASK); makes
+                ROOT and its missing parents, and each missing top folder;
+                walks the four folders and opens, fstats and changes each
+                entry (shared_entries); when .shared names g, opens it and
+                sets its mode if this user owns it, or says one line if
+                another user's is writable (settle_marker_mode); else
                 creates ROOT/.shared.<pid>.tmp at SHARED_MARKER_MODE and
                 renames it to ROOT/.shared, removing its own .tmp if the
-                rename fails, and on a permission error lstats
-                ROOT/.shared for its owner and reads the user database.
-                Prints one line, plus one stderr line per skipped entry,
-                first.
-    @deps       shared_entries, shared_group, init_user_words,
+                rename fails. Prints one line, plus one stderr line per
+                skipped entry, first.
+    @deps       shared_entries, shared_group, marker_other_owner,
                 settle_marker_mode, write_new_file, refuse, printable; grp,
                 os, sys; SHARED_FOLDER_NAMES, SHARED_MARKER_NAME,
-                SHARED_MARKER_MODE, SHARED_UMASK.
+                SHARED_MARKER_MODE, INIT_USER_WORDS, SHARED_UMASK.
     @complexity O(f) over f folders and files under the four folders: the
                 inboxes and every read/ (hundreds to thousands, growing
                 with the history).
@@ -1044,11 +1057,14 @@ def cmd_init(args):
         current = shared_group()
     except ValueError:
         current = ValueError  # unreadable: init is the one command that runs past it
-    # SHARED D21 (Claude Opus 5.5, unreviewed): another member's init that would change the group changes nothing.
-    only = init_user_words(marker) if isinstance(current, str) and current != group else ""
-    if only:
+    # SHARED D21 (Claude Opus 5.5, unreviewed): a .shared another user owns, that init would rewrite, changes nothing.
+    owner = marker_other_owner(marker) if current != group else None
+    if owner is not None and current is ValueError:
+        refuse(f"tc init: {marker} is owned by {owner} and unreadable to you; "
+               f"{INIT_USER_WORDS.format(owner=owner)}. Nothing changed.", EXIT_REFUSED)
+    if owner is not None and isinstance(current, str):
         refuse(f"tc init: may not change {marker}; the mailbox stays shared with group "
-               f"{printable(current)}{only}. Nothing changed.", EXIT_REFUSED)
+               f"{printable(current)}; {INIT_USER_WORDS.format(owner=owner)}. Nothing changed.", EXIT_REFUSED)
     os.umask(SHARED_UMASK)
     try:
         os.makedirs(ROOT, exist_ok=True)  # ROOT itself is not shared: no group, no mode
@@ -1085,8 +1101,6 @@ def cmd_init(args):
             state = ("the mailbox stays private" if current is None
                      else f"{marker} stays unreadable, so tc refuses every command but init"
                      if current is ValueError else f"the mailbox stays shared with group {printable(current)}")
-            if current is not None and isinstance(err, PermissionError):
-                state += init_user_words(marker)  # SHARED D21 (Claude Opus 5.5, unreviewed)
             refuse(f"tc init: could not write {marker} ({err.strerror}); {state}. {done['folder']} "
                    f"folders and {done['file']} files are in group {printable(group)}.", EXIT_REFUSED)
     print(f"mailbox shared with group {printable(group)}: {done['folder']} folders and "
