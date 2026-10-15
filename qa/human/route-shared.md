@@ -6,9 +6,9 @@ Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
         the SHARED fixer, Claude Opus 5.5; steps 30 and 31, and the words
         of steps 3, 15, 28 and 29, in round 3 by the SHARED fixer, Claude
         Opus 5.5, 2026-10-15; steps 15, 30 and 31 changed in round 4 by
-        the SHARED fixer, Claude Opus 5.5, 2026-10-15; steps 15 and 31
-        changed in round 5 by the SHARED fixer, Claude Opus 5.5,
-        2026-10-15
+        the SHARED fixer, Claude Opus 5.5, 2026-10-15; steps 15 and 31,
+        and the paragraph after step 23, changed in round 5 by the
+        SHARED fixer, Claude Opus 5.5, 2026-10-15
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
@@ -218,7 +218,10 @@ message that member wrote, and the recipient may remove anything in its
 own inbox. The files every member must write stay group-writable: as
 ben, `echo 999 > /srv/tc-shared/mail/.seq` works, and the next send is
 numbered 1000. The worst a member can do through them is make a send
-fail or ring once more, never read, lose or alter mail.
+fail, or make a codex ring come once more or once fewer (a member who
+holds the ring marker through a failed ring leaves it clear, and that
+send warns that a later send may not ring), never read, lose or alter
+mail.
 
 ## A planted link is never printed (D19)
 

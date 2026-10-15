@@ -308,7 +308,10 @@ SHARED_FOLDER_MODE = 0o2775
 # another member's mail.
 # The files every member must write, directly in mail/: mail/.seq, the
 # locks and the ring marker. Owner and group read and write them. The
-# worst a member can do through one is make a send fail or ring once more.
+# worst a member can do through one is make a send fail, or make a ring
+# come once more or once fewer (SHARED fix round 5, Claude Opus 5.5,
+# unreviewed: a held marker can leave it clear after a failed ring, and
+# the send then warns that a later send may not ring).
 SHARED_WRITABLE_FILE_MODE = 0o664
 # Message, card and status files (D20 item 2): the owner reads and writes,
 # the group only reads, so no member rewrites another's file in place.

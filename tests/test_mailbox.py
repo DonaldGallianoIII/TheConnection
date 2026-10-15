@@ -328,6 +328,11 @@ class MailboxTest(unittest.TestCase):
         LOW-6. `deadline`, a time.monotonic() value the caller took
         `ceiling` seconds ahead (K3's fifty, before their first spawn),
         counts the ceiling from then; None counts it from this call.
+        SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's LOW-3
+        (audits/2026-10-15-0201-quick). Each poll tests the deadline
+        before it looks for a finished child. So spawns slower than a
+        sender's own bound fail by count of senders blocked, never by a
+        sender that gave up past its bound being blamed for not waiting.
 
         @interacts  reads /proc/locks; reads a finished child's output.
         @deps       lock_waiters, said, time.
@@ -342,15 +347,15 @@ class MailboxTest(unittest.TestCase):
             waiting = lock_waiters(seq) & pids
             if waiting == pids:
                 return
+            if time.monotonic() >= deadline:  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): LOW-3, before a finished child
+                self.fail(f"{what}: {len(waiting)} of {len(pids)} sends blocked on {seq} "
+                          f"within {ceiling} s")
             done = [proc for proc in procs if proc.poll() is not None]
             if done:
                 proc = done[0]
                 out, err = proc.communicate()
                 self.fail(f"{what}: pid {proc.pid} finished while the test held {seq}, so it "
                           f"never waited for the lock{said(proc.args[2:], proc.returncode, out, err)}")
-            if time.monotonic() >= deadline:
-                self.fail(f"{what}: {len(waiting)} of {len(pids)} sends blocked on {seq} "
-                          f"within {ceiling} s")
             time.sleep(LOCK_POLL_SECONDS)
 
     def test_k1_a_message_is_read_once(self):
