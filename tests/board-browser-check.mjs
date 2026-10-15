@@ -8,16 +8,18 @@
  *   NODE_PATH=<a Playwright install>/node_modules node tests/board-browser-check.mjs
  *
  * It builds a throwaway mailbox in the system temp folder: 14 names in two
- * orchestrator trees and a pair of peers. The cards are in C1's shape:
+ * orchestrator trees and a pair of peers, the owner's real size, and two
+ * names of 64 characters (C0's longest), a root over a worker. The cards
+ * are in C1's shape:
  * written by `tc join` when this tree's tc has it (it says which), else by
  * hand. p1 and p2 share a named account and mail each other, and e2 and e3
  * share another and do not, so the board draws both kinds of native pair.
  * The mail is sent with this tree's tc. Six listeners start with
  * `tc wait --timeout`, each proven by `tc health`; then `d`'s and `e2`'s
- * are seen by the feed and stopped by their pids, so both are down
- * workers: `d` is b's only child on its side, and `e2` sits in a's wrapped
- * row, so its wire shares a stretch with a's quiet wire to `b` and its
- * flowing one to `e3`. It starts
+ * are seen by the feed and stopped by their pids with no new mail, so both
+ * are down workers, not woken ones (D24): `d` is b's only child on its
+ * side, and `e2` sits in a's wrapped row, so its wire shares a stretch
+ * with a's quiet wire to `b` and its flowing one to `e3`. It starts
  * board/serve.py on a port the OS picks, under its own time limit, opens
  * the board at 1280 x 900 and 390 x 844, and fails on any of: a console
  * error, sideways scroll, drawn text under 11 px, a session missing from the
@@ -27,12 +29,24 @@
  * less its margins, a wire label over another label, a node box or a tree
  * heading, a wire or connector through a node box, the legend not below the
  * last session, no list of roots (or a root link that does not bring its
- * tree into view), an ellipsis or cut words in the pill or the footer, a
+ * tree into view: at a short viewport z's heading must start out of view,
+ * and the click must scroll the page and bring it in), a request to any
+ * host but 127.0.0.1 (each one aborted before it leaves the page) or no
+ * request to 127.0.0.1 seen at all, one of the board's two faces not loaded from
+ * serve.py (D26), a stale line out of view on a page scrolled down while
+ * the feed fails, a root jump made while stale that stops its heading
+ * anywhere but just under the stale line, an outline row, group heading or root button past the
+ * window's right edge, a long name's role words off screen on the phone,
+ * an ellipsis or cut words in the pill or the footer, a
  * native pair whose two sessions do not both say `native with <the other> ·
  * not observed` in full, and (on the desktop) a down worker's wire that is
  * not dotted, that a wire other than a dotted one is painted over, that
  * has no knockout in the canvas's face right under it, or whose gaps show
- * anything but the canvas in a screenshot. It saves four screenshots
+ * anything but the canvas in a screenshot. Then, on a stand-in feed (a
+ * real answer with three nodes changed, served by page.route) in each
+ * look at 1280 x 900, it fails if a woken, a working or a down node's
+ * state line is clipped or its unread words (`unread unknown`) or its
+ * badge (`inbox unreadable`) are cut. It saves four screenshots
  * (each size in color and in grayscale) to a temp folder it prints, never
  * into the repo. Every line it prints goes through masked(), so the board's
  * token never shows, an error's URL included.
@@ -68,26 +82,31 @@
  *             that mailbox, with the session's own CLAUDE and CODEX
  *             variables left out of a join; starts six `tc wait` children
  *             and one board/serve.py child and stops each by its own pid;
- *             asks serve.py's /feed twice with the token; starts one
- *             headless Chromium and closes it; sets file times on the
- *             mailbox's messages so the newest wires flow while the page is
- *             open; takes one more screenshot per desktop page, kept in
- *             memory, to read the down wires' pixels; listens for SIGTERM
- *             and SIGINT. --self-test writes a
+ *             asks serve.py's /feed three times with the token; starts one
+ *             headless Chromium and closes it; answers a page's /feed
+ *             itself (page.route) on the stale pages and the two stand-in
+ *             pages; sets file times on the
+ *             mailbox's messages, once before the down workers are made
+ *             and again before each page, so the newest wires flow while
+ *             the page is open and no down worker reads woken; takes one more screenshot per desktop page, kept in
+ *             memory, to read the down wires' pixels; sets a page's
+ *             viewport for the jump checks; watches every request each
+ *             page makes; listens for SIGTERM and SIGINT. --self-test writes a
  *             fake playwright module to a temp folder, runs this file as a
  *             child seven times, signals or kills five of them, and stops
  *             anything they left by its pid
  * @deps       Node 18+, Playwright (any recent version; 1.63 on the owner's
  *             machine), python3, ./tc, board/serve.py
- * @complexity O(v * (b^2 + w * s * b + d * s' * c)) per view over b <= 14
+ * @complexity O(v * (b^2 + w * s * b + d * s' * c)) per view over b <= 16
  *             boxes, w wires and s samples along each, and the s' samples
  *             along each of the d = 2 down wires, each tested against c
  *             boxes, ports and labels (tens); decoding one screenshot is
  *             O(P) over its P pixels (about 1280 x 1800); a run takes
  *             seconds (the self-test, seven runs without a browser, tens of
  *             seconds)
- * @alloc      one browser, one page at a time, four screenshots on disk and
- *             one decoded screenshot per desktop page in memory
+ * @alloc      one browser, one page at a time (six in all), four
+ *             screenshots on disk, one decoded screenshot per desktop page
+ *             in memory, and one stand-in feed
  */
 import { createRequire } from 'node:module';
 import { spawn, execFileSync } from 'node:child_process';
@@ -102,11 +121,18 @@ const REPO = join(dirname(HERE), '..');
 const TC = join(REPO, 'tc');
 const SERVE = join(REPO, 'board', 'serve.py');
 
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// Two names of 64 characters, C0's longest, with no hyphen to break at: a
+// root over a worker, so the phone's outline shows one in a row, a group
+// heading and a root button, and the other in a row of its own.
+const LONG_STEM = 'orchestrator_for_the_parser_and_the_lexer_and_the_codegen_team_';
+const LONG_NAMES = [`${LONG_STEM}a`, `${LONG_STEM}b`];
 // The owner's real board is about 14 names: two orchestrator trees (b is a
-// relay under a) and two peers. [name, reports_to].
+// relay under a) and two peers; then the two long names. [name, reports_to].
 const CARDS = [
   ['a', null], ['b', 'a'], ['docs', 'a'], ['c', 'b'], ['d', 'b'], ['e1', 'a'], ['e2', 'a'], ['e3', 'a'],
   ['z', null], ['y1', 'z'], ['y2', 'z'], ['y3', 'z'], ['p1', null], ['p2', null],
+  [LONG_NAMES[0], null], [LONG_NAMES[1], LONG_NAMES[0]],
 ];
 const NAMES = CARDS.map(([name]) => name);
 // Two native pairs: p1 and p2 share an account and mail each other; e2 and
@@ -125,8 +151,10 @@ const MAIL = [
   ['z', 'y3'], ['z', 'a'], ['a', 'z'], ['a', 'e1'], ['a', 'e2'], ['a', 'e3'], ['p1', 'p2'], ['p2', 'p1'], ['b', 'd'],
 ];
 // Messages from this seq on are made fresh before each page opens, so their
-// wires flow (the feed's 10 s writing window) and carry labels: seven pairs,
-// among them a wire between the two trees and one between the peers.
+// wires flow (the feed's 10 s writing window) and carry labels: five pairs,
+// among them a wire between the two trees and one between the peers. A
+// message to a down worker stays old: mail that reached it after it was
+// last seen listening would read as a wake (D24), not a listener lost.
 const FRESH_FROM_SEQ = 10;
 // Every other message is set this old, past the writing window, so only
 // the fresh ones flow and only their senders read writing.
@@ -144,6 +172,32 @@ const LISTENERS = ['a', 'b', 'c', 'z', 'd', 'e2'];
 // show nothing but the canvas between them.
 const DOWN_EDGES = { d: 'mailbox:b>d', e2: 'mailbox:a>e2' };
 const DOWN = Object.keys(DOWN_EDGES);
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+// The nodes a stand-in feed changes to read their lines (linesInFull), each
+// with the state word and the unread words its box must show whole, and a
+// badge where it carries one: a woken node and a working one whose unread
+// count tc could not take, and a down one whose inbox the board could not
+// list. The reason is made up.
+const MADE_UP_REASON = 'made-up reason: cannot list this inbox';
+const WHOLE_LINES = {
+  y1: {
+    node: { state: 'woken', listener_pid: null, unread: null, unread_problem: MADE_UP_REASON, status: 'parsing the logs' },
+    word: 'woken · not read', unreadWords: 'unread unknown',
+  },
+  docs: {
+    node: { state: 'working', listener_pid: null, unread: null, unread_problem: MADE_UP_REASON, status: 'drafting the README' },
+    word: 'working', unreadWords: 'unread unknown',
+  },
+  y3: {
+    node: { state: 'down', listener_pid: null, unread: null, unread_problem: MADE_UP_REASON, inbox_unreadable: true },
+    word: 'no listener', unreadWords: 'unread unknown', badge: 'inbox unreadable',
+  },
+};
+// The page's two looks, by the names ?theme= takes (look.js LOOKS).
+const LOOK_NAMES = ['dark', 'daylight'];
+// What a stand-in feed answer carries: serve.py's status and type for /feed.
+const HTTP_OK = 200;
+const FEED_TYPE = 'application/json; charset=utf-8';
 // A listener outlives the run on its own if no cleanup ran.
 const LISTEN_TIMEOUT_S = 120;
 // serve.py's own limit, for a run killed outright: an alarm set before
@@ -167,6 +221,26 @@ const VIEWS = [
   { label: '1280', width: 1280, height: 900, expect: 'graph' },
   { label: '390', width: 390, height: 844, expect: 'outline' },
 ];
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// The root link check's viewport height: short enough that z's heading
+// starts below the fold at either width, with the roots list on screen, so
+// only a working jump brings the heading into view.
+const JUMP_VIEW_H = 400;
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+// The stale jump check's viewport height: short enough that the page can
+// scroll z's heading, the last on the desktop board, up to the top of the
+// screen. And the gap theme.css keeps between a jump's target and the top,
+// or the stale line (--tc-jump-gap).
+const STALE_JUMP_VIEW_H = 300;
+const JUMP_GAP_PX = 8;
+// D26: the page asks no host but the one serve.py binds. Requests by these
+// schemes count; data: and blob: URLs never leave the page.
+const HOME_HOST = '127.0.0.1';
+// The status the stale check makes every feed answer give.
+const HTTP_SERVER_ERROR = 500;
+const WEB_SCHEMES = ['http:', 'https:', 'ws:', 'wss:'];
+// The board's two faces, shipped in board/fonts/ (theme.css @font-face).
+const FACES = ['Space Grotesk', 'JetBrains Mono'];
 const MIN_TEXT_PX = 11;
 // Two boxes may touch at an edge; this much overlap is a real overlap.
 const OVERLAP_PX = 1;
@@ -206,12 +280,11 @@ const PNG = Object.freeze({
   DEPTH: 8, CHANNELS: { 2: 3, 6: 4 }, NONE: 0, SUB: 1, UP: 2, AVERAGE: 3, PAETH: 4,
 });
 // Setup and settle times. The page polls every 3 s and draws the first
-// answer at once; fonts may come from the network.
+// answer at once; its fonts come from serve.py, as every file does.
 const SERVER_START_MS = 10000;
 const PROOF_MS = 5000;
 const PROOF_STEP_MS = 100;
 const DRAWN_MS = 10000;
-const SETTLE_MS = 800;
 const STOP_MS = 5000;
 const SPACES_IN_JSON = 0;
 // A shell's code for a process ended by a signal: this plus its number.
@@ -294,7 +367,8 @@ function buildMailbox() {
 
 /**
  * Set every message from FRESH_FROM_SEQ on to now, so its wire flows, and
- * every older one OLD_AGE_S back, so it does not.
+ * every older one OLD_AGE_S back, so it does not. Every message to a down
+ * worker is set old too, so it reads down and never woken (D24).
  * @complexity O(m) over m message files  @alloc one list of names
  */
 function freshen(root) {
@@ -302,9 +376,10 @@ function freshen(root) {
   const old = new Date(now.getTime() - OLD_AGE_S * MS_PER_S);
   const mail = join(root, 'mail');
   for (const box of readdirSync(mail).filter((d) => d.startsWith('to-'))) {
+    const toDown = DOWN.includes(box.slice('to-'.length));
     for (const where of [join(mail, box), join(mail, box, 'read')]) {
       for (const file of readdirSync(where).filter((f) => f.endsWith('.md'))) {
-        const when = Number(file.slice(0, file.indexOf('-'))) >= FRESH_FROM_SEQ ? now : old;
+        const when = !toDown && Number(file.slice(0, file.indexOf('-'))) >= FRESH_FROM_SEQ ? now : old;
         utimesSync(join(where, file), when, when);
       }
     }
@@ -416,7 +491,7 @@ async function stop(child) {
  *             block)  @alloc one plain object, with s' points per down wire
  */
 function measure(page, names) {
-  return page.evaluate(({ names, wireStep, insidePx, downEdges, dottedStep, endSkip, coverPx }) => {
+  return page.evaluate(({ names, wireStep, insidePx, downEdges, dottedStep, endSkip, coverPx, longNames }) => {
     const visible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     // On screen means reachable: drawn, and not cut off by an ancestor that
     // clips without scrolling (overflow hidden or clip).
@@ -557,10 +632,24 @@ function measure(page, names) {
     out.cutWords = [pill, ...document.querySelectorAll('.tc-conn *, .tc-foot, .tc-foot *')].filter((el) => el && visible(el) && cut(el))
       .map((el) => `${el.className}: ${el.textContent.slice(0, 40)}`);
     out.foot = document.querySelector('.tc-foot').textContent;
+    // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    // Every outline row and its words, group heading and root button, by
+    // its right edge; and each long name's row, whether its role words are
+    // drawn, unclipped, inside the viewport.
+    out.winRight = win.getBoundingClientRect().right;
+    out.edges = [...document.querySelectorAll('.tc-row, .tc-row-title, .tc-row-name, .tc-row-role, .tc-group-head, .tc-root-btn')]
+      .filter(visible).map((el) => ({ cls: el.className, text: el.textContent, right: el.getBoundingClientRect().right }));
+    out.longRows = longNames.map((name) => {
+      const row = [...document.querySelectorAll('.tc-row')].filter(visible).find((r) => r.querySelector('.tc-row-name').textContent === name);
+      if (!row) return { name, found: false, roleOn: false };
+      const role = row.querySelector('.tc-row-role');
+      const r = role.getBoundingClientRect();
+      return { name, found: true, roleOn: !!role.textContent.trim() && reachable(role) && r.width > 0 && r.left >= 0 && r.right <= innerWidth };
+    });
     return out;
   }, {
     names, wireStep: WIRE_STEP_PX, insidePx: WIRE_INSIDE_PX, downEdges: Object.values(DOWN_EDGES), dottedStep: DOTTED_STEP_PX,
-    endSkip: END_SKIP_PX, coverPx: COVER_PX,
+    endSkip: END_SKIP_PX, coverPx: COVER_PX, longNames: LONG_NAMES,
   });
 }
 
@@ -682,7 +771,14 @@ function judge(view, m, errors, jump) {
   const lastBottom = Math.max(...m.boxes.map((b) => b.bottom));
   check('legend below the last session', !!m.legend && m.legend.top >= lastBottom && !m.boxes.some((b) => overlap(m.legend, b)),
     m.legend ? `legend top ${m.legend.top.toFixed(0)}, last session bottom ${lastBottom.toFixed(0)}` : 'no legend shown');
-  check('roots listed at the top', !!m.roots && m.roots.includes('2 orchestrators: a, z'), `roots: ${m.roots}`);
+  check('roots listed at the top', !!m.roots && m.roots.includes(`3 orchestrators: a, ${LONG_NAMES[0]}, z`), `roots: ${m.roots}`);
+  const pastEdge = m.edges.filter((e) => e.right > m.winRight + 1).map((e) => `${e.cls} "${e.text.slice(0, 24)}" ends at ${e.right.toFixed(0)}`);
+  check(`no row, group heading or root button past the window's right edge (${m.winRight.toFixed(0)} px)`, pastEdge.length === 0,
+    pastEdge.join('; '));
+  const roleMiss = m.longRows.filter((r) => !r.roleOn).map((r) => (r.found ? `${r.name.slice(-12)}'s role words are off screen` : `no row for ${r.name}`));
+  if (view.expect === 'outline') {
+    check('each 64-character name\'s role words are on screen', roleMiss.length === 0, roleMiss.join('; '));
+  }
   check('the root link for z brings z\'s tree into view', jump.ok, jump.detail);
   check('nothing cut off in the pill or the footer', m.cutWords.length === 0, m.cutWords.join('; '));
   const badgeMiss = NAMES.flatMap((name) => {
@@ -715,26 +811,213 @@ function judge(view, m, errors, jump) {
 }
 
 /**
- * Click the roots list's `z` and say whether z's heading is then on screen.
- * @complexity O(1)  @alloc one small object
+ * Prove the roots list's `z` brings z's tree into view: at JUMP_VIEW_H of
+ * height and the top of the page, z's heading must start out of view (else
+ * the check fails as a precondition, since it would prove nothing); then a
+ * click event on the button, which scrolls nothing by itself (Playwright's
+ * click() would scroll the button into view first); then the page must have
+ * scrolled and the heading be in view. The viewport keeps the new height:
+ * the page closes after its last check.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+ * @complexity O(1)  @alloc a few small objects
  */
-async function jumpToZ(page) {
+async function jumpToZ(page, view) {
   const button = page.locator('.tc-roots button', { hasText: /^z$/ });
   if (await button.count() !== 1) return { ok: false, detail: 'no button named z in the roots list' };
-  await button.click();
-  return page.evaluate(() => {
+  await page.setViewportSize({ width: view.width, height: JUMP_VIEW_H });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const where = () => page.evaluate(() => {
     const heads = [...document.querySelectorAll('.tc-head, .tc-group-head')].filter((el) => el.getClientRects().length);
     const head = heads.find((el) => el.textContent.startsWith('z ·'));
-    if (!head) return { ok: false, detail: 'no heading for z' };
+    if (!head) return null;
     const r = head.getBoundingClientRect();
-    return { ok: r.top >= 0 && r.bottom <= innerHeight, detail: `z's heading at ${r.top.toFixed(0)} to ${r.bottom.toFixed(0)} in a ${innerHeight} px viewport` };
+    return { top: r.top, bottom: r.bottom, inView: r.top >= 0 && r.bottom <= innerHeight, scrollY, innerHeight };
+  });
+  const before = await where();
+  if (!before) return { ok: false, detail: 'no heading for z' };
+  const said = (w) => `z's heading at ${w.top.toFixed(0)} to ${w.bottom.toFixed(0)} in a ${w.innerHeight} px viewport, scrollY ${w.scrollY}`;
+  if (before.inView) return { ok: false, detail: `precondition: before the click ${said(before)}, already in view` };
+  await button.dispatchEvent('click');
+  const after = await where();
+  if (!after) return { ok: false, detail: 'z\'s heading went away after the click' };
+  return { ok: after.inView && after.scrollY !== before.scrollY, detail: `before the click ${said(before)}; after it ${said(after)}` };
+}
+
+/**
+ * Scroll the page to its bottom, past the roots list, make every later feed
+ * answer 500, and wait for the window to say stale; then the stale line
+ * must be on screen with its words, though the top of the page is not.
+ * Run last on a page: its feed never answers again.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+ * @complexity O(1), plus up to one poll's wait  @alloc a few small objects
+ */
+async function staleInView(page) {
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await page.route('**/feed', (route) => route.fulfill({ status: HTTP_SERVER_ERROR, body: '' }));
+  await page.waitForSelector('.tc-win[data-conn="stale"]', { state: 'attached', timeout: DRAWN_MS });
+  return page.evaluate(() => {
+    const roots = document.querySelector('.tc-roots').getBoundingClientRect();
+    const line = document.querySelector('.tc-stale');
+    const r = line.getBoundingClientRect();
+    const words = line.textContent;
+    const where = `stale line at ${r.top.toFixed(0)} to ${r.bottom.toFixed(0)} in a ${innerHeight} px viewport at scrollY ${scrollY}, `
+      + `roots list bottom at ${roots.bottom.toFixed(0)}, words "${words}"`;
+    if (roots.bottom >= 0) return { ok: false, detail: `precondition: the page is not scrolled past the roots list; ${where}` };
+    return { ok: words.startsWith('stale · last answer') && r.top >= 0 && r.bottom <= innerHeight && r.height > 0, detail: where };
   });
 }
 
 /**
+ * Watch every request `page` makes, from before it loads (D26), and abort
+ * any to a host but HOME_HOST (page.route), so a regression is caught
+ * without the owner's address reaching anyone. The request event still
+ * fires for an aborted one, so it is still counted. Returns
+ * asked(prefix): the row that passes only when the page asked no other
+ * host and asked HOME_HOST at least once (a watch that saw nothing proves
+ * nothing), each off-host URL masked.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; one helper for
+ * every page, the home count and the abort by the P4 phase fixer, round 2.
+ * Status: unreviewed.
+ * @complexity O(1) per request  @alloc one list of off-host URLs and two counts
+ * @returns {Promise<(prefix: string) => [string, boolean, string]>}
+ */
+async function watchHosts(page) {
+  const offHost = [];
+  let home = 0;
+  let aborted = 0;
+  const elsewhere = (at) => WEB_SCHEMES.includes(at.protocol) && at.hostname !== HOME_HOST;
+  await page.route(elsewhere, (route) => {
+    aborted += 1;
+    return route.abort();
+  });
+  page.on('request', (req) => {
+    const at = new URL(req.url());
+    if (elsewhere(at)) offHost.push(masked(req.url()));
+    else if (WEB_SCHEMES.includes(at.protocol)) home += 1;
+  });
+  return (prefix) => [`${prefix}the page asked no host but ${HOME_HOST} (${home} requests to it watched)`,
+    offHost.length === 0 && home > 0,
+    offHost.length ? `asked: ${offHost.join(' | ')} (aborted here: ${aborted})`
+      : (home ? '' : `no request to ${HOME_HOST} seen, so the watch proves nothing`)];
+}
+
+/**
+ * While the board is stale, prove the roots list's `z` stops z's heading
+ * under the stale line, not behind it: at STALE_JUMP_VIEW_H of height and
+ * from the top of the page (z's heading out of view, else the check fails
+ * as a precondition), a click event on the button; then the page must
+ * have scrolled, the stale line must stick at the top of the screen, and
+ * z's heading must start JUMP_GAP_PX under the line's bottom, no less (it
+ * would be behind the line) and no more (the page could not scroll that
+ * far, which would prove nothing). Run after staleInView: the feed keeps
+ * failing, so the window stays stale.
+ * Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+ * @complexity O(1)  @alloc a few small objects
+ */
+async function jumpUnderStale(page, view) {
+  await page.setViewportSize({ width: view.width, height: STALE_JUMP_VIEW_H });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const where = () => page.evaluate(() => {
+    const head = [...document.querySelectorAll('.tc-head, .tc-group-head')].filter((el) => el.getClientRects().length)
+      .find((el) => el.textContent.startsWith('z ·'));
+    const line = document.querySelector('.tc-stale');
+    if (!head || !line) return null;
+    const h = head.getBoundingClientRect();
+    const s = line.getBoundingClientRect();
+    return {
+      top: h.top, bottom: h.bottom, lineTop: s.top, lineBottom: s.bottom, inView: h.top >= 0 && h.bottom <= innerHeight,
+      scrollY, innerHeight, stale: document.querySelector('.tc-win').dataset.conn === 'stale',
+    };
+  });
+  const before = await where();
+  if (!before) return { ok: false, detail: 'no heading for z, or no stale line' };
+  const said = (w) => `z's heading at ${w.top.toFixed(0)} to ${w.bottom.toFixed(0)}, the stale line at ${w.lineTop.toFixed(0)} to `
+    + `${w.lineBottom.toFixed(0)}, in a ${w.innerHeight} px viewport at scrollY ${w.scrollY}`;
+  if (!before.stale) return { ok: false, detail: `precondition: the board is not stale; ${said(before)}` };
+  if (before.inView) return { ok: false, detail: `precondition: before the click ${said(before)}, already in view` };
+  await page.locator('.tc-roots button', { hasText: /^z$/ }).dispatchEvent('click');
+  const after = await where();
+  if (!after) return { ok: false, detail: 'z\'s heading went away after the click' };
+  const stuck = Math.abs(after.lineTop) <= OVERLAP_PX;
+  const underLine = after.top >= after.lineBottom && after.top <= after.lineBottom + JUMP_GAP_PX + OVERLAP_PX;
+  return {
+    ok: after.inView && after.scrollY !== before.scrollY && stuck && underLine,
+    detail: `before the click ${said(before)}; after it ${said(after)}`,
+  };
+}
+
+/**
+ * Open the board on a stand-in feed, once per look, and read the lines of
+ * the nodes WHOLE_LINES changes: each one's state line (`.tc-node-sub`)
+ * must not be clipped, its unread words (`.tc-node-unread`) must be whole
+ * and inside its box, and its badges whole. The stand-in is a real feed
+ * answer with those nodes changed; page.route answers every /feed with it.
+ * Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+ * @complexity two page loads  @alloc two pages, closed
+ * @returns {Promise<[string, boolean, string][]>}  one row per look
+ */
+async function linesInFull(browser, url, feed, halt) {
+  const standIn = { ...feed, nodes: feed.nodes.map((n) => (WHOLE_LINES[n.id] ? { ...n, ...WHOLE_LINES[n.id].node } : n)) };
+  const rows = [];
+  for (const look of LOOK_NAMES) {
+    const page = await browser.newPage({ viewport: { width: VIEWS[0].width, height: VIEWS[0].height } });
+    halt();
+    const asked = await watchHosts(page);
+    halt();
+    await page.route('**/feed', (route) => route.fulfill({ status: HTTP_OK, contentType: FEED_TYPE, body: JSON.stringify(standIn) }));
+    halt();
+    const [base, hash] = url.split('#');
+    await page.goto(`${base}?theme=${look}#${hash}`);
+    halt();
+    await page.waitForSelector('.tc-node', { timeout: DRAWN_MS });
+    halt();
+    await page.evaluate(() => document.fonts.ready);
+    halt();
+    await page.evaluate(() => new Promise((done) => { requestAnimationFrame(() => requestAnimationFrame(done)); }));
+    halt();
+    const read = await page.evaluate((ids) => ids.map((id) => {
+      const node = [...document.querySelectorAll('.tc-node')].find((el) => el.querySelector('.tc-node-name').textContent === id);
+      if (!node) return { id, found: false };
+      const body = node.querySelector('.tc-node-body');
+      const inner = body.getBoundingClientRect().right - parseFloat(getComputedStyle(body).paddingRight);
+      const sub = node.querySelector('.tc-node-sub');
+      const unread = node.querySelector('.tc-node-unread');
+      const shown = unread && unread.getClientRects().length > 0;
+      return {
+        id, found: true, sub: sub.textContent, subCut: sub.scrollWidth > sub.clientWidth + 1,
+        unread: shown ? unread.textContent : '',
+        unreadCut: shown && (unread.scrollWidth > unread.clientWidth + 1 || unread.getBoundingClientRect().right > inner + 1),
+        badges: [...node.querySelectorAll('.tc-node-badge')].map((b) => ({ text: b.textContent, cut: b.scrollWidth > b.clientWidth + 1 })),
+      };
+    }), Object.keys(WHOLE_LINES));
+    halt();
+    const misses = read.flatMap((r) => {
+      if (!r.found) return [`no box for ${r.id}`];
+      const want = WHOLE_LINES[r.id];
+      const out = [];
+      if (r.subCut || !r.sub.endsWith(want.word)) out.push(`${r.id}'s state line "${r.sub}" is cut or is not ${want.word}`);
+      if (r.unreadCut || !r.unread.startsWith(want.unreadWords)) out.push(`${r.id}'s unread words "${r.unread}" are cut or are not ${want.unreadWords}`);
+      for (const b of r.badges) if (b.cut) out.push(`${r.id}'s badge "${b.text}" is cut`);
+      if (want.badge && !r.badges.some((b) => b.text === want.badge)) out.push(`${r.id} has no badge "${want.badge}"`);
+      return out;
+    });
+    rows.push([`${look} look: the state line and the unread words are whole (${Object.keys(WHOLE_LINES).join(', ')})`, misses.length === 0,
+      `${misses.join('; ')} | read: ${JSON.stringify(read)}`]);
+    rows.push(asked(`${look} look, stand-in feed: `));
+    await page.close();
+    halt();
+  }
+  return rows;
+}
+
+/**
  * Open one view: color (measured and saved; on the desktop one more
- * screenshot, kept in memory, for the down wires' pixels), then grayscale
- * (saved). `halt` is called after each await: it throws once a signal has
+ * screenshot, kept in memory, for the down wires' pixels; then the root
+ * jump, the stale line on a page scrolled down and, last, the root jump
+ * while stale), then grayscale
+ * (saved). Each page is settled on signals (a drawn node or row, its
+ * faces loaded, two animation frames), and every request it makes is
+ * watched, any to another host aborted (watchHosts). `halt` is called after each await: it throws once a signal has
  * begun cleanup, so a stopped run goes no further.
  * @complexity two page loads, plus one screenshot decoded in O(P) over its
  *             P pixels on the desktop
@@ -749,15 +1032,34 @@ async function runView(browser, url, root, view, shots, halt) {
     const errors = [];
     page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
     page.on('pageerror', (err) => errors.push(String(err)));
+    // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    // Every request the page makes, watched from before it loads (D26).
+    const asked = await watchHosts(page);
+    halt();
     const [base, hash] = url.split('#');
     await page.goto(`${base}${gray ? '?gray=1' : ''}#${hash}`);
     halt();
+    // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; the settle
+    // named by the P4 phase fixer, round 2. Status: unreviewed.
+    // Settled on signals, not a fixed sleep: a drawn node or row (the poller
+    // marks the window live and draws in one task, so a drawn node is a
+    // good answer drawn), then the faces loaded, then two animation frames
+    // for the layout and the resize observer's redraw to finish.
     await page.waitForSelector('.tc-node, .tc-row', { timeout: DRAWN_MS });
     halt();
     await page.evaluate(() => document.fonts.ready);
     halt();
-    await page.waitForTimeout(SETTLE_MS);
+    await page.evaluate(() => new Promise((done) => { requestAnimationFrame(() => requestAnimationFrame(done)); }));
     halt();
+    const faces = await page.evaluate((families) => families.map((family) => ({
+      family,
+      check: document.fonts.check(`12px "${family}"`),
+      loaded: [...document.fonts].filter((f) => f.family.replace(/["']/g, '') === family && f.status === 'loaded').length,
+    })), FACES);
+    halt();
+    const prefix = gray ? 'grayscale page: ' : '';
+    results.rows.push([`${prefix}the board's own faces load (${FACES.join(', ')})`, faces.every((f) => f.check && f.loaded > 0),
+      faces.map((f) => `${f.family}: check ${f.check}, ${f.loaded} loaded`).join('; ')]);
     const file = join(shots, `board-${view.label}-${gray ? 'gray' : 'color'}.png`);
     await page.screenshot({ path: file, fullPage: true });
     halt();
@@ -773,14 +1075,24 @@ async function runView(browser, url, root, view, shots, halt) {
         halt();
         for (const d of m.downs) if (d.drawn) d.dots = readDots(shot, d);
       }
-      const jump = await jumpToZ(page);
+      const jump = await jumpToZ(page, view);
       halt();
       results.rows.push(...judge(view, m, errors, jump));
+      // Last on the page: from here every feed answers 500, which the
+      // console reports, so the console was judged first.
+      const stale = await staleInView(page);
+      halt();
+      results.rows.push(['a stale board says so where the reader is looking, scrolled down', stale.ok, stale.detail]);
+      // Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+      const under = await jumpUnderStale(page, view);
+      halt();
+      results.rows.push(['while stale, the root link for z stops z\'s heading under the stale line, not behind it', under.ok, under.detail]);
       results.pill = m.pill;
       results.counts = { labels: m.labels.length, wires: m.wires, heads: m.heads.length };
     } else {
       results.rows.push(['grayscale page: no console errors', errors.length === 0, errors.join(' | ')]);
     }
+    results.rows.push(asked(prefix));
     await page.close();
     halt();
   }
@@ -834,7 +1146,7 @@ async function check(chromium) {
   }
   try {
     const { root, joined } = buildMailbox();
-    say(`mailbox: ${root} (14 names, ${MAIL.length} messages; left in the temp folder)`);
+    say(`mailbox: ${root} (${NAMES.length} names, ${MAIL.length} messages; left in the temp folder)`);
     say(`cards: ${joined ? 'written by tc join' : 'written by hand in C1\'s shape (this tree\'s tc has no join)'}`);
     const proven = await startListeners(root, children, listenerOf);
     halt();
@@ -842,6 +1154,9 @@ async function check(chromium) {
     const url = await startServer(root, children);
     halt();
     say(`serve.py: ${url} (pid ${children.at(-1).pid}; it ends by itself ${process.env[SERVE_LIMIT_ENV] || SERVE_LIMIT_S} s after start)`);
+    // The mail was sent moments ago; aged now, none of it reads as waking
+    // a down worker after the feed saw it listening (D24).
+    freshen(root);
     const downPids = await makeDown(root, url, listenerOf);
     halt();
     say(`down workers: ${DOWN.join(', ')} (the feed saw their listeners; pids ${downPids.join(' ')} stopped; tc health shows none; `
@@ -860,6 +1175,14 @@ async function check(chromium) {
         say(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `: ${detail}` : ''}`);
       }
       files.push(...r.files);
+    }
+    // Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    const lines = await linesInFull(browser, url, await askFeed(url), halt);
+    halt();
+    say(`\n${VIEWS[0].width} x ${VIEWS[0].height}  a stand-in feed (${Object.keys(WHOLE_LINES).join(', ')} changed), each look`);
+    for (const [name, ok, detail] of lines) {
+      if (!ok) failed += 1;
+      say(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : `: ${detail}`}`);
     }
     say(`\nscreenshots (not in the repo): ${shots}`);
     for (const f of files) say(`  ${f}`);
@@ -893,6 +1216,7 @@ exports.chromium = {
       async newPage() {
         return {
           on() {},
+          async route() {},
           async goto(url) {
             if (mode === 'hang') return new Promise(() => {});
             throw new Error('page.goto: net::ERR_CONNECTION_REFUSED at ' + url + '\\nCall log:\\n  - navigating to "' + url + '", waiting until "load"\\n');

@@ -7,8 +7,11 @@ window's 1180 px cap, one of them over a relay that is an orchestrator too),
 and every state and every role reads without color.
 
 Updated for the shapes demo by Claude Opus 5.5 (the BOARD lane agent),
-2026-10-14, and for routing, labels, headings, the outline, native badges
-and wires beside their tree lines by Claude Opus 5.5 (the BOARD fixer).
+2026-10-14, for routing, labels, headings, the outline, native badges
+and wires beside their tree lines by Claude Opus 5.5 (the BOARD fixer),
+and for D24's working and woken states and the dash-dot line by Claude
+Opus 5.5 (the P4 phase fixer), 2026-10-15, and for the unread words on a
+line of their own by the same fixer's round 2.
 Status: unreviewed, not yet run by a person. `tests/board-browser-check.mjs` measures the same page frame on
 the live board (see `qa/human/board-live.md`); this script is the demo's.
 
@@ -18,7 +21,8 @@ the live board (see `qa/human/board-live.md`); this script is the demo's.
 2. Open http://127.0.0.1:8780/demo.html in a browser.
    - You should see a dark window with three traffic dots, the title
      `connection.board`, and a status pill on the right reading
-     `4 listening · 1 no listener`, the same words as `d`'s box.
+     `2 listening · 1 no listener · 1 woken · not read`, the same words as
+     `d`'s and `y1`'s boxes.
    - The window reaches the bottom of the browser window. Under the title
      bar, the session chips, then the roots list: `2 orchestrators: a, z`.
    - Two trees, each with its root on top and a heading over it. Side by
@@ -34,7 +38,10 @@ the live board (see `qa/human/board-live.md`); this script is the demo's.
      screen.
    - Each box has a colored bar on its left edge (identity only) and up to
      three lines: the title (`a · orchestrator`, with a space each side of
-     the dot), the state, and a status line where one is set. `b` and
+     the dot), the state's glyph and word alone, and a line with the unread
+     count first, never cut (`1 unread` on `b` and `y1`), then the status
+     where one is set. `y1`'s second line reads `△ woken · not read` in
+     full. `b` and
      `docs` share an account, so each also carries a dashed badge in words:
      `native with docs · not observed` on `b`, `native with b · not
      observed` on `docs`.
@@ -57,18 +64,21 @@ the live board (see `qa/human/board-live.md`); this script is the demo's.
      comes first).
 4. Check each state reads without color (turn your screen to grayscale, or use
    the browser's devtools "emulate achromatopsia"):
-   - `● listening` (`a`, `b`, `z`, `y1`), `○ idle` (`docs`), `✕ no listener`
-     (`d`), `◎ doorbell` (`c`), `⇄ remote · not checked` (`y2`), and
-     `✎ writing` on whichever box sends, all show as words.
+   - `● listening` (`a`, `z`), `◔ working` (`b`: mail woke it and it is on
+     its turn), `△ woken · not read` (`y1`: mail woke it and nothing read
+     it), `○ idle` (`docs`), `✕ no listener` (`d`), `◎ doorbell` (`c`),
+     `⇄ remote · not checked` (`y2`), and `✎ writing` on whichever box
+     sends, all show as words.
    - `d` has a dashed border and its wire to `b` is dotted. The dotted wire
-     runs beside `b`'s thin line to `d`, not on it, so its gaps show. `c`
-     has a double border; `y2` a dotted one.
+     runs beside `b`'s thin line to `d`, not on it, so its gaps show. `y1`
+     has a heavier solid border, and its wire to `z` is a mail wire like
+     any other, never dotted. `c` has a double border; `y2` a dotted one.
    - The tree's thin lines carry no words. Hover one: `docs reports to a`,
      or, where no card says so, `d under b · inferred from mail`. The legend
      names the thin line.
-   - A long-dash line joins `b` and `docs`, side to side, with no words on
+   - A dash-dot line joins `b` and `docs`, side to side, with no words on
      the line; the badges on both boxes say it in words. Hover the line:
-     `b and docs · native · not observed`. The legend names the long dash,
+     `b and docs · native · not observed`. The legend names the dash-dot line,
      and the thicker quiet mail line (`thick line: mail, none in the last
      10 s`), and says the thin line is `reports to, or inferred from
      mail`.
@@ -81,7 +91,8 @@ the live board (see `qa/human/board-live.md`); this script is the demo's.
      then `z`'s tree the same way; then `recent traffic`, one line per
      pair, newest first, such as `a → b · #41 · 0 s ago`. No wires.
    - Each row reads its name, role, state glyph and word, and unread count:
-     `d · worker · inferred ✕ no listener · 2 unread`. Under `b`'s row a line
+     `d · worker · inferred ✕ no listener`, and `y1 · worker △ woken · not
+     read · 1 unread`. Under `b`'s row a line
      reads `native with docs · not observed`, and under `docs`'s `native
      with b · not observed`.
    - The pill takes a line of its own; it and the footer wrap rather than
@@ -100,8 +111,8 @@ the live board (see `qa/human/board-live.md`); this script is the demo's.
 8. Open http://127.0.0.1:8780/demo.html?theme=daylight&gray=1, then the same
    without `theme=daylight`.
    - The page draws in grayscale. Every state still reads by its word and glyph,
-     the dead wire is still dotted, the active one still dashed with an arrow
-     and its words.
+     `d`'s wire, the one dead wire, is still dotted, `y1`'s is not, and the
+     active one is still dashed with an arrow and its words.
    - Each orchestrator reads as one by its word: `a · orchestrator`,
      `b · orchestrator · inferred` and `z · orchestrator · inferred`, and the
      two roots again in their headings and the roots list. Every other box

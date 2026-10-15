@@ -36,10 +36,19 @@ query. Cards never come from tc's health:
                            card (cards/<name>.json), sorted
   nodes[].listener_pid     snap["listeners"][name]: the pid tc read from
                            /proc/locks, or None
-  nodes[].unread           snap["mail"][name]["unread"]; 0 with no inbox
+  nodes[].unread           snap["mail"][name]["unread"]; 0 with no inbox;
+                           None when tc cannot count it (a tc that says
+                           so for an inbox it cannot see into)
+  nodes[].unread_problem   snap["mail"][name]["mail_problem"], tc's reason,
+                           when unread is None; else None
+  nodes[].inbox_unreadable True when this board could not list the name's
+                           mail/to-<name>/ or its read/ (a folder it may
+                           not open); the page says `inbox unreadable`
+                           beside `down`
   nodes[].last_mail_age_s  snap["mail"][name]["newest_mail_age_s"]: seconds
                            since the newest message in the name's inbox or
-                           read/, so mail it received; None with no inbox
+                           read/, so mail it received, never under 0 (a
+                           future mtime reads 0); None with no inbox
   nodes[].kind, account,   the card, read straight from cards/<name>.json
   route, reports_to        (C1), never from a `cards` key in health. With no
                            card: kind and account None, route "local" (C1:
@@ -56,73 +65,123 @@ query. Cards never come from tc's health:
                            mail/to-*/read/; ages from each file's mtime (a
                            stat, never an open)
 
-State, first match wins, in D15's order: `writing` (its newest sent message
-is at most WRITING_WINDOW_S old, listener or not), `down` (no pid now, and
-seen listening by this Board within DOWN_WINDOW_S), `listening` (a pid holds
-the name's lock in /proc/locks), `doorbell` (route codex), `remote` (route
-ssh), `idle`. A message whose mtime is in the future has no age, so it never
-makes its sender writing. `down` lives in this object's memory only: after a
-restart nothing is down until it has been seen listening again.
+State, first match wins, in D15 and D24's order: `writing` (its newest sent
+message is at most WRITING_WINDOW_S old, listener or not); then, for a name
+with no pid now that this Board saw listening within DOWN_WINDOW_S, one of
+`down`, `woken` or `working` (after_listening). Mail woke it when a message
+landed in its inbox no earlier than tc's POLL_SECONDS before it was last
+seen listening and no later than POLL_SECONDS after the first poll that
+found no pid (D28): mail that lands after the board has seen the listener
+gone woke nothing. No such mail: `down`, the lock vanished and nothing woke
+it, whatever mail lands later. Woken: `working` when the message that woke
+it has left the inbox, or its status file or its last sent message is
+newer than when it was last seen listening, or the wake is under
+WOKEN_GRACE_S old; else `woken`. A name whose inbox (or its read/) this
+board cannot list reads `down` with inbox_unreadable set: the board cannot
+tell. Then `listening` (a pid holds the name's lock in /proc/locks),
+`doorbell` (route codex), `remote` (route ssh), `idle`. A message whose
+mtime is in the future has no age, so it never makes its sender writing.
+What was seen listening, when it was first seen gone and the wake found
+live in this object's memory only: after a restart nothing is down, woken
+or working until it has been seen listening again. Two cases these states
+cannot see (C5): a session that crashes after reading its mail reads
+`working` until DOWN_WINDOW_S has passed since it was last seen listening;
+and with no board page open nothing polls, so the board cannot tell when a
+listener went, and mail that landed before the first poll after it went
+counts as a wake.
 
 Roles and levels follow C5 step by step. Partners are the names a node has
 exchanged mail with, either way, itself excluded; a partner need not be a
 node. A parent is always a node: declared from the card's reports_to when
-it names a node, else inferred as the one partner of a node with exactly
-one partner when that partner has HUB_MIN_PARTNERS or more, unless that
-partner's card declares this node as its own parent (D15: inference never
-inverts a declared edge). A reports_to that names no node, or the node
-itself, gives no parent and stops inference. Nodes the walk from the roots cannot reach hang on a reports_to
-cycle; the cycle member whose name sorts first becomes a root (assumption
-in the BOARD handoff: a node below a cycle is not on it, so it stays below).
+it names a node, else inferred (D27) as the partner holding at least
+PARENT_MAJORITY (two thirds) of the node's messages, sent and received,
+when that partner has HUB_MIN_PARTNERS or more, unless that partner's card
+declares this node as its own parent (D15: inference never inverts a
+declared edge); a node split evenly between two relays gets no guess. A
+reports_to that names no node, or the node itself, gives no parent and
+stops inference. A peer's role_source is `none`, never `inferred`: no
+edge decided it. An inferred edge that closes
+a cycle, through any chain of declared ones, is taken out with every other
+inferred edge on that cycle (drop_inferred_cycles), before roles and
+levels are read, so the drawing never depends on the order the names sort
+in. Nodes the walk from the roots cannot reach then hang on a cycle made
+only of reports_to cards; the cycle member whose name sorts first becomes
+a root (assumption in the BOARD handoff: a node below a cycle is not on
+it, so it stays below).
 
 Known limit (C5 rule 6): with no hints at all, a top relay whose only
 partner is a lower relay is drawn as that relay's `worker`, marked
 `inferred`. `tc join <name> --reports-to <relay>` fixes it.
 
-@interacts  loads ../tc as a module with TC_ROOT set for the load only,
-            then calls tc.now_iso(), tc.listeners("wait") (reads
+@interacts  loads ../tc as a module from its source, compiled in memory,
+            with TC_ROOT set for the load only, then calls tc.now_iso(), tc.listeners("wait") (reads
             /proc/locks, globs mail/.wait-*.lock) and tc.mailbox_summary()
             (globs and stats mail/ and status/ under tc's ROOT); reads the
             load average and /proc/meminfo itself. Never runs nvidia-smi
             and never scans the process list. Reads cards/*.json and the
             head of status/<name>.md; lists mail/to-*/ and mail/to-*/read/
-            and stats a few message files.
-            Opens no message body. Writes nothing to the mailbox; the first
-            load of tc may write tc's bytecode cache (__pycache__/ beside
-            tc), as any import of it does. main() binds one
+            and stats a few message files, and for a name that stopped
+            listening, its status file, its last sent message and, while
+            its wake window is open, its WAKE_CANDIDATES newest messages.
+            Opens no message body. Writes nothing to the mailbox, and
+            reads and writes no bytecode cache of tc's. main() binds one
             TCP socket on 127.0.0.1, prints the URL with the token once to
             stdout, reads the allow-listed files in board/ per request, and
             writes no request log. A failed feed writes one line to stderr,
-            and so does the first poll that meets a card nested past
-            Python's recursion limit. Card and status files are opened with
-            O_NONBLOCK and O_NOFOLLOW and read only when fstat says regular,
-            so a FIFO never blocks a poll and a symlink never redirects one.
-@deps       python3 stdlib (argparse, collections, heapq, hmac, http.server,
-            importlib, io, json, os, pathlib, re, secrets, signal, stat,
-            sys, threading, time, urllib.parse); ../tc; Linux (/proc:
-            /proc/locks through tc, the load average and /proc/meminfo
-            read here).
-@complexity feed(), per poll: O(k + m log W + n + c^2). The snapshot:
-            tc.listeners is O(k + n), k lines in /proc/locks (tens) and n
-            names (single digits to tens); tc.mailbox_summary is O(n + m),
-            since it stats every message file, m of them (about 800 after
-            two weeks of heavy use, and only growing, since read/ is kept).
-            Here: every inbox listed again and each of the m names matched
-            once (no body read); the last WIRE_HISTORY picked in
-            O(m log W), W = 50; W + n + l more stats for l linked pairs (at
-            most n^2/2, tens in practice); each card read once, c cards;
-            levels in O(n + e), e parent edges (at most n); and c(c-1)/2
-            native links over the claude cards on one named account. In
-            all m + W + n + l stats per poll, and no child process. One
+            and so do a client that hangs up mid-answer, any other request
+            that fails past its handler (never a traceback), and the first
+            poll that meets a card nested past Python's recursion limit.
+            Card and status files are opened with O_NONBLOCK and O_NOFOLLOW
+            and read only when fstat says regular, so a FIFO never blocks a
+            poll and a symlink never redirects one; mail folders are listed
+            the same way, never through a link.
+@deps       python3 stdlib (argparse, collections, errno, fractions, heapq,
+            hmac, http.server, io, json, os, pathlib, re, secrets, signal,
+            stat, sys, threading, time, types, urllib.parse); ../tc; Linux
+            (/proc: /proc/locks through tc, the load average and
+            /proc/meminfo read here).
+@complexity feed(), per poll: O(k + m (log W + log K) + n + c^2). The
+            snapshot: tc.listeners is O(k + n), k lines in /proc/locks
+            (tens) and n names (single digits to tens);
+            tc.mailbox_summary is O(n + m), since it stats every message
+            file, m of them (about 800 after two weeks of heavy use, and
+            only growing, since read/ is kept). Here: every inbox listed
+            again and each of the m names matched twice (no body read);
+            the last WIRE_HISTORY picked in O(m log W), W = 50; W + n + l
+            more stats for l linked pairs (at most n^2/2, tens in
+            practice); each card read once, c cards; parents, roles and
+            levels in O(n + l + e) from the l pairs' counts, e parent
+            edges (at most n); c(c-1)/2 native links over the
+            claude cards on one named account; and for each of s names
+            that stopped listening within DOWN_WINDOW_S, its newest
+            K = WAKE_CANDIDATES messages kept in a heap as the scan goes
+            (O(log K) per message to such a name), stats of those K while
+            its wake window is open (a poll or two per stop), and of its
+            status file and its last sent message. In all about
+            m + W + n + l + s(K + 2) stats per poll at most, and no child
+            process. One
             request: O(1) to route, plus one feed() or one read of a board
             file (tens of KB).
 @alloc      per feed(): tc.mailbox_summary builds m path and stat objects; here
-            one Message per message file, the per-pair counts, and the
-            returned dict (n nodes, at most W wires, l + n + c(c-1)/2
-            links); all freed when the caller drops them. Held across calls: the
-            loaded tc module and last_listening_at, one float per name
-            seen listening, pruned past DOWN_WINDOW_S on every feed(), and
-            the names of cards found nested too deep, one each. The server
+            one Message per message file, each one's dedupe key and dict
+            slot, the name list of each folder (message_names), and for
+            each message a short-lived sorted pair (a list and two tuples)
+            and a default count dict, kept only for a pair's first
+            message as the per-pair counts; the partner counts, one dict
+            per name with a partner and two entries per pair; for each
+            name that stopped listening, a heap of at most K Messages
+            while its wake window is open and the set of its inbox's file
+            names; then the returned dict (n nodes, at most W wires,
+            l + n + c(c-1)/2 links); all freed when the caller drops them.
+            Held across calls: the
+            loaded tc module; last_listening_at, one float per name seen
+            listening, pruned past DOWN_WINDOW_S on every feed();
+            first_missing_at, one float per name seen listening and not
+            listening now, and wakes, one small dict per such name with
+            the file names of the messages that woke it (one or two,
+            WAKE_CANDIDATES at most), both cleared on the name's next
+            sighting and pruned with last_listening_at; and the names of
+            cards found nested too deep, one each. The server
             holds one Board, the token, a lock and MAX_CONNECTIONS slots;
             one short-lived thread per request, at most MAX_CONNECTIONS at
             once, each ended by REQUEST_DEADLINE_S.
@@ -130,11 +189,11 @@ partner is a lower relay is drawn as that relay's `worker`, marked
 
 import argparse
 import collections
+import errno
+import fractions
 import heapq
 import hmac
 import http.server
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -146,6 +205,7 @@ import stat
 import sys
 import threading
 import time
+import types
 import urllib.parse
 
 BOARD_DIR = pathlib.Path(__file__).resolve().parent
@@ -155,10 +215,32 @@ TC_PATH = BOARD_DIR.parent / "tc"
 # Three of the page's 3 s polls, so a send is seen at least once; short
 # enough that a session that went quiet stops reading as busy.
 WRITING_WINDOW_S = 10
-# A name seen listening this recently and not listening now is down (C5).
-# Ten minutes covers a listener's re-arm gap and a long turn; past it, a
-# name that stopped on purpose reads idle instead of raising an alarm.
+# A name seen listening this recently and not listening now is down, woken
+# or working (C5, D24). Ten minutes covers a listener's re-arm gap and a
+# long turn; past it, a name that stopped on purpose reads idle instead of
+# raising an alarm.
 DOWN_WINDOW_S = 600
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+# A listener that mail woke reads working for this long after the wake
+# with no other sign of life (D24): the time a session takes to start its
+# turn. Past it with no sign, it reads woken, not read: the doorbell rang
+# and nobody answered.
+WOKEN_GRACE_S = 120
+# Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+# unreviewed. A stopped name's newest this many messages, by number, are the
+# candidates for its wake (D24, D28). A wake is the mail that lands within
+# one of tc wait's polls of the board's last sighting: a message or two.
+# They are kept as the scan walks the mail, never by sorting a name's whole
+# history, and read in file time order, so a hand-made file with a high
+# number and an old time takes one place and ends nothing. A burst past
+# this many in that window still dates the wake inside it.
+WAKE_CANDIDATES = 16
+# What message_names makes of a folder it cannot open: no folder (ENOENT),
+# a link (ELOOP under O_NOFOLLOW) or a file where a folder should be
+# (ENOTDIR) holds no messages, as the scan has always read them. Any other
+# error (EACCES, EIO) is a folder the board cannot list (C5: the name reads
+# down, `inbox unreadable`).
+NO_FOLDER_ERRNOS = (errno.ENOENT, errno.ELOOP, errno.ENOTDIR)
 # Characters of a status line on a node (C5): one line on a node box. The
 # whole status stays in status/<name>.md.
 STATUS_PREVIEW_CHARS = 80
@@ -168,10 +250,18 @@ STATUS_READ_MAX_BYTES = 4096
 # Messages carried in "wires" (C5): the recent traffic the page animates.
 # Links still read every message file name.
 WIRE_HISTORY = 50
-# A node with exactly one partner is that partner's worker when the partner
-# has at least this many partners (O11). With two, one partner alone is a
-# pair of peers, and a relay needs a second partner to be one.
+# A node's guessed parent must have at least this many partners (O11, C5
+# rule 2): a hub. With two, a pair that mails only each other is a pair of
+# peers, and a relay needs a second partner to be one.
 HUB_MIN_PARTNERS = 2
+# Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+# unreviewed. With no card to say so, a node's parent is guessed only from
+# a partner holding at least this share of the node's messages, sent and
+# received (D27). The board counts every message ever sent, so one message
+# between two siblings must not move both out of their relay's tree, and a
+# worker split evenly between two relays gets no guess. Two thirds is a
+# clear majority, and no two partners can both hold it.
+PARENT_MAJORITY = fractions.Fraction(2, 3)
 # A card is a few hundred bytes (C1). The board reads at most this much of a
 # file in cards/ and skips a bigger one, which is not a card. The merged tc
 # caps its own card reads at the same 65,536 bytes; feed() never calls tc's
@@ -189,6 +279,12 @@ MEMINFO_PATH = "/proc/meminfo"
 # The server (C6). 8780 because 8765 was taken on the owner's machine on
 # 2026-10-14 (O7); --port moves it, and port 0 lets the OS pick.
 DEFAULT_PORT = 8780
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status:
+# unreviewed. http's own port. A browser leaves it out of its Host header,
+# and the Host check wants 127.0.0.1:<port>, so on this port it would
+# refuse the page itself; main() refuses the port at start instead of
+# loosening the check.
+HTTP_DEFAULT_PORT = 80
 # Loopback only. Nothing off this machine can reach the board; the token
 # guards it from other local users' pages.
 BIND_HOST = "127.0.0.1"
@@ -201,7 +297,12 @@ TOKEN_HEADER = "X-TC-Token"
 HOST_NAMES = ("127.0.0.1", "localhost")
 FEED_PATH = "/feed"
 # The only files the server sends (C6). Anything else is 404, with no
-# folder listing, so serve.py, tc and the mailbox never leave.
+# folder listing, so serve.py, tc and the mailbox never leave. A request's
+# path is matched whole against these keys and the key alone is read from
+# board/, so no part of a request is ever joined into a path.
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status:
+# unreviewed. The two faces and their licenses ship in board/fonts/, so the
+# page asks no other host (D26).
 STATIC_FILES = {
     "live.html": "text/html; charset=utf-8",
     "look.js": "text/javascript; charset=utf-8",
@@ -209,7 +310,15 @@ STATIC_FILES = {
     "demo.html": "text/html; charset=utf-8",
     "demo-script.json": "application/json; charset=utf-8",
     "compare.html": "text/html; charset=utf-8",
+    "fonts/space-grotesk-latin-wght-normal.woff2": "font/woff2",
+    "fonts/space-grotesk-latin-ext-wght-normal.woff2": "font/woff2",
+    "fonts/jetbrains-mono-latin-wght-normal.woff2": "font/woff2",
+    "fonts/jetbrains-mono-latin-ext-wght-normal.woff2": "font/woff2",
+    "fonts/space-grotesk-ofl.txt": "text/plain; charset=utf-8",
+    "fonts/jetbrains-mono-ofl.txt": "text/plain; charset=utf-8",
 }
+# Each allowed file's path, built from its key once, here.
+STATIC_PATHS = {name: BOARD_DIR / name for name in STATIC_FILES}
 FEED_TYPE = "application/json; charset=utf-8"
 # Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
 # The longest one request may take, start to end: reading its request line
@@ -243,38 +352,50 @@ KIND_CLAUDE = "claude"
 # (D15): the link would claim a shared account that no card knows.
 ACCOUNT_UNKNOWN = "unknown"
 
-# C5's states, in the order the first match wins (D15).
-WRITING, DOWN, LISTENING, DOORBELL, REMOTE, IDLE = (
-    "writing", "down", "listening", "doorbell", "remote", "idle")
+# C5's states, in the order the first match wins (D15, D24).
+WRITING, DOWN, WOKEN, WORKING, LISTENING, DOORBELL, REMOTE, IDLE = (
+    "writing", "down", "woken", "working", "listening", "doorbell", "remote", "idle")
 ORCHESTRATOR, WORKER, PEER = "orchestrator", "worker", "peer"
-DECLARED, INFERRED = "declared", "inferred"
+# C5 rule 4's role_source words. NO_EDGE is a peer's (D27): no parent edge
+# decided its role, so it is no guess and never reads `inferred`.
+DECLARED, INFERRED, NO_EDGE = "declared", "inferred", "none"
 LINK_MAILBOX, LINK_REPORTS_TO, LINK_NATIVE = "mailbox", "reports_to", "native"
 
-# One message, from its file name alone.
-Message = collections.namedtuple("Message", "seq sender to path")
+# One message, from its file name alone; `read` when it lies in read/.
+Message = collections.namedtuple("Message", "seq sender to path read")
 
 
 def load_tc(root=None):
-    """Load ../tc as a module without running main(), the way C5 shows.
+    """Load ../tc as a module without running main(), from its source alone.
 
-    tc fixes ROOT, MAIL, STATUS and SEQ_FILE at import, from TC_ROOT. With
-    `root` given, TC_ROOT is set to it for the load and put back after, so
-    the module points at `root` and the process's environment is unchanged.
-    With `root` None, tc reads TC_ROOT as it stands (or its own folder).
+    tc fixes five paths at import, from TC_ROOT: ROOT, MAIL, STATUS,
+    SEQ_FILE and CARDS. With `root` given, TC_ROOT is set to it for the
+    load and put back after, so the module points at `root` and the
+    process's environment is unchanged. With `root` None, tc reads TC_ROOT
+    as it stands (or its own folder).
 
-    @interacts  reads and restores os.environ["TC_ROOT"]; executes ../tc's
-                top level (imports and constants; tc's main() is not run).
-    @deps       importlib; ../tc.
-    @complexity O(1): one module load.
-    @alloc      one module object, returned; the caller holds it.
+    tc's source is read and compiled in memory and run in a fresh module,
+    so no bytecode cache beside tc is read or written. An import would
+    trust a cache by its header alone (the source's mtime and size, which
+    anyone can read), and on a group-writable ROOT another user could plant
+    one for the board to run as its own user.
+
+    @interacts  reads ../tc's source; reads and restores
+                os.environ["TC_ROOT"]; executes tc's top level (imports and
+                constants; tc's main() is not run). Writes no file.
+    @deps       types; ../tc.
+    @complexity O(s) over s bytes of tc's source: one compile.
+    @alloc      the source, freed on return; one module object, returned;
+                the caller holds it.
     """
+    code = compile(TC_PATH.read_bytes(), str(TC_PATH), "exec", dont_inherit=True)
+    tc = types.ModuleType("tc")
+    tc.__file__ = str(TC_PATH)
     old = os.environ.get("TC_ROOT")
     if root is not None:
         os.environ["TC_ROOT"] = str(root)
     try:
-        loader = importlib.machinery.SourceFileLoader("tc", str(TC_PATH))
-        tc = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-        loader.exec_module(tc)
+        exec(code, tc.__dict__)
     finally:
         if root is not None:
             if old is None:
@@ -397,49 +518,91 @@ def card_text(card, key):
 
 
 def scan_messages(mail):
-    """Every message under `mail`, from file names only: [Message].
+    """Every message under `mail`, from file names only: ([Message], {names whose inbox could not be listed}).
 
     Looks in each mail/to-<name>/ and its read/. A name that does not match
     MESSAGE_NAME (a .tmp being written, a lock, anything else) is skipped.
-    A to-* entry whose stat fails (a link that loops, a folder the user
-    cannot search, a dead mount) is skipped on its own; the rest of the
-    scan stands. Opens no file.
+    A to-* entry whose stat fails (a folder the user cannot search, a dead
+    mount) is skipped on its own and its name goes in the second set, and
+    so does a name whose inbox or read/ message_names could not list; the
+    rest of the scan stands. Opens no file.
+
+    Never follows a link, so a link a group member puts in a shared
+    mailbox points the board nowhere: a to-* entry or
+    a read/ that is a link is not looked in, and only a regular file is a
+    message (message_names). The inbox is listed before read/, and a file
+    in read/ with the same recipient, number and sender as one in the inbox
+    (a `tc read` moved it between the two listings, or a hand-made twin)
+    counts once, as the inbox copy: a file put in read/ cannot hide or
+    stand in for unread mail. Two files with one number and two senders are
+    two messages.
 
     @interacts  lists `mail`, each to-*/ folder and each to-*/read/.
-    @deps       os, re.
+    @deps       os, re; message_names.
     @complexity O(b + m) over b inbox folders and m file names in them.
-    @alloc      one Message per message file, in the returned list.
+    @alloc      one Message per message file, in a dict by recipient,
+                number and sender, returned as a list; one set of names.
     """
-    found = []
     try:
         with os.scandir(mail) as listing:
             entries = list(listing)
     except OSError:
-        return found
-    boxes = []
+        return [], set()
+    boxes, unreadable = [], set()
     for entry in entries:
         if not entry.name.startswith(INBOX_PREFIX):
             continue
         try:
-            if entry.is_dir():
+            if entry.is_dir(follow_symlinks=False):
                 boxes.append(entry)
         except OSError:
-            continue
+            unreadable.add(entry.name[len(INBOX_PREFIX):])
+    found = {}
     for box in boxes:
         to = box.name[len(INBOX_PREFIX):]
         if not to:
             continue
-        for folder in (box.path, os.path.join(box.path, READ_FOLDER)):
-            try:
-                entries = os.scandir(folder)
-            except OSError:
+        for folder, read in ((box.path, False), (os.path.join(box.path, READ_FOLDER), True)):
+            names = message_names(folder)
+            if names is None:
+                unreadable.add(to)
                 continue
-            with entries:
-                for entry in entries:
-                    match = MESSAGE_NAME.match(entry.name)
-                    if match:
-                        found.append(Message(int(match.group(1)), match.group(2), to, entry.path))
-    return found
+            for name in names:
+                match = MESSAGE_NAME.match(name)
+                msg = Message(int(match.group(1)), match.group(2), to, os.path.join(folder, name), read)
+                found.setdefault((to, msg.seq, msg.sender), msg)
+    return list(found.values()), unreadable
+
+
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+def message_names(folder):
+    """The names of the regular files in `folder` that match MESSAGE_NAME: [] for a link or no folder, None for one it cannot list.
+
+    The folder is opened with O_NOFOLLOW and O_DIRECTORY and listed through
+    that descriptor, so a folder that is a link, even one swapped in after
+    the caller looked, is never listed, and an entry counts only when it is
+    a regular file itself, never a link to one. An open that fails with one
+    of NO_FOLDER_ERRNOS is no folder: []. Any other failure, to open or to
+    list (a folder another user left closed to this one), is None: the
+    board cannot tell what the folder holds.
+
+    @interacts  opens, lists and closes one folder.
+    @deps       os, re.
+    @complexity O(f) over f entries in the folder.
+    @alloc      one list of names, returned.
+    """
+    try:
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as error:
+        return [] if error.errno in NO_FOLDER_ERRNOS else None
+    try:
+        with os.scandir(fd) as entries:
+            return [entry.name for entry in entries
+                    if MESSAGE_NAME.match(entry.name) and entry.is_file(follow_symlinks=False)]
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def status_preview(folder, name):
@@ -487,20 +650,116 @@ def file_age(path, now):
     return age if age >= 0 else None
 
 
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+def file_time(path):
+    """`path`'s mtime, seconds since the epoch, or None when it is gone. Never follows a link.
+
+    @interacts  lstats `path`; never opens it.
+    @deps       os.
+    @complexity O(1).
+    @alloc      none.
+    """
+    try:
+        return os.stat(path, follow_symlinks=False).st_mtime
+    except OSError:
+        return None
+
+
+# Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+def find_wake(candidates, since, until):
+    """D24 and D28: (the earliest mtime, the file names) of the candidates that landed from `since` to `until`; (None, empty) for none.
+
+    `tc wait` exits when mail lands, and a session re-arms only after its
+    turn, so a lock that went away is not always a listener lost. The name
+    was woken by a message that reached its inbox no earlier than `since`
+    (tc's POLL_SECONDS before the board last saw it listening: a wait sees
+    new mail up to one of its polls late, and the board may see its pid in
+    that time) and no later than `until` (POLL_SECONDS after the first poll
+    that found no pid): mail that lands after the board has seen the
+    listener gone woke nothing (D28).
+
+    `candidates` is the name's newest messages by number (WAKE_CANDIDATES
+    at most). Each is lstatted, and the walk runs in file time order,
+    newest first: a message past `until` is passed over, and the first one
+    before `since` ends the walk, since every one after it in that order is
+    older still. A number decides nothing here, so a hand-made file with a
+    high number and an old time cannot end the walk early. A message gone
+    between the scan and its lstat (a read moved it) is skipped this poll.
+
+    @interacts  lstats each candidate; opens none.
+    @deps       os; file_time.
+    @complexity O(K log K) over the K <= WAKE_CANDIDATES candidates, plus K
+                lstats.
+    @alloc      one list of K (time, message) pairs and the returned set of
+                names.
+    """
+    timed = []
+    for msg in candidates:
+        when = file_time(msg.path)
+        if when is not None:
+            timed.append((when, msg))
+    timed.sort(key=lambda pair: pair[0], reverse=True)
+    wake, names = None, set()
+    for when, msg in timed:
+        if when > until:
+            continue
+        if when < since:
+            break
+        wake = when
+        names.add(os.path.basename(msg.path))
+    return wake, names
+
+
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; the evidence by
+# the P4 phase fixer, round 2. Status: unreviewed.
+def after_listening(seen, now, wake, waking, inbox, sent, status_path):
+    """D24: DOWN, WOKEN or WORKING for a name seen listening at `seen` and not listening now.
+
+    `wake` is the mtime of the earliest message that woke it, or None, and
+    `waking` those messages' file names (find_wake, kept by the Board).
+    Not woken: DOWN, the lock vanished and nothing woke it. Woken, it is
+    WORKING when it shows life after `seen` (a message that woke it has
+    left the inbox: `inbox` is the file names in mail/to-<name>/ now, so
+    where the message went, read/ under its own name or another, does not
+    matter; or its status file or the message it sent last is newer than
+    `seen`), or while the wake is at most WOKEN_GRACE_S old; else WOKEN.
+
+    @interacts  lstats its status file and the message it sent last; opens
+                none.
+    @deps       file_time.
+    @complexity O(w) over the w <= WAKE_CANDIDATES waking names (one or
+                two), plus two lstats.
+    @alloc      none.
+    """
+    if wake is None:
+        return DOWN
+    left = any(name not in inbox for name in waking)
+    stamps = (file_time(status_path), file_time(sent.path) if sent else None)
+    if left or any(at is not None and at > seen for at in stamps) or now - wake <= WOKEN_GRACE_S:
+        return WORKING
+    return WOKEN
+
+
 def parents_of(names, cards, partners):
     """C5 rule 2: {name: (parent, DECLARED or INFERRED)} for each node with one.
 
-    Declared: the card's reports_to, when it names a node other than the
-    node itself. A reports_to that names no node (or itself) gives no
-    parent, and nothing is inferred over it. Inferred, when nothing is
-    declared: the one partner of a node with exactly one partner, when that
-    partner is a node with HUB_MIN_PARTNERS or more partners and its card
-    does not report to this node (D15: an inferred edge never runs against
-    a declared one, whatever order the names sort in).
+    `partners` is {name: {partner: messages}}: how many messages each pair
+    exchanged, both ways counted, a name's own notes left out. Declared:
+    the card's reports_to, when it names a node other than the node
+    itself. A reports_to that names no node (or itself) gives no parent,
+    and nothing is inferred over it. Inferred, when nothing is declared
+    (D27): the partner holding at least PARENT_MAJORITY of the node's
+    messages, when that partner is a node with HUB_MIN_PARTNERS or more
+    partners and its card does not report to this node (D15: an inferred
+    edge never runs against a declared one, whatever order the names sort
+    in). No partner holding that share, as with a node split evenly between
+    two relays: no guess.
 
     @interacts  none; pure.
-    @deps       none.
-    @complexity O(n) over n names: one set lookup per node and per partner.
+    @deps       fractions (PARENT_MAJORITY).
+    @complexity O(n + p) over n names and p partner entries (two per
+                pair that exchanged mail): each node's counts summed and
+                walked once.
     @alloc      the returned dict, one entry per node with a parent.
     """
     found = {}
@@ -510,13 +769,74 @@ def parents_of(names, cards, partners):
             if declared in names and declared != name:
                 found[name] = (declared, DECLARED)
             continue
-        mine = partners.get(name, ())
-        if len(mine) == 1:
-            (only,) = mine
-            if (only in names and len(partners.get(only, ())) >= HUB_MIN_PARTNERS
-                    and cards.get(only, {}).get("reports_to") != name):
-                found[name] = (only, INFERRED)
+        mine = partners.get(name, {})
+        total = sum(mine.values())
+        for partner, count in mine.items():
+            if count < PARENT_MAJORITY * total:
+                continue
+            if (partner in names and len(partners.get(partner, ())) >= HUB_MIN_PARTNERS
+                    and cards.get(partner, {}).get("reports_to") != name):
+                found[name] = (partner, INFERRED)
+            break
     return found
+
+
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+def drop_inferred_cycles(parents):
+    """`parents` with every inferred edge that sits on a cycle taken out.
+
+    Rule 2's D15 guard looks one hop only, so an inferred parent can close
+    a loop through a chain of declared ones: zed inferred under alpha,
+    while alpha reports to mid and mid to zed by card. A cycle that holds an
+    inferred edge loses every inferred edge on it, so the cards decide the
+    shape whatever order the names sort in, and no badge names a cycle no
+    card makes. A cycle made only of declared edges is left whole:
+    levels_of breaks it at the name that sorts first. Each node has at most
+    one parent, so cycles never share a node, and taking edges out makes
+    no new one: one pass is enough.
+
+    @interacts  none; pure.
+    @deps       none.
+    @complexity O(n) over n nodes with a parent: each is walked once.
+    @alloc      the returned dict, one entry per edge kept; one walk list
+                and two sets, freed on return.
+    """
+    done, cycles = set(), []
+    for start in sorted(parents):
+        path, on_path = [], set()
+        at = start
+        while at in parents and at not in done and at not in on_path:
+            on_path.add(at)
+            path.append(at)
+            at = parents[at][0]
+        if at in on_path:
+            cycles.append(path[path.index(at):])
+        done.update(path)
+    kept = dict(parents)
+    for cycle in cycles:
+        if any(parents[name][1] == INFERRED for name in cycle):
+            for name in cycle:
+                if parents[name][1] == INFERRED:
+                    del kept[name]
+    return kept
+
+
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+def hierarchy(names, cards, partners):
+    """C5 rules 2 to 5 in one call: (parents, roles, levels).
+
+    parents is parents_of's map less every inferred edge on a cycle
+    (drop_inferred_cycles), and roles_of and levels_of both read that one
+    map, so an edge taken out leaves no role behind it.
+
+    @interacts  none; pure.
+    @deps       parents_of, drop_inferred_cycles, roles_of, levels_of.
+    @complexity O(n + p + e) over n names, p partner entries and e parent
+                edges.
+    @alloc      the three returned dicts and their helpers' working sets.
+    """
+    parents = drop_inferred_cycles(parents_of(names, cards, partners))
+    return parents, roles_of(names, parents), levels_of(names, parents)
 
 
 def roles_of(names, parents):
@@ -524,7 +844,8 @@ def roles_of(names, parents):
 
     orchestrator: one or more nodes have it as parent; declared when every
     one of those edges is. worker: it has a parent and no children; the
-    source is that edge's. peer: neither, always inferred.
+    source is that edge's. peer: neither; NO_EDGE (`none`, D27), since no
+    edge decided it and a peer is no guess.
 
     @interacts  none; pure.
     @deps       none.
@@ -542,7 +863,7 @@ def roles_of(names, parents):
         elif name in parents:
             roles[name] = (WORKER, parents[name][1])
         else:
-            roles[name] = (PEER, INFERRED)
+            roles[name] = (PEER, NO_EDGE)
     return roles
 
 
@@ -608,7 +929,7 @@ def levels_of(names, parents):
 
 
 class Board:
-    """The feed's state across polls: the loaded tc and who was seen listening.
+    """The feed's state across polls: the loaded tc, who was seen listening, when each was first seen gone, and what woke it.
 
     `clock` returns seconds since the epoch, as time.time does; tests pass a
     fake one so windows can be crossed without waiting. feed() is not safe
@@ -617,8 +938,9 @@ class Board:
     @interacts  see the module block.
     @deps       load_tc and the module's helpers.
     @complexity O(1) to build, plus one load of tc.
-    @alloc      the tc module, last_listening_at and nested_cards, held for
-                the object's life.
+    @alloc      the tc module, last_listening_at, first_missing_at, wakes
+                and nested_cards, held for the object's life (the module
+                block bounds each).
     """
 
     def __init__(self, root=None, clock=time.time):
@@ -627,12 +949,47 @@ class Board:
         @interacts  load_tc(root).
         @deps       load_tc.
         @complexity O(1).
-        @alloc      the tc module, one empty dict and one empty set.
+        @alloc      the tc module, three empty dicts and one empty set.
         """
         self.tc = load_tc(root)
         self.clock = clock
         self.last_listening_at = {}
+        # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15.
+        # Status: unreviewed. D28: the first poll that found no pid for a
+        # name seen listening, and the wake found for it, until its next
+        # sighting.
+        self.first_missing_at = {}
+        self.wakes = {}
         self.nested_cards = set()
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    def wake_of(self, name, now, candidates):
+        """The wake kept for `name`, a stopped listener: {"at", "names", "settled"} (D24, D28).
+
+        While the wake window is open (until POLL_SECONDS past the first
+        poll that found no pid), each poll looks for the wake in
+        `candidates` (find_wake) and adds what it finds to what earlier
+        polls found, so a waking message that a read later moves out of the
+        board's sight (a name MESSAGE_NAME does not match) stays known. The
+        first poll past the window looks once more and settles it: no mail
+        that lands later can be a wake, so later polls look for none.
+
+        @interacts  updates wakes[name]; lstats the candidates (find_wake).
+        @deps       find_wake; tc.POLL_SECONDS.
+        @complexity find_wake's while the window is open, else O(1).
+        @alloc      one small dict per stopped name, held until its next
+                    sighting or the prune.
+        """
+        wake = self.wakes.setdefault(name, {"at": None, "names": set(), "settled": False})
+        if wake["settled"]:
+            return wake
+        until = self.first_missing_at[name] + self.tc.POLL_SECONDS
+        at, names = find_wake(candidates, self.last_listening_at[name] - self.tc.POLL_SECONDS, until)
+        if at is not None:
+            wake["at"] = at if wake["at"] is None else min(wake["at"], at)
+            wake["names"] |= names
+        wake["settled"] = now > until
+        return wake
 
     # Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
     def note_nested(self, file_name):
@@ -667,30 +1024,50 @@ class Board:
         tc's GPU_QUERY_TIMEOUT_SECONDS), scans every process and, on the
         merged tc, reads every card: none of which the feed uses.
 
+        The retry serves the dev branch's tc before SHARED merges: there a
+        `tc read` that moves a message between mailbox_summary's glob and
+        its stat makes it raise FileNotFoundError. It is asked once more,
+        and finds the message in read/; a second miss raises, and that poll
+        answers 500. SHARED's tc skips an entry that vanished before its
+        stat, so with it the retry never runs and costs nothing, and the
+        stand-in test of it says nothing about that tc.
+
         @interacts  see the module block: /proc/locks, the lock files, mail/
                     and status/ through tc; the load average and
                     /proc/meminfo through machine_now.
         @deps       tc.now_iso, tc.listeners, tc.mailbox_summary;
                     machine_now.
         @complexity O(k + n + m): k lines in /proc/locks, n names, m message
-                    files.
+                    files; twice m when a message moved mid-poll.
         @alloc      one dict, returned.
         """
+        try:
+            mail = self.tc.mailbox_summary()
+        except FileNotFoundError:
+            mail = self.tc.mailbox_summary()
         return {"time": self.tc.now_iso(), "machine": machine_now(),
-                "listeners": self.tc.listeners("wait"), "mail": self.tc.mailbox_summary()}
+                "listeners": self.tc.listeners("wait"), "mail": mail}
 
     def feed(self):
         """One C5 feed object for the mailbox as it is now.
 
-        @interacts  see the module block; updates last_listening_at and,
-                    through note_nested, nested_cards.
+        @interacts  see the module block; updates last_listening_at,
+                    first_missing_at, wakes and, through note_nested,
+                    nested_cards.
         @deps       snapshot, read_cards, scan_messages, status_preview,
-                    file_age, parents_of, roles_of, levels_of, note_nested.
-        @complexity O(k + m log W + n + c^2) per poll; the module block
-                    names each term.
-        @alloc      the per-poll objects the module block lists, and the
-                    returned dict; last_listening_at gains one float per
-                    name listening now and drops each past DOWN_WINDOW_S.
+                    file_age, wake_of, after_listening, hierarchy,
+                    note_nested; heapq, os; tc.POLL_SECONDS.
+        @complexity O(k + m (log W + log K) + n + c^2) per poll; the module
+                    block names each term.
+        @alloc      the per-poll objects the module block lists (a Message,
+                    a sorted pair and a default count dict per message
+                    among them, and a heap and an inbox name set per name
+                    that stopped listening), and the returned dict;
+                    last_listening_at gains one float per name listening
+                    now, first_missing_at one per name that stopped, wakes
+                    one small dict per stopped name; a sighting drops a
+                    name from the last two, and the prune past
+                    DOWN_WINDOW_S from all three.
         """
         now = self.clock()
         snap = self.snapshot()
@@ -698,32 +1075,57 @@ class Board:
         for name, pid in pids.items():
             if pid:
                 self.last_listening_at[name] = now
+                self.first_missing_at.pop(name, None)
+                self.wakes.pop(name, None)
         for name, seen in list(self.last_listening_at.items()):
             if now - seen > DOWN_WINDOW_S:
                 del self.last_listening_at[name]
+                self.first_missing_at.pop(name, None)
+                self.wakes.pop(name, None)
+            elif not pids.get(name):
+                # D28: the first poll that finds no pid after a sighting.
+                self.first_missing_at.setdefault(name, now)
 
         cards = read_cards(self.tc.ROOT / CARDS_FOLDER, self.note_nested)
         mail = snap["mail"]
         names = set(mail) | set(cards)
-        messages = scan_messages(self.tc.MAIL)
+        messages, unreadable = scan_messages(self.tc.MAIL)
 
-        partners, sent, newest_pair, newest_sent = {}, {}, {}, {}
+        # Every stopped name's inbox file names (where its waking mail went
+        # is evidence it was read), and, while its wake window is open, its
+        # newest WAKE_CANDIDATES messages by number, kept as the walk goes.
+        inbox = {name: set() for name in self.first_missing_at}
+        candidates = {name: [] for name in self.first_missing_at
+                      if not self.wakes.get(name, {}).get("settled")}
+        sent, newest_pair, newest_sent = {}, {}, {}
         for msg in messages:
             if msg.sender not in newest_sent or msg.seq > newest_sent[msg.sender].seq:
                 newest_sent[msg.sender] = msg
+            if msg.to in inbox:
+                if not msg.read:
+                    inbox[msg.to].add(os.path.basename(msg.path))
+                heap = candidates.get(msg.to)
+                if heap is not None:
+                    if len(heap) < WAKE_CANDIDATES:
+                        heapq.heappush(heap, msg)
+                    else:
+                        heapq.heappushpop(heap, msg)
             if msg.sender == msg.to:
                 continue
-            partners.setdefault(msg.sender, set()).add(msg.to)
-            partners.setdefault(msg.to, set()).add(msg.sender)
             pair = tuple(sorted((msg.sender, msg.to)))
             counts = sent.setdefault(pair, dict.fromkeys(pair, 0))
             counts[msg.sender] += 1
             if pair not in newest_pair or msg.seq > newest_pair[pair].seq:
                 newest_pair[pair] = msg
+        # C5 rule 1 with D27's counts: each name's partners, and how many
+        # messages it exchanged with each, both ways.
+        partners = {}
+        for (low, high), counts in sent.items():
+            both = counts[low] + counts[high]
+            partners.setdefault(low, {})[high] = both
+            partners.setdefault(high, {})[low] = both
 
-        parents = parents_of(names, cards, partners)
-        roles = roles_of(names, parents)
-        levels = levels_of(names, parents)
+        parents, roles, levels = hierarchy(names, cards, partners)
 
         nodes = []
         for name in sorted(names):
@@ -733,13 +1135,21 @@ class Board:
             route = card.get("route") or DEFAULT_ROUTE
             mine = newest_sent.get(name)
             sent_age = file_age(mine.path, now) if mine else None
-            # D15's order. Down needs `not pid`: every live listener was
-            # just stamped into last_listening_at above, so the map alone
-            # would call each one down.
+            # D15 and D24's order. Down, woken and working each need `not
+            # pid` and a recent sighting, so one branch picks among them
+            # (after_listening): every live listener was just stamped into
+            # last_listening_at above, so the map alone would catch each one.
             if sent_age is not None and sent_age <= WRITING_WINDOW_S:
                 state = WRITING
             elif not pid and name in self.last_listening_at:
-                state = DOWN
+                if name in unreadable:
+                    # C5, D28: the board cannot list the inbox, so it cannot tell.
+                    state = DOWN
+                else:
+                    wake = self.wake_of(name, now, candidates.get(name, ()))
+                    state = after_listening(self.last_listening_at[name], now, wake["at"], wake["names"],
+                                            inbox.get(name, set()), mine,
+                                            self.tc.STATUS / f"{name}{STATUS_SUFFIX}")
             elif pid:
                 state = LISTENING
             elif route == ROUTE_CODEX:
@@ -749,11 +1159,15 @@ class Board:
             else:
                 state = IDLE
             role, role_source = roles[name]
+            unread = box.get("unread") if box else 0
+            newest = box.get("newest_mail_age_s") if box else None
             nodes.append({
                 "id": name, "kind": card.get("kind"), "account": card.get("account"),
                 "route": route, "state": state, "listener_pid": pid,
-                "unread": box["unread"] if box else 0,
-                "last_mail_age_s": box["newest_mail_age_s"] if box else None,
+                # An inbox tc cannot count stays unknown, never 0, with tc's reason.
+                "unread": unread, "unread_problem": box.get("mail_problem") if box and unread is None else None,
+                "inbox_unreadable": name in unreadable,
+                "last_mail_age_s": None if newest is None else max(0, newest),
                 "status": status_preview(self.tc.STATUS, name),
                 "role": role, "role_source": role_source,
                 "reports_to": card.get("reports_to"), "level": levels[name],
@@ -883,7 +1297,12 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
     Every request is checked in this order. A Host that is not
     127.0.0.1:<port> or localhost:<port>: 421. A method other than GET or
     HEAD: 405. /feed without the right X-TC-Token header: 401. A path not
-    on STATIC_FILES (or not on disk): 404. Every refusal has no body. The
+    on STATIC_FILES (or not on disk): 404. Every refusal has no body,
+    http.server's own too (send_error), which come before the Host check:
+    a request whose version http.server has read gets 400, 414 or 431, a
+    status line and no body; one it still holds as HTTP/0.9 gets no bytes
+    at all, not even a status line: a one-word request line, an unreadable
+    version (`GET / FOO/1.0`) and HTTP/2.0, whose 505 never goes out. The
     whole request, read and answer, has REQUEST_DEADLINE_S (setup()).
 
     @interacts  reads the request; writes one response; calls the server's
@@ -983,6 +1402,27 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def send_error(self, code, message=None, explain=None):
+        """Refuse with `code` and no body: http.server's own refusals too.
+
+        http.server calls this when it cannot take a request at all (a bad
+        request line, one past 65,536 bytes, too many or too long headers,
+        an HTTP version it does not speak), before answer() and its Host
+        check run. Its own page would carry a body, so every refusal here
+        is empty, and the connection closes. A request it read as HTTP/0.9
+        gets no status line either, as that version has none: a one-word
+        request line, an unreadable version, and HTTP/2.0, whose 505 is
+        never sent.
+
+        @interacts  writes one empty response.
+        @deps       send_empty.
+        @complexity O(1).
+        @alloc      none retained.
+        """
+        self.close_connection = True
+        self.send_empty(code)
+
     def send_bytes(self, ctype, data, with_body):
         """Send 200 with `data` as `ctype`; the body only when `with_body`.
 
@@ -1043,11 +1483,11 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
             self.send_bytes(FEED_TYPE, data, with_body)
             return
         name = path[1:] if path.startswith("/") else ""
-        if name not in STATIC_FILES:
+        if name not in STATIC_PATHS:
             self.send_empty(http.server.HTTPStatus.NOT_FOUND)
             return
         try:
-            data = (BOARD_DIR / name).read_bytes()
+            data = STATIC_PATHS[name].read_bytes()
         except OSError:
             self.send_empty(http.server.HTTPStatus.NOT_FOUND)
             return
@@ -1057,8 +1497,9 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
 class BoardServer(http.server.ThreadingHTTPServer):
     """The board's HTTP server: bound to BIND_HOST, holding one Board and the token.
 
-    Board.feed() keeps state across calls (last_listening_at), so requests
-    take `feed_lock` around it. Request threads are daemon threads, so a
+    Board.feed() keeps state across calls (last_listening_at,
+    first_missing_at, wakes), so requests take `feed_lock` around it.
+    Request threads are daemon threads, so a
     stalled one never keeps the process alive. At most `max_connections`
     (MAX_CONNECTIONS) are served at once, each holding one of `slots`; one
     past that is closed at once, and each ends by REQUEST_DEADLINE_S.
@@ -1104,6 +1545,26 @@ class BoardServer(http.server.ThreadingHTTPServer):
             self.slots.release()
             raise
 
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def handle_error(self, request, client_address):
+        """One line on stderr for a request that failed past its handler, never a traceback.
+
+        A client that hangs up before its answer is written (a reload, a
+        closed tab, a poll the page gave up on) makes the write raise
+        BrokenPipeError or ConnectionResetError, and socketserver's own
+        handle_error would print a traceback for it.
+
+        @interacts  writes one line to stderr.
+        @deps       sys.
+        @complexity O(1).
+        @alloc      one short string.
+        """
+        error = sys.exc_info()[1]
+        if isinstance(error, (BrokenPipeError, ConnectionResetError)):
+            print("serve.py: a client hung up before its answer was written", file=sys.stderr, flush=True)
+        else:
+            print(f"serve.py: a request failed: {error!r}", file=sys.stderr, flush=True)
+
     def process_request_thread(self, request, client_address):
         """Handle one request on its own thread, then give its slot back.
 
@@ -1134,7 +1595,9 @@ def main(argv=None):
 
     @interacts  see the module block: loads tc for the mailbox TC_ROOT
                 names (or tc's own folder), binds BIND_HOST:--port, prints
-                one line to stdout, sets a SIGTERM handler.
+                one line to stdout, sets a SIGTERM handler. A usage error,
+                --port 80 among them, goes to stderr in words and exits 2
+                (argparse's) before anything is loaded or bound.
     @deps       argparse, secrets, signal; Board, BoardServer.
     @complexity O(1) to start; then one request at a time per thread.
     @alloc      one Board and one BoardServer, closed on the way out.
@@ -1144,6 +1607,9 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,
                     help=f"port on {BIND_HOST} (default {DEFAULT_PORT}; 0 lets the OS pick)")
     args = ap.parse_args(argv)
+    if args.port == HTTP_DEFAULT_PORT:
+        ap.error(f"--port {HTTP_DEFAULT_PORT}: a browser leaves port {HTTP_DEFAULT_PORT} out of its Host header, "
+                 "which the board refuses; pick another port (0 lets the OS pick)")
     token = secrets.token_urlsafe(TOKEN_BYTES)
     server = BoardServer(Board(), args.port, token)
     signal.signal(signal.SIGTERM, stop_on_term)

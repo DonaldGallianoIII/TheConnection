@@ -3,42 +3,55 @@
  * feed JSON the way board/serve.py's feed() gives them (the values match
  * tests/test_board_feed.py's expectations): roots side by side in name
  * order, levels top to bottom, no two boxes overlapping, the cycle laid out,
- * and each title carrying its role word. Round 1 adds a2's legibility
- * check: fourteen names on a 1152 px desktop canvas and a 358 px phone
+ * and each title carrying its role word. The board reads at the owner's
+ * size: fourteen names on a 1152 px desktop canvas and a 358 px phone
  * window, every box inside the width with no overlap and no text under
- * MIN_TEXT_PX, read against theme.css's own font sizes; and createFit,
- * which sizes the board from the ResizeObserver entry. Round 2 adds the
- * frame growing to the board, and on the 14-name feeds at both widths: no
- * wire or connector entering a node box, no label on a label or a box, and
- * two boxes in one row joined straight across. Since then: a parent's mail
- * (or native line) runs beside its connector and shares no piece of it,
- * and two parents' connectors share no piece (a relay over a relay whose
- * workers wrap, at a 1180 px window and a 700 px stage); the switch
- * between graph and outline has two breakpoints; the outline is brought up
- * to date in place (a fake document counts its writes) and heads no tree
- * of one; the legend names the quiet wire and the inferred thin line; a
- * down wire whose siblings' wires share its run is drawn after every solid
- * and dashed one, on a knockout in the canvas's face (createKit on the
- * fake document); and a tree wire clears both port rings at the widest
- * node border.
+ * MIN_TEXT_PX, read against theme.css's own font sizes; createFit sizes
+ * the board from the ResizeObserver entry and grows its frame to the
+ * board. On the 14-name feeds at both widths: no wire or connector
+ * entering a node box, no label on a label or a box, and two boxes in one
+ * row joined straight across. A parent's mail (or native line) runs beside
+ * its connector and shares no piece of it, and two parents' connectors
+ * share no piece (a relay over a relay whose workers wrap, at a 1180 px
+ * window and a 700 px stage); the switch between graph and outline has two
+ * breakpoints; the outline is brought up to date in place (a fake document
+ * counts its writes) and heads no tree of one; the legend names the quiet
+ * wire and the inferred thin line, and calls each patterned line what
+ * theme.css draws; a down wire whose siblings' wires share its run is drawn
+ * after every solid and dashed one, on a knockout in the canvas's face
+ * (createKit on the fake document); a tree wire clears both port rings at
+ * the widest node border; routes are searched once per routed pair and
+ * never on a poll that only aged the mail, a pair's first mail searches
+ * that pair alone, 20 Claude peers on one account search once per native
+ * line with the grid edge flags at work, and createFit searches none on a
+ * resize that wraps no row; a node's state words and unread words are
+ * never cut; and theme.css asks no other host.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
- * @interacts  imports board/look.js; reads board/demo-script.json and
- *             board/theme.css as text; no DOM (a fake observer, kit and
- *             document)
+ * @interacts  imports board/look.js; reads board/demo-script.json,
+ *             board/theme.css and board/serve.py as text, and looks for
+ *             the font files in board/fonts/; no DOM (a fake observer, kit
+ *             and document)
  * @deps       node:test, node:assert, node:fs (Node 18+)
- * @complexity O(n^2) per shape over n <= 14 nodes, for the pairwise overlap
+ * @complexity O(n^2) per shape over n <= 20 nodes, for the pairwise overlap
  *             check; O(r * p * n) for the runs over r runs of p points, and
- *             O(e^2 + e * n) for the labels over e labels
+ *             O(e^2 + e * n) for the labels over e labels. The routing
+ *             dominates: the 20-peer feed's 190 native lines are searched
+ *             three times in all (its first draw, and the resize test's
+ *             first draw and 1000 px), each search O(g log g) over g up to
+ *             12,180 states, about 130 to 210 ms per 190 on the owner's
+ *             machine; the 14-name shared feed's 20 routed pairs about
+ *             six times in all (two cached first draws, and fresh views
+ *             to compare the cached runs with)
  * @alloc      the layouts, dropped at the end of each test
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import {
   layoutLevels, layoutWidth, roleTitle, fitTransform, boardView, createBoard, createFit, createKit, levelPort, rootsList,
-  outlineView, createCanvas, patchBoard, STATES, CONFIG, LEGEND_WORDS,
+  outlineView, createCanvas, createNode, patchBoard, STATES, CONFIG, LEGEND_WORDS, UNREAD_WORDS,
 } from '../board/look.js';
 
 /** One feed node with the fields the layout reads. @complexity O(1)  @alloc one object */
@@ -59,7 +72,7 @@ const SHAPES = {
     n('y1', 'worker', 'inferred', 1, 'y'), n('y2', 'worker', 'inferred', 1, 'y')],
   // A cycle's root carries no parent: the walk used none for it (D15).
   cycle: [n('p', 'orchestrator', 'declared', 0, null), n('q', 'orchestrator', 'declared', 1, 'p')],
-  ghost: [n('r', 'peer', 'inferred', 0, null, { reports_to: 'ghost' })],
+  ghost: [n('r', 'peer', 'none', 0, null, { reports_to: 'ghost' })],
   sharedWorker: [n('a', 'orchestrator', 'declared', 0, null), n('a2', 'worker', 'declared', 1, 'a'),
     n('b', 'worker', 'declared', 1, 'a'), n('x', 'orchestrator', 'inferred', 0, null),
     n('x1', 'worker', 'inferred', 1, 'x'), n('x2', 'worker', 'inferred', 1, 'x')],
@@ -123,7 +136,7 @@ test('a shared worker sits once, under its declared parent', () => {
   assert.ok(lay.pos.b.x + CONFIG.NODE_W < lay.pos.x.x, 'b is not in a\'s tree');
 });
 
-test('each title carries its role word, and "· inferred" exactly when role_source says so', () => {
+test('each title carries its role word, and "· inferred" exactly when role_source says so, never on a peer', () => {
   for (const [name, nodes] of Object.entries(SHAPES)) {
     const lay = layoutLevels({ nodes });
     for (const node of nodes) {
@@ -133,7 +146,12 @@ test('each title carries its role word, and "· inferred" exactly when role_sour
     }
   }
   assert.equal(roleTitle({ id: 'a', role: 'orchestrator', role_source: 'declared' }), 'a · orchestrator');
-  assert.equal(roleTitle({ id: 'x', role: 'peer', role_source: 'inferred' }), 'x · peer · inferred');
+  // Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+  // D27: a peer is no guess. The feed says role_source none; a feed that
+  // says inferred on a peer still draws no `inferred`.
+  assert.equal(roleTitle({ id: 'x', role: 'peer', role_source: 'none' }), 'x · peer');
+  assert.equal(roleTitle({ id: 'x', role: 'peer', role_source: 'inferred' }), 'x · peer');
+  assert.equal(roleTitle({ id: 'w', role: 'worker', role_source: 'inferred' }), 'w · worker · inferred');
 });
 
 test('an empty feed lays out nothing; fitTransform never enlarges or shrinks past its floor', () => {
@@ -143,7 +161,7 @@ test('an empty feed lays out nothing; fitTransform never enlarges or shrinks pas
   assert.equal(big.k, 1);
   assert.equal(big.x, (10000 - lay.extent.w) / 2, 'a board that fits is not centered');
   assert.equal(fitTransform(1, 1, lay.extent, 24).k, CONFIG.MIN_FIT_SCALE);
-  // Round 1: the floor is the scale at which the smallest board text is MIN_TEXT_PX.
+  // The floor is the scale at which the smallest board text is MIN_TEXT_PX.
   assert.equal(CONFIG.MIN_FIT_SCALE, CONFIG.MIN_TEXT_PX / CONFIG.BOARD_TEXT_MIN_PX);
 });
 
@@ -176,8 +194,8 @@ test('the demo shows every state, every line kind, and a wire for every scripted
 });
 
 // Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
-// a2, for Donald (MEDIUM-1): the board reads at his real size, about 14
-// names, on a desktop and on a phone. The canvas inside .tc-win at its
+// The board reads at the owner's real size, about 14 names, on a desktop
+// and on a phone. The canvas inside .tc-win at its
 // 1180 px cap is 1152 px (theme.css: 1180 less two 1 px borders, 12 px body
 // padding each side, and the canvas's 1 px borders). 358 is a 390 px phone
 // less the page's two 16 px gutters. Height does not limit the scale: a
@@ -190,11 +208,12 @@ const FIT_PADDING = 24;
 const FOURTEEN = {
   star: [n('hub', 'orchestrator', 'declared', 0, null),
     ...Array.from({ length: 13 }, (_, i) => n(`w${i + 1}`, 'worker', 'declared', 1, 'hub'))],
-  peers: Array.from({ length: 14 }, (_, i) => n(`p${i + 1}`, 'peer', 'inferred', 0, null)),
+  peers: Array.from({ length: 14 }, (_, i) => n(`p${i + 1}`, 'peer', 'none', 0, null)),
 };
-// The text drawn inside the board's view, so scaled with it (round 2 adds
-// the headings over the trees).
-const BOARD_TEXT = ['.tc-node-title', '.tc-node-role', '.tc-node-sub', '.tc-node-note', '.tc-node-badge', '.tc-wire-label', '.tc-head'];
+// The text drawn inside the board's view, so scaled with it, the headings
+// over the trees too.
+const BOARD_TEXT = ['.tc-node-title', '.tc-node-role', '.tc-node-sub', '.tc-node-line', '.tc-node-unread', '.tc-node-note', '.tc-node-badge',
+  '.tc-wire-label', '.tc-head'];
 const CSS = readFileSync(new URL('../board/theme.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
 
 /**
@@ -293,7 +312,7 @@ test('createFit takes the canvas size from the ResizeObserver entry, never from 
   assert.equal(canvas.view.style.height, `${extent.h}px`);
   assert.equal(Number(attrs.height), extent.h, 'the wire layer is not the board\'s height');
   // Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
-  // Round 2, item 1: the frame grows to the board's height, so the page
+  // The frame grows to the board's height, so the page
   // scrolls to every box; a height-only resize lays nothing out again.
   assert.equal(canvas.frame.style.height, `${extent.h + FIT_PADDING}px`, 'the frame does not grow to the board');
   const laidOut = board.view;
@@ -306,8 +325,8 @@ test('createFit takes the canvas size from the ResizeObserver entry, never from 
 });
 
 // Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
-// Round 2, items 2 and 3, from the architect's screenshots: wires looped
-// through boxes and labels sat on each other and on node text. The
+// Wires once looped through boxes, and labels sat on each other and on
+// node text. The
 // 14-name feeds at the desktop and phone widths, with every pair's newest
 // message fresh, so every mail wire flows and wants a label (the worst
 // case for labels). `mixed` is the screenshot's own shape.
@@ -348,7 +367,7 @@ const ROUTED = {
     ...['c', 'd'].map((id) => fed(id, 'worker', 'declared', 2, 'b', { reports_to: 'b' })),
     fed('z', 'orchestrator', 'declared', 0, null),
     ...['y1', 'y2', 'y3'].map((id) => fed(id, 'worker', 'declared', 1, 'z', { reports_to: 'z' })),
-    fed('p1', 'peer', 'inferred', 0, null), fed('p2', 'peer', 'inferred', 0, null),
+    fed('p1', 'peer', 'none', 0, null), fed('p2', 'peer', 'none', 0, null),
   ], [['b', 'a'], ['a', 'docs'], ['c', 'b'], ['y1', 'z'], ['z', 'y2'], ['z', 'y3'], ['a', 'z'], ['a', 'e1'],
     ['a', 'e2'], ['a', 'e3'], ['p2', 'p1'], ['b', 'd']]),
   // The hub mails every worker, and three pairs of workers in different rows mail each other.
@@ -513,6 +532,168 @@ test('a parent\'s mail runs beside its connector and shares no piece of it; two 
   assert.equal(peers.points[0].y, peers.points[1].y, 'p1 to p2 is not level');
 });
 
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// Every poll ran the router again for every pair that is not parent and
+// child, and Claude cards on one account make c(c-1)/2 native lines. The
+// board now keeps its runs while the boxes and the drawn pairs stand, and
+// lays nothing out on a poll that only aged the mail.
+const ACCOUNT_OF = {
+  a: 'acct1', b: 'acct1', docs: 'acct1', e1: 'acct1', e2: 'acct1', z: 'acct2', y1: 'acct2', y2: 'acct2', y3: 'acct2',
+  c: 'acct3', d: 'acct3', e3: 'acct3', p1: 'acct3', p2: 'acct3',
+};
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+// unreviewed. The first draw of PEERS Claude cards on one account is judged
+// by its counts (one search per native line, PEERS(PEERS-1)/2 = 190, and the
+// grid edge flags hit), not its time. This stopwatch is only a backstop:
+// the draw took 127 to 213 ms on the owner's machine (2026-10-15), so a
+// draw past it is a hang, not a slow machine.
+const FIRST_DRAW_BACKSTOP_MS = 10000;
+const PEERS = 20;
+// createFit's widths for the resize claim: the 20 peers sit four to a row
+// at the desktop canvas and still at NARROWER_W (four boxes and three root
+// gaps need 1,048 px of the room), and three to a row at WRAP_W.
+const NARROWER_W = 1140;
+const WRAP_W = 1000;
+
+/**
+ * The 14-name mixed feed with every card Claude, on three accounts of 5, 4
+ * and 5, and one native link for each pair on an account (26 in all).
+ * @complexity O(n^2) over the 14 names  @alloc one feed
+ */
+function sharedFeed() {
+  const nodes = ROUTED.mixed.nodes.map((x) => ({ ...x, kind: 'claude', account: ACCOUNT_OF[x.id] }));
+  const ids = nodes.map((x) => x.id).sort();
+  const native = ids.flatMap((p, i) => ids.slice(i + 1).filter((q) => ACCOUNT_OF[p] === ACCOUNT_OF[q])
+    .map((q) => ({ from: p, to: q, kind: 'native' })));
+  return { ...ROUTED.mixed, nodes, links: [...ROUTED.mixed.links, ...native] };
+}
+
+/** A drawing kit that counts its calls and draws nothing. @complexity O(1) per call  @alloc one handle per create */
+function createCountingKit() {
+  const kit = { calls: 0 };
+  const handle = () => ({ update() { kit.calls += 1; }, remove() { kit.calls += 1; } });
+  kit.createNode = () => { kit.calls += 1; return handle(); };
+  kit.createEdge = () => { kit.calls += 1; return handle(); };
+  return kit;
+}
+
+/** Each edge's run, by id. @complexity O(e) over e edges  @alloc one object */
+const runsById = (view) => Object.fromEntries(Object.entries(view.edges).map(([id, e]) => [id, e.points]));
+
+test('routes are searched once per routed pair, none on a poll that only aged the mail or stopped a flow, and draw as before', () => {
+  const width = layoutWidth(DESK_W);
+  const feed = sharedFeed();
+  const parentOf = Object.fromEntries(feed.nodes.map((x) => [x.id, x.parent]));
+  const kit = createCountingKit();
+  const board = createBoard(kit);
+  patchBoard(board, feed, width);
+  const routed = Object.values(board.view.edges).filter((e) => parentOf[e.to] !== e.from && parentOf[e.from] !== e.to);
+  assert.ok(routed.length >= 20, `only ${routed.length} routed pairs, so the shape tests little`);
+  assert.equal(board.routes.searches, routed.length, 'not one search per routed pair');
+  assert.deepEqual(runsById(board.view), runsById(boardView(feed, width)), 'the cached board draws other runs than boardView alone');
+  // Every age up 3 s, a new `at`, no wire past FLOW_AGE_S: nothing is laid out.
+  const aged = {
+    ...feed, at: 'three seconds on', wires: feed.wires.map((w) => ({ ...w, age_s: w.age_s + 3 })),
+    nodes: feed.nodes.map((x) => ({ ...x, last_mail_age_s: 3 })),
+  };
+  const [view, calls] = [board.view, kit.calls];
+  const ops = patchBoard(board, aged, width);
+  assert.equal(board.routes.searches, routed.length, 'a poll that only aged the mail searched a route');
+  assert.equal(board.view, view, 'a poll that only aged the mail laid the board out again');
+  assert.equal(kit.calls, calls, 'a poll that only aged the mail called the kit');
+  for (const [name, list] of Object.entries(ops)) assert.deepEqual(list, [], name);
+  // One wire past FLOW_AGE_S: its flow and words change, its run does not.
+  const stopped = { ...aged, wires: aged.wires.map((w, i) => (i ? w : { ...w, age_s: CONFIG.FLOW_AGE_S + 1 })) };
+  const changed = patchBoard(board, stopped, width);
+  assert.equal(board.routes.searches, routed.length, 'a wire that stopped flowing set off a route search');
+  assert.ok(changed.updateEdges.length > 0, 'the wire that stopped flowing was not redrawn');
+  assert.deepEqual(runsById(board.view), runsById(boardView(stopped, width)), 'a reused run differs from a fresh search');
+});
+
+/**
+ * PEERS Claude cards on one account, every pair joined by a native line.
+ * @complexity O(PEERS^2)  @alloc one feed
+ */
+function peersFeed() {
+  const nodes = Array.from({ length: PEERS }, (_, i) => fed(`s${i + 1}`, 'peer', 'none', 0, null, { kind: 'claude', account: 'work' }));
+  const links = nodes.flatMap((p, i) => nodes.slice(i + 1).map((q) => ({ from: p.id, to: q.id, kind: 'native' })));
+  return { nodes, links, wires: [] };
+}
+const NATIVE_LINES = (PEERS * (PEERS - 1)) / 2;
+
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+test('twenty Claude peers on one account: the first draw searches once per native line and reuses grid edges, the next poll searches none', (t) => {
+  const feed = peersFeed();
+  const board = createBoard(createCountingKit());
+  const start = performance.now();
+  patchBoard(board, feed, layoutWidth(DESK_W));
+  const ms = performance.now() - start;
+  t.diagnostic(`first draw of ${PEERS} peers on one account: ${ms.toFixed(0)} ms, ${board.routes.searches} route searches, `
+    + `${board.routes.edgeHits} grid edges looked up again`);
+  assert.equal(board.routes.searches, NATIVE_LINES, 'not one search per native line');
+  assert.ok(board.routes.edgeHits > 0, 'no search looked up a grid edge it had already checked: the edge flags keep nothing');
+  assert.ok(ms <= FIRST_DRAW_BACKSTOP_MS, `the first draw took ${ms.toFixed(0)} ms, past the ${FIRST_DRAW_BACKSTOP_MS} ms backstop`);
+  const hits = board.routes.edgeHits;
+  patchBoard(board, { ...feed, at: 'the next poll' }, layoutWidth(DESK_W));
+  assert.deepEqual([board.routes.searches, board.routes.edgeHits], [NATIVE_LINES, hits], 'the next poll searched again');
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+// One key covered every routed run, so a pair's first message searched
+// every routed pair again though no box moved. A run rests on the boxes
+// and its own ends only, so the cache keeps runs by their ends.
+test('a pair\'s first mail searches only that pair, and a native pair\'s first mail searches none', () => {
+  const width = layoutWidth(DESK_W);
+  const feed = sharedFeed();
+  const board = createBoard(createCountingKit());
+  patchBoard(board, feed, width);
+  const first = board.routes.searches;
+  const parentOf = Object.fromEntries(feed.nodes.map((x) => [x.id, x.parent]));
+  // docs (under a) and y3 (under z): no link yet, no shared account, not parent and child.
+  assert.ok(!feed.links.some((l) => [l.from, l.to].sort().join('>') === 'docs>y3') && parentOf.y3 !== 'docs', 'docs and y3 are linked already');
+  const mailed = {
+    ...feed, links: [...feed.links, { from: 'docs', to: 'y3', kind: 'mailbox' }], wires: [...feed.wires, { from: 'docs', to: 'y3', seq: 99, age_s: 0 }],
+  };
+  patchBoard(board, mailed, width);
+  assert.equal(board.routes.searches, first + 1, 'a new pair searched more than itself');
+  // c (under b) and e3 (under a) share an account: their native line becomes a mail wire on the same run.
+  assert.ok(feed.links.some((l) => l.kind === 'native' && [l.from, l.to].sort().join('>') === 'c>e3'), 'c and e3 have no native line');
+  const native = {
+    ...mailed, links: [...mailed.links, { from: 'c', to: 'e3', kind: 'mailbox' }], wires: [...mailed.wires, { from: 'e3', to: 'c', seq: 100, age_s: 0 }],
+  };
+  patchBoard(board, native, width);
+  assert.equal(board.routes.searches, first + 1, 'a native pair\'s first mail searched again');
+  assert.deepEqual(runsById(board.view), runsById(boardView(native, width)), 'a cached run differs from a fresh search');
+  assert.equal(board.routes.runs.size, Object.values(board.view.edges).filter((e) => parentOf[e.to] !== e.from && parentOf[e.from] !== e.to).length,
+    'the cache holds runs for pairs no longer drawn');
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+// createFit's @complexity says a width change searches only when a row
+// wraps differently. Pinned on the 20 peers.
+test('createFit searches no route from 1152 to 1140 px, where no row wraps, and every native line again at 1000 px, where one does', () => {
+  let report = null;
+  class FakeObserver {
+    constructor(callback) { report = callback; }
+    observe() {}
+    disconnect() {}
+  }
+  const board = createBoard(createCountingKit());
+  const fit = createFit({ root: {}, frame: { style: {} }, view: { style: {} }, wires: { setAttribute() {} } }, board,
+    { padding: FIT_PADDING, Observer: FakeObserver });
+  fit.start();
+  fit.draw(peersFeed());
+  report([{ contentRect: { width: DESK_W, height: CANVAS_H } }]);
+  assert.equal(board.routes.searches, NATIVE_LINES);
+  const desk = board.view;
+  report([{ contentRect: { width: NARROWER_W, height: CANVAS_H } }]);
+  assert.notEqual(board.view, desk, `${NARROWER_W} px did not lay the board out again, so the claim is not tested`);
+  assert.equal(board.routes.searches, NATIVE_LINES, `${NARROWER_W} px, where no row wraps, searched a route`);
+  report([{ contentRect: { width: WRAP_W, height: CANVAS_H } }]);
+  assert.equal(board.routes.searches, 2 * NATIVE_LINES, `${WRAP_W} px, three to a row, did not search every native line again`);
+  fit.stop();
+});
+
 // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
 // Two parents' connectors once ran down one gutter, so a top relay's
 // worker read as its sub-relay's. Each wrapping block now has a lane.
@@ -536,8 +717,8 @@ test('every connector trunk serves one parent: a over b and x, b over b1 to b5, 
 });
 
 // Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
-// Round 2, item 5: the second orchestrator is reachable at a glance. A
-// list of roots at the top, and a heading over each root's tree.
+// The second orchestrator is reachable at a glance: a list of roots at
+// the top, and a heading over each root's tree.
 
 test('the roots list names each root by role, orchestrators first, in words', () => {
   assert.deepEqual(rootsList(ROUTED.mixed), [
@@ -574,7 +755,7 @@ test('each root\'s tree starts with a heading naming its root, over the whole tr
   }
 });
 
-// a2's direction for the phone: the outline view, one row per session,
+// On a phone the board draws the outline view, one row per session,
 // indented by level under its parent, each tree headed by its root, then
 // the recent traffic. The 14-name feed at 358 px.
 
@@ -691,7 +872,7 @@ test('the switch between graph and outline has two breakpoints, so a stage near 
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @complexity O(1) per element, O(k) per insert over k siblings  @alloc one object per element
  */
-function fakeDoc() {
+function createFakeDoc() {
   const make = (tag) => {
     const e = {
       tag, className: '', dataset: {}, hidden: false, title: '', children: [], parentNode: null, writes: 0, text: '', scrolled: 0,
@@ -742,7 +923,7 @@ const everyEl = (e) => [e, ...e.children.flatMap(everyEl)];
 // The phone's outline was rebuilt whenever a traffic age ticked, which
 // lost a selection and a screen reader's place. C5 and C6: never rebuild.
 test('the outline is brought up to date in place: an age tick rewrites only traffic words; a new session adds one row', () => {
-  const doc = fakeDoc();
+  const doc = createFakeDoc();
   const canvas = { outline: doc.createElement('div') };
   const kit = createKit(doc, canvas);
   const aged = (age, feed = ROUTED.mixed) => ({ ...feed, wires: feed.wires.map((w) => ({ ...w, age_s: age })) });
@@ -768,6 +949,49 @@ test('the outline is brought up to date in place: an age tick rewrites only traf
   assert.equal(p1.children[0].hidden, true, 'p1\'s tree of one draws a heading');
   kit.revealOutline('p1');
   assert.equal(p1.children[1].scrolled, 1, 'the jump to p1 did not reach its row');
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+// One ellipsized line held `woken · not read · unread unknown` and cut C5's
+// words. The state words now have their line; the unread words lead the next.
+test('a node\'s state words have the second line to themselves, and its unread words lead the third, whole', () => {
+  const doc = createFakeDoc();
+  const canvas = createCanvas(doc, doc.createElement('div'));
+  const node = createNode(doc, canvas, {
+    title: 'y1 · worker', pos: { x: 0, y: 0 }, state: 'woken', detail: UNREAD_WORDS.unknown, note: 'last status: parsing the logs', levels: true,
+  });
+  const part = (cls) => everyEl(node.root).find((e) => e.className === cls);
+  assert.equal(part('tc-node-sub').textContent, `${STATES.woken.glyph}${STATES.woken.word}`, 'the state line holds more than the state');
+  assert.equal(part('tc-node-unread').textContent, `${UNREAD_WORDS.unknown} · `);
+  assert.equal(part('tc-node-note').textContent, 'last status: parsing the logs');
+  assert.deepEqual(part('tc-node-line').children.map((e) => e.className), ['tc-node-unread', 'tc-node-note'], 'the unread words do not lead the line');
+  node.setNote('');
+  assert.deepEqual([part('tc-node-unread').textContent, part('tc-node-note').hidden, part('tc-node-line').hidden], [UNREAD_WORDS.unknown, true, false]);
+  node.setState('listening', '');
+  assert.equal(part('tc-node-line').hidden, true, 'an empty third line still shows');
+  assert.equal(cssRule('.tc-node-unread').includes('flex: none'), true, 'the unread words may shrink');
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+// tc's reason an unread count is unknown, on the box's hover title and on
+// the outline row, as text: a group member chooses the file names in it.
+test('tc\'s reason for an unknown count shows in the box\'s hover title and on its outline row, as text', () => {
+  const reason = 'made-up <b>reason</b>: cannot list mail/to-b';
+  const feed = {
+    nodes: [fed('b', 'peer', 'none', 0, null, { unread: null, unread_problem: reason }), fed('c', 'peer', 'none', 0, null, { unread: 2 })],
+    links: [], wires: [],
+  };
+  const doc = createFakeDoc();
+  const canvas = createCanvas(doc, doc.createElement('div'));
+  const kit = createKit(doc, canvas);
+  const board = createBoard(kit);
+  patchBoard(board, feed, layoutWidth(DESK_W));
+  assert.equal(board.nodes.get('b').node.root.title, `b · peer\n${UNREAD_WORDS.unknown}: ${reason}`);
+  assert.equal(board.nodes.get('c').node.root.title, 'c · peer', 'a counted inbox carries a reason');
+  kit.drawOutline(outlineView(feed));
+  const lines = everyEl(canvas.outline).filter((e) => e.className === 'tc-row-problem');
+  assert.deepEqual(lines.map((e) => [e.textContent, e.hidden]), [[`${UNREAD_WORDS.unknown}: ${reason}`, false], ['', true]]);
+  assert.ok(lines.every((e) => e.children.length === 0), 'the reason was drawn as markup');
 });
 
 // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
@@ -809,7 +1033,7 @@ test('a relay over w1 to w4 it has mailed, w2 down, at 1152 px: the down wire is
   assert.equal(view.edges['mailbox:a>w2'].down, true, 'w2\'s wire is not down');
   assert.ok(sharedPiece(view.edges['mailbox:a>w2'].points, view.edges['mailbox:a>w1'].points),
     'a>w1 and a>w2 share no piece, so the shape tests nothing');
-  const doc = fakeDoc();
+  const doc = createFakeDoc();
   const canvas = createCanvas(doc, doc.createElement('div'));
   const board = createBoard(createKit(doc, canvas));
   // Drawn with w2 listening first, then w2 goes down, as on a live board:
@@ -839,6 +1063,42 @@ test('a relay over w1 to w4 it has mailed, w2 down, at 1152 px: the down wire is
   assert.ok(face && cssRule('.tc-knockout').includes(`stroke: ${face[1].trim()}`), 'the knockout is not the canvas\'s own face');
   assert.match(cssRule('.tc-knockout'), /stroke-width:\s*calc\(var\(--tc-wire-w\) \+ var\(--tc-wire-w-knockout-pad\)\)/);
   assert.match(CSS, /--tc-wire-w-knockout-pad:\s*var\(--tc-wire-w\);/, 'the knockout is not one quiet wire wider than its wire');
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// For a colorblind reader a line's dash pattern is the channel, so the
+// legend's word for each patterned line names the pattern theme.css draws.
+test('the legend calls each patterned line what theme.css draws: dash-dot for native, dotted for no listener', () => {
+  const dashes = (selector) => (cssRule(selector).match(/stroke-dasharray:\s*([^;]+);/) || [])[1] || '';
+  const shapeOf = (pattern) => {
+    const v = pattern.trim().split(/\s+/).map(Number);
+    if (v.length === 4 && v[0] > v[2]) return 'dash-dot';
+    if (v.length === 2 && 2 * v[0] <= v[1]) return 'dotted';
+    return `a pattern with no word (${pattern})`;
+  };
+  for (const [selector, means] of [['.tc-wire.kind-native', 'native'], ['.tc-wire.down', 'no listener']]) {
+    const word = shapeOf(dashes(selector));
+    assert.ok(LEGEND_WORDS.graph.includes(`${word}: ${means}`), `theme.css draws ${selector} as ${word}; the legend says: ${LEGEND_WORDS.graph}`);
+  }
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// D26: the board asks no host but its own. The browser check watches the
+// page's requests; this is the same promise read from the files.
+test('theme.css names no other host, and each face it names ships in board/fonts/ and is on serve.py\'s allow list', () => {
+  assert.ok(!/@import/.test(CSS), 'theme.css imports another stylesheet');
+  assert.ok(!/url\(\s*['"]?[a-z][a-z0-9+.-]*:/i.test(CSS), 'theme.css names a URL with a scheme');
+  const urls = [...CSS.matchAll(/url\(\s*['"]?([^'")]+)['"]?\s*\)/g)].map((m) => m[1]);
+  assert.equal(urls.length, 4, `theme.css names ${urls.length} files: ${urls.join(', ')}`);
+  const serve = readFileSync(new URL('../board/serve.py', import.meta.url), 'utf8');
+  for (const url of urls) {
+    assert.match(url, /^fonts\/[a-z0-9-]+\.woff2$/, `${url} is not a face in board/fonts/`);
+    assert.ok(existsSync(new URL(`../board/${url}`, import.meta.url)), `${url} is not in board/fonts/`);
+    assert.ok(serve.includes(`"${url}": "font/woff2"`), `${url} is not on serve.py's allow list`);
+  }
+  for (const family of ['Space Grotesk', 'JetBrains Mono']) {
+    assert.ok(CSS.includes(`font-family: '${family}'`), `no face for ${family}, which the stacks name`);
+  }
 });
 
 // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.

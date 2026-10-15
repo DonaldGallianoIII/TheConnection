@@ -2,9 +2,13 @@
  * theme.css: the board look. Window frame, canvas, session nodes, ports and
  * wires, taken from the Greener Pastures notebook's node graph.
  *
- * @interacts  styles elements built by look.js; reads no data
- * @deps       optional Google Fonts (Space Grotesk, JetBrains Mono); falls
- *             back to system fonts offline
+ * @interacts  styles elements built by look.js; reads no data; the page
+ *             fetches a face's file from fonts/ beside this file when it
+ *             first draws a character in that file's range, and asks no
+ *             other host (D26)
+ * @deps       the faces in board/fonts/ (Space Grotesk, JetBrains Mono,
+ *             SIL Open Font License 1.1); falls back to system fonts if a
+ *             file is missing
  * @complexity n/a (static stylesheet)
  * @alloc      none
  *
@@ -31,7 +35,48 @@
  * <html> and overrides only tokens; no rule
  * below names a color of its own, so a look is a token set and nothing else.
  */
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status:
+ * unreviewed. The two faces ship beside the board, so the page asks no
+ * host but its own (D26): the variable woff2 files, latin and latin-ext
+ * subsets, of the npm packages @fontsource-variable/space-grotesk 5.3.0
+ * and @fontsource-variable/jetbrains-mono 5.3.0, each under the SIL Open
+ * Font License 1.1 (board/fonts/space-grotesk-ofl.txt and
+ * jetbrains-mono-ofl.txt). Weight ranges and unicode-range are copied from
+ * the packages' wght.css; a subset loads only when the page draws a
+ * character in its range. The family names are the ones the stacks below
+ * use, and look.js LABEL_CHAR_W assumes JetBrains Mono's width. */
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300 700;
+  src: url('fonts/space-grotesk-latin-ext-wght-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300 700;
+  src: url('fonts/space-grotesk-latin-wght-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url('fonts/jetbrains-mono-latin-ext-wght-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url('fonts/jetbrains-mono-latin-wght-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
 
 :root {
   color-scheme: dark;
@@ -161,6 +206,17 @@
  * in a look's token set. */
 .tc-backdrop {
   --tc-page-pad: 16px;
+  /* Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15.
+   * Status: unreviewed. Sizes too. The stale line's height, from its
+   * parts: one 12 px line of words, its padding and its border, top and
+   * bottom. A root jump stops --tc-jump-gap under the top of the screen,
+   * and while the line is up, that far under the line, so the line never
+   * covers the heading the jump brought into view. */
+  --tc-stale-line: 16px;
+  --tc-stale-pad: 4px;
+  --tc-stale-border: 1px;
+  --tc-stale-h: calc(var(--tc-stale-line) + 2 * var(--tc-stale-pad) + 2 * var(--tc-stale-border));
+  --tc-jump-gap: 8px;
   min-height: 100vh;
   min-height: 100dvh;
   margin: 0;
@@ -188,7 +244,9 @@
   background: var(--tc-bg);
   border: 1px solid var(--tc-line);
   border-radius: var(--tc-radius-win);
-  overflow: hidden;
+  /* Clips like hidden, but makes no scroll box, so the stale line can
+   * stick to the top of the screen (P4 phase fixer, 2026-10-15). */
+  overflow: clip;
   display: flex;
   flex-direction: column;
   box-shadow: var(--tc-shadow-win);
@@ -269,18 +327,29 @@
 /* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * While the feed is stale the line over the board says so in words
  * (`stale · last answer N s ago`), in a dashed frame, and no wire's
- * dashes move: nothing looks live that is not (look.js createWindow). */
+ * dashes move: nothing looks live that is not (look.js createWindow).
+ * The line sticks to the top of the screen on its own face, so a board or
+ * an outline scrolled down still shows it (P4 phase fixer, 2026-10-15). */
 .tc-stale {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--tc-bg);
   font-family: var(--tc-mono);
   font-size: 12px;
+  line-height: var(--tc-stale-line);
   font-weight: 700;
   color: var(--tc-text);
-  border: 1px dashed var(--tc-text);
+  border: var(--tc-stale-border) dashed var(--tc-text);
   border-radius: 6px;
-  padding: 4px 10px;
+  padding: var(--tc-stale-pad) 10px;
 }
 .tc-stale[hidden] { display: none; }
 .tc-win[data-conn="stale"] .tc-wire.flow { animation: none; }
+/* Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+ * unreviewed. While the stale line sticks to the top, a root jump stops
+ * under it, not behind it. */
+.tc-win[data-conn="stale"] :is(.tc-head, .tc-group-head, .tc-row) { scroll-margin-top: calc(var(--tc-stale-h) + var(--tc-jump-gap)); }
 
 /* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
  * unreviewed. The footer: the legend on its own first row, then
@@ -361,6 +430,12 @@
   border-radius: 5px;
   padding: 1px 9px;
   cursor: pointer;
+  /* Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status:
+   * unreviewed. A 64-character name (C0's longest) wraps inside the
+   * window on a phone instead of running past its edge. */
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 .tc-root-btn:focus-visible { outline: 2px solid var(--tc-text); outline-offset: 1px; }
 .tc-head {
@@ -373,7 +448,7 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  scroll-margin-top: 8px;
+  scroll-margin-top: var(--tc-jump-gap);
 }
 .tc-head[hidden] { display: none; }
 
@@ -397,19 +472,29 @@
   border-bottom: 1px solid var(--tc-line);
   padding-bottom: 3px;
   margin-bottom: 4px;
-  scroll-margin-top: 8px;
+  scroll-margin-top: var(--tc-jump-gap);
+  overflow-wrap: anywhere;
 }
-.tc-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 3px 0 3px 8px; scroll-margin-top: 8px; }
+.tc-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 3px 0 3px 8px; scroll-margin-top: var(--tc-jump-gap); }
 .tc-row-note[hidden], .tc-group-head[hidden] { display: none; }
 .tc-row.nested { border-left: 2px solid var(--tc-line); }
-.tc-row-title { font-size: 12px; font-weight: 600; color: var(--tc-text); }
-.tc-row-role { font-size: 11px; font-weight: 500; white-space: pre; word-spacing: .2em; }
+/* Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status:
+ * unreviewed. A long name wraps inside its row, anywhere if it has no
+ * break, and its role words wrap after it, keeping their leading space:
+ * nothing runs past the window's edge, and the role words stay in view. */
+.tc-row-title { font-size: 12px; font-weight: 600; color: var(--tc-text); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.tc-row-role { font-size: 11px; font-weight: 500; white-space: pre-wrap; word-spacing: .2em; }
 .tc-row-state { font-family: var(--tc-mono); font-size: 11px; color: var(--tc-muted); }
 .tc-row-note { flex: 1 0 100%; font-size: 11px; color: var(--tc-dim); overflow-wrap: anywhere; }
+/* Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+ * unreviewed. tc's reason an unread count is unknown, a line of its own. */
+.tc-row-problem { flex: 1 0 100%; font-size: 11px; color: var(--tc-dim); overflow-wrap: anywhere; }
+.tc-row-problem[hidden] { display: none; }
 /* A native pair's or a cycle root's words, one line each under its row. */
 .tc-row-badge { flex: 1 0 100%; font-size: 11px; color: var(--tc-muted); overflow-wrap: anywhere; word-spacing: .2em; }
 .tc-row[data-state="writing"] .tc-row-state { color: var(--tc-cyan); font-weight: 600; }
 .tc-row[data-state="down"] .tc-row-state { color: var(--tc-red); font-weight: 600; }
+.tc-row[data-state="woken"] .tc-row-state { color: var(--tc-amber); font-weight: 700; }
 .tc-traffic-line { font-family: var(--tc-mono); font-size: 11px; color: var(--tc-text); padding: 2px 0; overflow-wrap: anywhere; }
 .tc-wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
 /* A wire's words are its title, shown on hover: the line itself
@@ -437,12 +522,21 @@
  * narrow, so each is widened a little to read as one at 11 px. */
 .tc-node-role { flex: none; font-size: 11px; font-weight: 500; white-space: pre; word-spacing: .2em; }
 .tc-node-sub { font-size: 11px; color: var(--tc-dim); font-family: var(--tc-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tc-node-note { font-size: 11px; color: var(--tc-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+ * unreviewed. A box's third line: its unread words first, whole (`2
+ * unread`, `unread unknown`, never cut), then its note, which may shorten.
+ * The state words have the second line to themselves, so `woken · not
+ * read` is never cut either (look.js createNode). */
+.tc-node-line { display: flex; min-width: 0; font-size: 11px; }
+.tc-node-line[hidden], .tc-node-unread[hidden] { display: none; }
+.tc-node-unread { flex: none; font-size: 11px; font-family: var(--tc-mono); color: var(--tc-dim); white-space: pre; }
+.tc-node-note { min-width: 0; font-size: 11px; color: var(--tc-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tc-node-note[hidden] { display: none; }
 .tc-node-glyph { display: inline-block; width: 1.2em; }
 /* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * A badge line under a box's note: a native pair (`native with b · not
- * observed`) or a reports_to cycle's root (`reports to q · cycle`). Words
+ * observed`), a reports_to cycle's root (`reports to q · cycle`) or a down
+ * node whose inbox the board could not list (`inbox unreadable`). Words
  * in a dashed rule, so it reads as a mark of its own without color; only
  * the names may shorten, and the spaces round them stay, widened a little
  * as the role words' are. Its line height and rule make look.js BADGE_H. */
@@ -479,6 +573,14 @@
 .tc-node[data-state="doorbell"] .tc-node-sub { color: var(--tc-muted); font-weight: 600; }
 .tc-node[data-state="remote"] { border-style: dotted; border-width: 2px; }
 .tc-node[data-state="remote"] .tc-node-sub { color: var(--tc-muted); }
+/* Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status:
+ * unreviewed. D24's two states, told apart by glyph and word first.
+ * working is calm, drawn as listening is. woken is a warning: a heavier
+ * solid border and bold words, never down's dashed border, and its wire
+ * stays a mail wire, never the dotted one. */
+.tc-node[data-state="working"] .tc-node-sub { color: var(--tc-muted); }
+.tc-node[data-state="woken"] { border-color: var(--tc-amber); border-width: 3px; }
+.tc-node[data-state="woken"] .tc-node-sub { color: var(--tc-amber); font-weight: 700; }
 .tc-node.sel { box-shadow: 0 0 0 2px var(--tc-cyan), var(--tc-shadow-sel); }
 
 /* Ports: shape carries direction. In = hollow ring, out = filled dot. */
@@ -505,8 +607,8 @@
 /* Model: Claude Opus 5.5 (the BOARD lane agent and the BOARD fixer),
  * 2026-10-14. Status: unreviewed. The tree's connector is thin and solid,
  * from a parent's bottom to its child's top, under every wire, with no
- * words on the board (the legend names it); native is a long dash, its
- * words in its title and the legend. */
+ * words on the board (the legend names it); native is dash-dot, its words
+ * in its title and the legend. */
 .tc-wire.kind-tree { stroke: var(--tc-muted); stroke-width: 1.25px; opacity: .8; }
 .tc-wire.kind-native { stroke: var(--tc-muted); stroke-width: var(--tc-wire-w-native); stroke-dasharray: 10 4 2 4; opacity: .8; }
 /* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:

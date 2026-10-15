@@ -12,8 +12,9 @@
  * other labels (placeLabels); the routing section states the one rule. A
  * dotted or dashed wire is drawn over every solid one, on a knockout in the
  * canvas's color, so no other stroke shows in its gaps (drawEdge). A
- * native pair's boxes and a reports_to cycle's root carry badge lines in
- * words (badgesOf). Each root's tree starts with a heading, rootsList and
+ * native pair's boxes, a reports_to cycle's root and a down node whose
+ * inbox the board could not list carry badge lines in words (badgesOf).
+ * Each root's tree starts with a heading, rootsList and
  * createRoots make the list of roots at the top of the page, and on a
  * phone createFit draws outlineView's outline instead of the graph.
  *
@@ -22,9 +23,10 @@
  *             never touches innerHTML, storage or globals. layoutLevels,
  *             boardView, diffBoard, roleTitle, hueFor, pillText,
  *             layoutWidth, levelPort, routeTree, routeAround, roundedPath,
- *             placeLabels, rootsList, outlineView and fitTransform read
- *             only their arguments; patchBoard writes only the board object
- *             it is given and calls only its kit; createRoots calls back on
+ *             placeLabels, rootsList, outlineView, fitTransform and
+ *             tokenProblem read only their arguments (boardView writes the
+ *             route cache it is given, if any); patchBoard writes only the
+ *             board object it is given and calls only its kit; createRoots calls back on
  *             a click; createFit observes the canvas's stage through the
  *             observer it is given and writes the window's data-view, the
  *             frame's height and the view's size and transform, and its
@@ -37,10 +39,19 @@
  * @complexity every drawing function is O(1) per call, or O(p) over a run's
  *             p points; a board with n nodes and w wires costs O(n + w) to
  *             build. layoutLevels is O(n log n + l + r) over n feed nodes, l
- *             links and r recent wires (C5: n tens, l tens, r <= 50), the
- *             log from the sort by name; boardView and patchBoard add
- *             routeAround's search per routed pair, O(g log g) over its g
- *             states (thousands on a real board), and placeLabels; diffBoard
+ *             links and r recent wires (C5: n tens; l the mail pairs plus
+ *             c(c-1)/2 native lines per account shared by c Claude cards,
+ *             190 for 20 on one; r <= 50), the log from the sort by name.
+ *             patchBoard lays nothing out when only ages moved (drawnKey);
+ *             else boardView adds placeLabels and routeAround's search,
+ *             O(g log g) over its g = 4XY states, per routed pair when
+ *             the boxes, headings, extent or tree runs changed
+ *             (createRouteCache's key), else only per routed pair new to
+ *             the cache:
+ *             up to 31,916 on the 14-name test feed at 1152 px (X 79 and Y
+ *             101 lines), and 190 searches of up to 12,180 for 20 peers on
+ *             one account, which drew in about 150 ms on the owner's machine
+ *             (measured 2026-10-15). diffBoard
  *             is O(n + e) over two views' nodes and e edges, times their
  *             points; outlineView is O(n log n + l + r log r); rootsList and
  *             pillText are O(n) after the sort; createPoller is O(1) per poll
@@ -57,8 +68,12 @@
  *             under a parent and nothing else: a board object from
  *             createBoard goes with it, since nothing else holds its
  *             handles. That board holds one handle per drawn node and edge,
- *             dropped when patchBoard removes it, and the last full view
- *             (board.view), replaced on every patch
+ *             dropped when patchBoard removes it, the last full view
+ *             (board.view), replaced on every patch that lays out, the
+ *             last feed's key (board.drawn), and its route cache
+ *             (board.routes): one routed run per routed pair drawn now,
+ *             by its ends, and their key, replaced on each layout, and
+ *             two counts
  */
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -199,6 +214,12 @@ export const STATES = Object.freeze({
   writing: { glyph: '✎', word: 'writing' },
   idle: { glyph: '○', word: 'idle' },
   down: { glyph: '✕', word: 'no listener' },
+  // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+  // D24: a listener that mail woke, since tc wait exits on mail. working:
+  // it shows life after the wake, or the wake is under two minutes old;
+  // calm. woken: no sign of life past that; a warning, never down.
+  woken: { glyph: '△', word: 'woken · not read' },
+  working: { glyph: '◔', word: 'working' },
   // Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
   // C5's two new states: a codex name is reached by its doorbell, with no
   // listener on purpose; an ssh name lives on another machine (O8).
@@ -474,18 +495,25 @@ export function createRoots(doc, parent, onJump) {
  * left and right edges (portPoint), or with `levels` on the top and bottom
  * edges (levelPort), as the live board draws them. The
  * title splits at its first ' · ': the name may shorten with an ellipsis,
- * the role words after it never do. A third line holds `note` (a status
- * line, or a reports_to that names nobody); empty, it is hidden. Under it,
+ * the role words after it never do. The second line holds the state's
+ * glyph and word alone, so a long one (`woken · not read`) is never cut.
+ * A third line holds `detail` (the unread words: `2 unread`, `unread
+ * unknown`) in full, then `note` (a status line, or a reports_to that
+ * names nobody), which may shorten; with neither, it is hidden. Under it,
  * one badge line per item of `badges` ({ lead, names, tail, text }: a
- * native pair or a cycle's root, in words), each in a dashed rule; only
+ * native pair, a cycle's root or an inbox the board could not list, in
+ * words), each in a dashed rule; only
  * the names may shorten, and the whole text is the badge's title. `h` is
- * the box's height (NODE_H, plus BADGE_H per badge line).
+ * the box's height (NODE_H, plus BADGE_H per badge line). `problem`, tc's
+ * reason for an unread count it could not take, goes on a second line of
+ * the box's hover title, `unread unknown: <reason>`, as text, never as
+ * markup: a group member chooses the file names in it.
  * @interacts  appends to canvas.view; remove() takes the node out again
  * @complexity O(1), plus O(b) over b badges  @alloc one node subtree
- * @returns {{ root, pos, setState(state, detail), setTitle(text), setNote(text), setBadges(list),
+ * @returns {{ root, pos, setState(state, detail), setTitle(text), setNote(text), setProblem(text), setBadges(list),
  *            setHeight(h), moveTo(pos), remove() }}
  */
-export function createNode(doc, canvas, { title, hue, pos, state, detail, note, levels, h, badges }) {
+export function createNode(doc, canvas, { title, hue, pos, state, detail, note, problem, levels, h, badges }) {
   const root = el(doc, 'div', 'tc-node');
   root.style.width = `${CONFIG.NODE_W}px`;
   root.style.setProperty('--tc-node-hue', hue || HUES[HUES.length - 1]);
@@ -499,9 +527,31 @@ export function createNode(doc, canvas, { title, hue, pos, state, detail, note, 
   const glyph = el(doc, 'span', 'tc-node-glyph');
   const word = el(doc, 'span');
   sub.append(glyph, word);
+  // Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+  // unreviewed. The third line: the unread words, never cut, then the note.
+  const line = el(doc, 'span', 'tc-node-line');
+  const unreadPart = el(doc, 'span', 'tc-node-unread');
   const noteLine = el(doc, 'span', 'tc-node-note');
+  line.append(unreadPart, noteLine);
   const badgeBox = el(doc, 'span', 'tc-node-badges');
-  body.append(t, sub, noteLine, badgeBox);
+  body.append(t, sub, line, badgeBox);
+  let detailText = '';
+  let noteText = '';
+  let titleText = '';
+  let problemText = '';
+  // The hover title: the box's title, and tc's reason on a line under it.
+  const setHover = () => {
+    root.title = problemText ? `${titleText}\n${UNREAD_WORDS.unknown}: ${problemText}` : titleText;
+  };
+  // The unread words lead the line, with a ` · ` before the note when
+  // both are there; the line hides when it has neither.
+  const fillLine = () => {
+    unreadPart.textContent = detailText && noteText ? `${detailText} · ` : detailText;
+    unreadPart.hidden = !detailText;
+    noteLine.textContent = noteText;
+    noteLine.hidden = !noteText;
+    line.hidden = !detailText && !noteText;
+  };
   const half = CONFIG.PORT_SIZE / 2;
   const at = levels ? levelPort : portPoint;
   const origin = { x: 0, y: 0 };
@@ -540,18 +590,25 @@ export function createNode(doc, canvas, { title, hue, pos, state, detail, note, 
       const st = STATES[s] || STATES.idle;
       root.dataset.state = s;
       glyph.textContent = st.glyph;
-      word.textContent = d ? `${st.word} · ${d}` : st.word;
+      word.textContent = st.word;
+      detailText = d || '';
+      fillLine();
     },
     setTitle(title) {
       const text = String(title ?? '');
       const cut = text.indexOf(' · ');
       tName.textContent = cut < 0 ? text : text.slice(0, cut);
       tRole.textContent = cut < 0 ? '' : text.slice(cut);
-      root.title = text;
+      titleText = text;
+      setHover();
     },
     setNote(text) {
-      noteLine.textContent = text || '';
-      noteLine.hidden = !text;
+      noteText = text || '';
+      fillLine();
+    },
+    setProblem(text) {
+      problemText = text ? String(text) : '';
+      setHover();
     },
     moveTo(p) {
       node.pos = p;
@@ -564,6 +621,7 @@ export function createNode(doc, canvas, { title, hue, pos, state, detail, note, 
   node.setHeight(h);
   node.setTitle(title);
   node.setNote(note);
+  node.setProblem(problem);
   node.setBadges(badges);
   node.setState(state || 'idle', detail);
   return node;
@@ -648,12 +706,26 @@ function nativeAllowed(p, q) {
  * sessions.
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  */
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+// unreviewed. The feed's DOWN_WINDOW_S (600) in minutes: a session that
+// crashed after reading its mail reads working this long after it was last
+// seen listening.
+const DOWN_WINDOW_MIN = 10;
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; the two cases by
+// the P4 phase fixer, round 2. Status: unreviewed.
+// D24's two states in words, on both legends, with the two cases they
+// cannot see (C5, D28).
+const WAKE_WORDS = `${STATES.working.glyph} ${STATES.working.word}: mail woke it and it is on its turn · `
+  + `${STATES.woken.glyph} ${STATES.woken.word}: mail woke it and nothing has read it · `
+  + `the board cannot see a crash after reading (it looks ${STATES.working.word} for up to ${DOWN_WINDOW_MIN} min) `
+  + 'or, with no board page open, when a listener went (mail that came meanwhile counts as a wake)';
 export const LEGEND_WORDS = Object.freeze({
   outline: 'outline: each session under the one it reports to, or that mail shows it works for · '
-    + 'traffic: newest first, arrow toward the reader',
+    + `traffic: newest first, arrow toward the reader · ${WAKE_WORDS}`,
   graph: 'thin line: reports to, or inferred from mail · '
     + `thick line: mail, none in the last ${CONFIG.FLOW_AGE_S} s · `
-    + 'dashes, arrow and words: mail now, arrow at the reader · long dash: native, not observed · dotted: no listener',
+    + 'dashes, arrow and words: mail now, arrow at the reader · dash-dot: native, not observed · dotted: no listener · '
+    + WAKE_WORDS,
   empty: 'no sessions yet · send a message or start a listener',
 });
 
@@ -668,13 +740,57 @@ export const TREE_WORDS = Object.freeze({
 });
 
 /**
- * Words on a node's third line. A down node's status was written while it
- * listened, so it reads as the last thing it said, never as its state now.
+ * Words on a node's third line. A down or woken node's status was written
+ * before it stopped listening, so it reads as the last thing it said,
+ * never as its state now.
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  */
 export const NOTE_WORDS = Object.freeze({
   lastStatus: 'last status:',
 });
+
+/**
+ * Words for a node's unread mail. The feed's unread is null when tc could
+ * not count an inbox (C5, with its reason in unread_problem): that reads
+ * `unread unknown`, never a blank, which would read as no mail.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+ */
+export const UNREAD_WORDS = Object.freeze({
+  unread: 'unread',
+  unknown: 'unread unknown',
+});
+
+/**
+ * Words for an inbox the board could not list (the feed's
+ * inbox_unreadable): beside `down`, the board cannot tell whether mail woke
+ * the session, so it says so (C5, D28).
+ * Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+ */
+export const INBOX_WORDS = Object.freeze({
+  unreadable: 'inbox unreadable',
+});
+
+/**
+ * A node's unread words: `N unread`, `unread unknown` when the feed could
+ * not count them (null), else '' (none, or a hand-made feed with no count).
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+ * @complexity O(1)  @alloc one short string
+ */
+function unreadWords(n) {
+  if (n.unread === null) return UNREAD_WORDS.unknown;
+  return n.unread > 0 ? `${n.unread} ${UNREAD_WORDS.unread}` : '';
+}
+
+/**
+ * tc's reason a node's unread count is unknown (the feed's unread_problem,
+ * beside a null unread), or ''. Drawn only as text (createNode's hover
+ * title, the outline row): a group member chooses the file names in it.
+ * Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+ * @complexity O(1)  @alloc one short string
+ */
+function problemOf(n) {
+  return n.unread === null && n.unread_problem ? String(n.unread_problem) : '';
+}
 
 /**
  * An empty map keyed by session name, with no prototype, so a name such as
@@ -695,12 +811,17 @@ function byName(p, q) {
 
 /**
  * A node's title: its name and role word, plus `· inferred` exactly when
- * role_source says inferred (C5). A node with no role is its name alone.
+ * role_source says inferred (C5), and never on a peer (D27: `inferred`
+ * marks a guess, and a peer is none; the feed gives a peer role_source
+ * `none`). A node with no role is its name alone.
+ * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14; the peer rule
+ * by the P4 phase fixer, round 2, 2026-10-15. Status: unreviewed.
  * @complexity O(1)  @alloc one string
  */
 export function roleTitle(node) {
   if (!node.role) return String(node.id);
-  return `${node.id} · ${node.role}${node.role_source === 'inferred' ? ' · inferred' : ''}`;
+  const guessed = node.role_source === 'inferred' && node.role !== 'peer';
+  return `${node.id} · ${node.role}${guessed ? ' · inferred' : ''}`;
 }
 
 /**
@@ -770,13 +891,16 @@ function treeOf(feed) {
 }
 
 /**
- * The badge lines each node's box carries, in words: `native with b · not
+ * The badge lines each node's box carries, in words: `inbox unreadable` on
+ * a down node whose inbox the board could not list (C5, D28: it cannot
+ * tell whether mail woke it), `native with b · not
  * observed` on both boxes of a native pair (C5's words, drawn whether or
  * not the pair also mails, never on account `unknown`, D15), and `reports
  * to q · cycle` on a reports_to cycle's root (its reports_to names a node,
  * yet the walk gave it no parent). Each badge is { lead, names, tail, text }:
  * on a box only the names may shorten.
- * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14; the inbox line by
+ * the P4 phase fixer, round 2, 2026-10-15. Status: unreviewed.
  * @interacts  none; pure
  * @complexity O(n + l + p log p) over n nodes, l links and p native partners
  *             of one node (its names are sorted)
@@ -800,6 +924,7 @@ function badgesOf(feed, known) {
   const out = nameMap();
   for (const n of known.values()) {
     const list = [];
+    if (n.state === 'down' && n.inbox_unreadable) list.push(badge(INBOX_WORDS.unreadable, '', ''));
     if (n.reports_to != null && n.reports_to !== n.id && known.has(n.reports_to) && n.parent == null) {
       list.push(badge(`${LINK_WORDS.reports_to} `, String(n.reports_to), ` · ${LINK_WORDS.cycle}`));
     }
@@ -823,9 +948,15 @@ function badgesOf(feed, known) {
  * LAYOUT_INDENT under it while a box still fits. Root trees fill rows the
  * same way: LAYOUT_ROOT_GAP apart side by side, LAYOUT_ROW_GAP apart one
  * under another. Each subtree keeps a band no other box enters, so no two
- * boxes overlap, and the extent is at most `width` whenever one box and
- * the margins fit in it. Every map is keyed with no prototype (or is a
- * Map), so a node named __proto__ lays out like any other.
+ * boxes overlap. The extent stays within `width` whenever one box and the
+ * margins fit in it and the tree is not both deep and bushy: each level
+ * with two or more children keeps a lane out of its children's room, and
+ * once a level's room is under NODE_W + LAYOUT_LANE its children's blocks
+ * run past it. A tree about ten levels deep with two children at each
+ * level outgrows a 560 px stage that way, and the canvas clips its right
+ * edge; no board the owner runs comes near that. Every map is keyed with
+ * no prototype (or is a Map), so a node named __proto__ lays out like any
+ * other.
  *
  * Each box is NODE_H tall plus BADGE_H per badge line (badgesOf); `heights`
  * and `badges` say so. Each root's tree starts with a band HEAD_H +
@@ -1003,6 +1134,13 @@ const STEPS = Object.freeze([[1, 0], [-1, 0], [0, 1], [0, -1]]);
 const BACK = Object.freeze([1, 0, 3, 2]);
 /** The sides routeAround joins (right, left), and which way each stub leaves (an index into STEPS). */
 const SIDES = Object.freeze([{ dx: 1, dy: 0, dir: 0 }, { dx: -1, dy: 0, dir: 1 }]);
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// What routeAround learns of one grid edge, kept so each edge is checked
+// once per search (0: not checked yet): it enters an obstacle, it is clear,
+// or it is clear and runs alongside a connector. Each grid point owns two
+// edges, the one to its right neighbor and the one to the point below.
+const EDGE = Object.freeze({ BLOCKED: 1, FREE: 2, ALONG: 3 });
+const EDGES_PER_POINT = 2;
 
 /**
  * Points with repeats and straight-through middles dropped, so each piece
@@ -1146,17 +1284,25 @@ function createHeap() {
  * within ROUTE_CLEAR of one of their pieces, the same way, costs
  * ROUTE_ALONG_COST times its length. With no free side on a box, or no run (neither happens on a
  * layoutLevels board), it returns the straight line from the upper box's
- * bottom to the lower's top.
- * @interacts  none; pure
+ * bottom to the lower's top. `counts`, when given (a route cache), gains
+ * one in edgeHits each time the search looks up a grid edge it already
+ * checked, which a test reads to see the edge flags at work.
+ * @interacts  none; pure, but for adding to counts.edgeHits when given
  * @complexity O(g log g) over the g = 4 * X * Y search states, X and Y the
- *             line counts (each at most 4b + 6 over b obstacles), with an
- *             O(b + a) check per state over a pieces of `along`; b and a
- *             are tens on a real board
- * @alloc      the line lists, a cache of X * Y free flags, and the search's
- *             heap and maps, all freed on return; the returned points
+ *             line counts (X at most 4b + 3 and Y at most 4b + 7 over b
+ *             obstacles: two lines per obstacle, the ring, the two middle
+ *             heights and a middle between each two neighbors), plus an
+ *             O(b + a) check of each grid edge, made once per search and
+ *             kept, over a pieces of `along`. boardView's b is 3n + r (n
+ *             boxes, two ports each, r headings): 46 on the 14-name test
+ *             feed, where a is 64, X 79, Y 101 and g 31,916; 80 for 20
+ *             peers, where g is 12,180
+ * @alloc      the line lists, a cache of X * Y free flags and one of
+ *             2 * X * Y grid edge flags, and the search's heap and maps,
+ *             all freed on return; the returned points
  * @returns {{x, y}[]}
  */
-export function routeAround(obstacles, from, to, extent, along = []) {
+export function routeAround(obstacles, from, to, extent, along = [], counts = null) {
   const C = CONFIG.ROUTE_CLEAR;
   const TURN = CONFIG.ROUTE_TURN_COST;
   const shadows = along.flatMap((run) => run.slice(1).map((q, i) => ({ p: run[i], q })));
@@ -1186,6 +1332,19 @@ export function routeAround(obstacles, from, to, extent, along = []) {
   // Between two neighboring lines a piece lies wholly in or out of each
   // obstacle's reach, so its middle says whether it enters one.
   const pieceFree = (ix, iy, jx, jy) => !obstacles.some((o) => inside(o, (xs[ix] + xs[jx]) / 2, (ys[iy] + ys[jy]) / 2));
+  // One grid edge's EDGE value, worked out the first time the search
+  // meets it and kept, as free() keeps each point's.
+  const edgeFlags = new Uint8Array(xs.length * ny * EDGES_PER_POINT);
+  const edgeOf = (ix, iy, jx, jy) => {
+    const k = (Math.min(ix, jx) * ny + Math.min(iy, jy)) * EDGES_PER_POINT + (ix === jx ? 1 : 0);
+    if (!edgeFlags[k]) {
+      if (!pieceFree(ix, iy, jx, jy)) edgeFlags[k] = EDGE.BLOCKED;
+      else edgeFlags[k] = alongside({ x: xs[ix], y: ys[iy] }, { x: xs[jx], y: ys[jy] }) ? EDGE.ALONG : EDGE.FREE;
+    } else if (counts) {
+      counts.edgeHits += 1;
+    }
+    return edgeFlags[k];
+  };
   const ends = (box) => SIDES.map((side) => {
     const edge = { x: side.dx > 0 ? box.x + box.w : box.x, y: box.y + box.h / 2 };
     return { edge, ix: xAt.get(side.dx > 0 ? box.x + box.w + C : box.x - C), iy: yAt.get(edge.y), dir: side.dir };
@@ -1232,9 +1391,11 @@ export function routeAround(obstacles, from, to, extent, along = []) {
       if (d === BACK[dir]) return;
       const jx = ix + dx;
       const jy = iy + dy;
-      if (jx < 0 || jy < 0 || jx >= xs.length || jy >= ny || !free(jx, jy) || !pieceFree(ix, iy, jx, jy)) return;
+      if (jx < 0 || jy < 0 || jx >= xs.length || jy >= ny || !free(jx, jy)) return;
+      const edge = edgeOf(ix, iy, jx, jy);
+      if (edge === EDGE.BLOCKED) return;
       const length = Math.abs(xs[jx] - xs[ix]) + Math.abs(ys[jy] - ys[iy]);
-      const weight = alongside({ x: xs[ix], y: ys[iy] }, { x: xs[jx], y: ys[jy] }) ? CONFIG.ROUTE_ALONG_COST : 1;
+      const weight = edge === EDGE.ALONG ? CONFIG.ROUTE_ALONG_COST : 1;
       const next = g + length * weight + (d === dir ? 0 : TURN);
       const nk = keyOf(jx, jy, d);
       if (next >= (cost.has(nk) ? cost.get(nk) : Infinity)) return;
@@ -1391,35 +1552,42 @@ function upperFirst(p, q, pos) {
 }
 
 /**
- * The pill's words and state for a feed: `live · N listening`, or
- * `N listening · M no listener` while a node is down, in the same words its
- * box shows (STATES.down). Listeners are counted by listener_pid (a pid tc
- * read from /proc/locks), never by state: under D15 a listener that just
- * sent reads writing and is still listening.
+ * The pill's words and state for a feed: `live · N listening`, or, while a
+ * node is down or woken, `N listening · M no listener · K woken · not
+ * read` (each part only when it counts one or more), in the same words the
+ * boxes show (STATES.down, STATES.woken), and the state turns to warn. A
+ * working node raises nothing (D24: it is on its turn). Listeners are
+ * counted by listener_pid (a pid tc read from /proc/locks), never by
+ * state: under D15 a listener that just sent reads writing and is still
+ * listening.
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @interacts  none; pure
- * @complexity O(n) over n feed nodes  @alloc one object
+ * @complexity O(n) over n feed nodes  @alloc one object and a short list
  * @returns {{ text, state, listening }}  state: 'up' | 'warn', for createWindow's setConn
  */
 export function pillText(feed) {
   const nodes = (feed && feed.nodes) || [];
   const listening = nodes.filter((n) => n.listener_pid).length;
-  const down = nodes.filter((n) => n.state === 'down').length;
-  return down
-    ? { text: `${listening} listening · ${down} ${STATES.down.word}`, state: 'warn', listening }
+  const warnings = ['down', 'woken']
+    .map((state) => [nodes.filter((n) => n.state === state).length, STATES[state].word])
+    .filter(([count]) => count > 0)
+    .map(([count, word]) => `${count} ${word}`);
+  return warnings.length
+    ? { text: [`${listening} listening`, ...warnings].join(' · '), state: 'warn', listening }
     : { text: `live · ${listening} listening`, state: 'up', listening };
 }
 
 /**
  * A node's third line: a reports_to that names no node, else its status. A
- * down node's status is stale, so it reads `last status: ...` and never
- * passes for the node's state now.
+ * down or woken node's status is stale (it was written before the node
+ * stopped listening), so it reads `last status: ...` and never passes for
+ * the node's state now.
  * @complexity O(1)  @alloc one string
  */
 function noteFor(n, known) {
   if (n.reports_to && !known.has(n.reports_to)) return `${LINK_WORDS.reports_to} ${n.reports_to} · ${LINK_WORDS.notFound}`;
   if (!n.status) return '';
-  return n.state === 'down' ? `${NOTE_WORDS.lastStatus} ${n.status}` : n.status;
+  return n.state === 'down' || n.state === 'woken' ? `${NOTE_WORDS.lastStatus} ${n.status}` : n.status;
 }
 
 // ---------- roots, headings and the phone's outline ----------
@@ -1499,13 +1667,15 @@ function agoWords(ageS) {
  * whose row says the same); in it one row
  * per session of that tree, parent before children, each `depth` levels
  * under its root, with its name, its role words, its state's glyph and
- * word, its unread count, its note (as boardView's) and its badges'
- * words (badgesOf: a native pair, a cycle's root), one line each. Then the
+ * word, its unread count (unreadWords), its note (as boardView's), tc's
+ * reason an unread count is unknown (problemOf, drawn as text) and its badges'
+ * words (badgesOf: a native pair, a cycle's root, an inbox the board could
+ * not list), one line each. Then the
  * recent traffic: one line per pair, its newest message, `a → b · #18 · 2
  * m ago`, newest first.
  * @interacts  none; pure
  * @complexity O(n log n + l + r log r) over n nodes, l links and r recent wires  @alloc the returned model
- * @returns {{ groups: { root, heading: string | null, rows: { id, depth, role, state, glyph, word, unread, note, badges }[] }[],
+ * @returns {{ groups: { root, heading: string | null, rows: { id, depth, role, state, glyph, word, unread, note, problem, badges }[] }[],
  *            traffic: { from, to, seq, text }[] }}
  */
 export function outlineView(feed) {
@@ -1519,7 +1689,7 @@ export function outlineView(feed) {
       const state = STATES[n.state] ? n.state : 'idle';
       rows.push({
         id, depth, role: roleTitle(n).slice(String(id).length), state, glyph: STATES[state].glyph, word: STATES[state].word,
-        unread: n.unread > 0 ? `${n.unread} unread` : '', note: noteFor(n, known), badges: badges[id].map((b) => b.text),
+        unread: unreadWords(n), note: noteFor(n, known), problem: problemOf(n), badges: badges[id].map((b) => b.text),
       });
       const children = kids.get(id) || [];
       for (let i = children.length - 1; i >= 0; i -= 1) stack.push([children[i], depth + 1]);
@@ -1544,10 +1714,12 @@ export function outlineView(feed) {
  * What to draw for a C5 feed laid out inside `width` (see layoutLevels):
  * one view per node and per edge, keyed by id. Node: title (roleTitle), pos
  * and h (layoutLevels: the box's place and height), state, detail (unread
- * count), note (`reports to N · not found`, else the status line, as `last
- * status: ...` on a down node), `badges` (badgesOf: `native with b · not
+ * count, or `unread unknown`: unreadWords), note (`reports to N · not found`, else the status line, as `last
+ * status: ...` on a down or woken node), problem (tc's reason an unread
+ * count is unknown, or '': problemOf), `badges` (badgesOf: `native with b · not
  * observed` on both boxes of a native pair, `reports to q · cycle` on a
- * cycle's root), and `connector`: on a node with a parent in the layout,
+ * cycle's root, `inbox unreadable` on a down node whose inbox the board
+ * could not list), and `connector`: on a node with a parent in the layout,
  * the hierarchy's own thin line from the parent's out port to this node's
  * in port (routeTree), with its words for a title and no label on the
  * board (the legend says what the thin line is); null on a root. It
@@ -1567,24 +1739,37 @@ export function outlineView(feed) {
  *   connectors and the tree wires where it can be. It flows, with dashes,
  *   an arrow at the reader and the label `from → to · #seq`, when its
  *   pair's newest wire is at most FLOW_AGE_S old; quiet, it is a solid line
- *   with no label. It is down when either end is down.
- * - a native link with no mailbox link on its pair: the same runs, long
- *   dashed, no label; its words, `native · not observed`, are in its
+ *   with no label. It is down when either end is down; a woken end (D24)
+ *   never makes it down: the mail that woke it is drawn as any mail is.
+ * - a native link with no mailbox link on its pair: the same runs,
+ *   dash-dot, no label; its words, `native · not observed`, are in its
  *   title, on both boxes' badges and in the legend. On a pair with mail
  *   too, they go in the mail wire's title and on the badges, and no second
  *   line is drawn. On account `unknown` (D15) a native link draws nothing.
  * A label sits where placeLabels puts it (`at`), clear of every node box
  * and every other label, or is dropped (`at` null) with its words kept in
  * the title.
- * @interacts  none; pure
+ * `routes`, when given (createRouteCache), keeps the routed runs by their
+ * two ends: on the key the last call left there (the boxes, headings,
+ * extent, connectors and tree wires) each pair it holds a run for reuses
+ * it with no search, and only a pair it has none for searches. Each search
+ * adds one to routes.searches, and each grid edge a search looks up again
+ * one to routes.edgeHits. Runs reused or found again are the same, so the
+ * board draws the same either way.
+ * @interacts  none; pure, but for writing `routes` when given
  * @complexity O(n log n + l + r) for the layout and the edges over n
- *             nodes, l links and r wires, plus routeAround per routed pair
- *             and placeLabels for the labels
- * @alloc      the returned views, one box per node and the routing's
- *             working sets, freed on return
+ *             nodes, l links and r wires, plus the route key, O(n + t)
+ *             over the boxes and the t tree runs it names; routeAround per
+ *             routed pair when there is no `routes` or its key changed,
+ *             else per routed pair new to it; and placeLabels for the
+ *             labels
+ * @alloc      the returned views, one box per node, the key string and the
+ *             routing's working sets, freed on return; with `routes`, its
+ *             runs map, one run per routed pair drawn now, replaced on
+ *             each call
  * @returns {{ nodes: {id: view}, edges: {id: view}, extent: {w, h} }}
  */
-export function boardView(feed, width) {
+export function boardView(feed, width, routes = null) {
   const C = CONFIG;
   const lay = layoutLevels(feed, width);
   const known = new Map(((feed && feed.nodes) || []).map((n) => [n.id, n]));
@@ -1593,8 +1778,8 @@ export function boardView(feed, width) {
   for (const n of known.values()) {
     nodes[n.id] = {
       id: n.id, title: lay.titles[n.id], pos: lay.pos[n.id], h: lay.heights[n.id],
-      state: STATES[n.state] ? n.state : 'idle', detail: n.unread > 0 ? `${n.unread} unread` : '',
-      note: noteFor(n, known), badges: lay.badges[n.id], connector: null, head: null,
+      state: STATES[n.state] ? n.state : 'idle', detail: unreadWords(n),
+      note: noteFor(n, known), problem: problemOf(n), badges: lay.badges[n.id], connector: null, head: null,
     };
     boxOf[n.id] = { x: lay.pos[n.id].x, y: lay.pos[n.id].y, w: C.NODE_W, h: lay.heights[n.id] };
   }
@@ -1654,26 +1839,49 @@ export function boardView(feed, width) {
     drawn.push({ l, p, q, pair, from: ends[0], to: ends[1], points: tree ? routeTreeWire(lay, ends[0], ends[1]) : null });
   }
   const along = [...connectors, ...drawn.filter((d) => d.points).map((d) => d.points)];
+  // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; keyed per pair
+  // by the P4 phase fixer, round 2. Status: unreviewed.
+  // A routed run rests on the boxes by name, the headings, the extent and
+  // the runs to keep off, one key for them all, and on its own two ends,
+  // never on another routed pair: routeAround keeps off boxes, ports,
+  // headings and `along`, and no routed run is in `along`. So on the key
+  // `routes` holds, a pair it has a run for reuses it, and only a pair new
+  // to it searches; a feed that only moved its ages or its flow, or gave a
+  // native pair its first mail, searches none.
+  const key = routes ? JSON.stringify([Object.entries(boxOf), headBoxes, lay.extent, along]) : null;
+  const reuse = !!routes && routes.key === key;
+  const runs = new Map();
   for (const { l, p, q, pair, from, to, points } of drawn) {
     const id = `${l.kind}:${l.from}>${l.to}`;
+    const ends = `${from}>${to}`;
+    let run = points || (reuse ? routes.runs.get(ends) : null);
+    if (!run) {
+      run = routeAround(obstacles, boxOf[from], boxOf[to], lay.extent, along, routes);
+      if (routes) routes.searches += 1;
+    }
+    if (!points) runs.set(ends, run);
     const w = l.kind === 'mailbox' ? flowing.get(pair) : undefined;
     const back = !!w && w.from !== from;
     const label = w ? `${w.from} → ${w.to} · #${w.seq}` : '';
     const native = l.kind === 'native' || nativePairs.has(pair);
     const said = l.kind === 'mailbox' ? (label || `${TREE_WORDS.mail} ${from} and ${to}`) : `${from} and ${to}`;
     edges[id] = {
-      id, kind: l.kind, from, to, points: points || routeAround(obstacles, boxOf[from], boxOf[to], lay.extent, along),
+      id, kind: l.kind, from, to, points: run,
       label, seq: w ? w.seq : null, words: native ? `${said} · ${LINK_WORDS.native}` : said,
       arrow: w ? (back ? 'start' : 'end') : null, flow: !!w, back,
       down: l.kind === 'mailbox' && (p.state === 'down' || q.state === 'down'),
     };
+  }
+  if (routes) {
+    routes.key = key;
+    routes.runs = runs;
   }
   const spots = placeLabels(edges, [...boxes, ...ports(C.PORT_SIZE / 2), ...headBoxes], lay.extent);
   for (const e of Object.values(edges)) e.at = spots[e.id] || null;
   return { nodes, edges, extent: lay.extent };
 }
 
-const NODE_FIELDS = ['title', 'state', 'detail', 'note', 'h'];
+const NODE_FIELDS = ['title', 'state', 'detail', 'note', 'problem', 'h'];
 const EDGE_FIELDS = ['kind', 'from', 'to', 'label', 'seq', 'words', 'arrow', 'flow', 'back', 'down'];
 
 /** True when two points sit at the same place. @complexity O(1)  @alloc none */
@@ -1729,29 +1937,81 @@ export function diffBoard(prev, next) {
 }
 
 /**
- * An empty board drawn through `kit`: { kit, nodes, edges, view }. kit has
- * createNode(view) and createEdge(view), each returning a handle with
- * update(view) and remove(). createKit(doc, canvas) is the DOM kit.
- * @complexity O(1)  @alloc two empty maps and an empty view
+ * An empty route cache for boardView: `key`, what the last routed runs
+ * rested on; `runs`, those runs by their two ends (`from>to`, from the
+ * upper box); `searches`, how many routeAround searches it has run; and
+ * `edgeHits`, how many times those searches looked up a grid edge they
+ * had already checked (routeAround's edge flags): the counts a test reads.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; runs by ends and
+ * edgeHits by the P4 phase fixer, round 2. Status: unreviewed.
+ * @complexity O(1)  @alloc one object and an empty Map
+ */
+export function createRouteCache() {
+  return { key: null, runs: new Map(), searches: 0, edgeHits: 0 };
+}
+
+/**
+ * Everything boardView reads from a feed, laid out at `width`, as one
+ * string: each node less last_mail_age_s (an age boardView never reads),
+ * each link's ends and kind, and each wire's ends, seq and whether it
+ * flows (age_s at most FLOW_AGE_S). `at`, the machine and every other age
+ * are left out, so two polls a few seconds apart with no news give one key.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+ * @complexity O(n + l + r) over n nodes, l links and r wires
+ * @alloc      n + l + r + 4 short-lived objects (a copy of each node, an
+ *             array per link and per wire, and the four arrays round them),
+ *             freed on return; the key string, returned
+ */
+function drawnKey(feed, width) {
+  const nodes = ((feed && feed.nodes) || []).map(({ last_mail_age_s: _age, ...rest }) => rest);
+  const links = ((feed && feed.links) || []).map((l) => [l.from, l.to, l.kind]);
+  const wires = ((feed && feed.wires) || []).map((w) => [w.from, w.to, w.seq, w.age_s != null && w.age_s <= CONFIG.FLOW_AGE_S]);
+  return JSON.stringify([width, nodes, links, wires]);
+}
+
+/**
+ * An empty board drawn through `kit`: { kit, nodes, edges, view, routes,
+ * drawn }. kit has createNode(view) and createEdge(view), each returning
+ * a handle with update(view) and remove(). createKit(doc, canvas) is the
+ * DOM kit. `routes` is the board's route cache (createRouteCache) and
+ * `drawn` the key of the feed it last drew (drawnKey).
+ * @complexity O(1)  @alloc two empty maps, an empty view and an empty route cache
  */
 export function createBoard(kit) {
-  return { kit, nodes: new Map(), edges: new Map(), view: { nodes: nameMap(), edges: nameMap(), extent: { w: 0, h: 0 } } };
+  return {
+    kit, nodes: new Map(), edges: new Map(), view: { nodes: nameMap(), edges: nameMap(), extent: { w: 0, h: 0 } },
+    routes: createRouteCache(), drawn: null,
+  };
 }
 
 /**
  * Bring `board` to `feed`, laid out inside `width` (see layoutLevels): add,
  * move and remove nodes and edges by id through board.kit, never rebuilding
- * what stays (C5). Returns the diff it applied.
+ * what stays (C5). Returns the diff it applied. A feed whose drawnKey is the
+ * last one drawn (a poll that only aged the mail, with no wire crossing
+ * FLOW_AGE_S) would draw the same board, so nothing is laid out and the
+ * diff is empty. Otherwise boardView lays it out with board.routes, which
+ * searches only the routed pairs new to it while the boxes, headings,
+ * extent and tree runs stand.
  * @interacts  calls board.kit and the handles it made; writes board.nodes,
- *             board.edges and board.view
- * @complexity boardView's (routing and labels included), plus O(c) kit calls for c changes
- * @alloc      one full view per call (an object per node and edge, plus the
- *             layout's maps), kept as board.view until the next call; one
- *             handle per added node or edge; each removed one is dropped
- *             from the maps after its remove()
+ *             board.edges, board.view, board.routes and board.drawn
+ * @complexity O(n + l + r) for drawnKey; when it changed, boardView's
+ *             (a route search per routed pair on a route key miss, else
+ *             per pair new to the cache, and labels), plus O(c) kit calls
+ *             for c changes
+ * @alloc      drawnKey's: n + l + r + 4 short-lived objects and the key
+ *             string, kept as board.drawn; when it changed, one full view
+ *             (an object per node and edge, plus the layout's maps), kept
+ *             as board.view
+ *             until the next one; one handle per added node or edge; each
+ *             removed one is dropped from the maps after its remove()
  */
 export function patchBoard(board, feed, width) {
-  const next = boardView(feed, width);
+  const drawn = drawnKey(feed, width);
+  if (drawn === board.drawn) {
+    return { addNodes: [], updateNodes: [], removeNodes: [], addEdges: [], updateEdges: [], removeEdges: [] };
+  }
+  const next = boardView(feed, width, board.routes);
   const ops = diffBoard(board.view, next);
   for (const id of ops.removeEdges) {
     board.edges.get(id).remove();
@@ -1766,6 +2026,7 @@ export function patchBoard(board, feed, width) {
   for (const v of ops.addEdges) board.edges.set(v.id, board.kit.createEdge(v));
   for (const v of ops.updateEdges) board.edges.get(v.id).update(v);
   board.view = next;
+  board.drawn = drawn;
   return ops;
 }
 
@@ -1890,7 +2151,8 @@ export function createKit(doc, canvas) {
   };
   const makeRow = () => {
     const row = { root: el(doc, 'div', 'tc-row'), title: el(doc, 'span', 'tc-row-title'), name: el(doc, 'span', 'tc-row-name'),
-      role: el(doc, 'span', 'tc-row-role'), state: el(doc, 'span', 'tc-row-state'), note: el(doc, 'span', 'tc-row-note'), badges: [] };
+      role: el(doc, 'span', 'tc-row-role'), state: el(doc, 'span', 'tc-row-state'), note: el(doc, 'span', 'tc-row-note'),
+      problem: el(doc, 'span', 'tc-row-problem'), badges: [] };
     row.title.append(row.name, row.role);
     return row;
   };
@@ -1905,10 +2167,14 @@ export function createKit(doc, canvas) {
     setText(row.state, `${r.glyph} ${r.word}${r.unread ? ` · ${r.unread}` : ''}`);
     setText(row.note, r.note);
     if (row.note.hidden !== !r.note) row.note.hidden = !r.note;
+    // Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+    const problem = r.problem ? `${UNREAD_WORDS.unknown}: ${r.problem}` : '';
+    setText(row.problem, problem);
+    if (row.problem.hidden !== !problem) row.problem.hidden = !problem;
     while (row.badges.length < r.badges.length) row.badges.push(el(doc, 'span', 'tc-row-badge'));
     while (row.badges.length > r.badges.length) row.badges.pop().remove();
     r.badges.forEach((words, i) => setText(row.badges[i], words));
-    place(row.root, [row.title, row.state, row.note, ...row.badges]);
+    place(row.root, [row.title, row.state, row.note, row.problem, ...row.badges]);
   };
   return {
     createNode(v) {
@@ -1927,6 +2193,7 @@ export function createKit(doc, canvas) {
           node.setHeight(n.h);
           node.setTitle(n.title);
           node.setNote(n.note);
+          node.setProblem(n.problem);
           node.setBadges(n.badges);
           node.setState(n.state, n.detail);
           stem.setAttribute('d', n.connector ? roundedPath(n.connector.points, CONFIG.ROUTE_CLEAR) : '');
@@ -2041,8 +2308,11 @@ export function fitTransform(width, height, extent, padding) {
  *             height; calls patchBoard, and through it board.kit, or
  *             board.kit.drawOutline; jump calls a node handle's reveal or
  *             board.kit.revealOutline
- * @complexity one draw or width change: patchBoard's (boardView's routing
- *             included), or outlineView's O(n log n + r log r)
+ * @complexity one draw or width change: patchBoard's (nothing past its
+ *             key when only ages moved; a route search per routed pair
+ *             only when a box moved, as a width change does only when a
+ *             row wraps differently, else only for a pair new to the
+ *             cache), or outlineView's O(n log n + r log r)
  * @alloc      one observer for the fit's life; holds the last feed, the
  *             last width and the last outline drawn (as a string), each
  *             replaced by the next
@@ -2108,6 +2378,8 @@ export function createFit(canvas, board, { padding, Observer, mark }) {
  * 2026-10-14. Status: unreviewed.
  */
 export const CONN_WORDS = Object.freeze({
+  // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+  tokenDamaged: 'token damaged · copy the URL serve.py printed again',
   asking: 'asking the server',
   noToken: 'no token · open the URL serve.py printed',
   tokenRefused: 'token refused · open the URL serve.py printed',
@@ -2119,6 +2391,37 @@ export const CONN_WORDS = Object.freeze({
 });
 // The status serve.py gives /feed without the right token (C6).
 const HTTP_UNAUTHORIZED = 401;
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// The highest code point an HTTP header value may hold: fetch refuses a
+// header past Latin-1 before it sends anything.
+const LATIN1_MAX = 0xff;
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status:
+// unreviewed. NUL, LF and CR: Latin-1, but fetch refuses a header value
+// that holds one inside it, before anything is sent. A fragment's %00, %0A
+// or %0D decodes to them. A token never holds one, so one anywhere is
+// damage.
+const HEADER_REFUSED = Object.freeze(['\0', '\n', '\r']);
+
+/**
+ * What is wrong with the URL's token before any request: CONN_WORDS.noToken
+ * when there is none, CONN_WORDS.tokenDamaged when it holds a character
+ * outside Latin-1 (a pasted ellipsis, say) or one of HEADER_REFUSED (NUL,
+ * LF, CR), which fetch refuses in the X-TC-Token header, so fetch would
+ * throw and the pill would blame a server that is running; else null.
+ * serve.py's tokens are token_urlsafe and hold none of these, so any of
+ * them, wherever it sits, is damage; any other wrong token reaches the
+ * server and gets 401, `token refused`.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15; NUL, LF and CR
+ * by the P4 phase fixer, round 2. Status: unreviewed.
+ * @complexity O(t) over t characters  @alloc none
+ */
+export function tokenProblem(token) {
+  if (!token) return CONN_WORDS.noToken;
+  for (const ch of token) {
+    if (ch.codePointAt(0) > LATIN1_MAX || HEADER_REFUSED.includes(ch)) return CONN_WORDS.tokenDamaged;
+  }
+  return null;
+}
 // The pill counts the age of the last answer in whole seconds.
 const MS_PER_S = 1000;
 

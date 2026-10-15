@@ -17,7 +17,9 @@
  * wires move in place. One request at a time (look.js createPoller): the
  * next starts POLL_MS after the last settles, so a slow old answer can
  * never overwrite a newer one, and one still out after FETCH_TIMEOUT_MS is
- * aborted. A late or failed answer turns the pill to words such as
+ * aborted. With no token, or one holding a character outside Latin-1
+ * (which cannot ride in a header), the pill says so and nothing is asked.
+ * A late or failed answer turns the pill to words such as
  * `stale · last answer 12 s ago · timed out`, never `live`; once a board is
  * drawn, a line over it says `stale · last answer 12 s ago` too and every
  * moving wire stops, until the next good answer. A page restored
@@ -47,18 +49,25 @@
  *             and one per root in the roots list, released when the list
  *             is rebuilt
  * @deps       look.js, theme.css; serve.py's /feed (C5, C6)
- * @complexity one poll: O(n log n + l + r), plus look.js routeAround's
- *             search per routed pair, in patchBoard over n nodes, l
- *             links and r recent wires (tens each)
+ * @complexity one poll: O(n log n + l + r) over n nodes, l links and r
+ *             recent wires (tens each, but l grows as c(c-1)/2 native
+ *             lines per shared account): patchBoard's key, O(n + l + r),
+ *             rootsList's sort of the nodes by name, O(n log n), pillText,
+ *             O(n), and the footer's seven cells; a poll with news
+ *             adds O(n log n + l + r) for the layout and labels, and
+ *             look.js routeAround's search per routed pair only when a box
+ *             moved, else only for a pair new to the board
  * @alloc      one board: its drawn nodes and wires are patched in place,
- *             and each answer builds one full view that replaces the last
- *             (look.js patchBoard); the poller's one AbortController and two
+ *             and each answer with news builds one full view that replaces
+ *             the last (look.js patchBoard; one that only aged the mail
+ *             builds none), and the board keeps its routed runs from one
+ *             answer to the next; the poller's one AbortController and two
  *             timers while a request is out; the last feed, which createFit
  *             keeps to lay out again on a resize
  */
 import {
   createWindow, createCanvas, createRoots, setFooter, createLookSwitch, pickLook, applyLook,
-  createBoard, createKit, createFit, createPoller, pillText, rootsList, CONN_WORDS, LEGEND_WORDS,
+  createBoard, createKit, createFit, createPoller, pillText, rootsList, tokenProblem, CONN_WORDS, LEGEND_WORDS,
 } from './look.js';
 
 // C6 and O7: a wire moves within 3 s of a send, and one feed costs the
@@ -81,6 +90,8 @@ const store = (look) => { try { localStorage.setItem(LOOK_KEY, look); } catch { 
 
 const query = new URLSearchParams(location.search);
 const token = new URLSearchParams(location.hash.slice(1)).get('token') || '';
+// No token, or one that cannot ride in a header: say which, and ask nothing.
+const problem = tokenProblem(token);
 let look = pickLook(query.get('theme'), readStored());
 applyLook(document, look);
 if (query.get('gray') === '1') document.documentElement.style.filter = 'grayscale(1)';
@@ -140,7 +151,7 @@ const poller = createPoller({
 // the pill says it is asking until an answer lands, never a frozen `live`.
 const start = () => {
   fit.start();
-  if (!token) return;
+  if (problem) return;
   win.setConn(CONN_WORDS.asking, 'warn');
   poller.start();
 };
@@ -148,7 +159,7 @@ const stop = () => {
   poller.stop();
   fit.stop();
 };
-if (!token) win.setConn(CONN_WORDS.noToken, 'down');
+if (problem) win.setConn(problem, 'down');
 start();
 addEventListener('pagehide', stop);
 addEventListener('pageshow', (event) => { if (event.persisted) start(); });

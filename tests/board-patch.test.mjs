@@ -1,17 +1,21 @@
 /**
  * Tests for the live board's diff and patch in board/look.js: patchBoard
  * keeps what stays, removes what went and adds what came, through a fake
- * drawing kit, so no DOM library is needed. Also the two new states, what
- * boardView draws for a feed's wires and links, and the pill's words. Round
- * 1 adds names that are Object.prototype keys, a pair with a mailbox wire
- * and a native line (since round 2, one path with the native words in its
- * title), a down node's stale status, the tree's own connector in place
- * of the reports_to hint (round 2), and the page's poll loop
+ * drawing kit, so no DOM library is needed. Also C5's states (D24's working
+ * and woken among them, with the pill and the wire they get), what
+ * boardView draws for a feed's wires and links, and the pill's words;
+ * names that are Object.prototype keys; a pair with a mailbox wire and a
+ * native line (one path with the native words in its title); a down
+ * node's stale status; the tree's own connector in place of the
+ * reports_to hint; an unread count tc could not take (`unread unknown`);
+ * the legend's two cases the states cannot see, and `inbox unreadable` on
+ * a down node whose inbox the board could not list (D28);
+ * a token that cannot ride in a header; and the page's poll loop
  * (createPoller) on fake timers and a fake fetch that the test settles by
- * hand, so no real clock or network is read. Since then: the badge lines
- * on a native pair's boxes and outline rows, with mail or without and
- * never on account `unknown`, and on a reports_to cycle's root; and the
- * poller's stale line over the board once an answer is late or refused.
+ * hand, so no real clock or network is read. Then the badge lines on a
+ * native pair's boxes and outline rows, with mail or without and never on
+ * account `unknown`, and on a reports_to cycle's root; and the poller's
+ * stale line over the board once an answer is late or refused.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
@@ -24,15 +28,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  STATES, NOTE_WORDS, CONN_WORDS, LINK_WORDS, boardView, diffBoard, createBoard, patchBoard, pillText, layoutLevels,
-  levelPort, createPoller, outlineView, CONFIG,
+  STATES, NOTE_WORDS, CONN_WORDS, LINK_WORDS, UNREAD_WORDS, INBOX_WORDS, LEGEND_WORDS, boardView, diffBoard, createBoard,
+  patchBoard, pillText, layoutLevels, levelPort, createPoller, outlineView, tokenProblem, CONFIG,
 } from '../board/look.js';
 
 /**
  * A fake drawing kit: counts create calls and keeps every live handle.
  * @complexity O(1) per call  @alloc one handle per create, dropped on remove()
  */
-function fakeKit() {
+function createFakeKit() {
   const kit = {
     created: { nodes: 0, edges: 0 },
     live: new Set(),
@@ -55,7 +59,7 @@ function fakeKit() {
 
 /** One feed node, a listening peer unless `extra` says otherwise. @complexity O(1)  @alloc one object */
 function node(id, extra) {
-  return { id, state: 'listening', role: 'peer', role_source: 'inferred', level: 0, parent: null, unread: 0, ...extra };
+  return { id, state: 'listening', role: 'peer', role_source: 'none', level: 0, parent: null, unread: 0, ...extra };
 }
 
 /** One mailbox link between two names. @complexity O(1)  @alloc one object */
@@ -87,23 +91,81 @@ const FEED_B = {
   links: [mailbox('a', 'b'), mailbox('a', 'd')],
 };
 
-test('the two new states have a glyph and a word, distinct from the other four', () => {
-  for (const name of ['doorbell', 'remote']) {
+test('C5\'s states each have a glyph and a word of their own, D24\'s working and woken too', () => {
+  for (const name of ['doorbell', 'remote', 'working', 'woken']) {
     assert.ok(STATES[name], `no state ${name}`);
     assert.ok(STATES[name].glyph && STATES[name].word, `${name} needs a glyph and a word`);
   }
   assert.equal(STATES.doorbell.glyph, '◎');
   assert.equal(STATES.remote.glyph, '⇄');
   assert.equal(STATES.remote.word, 'remote · not checked');
+  assert.equal(STATES.woken.word, 'woken · not read');
   const glyphs = Object.values(STATES).map((s) => s.glyph);
   const words = Object.values(STATES).map((s) => s.word);
-  assert.equal(Object.keys(STATES).length, 6);
+  assert.equal(Object.keys(STATES).length, 8);
   assert.equal(new Set(glyphs).size, glyphs.length, `glyphs repeat: ${glyphs}`);
   assert.equal(new Set(words).size, words.length, `words repeat: ${words}`);
 });
 
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// D24: a session that mail woke is working (calm) or woken (a warning), and
+// neither is down: its wire stays a mail wire, never the dotted dead one.
+test('a woken session warns in its own glyph and words and its wire is not the dotted dead wire; a working one is calm', () => {
+  const feed = {
+    nodes: [
+      node('a', { listener_pid: 11 }), node('b', { state: 'woken', status: 'parsing the logs' }),
+      node('c', { state: 'working', status: 'reading the diff' }),
+    ],
+    wires: [{ from: 'a', to: 'b', seq: 4, age_s: 0 }],
+    links: [mailbox('a', 'b'), mailbox('a', 'c')],
+  };
+  const pill = pillText(feed);
+  assert.deepEqual([pill.state, pill.text], ['warn', `1 listening · 1 ${STATES.woken.word}`]);
+  assert.ok(!pill.text.includes(STATES.down.word), `the pill calls a woken session down: ${pill.text}`);
+  assert.deepEqual(pillText({ nodes: [node('a', { listener_pid: 11 }), node('c', { state: 'working' })] }),
+    { text: 'live · 1 listening', state: 'up', listening: 1 }, 'a working session raised the pill');
+  const view = boardView(feed);
+  assert.equal(view.edges['mailbox:a>b'].down, false, 'the wire to a woken session is drawn as the dead wire');
+  assert.equal(view.edges['mailbox:a>b'].flow, true, 'the mail that woke b does not flow to it');
+  assert.equal(view.edges['mailbox:a>c'].down, false);
+  assert.deepEqual([view.nodes.b.state, view.nodes.b.note], ['woken', `${NOTE_WORDS.lastStatus} parsing the logs`]);
+  assert.deepEqual([view.nodes.c.state, view.nodes.c.note], ['working', 'reading the diff']);
+  const rows = Object.fromEntries(outlineView(feed).groups.flatMap((g) => g.rows).map((r) => [r.id, r]));
+  assert.deepEqual([rows.b.glyph, rows.b.word], [STATES.woken.glyph, STATES.woken.word]);
+  assert.deepEqual([rows.c.glyph, rows.c.word], [STATES.working.glyph, STATES.working.word]);
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+// C5 and D28: the legend names both cases the states cannot see, and a
+// down node whose inbox the board could not list says so in words.
+test('both legends name the two cases the states cannot see', () => {
+  for (const [view, words] of [['graph', LEGEND_WORDS.graph], ['outline', LEGEND_WORDS.outline]]) {
+    assert.match(words, /a crash after reading \(it looks working for up to 10 min\)/, `${view} legend: ${words}`);
+    assert.match(words, /with no board page open, when a listener went/, `${view} legend: ${words}`);
+    assert.ok(!words.includes('only a crash after reading'), `${view} legend still says a crash is the only case: ${words}`);
+  }
+});
+
+test('a down node whose inbox the board could not list says inbox unreadable on its box and its row, and no other node does', () => {
+  const feed = {
+    nodes: [
+      node('d', { state: 'down', inbox_unreadable: true, unread: null }), node('e', { state: 'down', inbox_unreadable: false }),
+      node('l', { listener_pid: 12, inbox_unreadable: true }),
+    ],
+    wires: [], links: [],
+  };
+  const view = boardView(feed);
+  const onBoxes = Object.fromEntries(Object.values(view.nodes).map((v) => [v.id, v.badges.map((b) => b.text)]));
+  assert.deepEqual(onBoxes, { d: [INBOX_WORDS.unreadable], e: [], l: [] });
+  assert.equal(INBOX_WORDS.unreadable, 'inbox unreadable');
+  assert.equal(view.nodes.d.h, CONFIG.NODE_H + CONFIG.BADGE_H, 'the box did not grow a line for its words');
+  assert.equal(view.nodes.d.state, 'down');
+  const rows = Object.fromEntries(outlineView(feed).groups.flatMap((g) => g.rows).map((r) => [r.id, r.badges]));
+  assert.deepEqual(rows, { d: [INBOX_WORDS.unreadable], e: [], l: [] });
+});
+
 test('patchBoard keeps what stays, drops what went, adds what came, and rebuilds nothing', () => {
-  const kit = fakeKit();
+  const kit = createFakeKit();
   const board = createBoard(kit);
   patchBoard(board, FEED_A);
   assert.deepEqual(kit.created, { nodes: 4, edges: 2 });
@@ -154,7 +216,7 @@ test('a reply flows back: the arrow sits at the start, at the reader', () => {
   assert.deepEqual([wire.flow, wire.back, wire.arrow, wire.label], [true, true, 'start', 'b → a · #9']);
 });
 
-// Round 2 (a2's direction): the tree draws its own thin connector, parent's
+// The tree draws its own thin connector, parent's
 // out port to child's in port, with no label; reports_to links draw nothing
 // of their own; a native line has no label, its words in its title.
 test('the tree draws its own connector, with no label; native words go in the title; a reports_to to nobody is a note', () => {
@@ -227,7 +289,7 @@ test('nodes named __proto__, constructor and toString lay out and draw like any 
   const wire = view.edges['mailbox:__proto__>constructor'];
   assert.ok(wire && wire.flow, 'the wire from __proto__ to constructor does not flow');
   for (const at of wire.points) assert.ok(Number.isFinite(at.x) && Number.isFinite(at.y), 'a wire point is not finite');
-  const kit = fakeKit();
+  const kit = createFakeKit();
   patchBoard(createBoard(kit), feed);
   assert.deepEqual(kit.created, { nodes: 4, edges: 2 });
 });
@@ -291,7 +353,7 @@ test('both boxes and both outline rows of a native pair say native with the othe
   }
   const rows = Object.fromEntries(outlineView(NATIVE_FEED).groups.flatMap((g) => g.rows).map((r) => [r.id, r.badges]));
   assert.deepEqual(rows, NATIVE_WORDS, 'the outline\'s lines');
-  assert.equal(Object.values(view.edges).filter((e) => e.kind === 'native').length, 3, 'a native pair with no mail lost its long dash');
+  assert.equal(Object.values(view.edges).filter((e) => e.kind === 'native').length, 3, 'a native pair with no mail lost its dash-dot line');
 });
 
 test('a reports_to cycle\'s root says whom it reports to, on a badge and in the outline', () => {
@@ -309,6 +371,46 @@ test('a reports_to cycle\'s root says whom it reports to, on a badge and in the 
   assert.equal(view.nodes.r.note, 'reports to ghost · not found');
   const row = outlineView(feed).groups.flatMap((g) => g.rows).find((r) => r.id === 'p');
   assert.deepEqual(row.badges, ['reports to q · cycle']);
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// The feed gives a null unread, with tc's reason, for an inbox tc cannot
+// count, and a reason beside a true count when tc could not see only read/.
+test('a null unread reads unread unknown in words, on the box and the row; a count with a reason keeps its count', () => {
+  const feed = {
+    nodes: [
+      node('b', { unread: null, unread_problem: 'made-up reason' }), node('c', { unread: 2, unread_problem: null }),
+      node('d', { unread: 0 }),
+    ],
+    wires: [], links: [],
+  };
+  const view = boardView(feed);
+  assert.deepEqual([view.nodes.b.detail, view.nodes.c.detail, view.nodes.d.detail], [UNREAD_WORDS.unknown, '2 unread', '']);
+  assert.equal(UNREAD_WORDS.unknown, 'unread unknown');
+  const rows = Object.fromEntries(outlineView(feed).groups.flatMap((g) => g.rows).map((r) => [r.id, r.unread]));
+  assert.deepEqual(rows, { b: UNREAD_WORDS.unknown, c: '2 unread', d: '' });
+  // Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+  // tc's reason rides beside the unknown count only.
+  assert.deepEqual([view.nodes.b.problem, view.nodes.c.problem, view.nodes.d.problem], ['made-up reason', '', '']);
+  const problems = Object.fromEntries(outlineView(feed).groups.flatMap((g) => g.rows).map((r) => [r.id, r.problem]));
+  assert.deepEqual(problems, { b: 'made-up reason', c: '', d: '' });
+});
+
+// A pasted token that ends in an ellipsis cannot ride in a header: fetch
+// throws before it sends, and the pill used to blame a running server.
+test('a token outside Latin-1 is called damaged in words, never `is serve.py running?`', () => {
+  assert.equal(tokenProblem(''), CONN_WORDS.noToken);
+  assert.equal(tokenProblem('abcDEF0189_-xyz…'), CONN_WORDS.tokenDamaged);
+  assert.notEqual(CONN_WORDS.tokenDamaged, CONN_WORDS.noServer);
+  assert.match(CONN_WORDS.tokenDamaged, /copy the URL/);
+  assert.equal(tokenProblem('abcDEF0189_-xyz'), null);
+  // A Latin-1 character rides in the header; the server refuses it (401, token refused).
+  assert.equal(tokenProblem('abcé'), null);
+  // Model: Claude Opus 5.5 (the P4 phase fixer, round 2), 2026-10-15. Status: unreviewed.
+  // NUL, LF and CR are Latin-1, yet fetch refuses them in a header: damage too.
+  for (const token of ['abc\ndef', 'abc\rdef', 'abc\0def', 'abcdef\n']) {
+    assert.equal(tokenProblem(token), CONN_WORDS.tokenDamaged, `${JSON.stringify(token)} would make fetch throw`);
+  }
 });
 
 test('a down node\'s status reads as its last status, never as its state now', () => {
@@ -378,7 +480,7 @@ const okAnswer = (feed) => ({ status: 200, ok: true, json: async () => feed });
 const flush = () => new Promise((resolve) => { setImmediate(resolve); });
 
 /** A poller on fake timers and a fake fetch, recording what it reports. @complexity O(1)  @alloc one poller */
-function rig() {
+function createPollerRig() {
   const timers = createFakeTimers();
   const net = createFakeFetch();
   const seen = [];
@@ -391,7 +493,7 @@ function rig() {
 }
 
 test('the poll loop asks one request at a time, drops a late one, and says so in words, never live', async () => {
-  const { timers, net, seen, pills, poller } = rig();
+  const { timers, net, seen, pills, poller } = createPollerRig();
   poller.start();
   assert.equal(net.calls.length, 1);
   net.calls[0].resolve(okAnswer(FEED_A));
@@ -428,7 +530,7 @@ test('the poll loop asks one request at a time, drops a late one, and says so in
 });
 
 test('before any answer the pill says no answer, and a 401 says the token was refused', async () => {
-  const { timers, net, pills, poller } = rig();
+  const { timers, net, pills, poller } = createPollerRig();
   poller.start();
   timers.advance(TIMEOUT_MS);
   await flush();
@@ -475,7 +577,7 @@ test('once a board is drawn, a late or refused answer says stale over the board,
 });
 
 test('stop clears every timer and aborts the request in flight; start polls again (pagehide, pageshow)', async () => {
-  const { timers, net, seen, pills, poller } = rig();
+  const { timers, net, seen, pills, poller } = createPollerRig();
   poller.start();
   assert.equal(timers.pending.size, 1, 'no deadline on the request in flight');
   poller.stop();
