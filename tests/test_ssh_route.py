@@ -31,7 +31,7 @@ it watched is reachable.
             shares the mailbox with the user's own primary group (tc init
             --shared) and reads modes and groups.
 @deps       python3 stdlib (fcntl, hashlib, json, os, pathlib, re, shlex,
-            stat, subprocess, sys, unittest, unittest.mock); tests/_root.py;
+            stat, sys, unittest, unittest.mock); tests/_root.py;
             load_tc, wait_until_blocked and FINISH_CEILING_SECONDS from
             test_codex_route.py; UmaskTestCase and primary_group from
             test_shared.py; ../tc.
@@ -50,7 +50,6 @@ import pathlib
 import re
 import shlex
 import stat
-import subprocess
 import sys
 import unittest
 from unittest import mock

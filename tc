@@ -21,6 +21,7 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   outbox/to-<name>/sent/, refused/         ssh messages the far tc took, or refused (+ .stderr note)
   outbox/.origin-token                     this mailbox's random origin token (D25)
   outbox/.send-<uid>-<key>.lock            one user's send lock for one ssh target
+  mail/.origins/<origin id>                an ssh message's origin id, filed once delivered (D25)
 
 @interacts  writes mail/, status/, cards/ and outbox/ under ROOT. Its one
             way off the machine is `ssh` (SSH S1, Claude Opus 5.5,
@@ -28,7 +29,13 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             (C3), as the user who ran tc, with that user's keys, and
             files the message in outbox/ by the answer; `flush` sends
             that user's waiting outbox mail the same way, one ssh run per
-            message (SSH S2). The waking side is
+            message (SSH S2). Inbound, `gate` is the forced command one
+            far key runs (SSH S3, C3): it reads SSH_ORIGINAL_COMMAND,
+            delivers a send as from its --as name through the router
+            (never to an ssh card, D18), answers `health --json` without
+            cards or a GPU query, files each origin id it delivers in
+            mail/.origins/ (D25), and starts no shell and no program but
+            the codex ring. The waking side is
             Claude Code's background Bash: `tc wait` or `tc watch` exiting is
             what re-invokes the session that started it. `health` and `watch`
             also read /proc (meminfo, locks, each process's comm and cmdline)
@@ -172,7 +179,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             message, kept forever in outbox/to-<name>/, its sent/ or its
             refused/ (with a .stderr note beside a refused one); one
             origin token per mailbox and one send lock per user per ssh
-            target, made on first use and kept.
+            target, made on first use and kept; one empty filing per
+            origin id delivered here, kept (SSH S3).
             Nothing held in memory past one command. `wait` measured flat at
             13 MB RSS over 200k polls; it also hard-caps itself at
             WAIT_MEMORY_CAP_BYTES so a runaway dies alone. `wait` holds
@@ -590,6 +598,27 @@ ORIGIN_PATTERN = re.compile(rf"([0-9a-f]{{{2 * ORIGIN_TOKEN_BYTES}}})-([0-9]{{1,
 # shared a key would only share a lock.
 SEND_LOCK_NAME = ".send-{uid}-{key}.lock"
 SEND_LOCK_KEY_CHARS = 16
+# SSH S3 (Claude Opus 5.5, unreviewed): tc gate, the forced command for
+# inbound ssh (C3, D16, D18, D25).
+# Row 7 of the exit table: refused by the gate.
+EXIT_GATE_REFUSED = 7
+# C3's words: anything the gate does not allow, and a gated message to a
+# name whose local card says ssh (D18: the gate never forwards).
+GATE_REFUSED_WORDS = "tc gate: refused"
+GATE_NO_FORWARD_WORDS = "tc gate: {name} is not a local name; the gate does not forward"
+# The note that ends a gated message's header line (C3): the key's name,
+# the only name a gated message is ever from.
+GATE_HEADER_NOTE = "via ssh gate, key {key}"
+# The two words after the far tc's path that make the gate's health shape.
+GATE_HEALTH_WORDS = ["health", "--json"]
+# Where D25's origin ids are filed once their message is delivered:
+# mail/ORIGINS_NAME/<id>, one empty file each, owned by the Linux user
+# whose gate or send delivered it. Only such a file counts as filed, so
+# an id another member planted ahead of a message can never drop it.
+ORIGINS_NAME = ".origins"
+# C3's words for a message whose origin id is already filed: the far
+# sender's retry, after a crash or a timeout, delivers nothing twice.
+ALREADY_DELIVERED_WORDS = "already delivered (origin {origin})"
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -1280,11 +1309,14 @@ def shared_folder_mode(path):
     SHARED_TOP_FOLDER_MODE too, sticky, so a member cannot move or delete
     another member's queued, sent or refused mail. The user who made such
     a folder owns it, and sticky still lets a folder's owner do that.
+    SSH S3 (Claude Opus 5.5, unreviewed): mail/.origins/ (D25's filed
+    origin ids) is sticky too, so no member removes another's filing.
 
     @interacts  none; path work only.
     @deps       pathlib; ROOT, MAIL, SHARED_FOLDER_NAMES, OUTBOX_NAME,
-                OUTBOX_SENT, OUTBOX_REFUSED, SHARED_TOP_FOLDER_MODE,
-                SHARED_INBOX_MODE, SHARED_FOLDER_MODE.
+                OUTBOX_SENT, OUTBOX_REFUSED, ORIGINS_NAME,
+                SHARED_TOP_FOLDER_MODE, SHARED_INBOX_MODE,
+                SHARED_FOLDER_MODE.
     @complexity O(1): a few name comparisons.
     @alloc      the parent paths it compares, freed on return.
     """
@@ -1295,6 +1327,8 @@ def shared_folder_mode(path):
         return SHARED_INBOX_MODE
     queue = path.parent if path.name in (OUTBOX_SENT, OUTBOX_REFUSED) else path  # SSH S1 (Claude Opus 5.5, unreviewed): D22
     if queue.parent == ROOT / OUTBOX_NAME and queue.name.startswith("to-"):
+        return SHARED_TOP_FOLDER_MODE
+    if path == MAIL / ORIGINS_NAME:  # SSH S3 (Claude Opus 5.5, unreviewed): D25, each filed id its filer's
         return SHARED_TOP_FOLDER_MODE
     return SHARED_FOLDER_MODE
 
@@ -2478,7 +2512,7 @@ def write_new_file(path, text, mode=NEW_FILE_MODE, dir_fd=None):
 
 # SSH task 0 (Claude Opus 5.5, unreviewed): D18, the one path that holds
 # the route and inbox-lock steps, which tc send and the gate (C3) share.
-def route_and_deliver(sender, to, body, header_note=None):
+def route_and_deliver(sender, to, body, header_note=None, *, forward=True):
     """Read `to`'s card and hand the message to the route it names (C2), under one lock deadline: the route's Delivery.
 
     The steps cmd_send held until SSH task 0, moved here unchanged so the
@@ -2495,6 +2529,12 @@ def route_and_deliver(sender, to, body, header_note=None):
     other route gets C2's arguments alone. `header_note` goes to the
     route, which ends the message's header line with it.
 
+    SSH S3 (Claude Opus 5.5, unreviewed): D18. `forward` False is the
+    gate's: a card that says ssh, at the read that picks the route, is
+    Delivery exit 7, GATE_NO_FORWARD_WORDS, before ssh could run and
+    with nothing written, so a far key never sends mail on to a third
+    machine.
+
     Busy leaves two ways (D23). A lock held past the deadline exits 10
     through sys.exit inside inbox_lock or next_seq, so nothing after this
     call runs. A send out of numbers comes back as Delivery exit 10. So a
@@ -2508,7 +2548,8 @@ def route_and_deliver(sender, to, body, header_note=None):
                 nothing written) and reads the card again; calls one
                 ROUTES function, which writes the message.
     @deps       card_route, lock_deadline, inbox_lock, deliver_local,
-                deliver_codex, deliver_ssh; fcntl.
+                deliver_codex, deliver_ssh, Delivery; fcntl;
+                EXIT_GATE_REFUSED, GATE_NO_FORWARD_WORDS.
     @complexity O(1) here, plus the route's own work; the inbox lock and
                 every mail/.seq wait take at most LOCK_WAIT_SECONDS in all.
     @alloc      the card dict, freed on return; whatever the route keeps.
@@ -2521,9 +2562,129 @@ def route_and_deliver(sender, to, body, header_note=None):
             card, deliver = card_route(to)
             if deliver is deliver_local:
                 return deliver_local(card, sender, to, body, header_note, deadline=deadline)
+    if deliver is deliver_ssh and not forward:  # SSH S3 (Claude Opus 5.5, unreviewed): D18, the gate never forwards
+        return Delivery(EXIT_GATE_REFUSED, GATE_NO_FORWARD_WORDS.format(name=to), [])
     if deliver is deliver_codex or deliver is deliver_ssh:  # SSH S1 (Claude Opus 5.5, unreviewed): ssh's too (DEBT-2)
         return deliver(card, sender, to, body, header_note, deadline=deadline)
     return deliver(card, sender, to, body, header_note)
+
+
+# SSH S3 (Claude Opus 5.5, unreviewed): D25, origin ids filed by the side that delivers.
+def origin_filed(origin):
+    """True when the origin id `origin` is filed here: a regular file at mail/.origins/<origin> that this Linux user owns.
+
+    A file another user owns at that name is not a filing this user made
+    (a member could plant one ahead of a message to drop it), so it does
+    not count, and the message is delivered: a duplicate at worst, never
+    a loss. Anything lstat cannot reach counts as not filed, for the same
+    reason.
+
+    @interacts  lstats one name. Writes nothing.
+    @deps       owned_by_me; os, stat; MAIL, ORIGINS_NAME.
+    @complexity O(1).
+    @alloc      one stat result, freed on return.
+    """
+    try:
+        st = os.lstat(MAIL / ORIGINS_NAME / origin)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and owned_by_me(st)
+
+
+def file_origin(origin):
+    """File the origin id `origin` as delivered: make mail/.origins/<origin> as this user. None when filed, else a warning in words.
+
+    The folder is made through make_folder (sticky under a shared
+    mailbox); the file through write_new_file (never through a link,
+    never over a file), holding the time, at SHARED_OWNED_FILE_MODE under
+    a shared mailbox. One already there as this user's is a filing made
+    meanwhile, and that is fine; one another user made, or a failure, is
+    a warning: a retry of that message would be delivered again.
+
+    @interacts  reads ROOT/.shared and makes mail/.origins/ (make_folder);
+                creates one file there (write_new_file), or lstats it.
+    @deps       make_folder, write_new_file, origin_filed, now_iso; MAIL,
+                ORIGINS_NAME, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE.
+    @complexity O(1).
+    @alloc      one file, kept: the filing; one string or none, returned.
+    """
+    folder = MAIL / ORIGINS_NAME
+    share = make_folder(folder)
+    mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
+    try:
+        write_new_file(folder / origin, f"{now_iso()}\n", mode)
+    except FileExistsError:
+        if origin_filed(origin):
+            return None
+        return (f"origin {origin} could not be filed: something another user made, or a link, has its name in "
+                f"{folder}, so a retry of this message would be delivered again")
+    except OSError as err:
+        return (f"origin {origin} could not be filed in {folder} ({err.strerror}), so a retry of this message "
+                f"would be delivered again")
+    return None
+
+
+def deliver_once(sender, to, body, header_note=None, *, origin=None, forward=True):
+    """route_and_deliver, but at most once per origin id (D25): a Delivery.
+
+    With no `origin`, route_and_deliver alone. With one already filed
+    here (origin_filed), nothing is written and nothing rung: Delivery
+    exit 0, ALREADY_DELIVERED_WORDS, so a far tc flush that sends a
+    message again after a crash or a timeout delivers nothing twice.
+    Else the message goes through route_and_deliver and, only once that
+    returns exit 0, the id is filed (file_origin; a filing that fails is
+    a warning). Never in a finally: busy leaves route_and_deliver two
+    ways (D23), a sys.exit inside a lock wait, after which nothing here
+    runs, and Delivery exit 10, which is not 0; neither files the id.
+
+    @interacts  lstats mail/.origins/<origin> (origin_filed); then see
+                route_and_deliver; on exit 0 with an origin, makes its
+                filing (file_origin).
+    @deps       origin_filed, route_and_deliver, file_origin, Delivery;
+                ALREADY_DELIVERED_WORDS.
+    @complexity O(1) here, plus route_and_deliver's.
+    @alloc      one Delivery, returned; one filing per delivered origin,
+                kept.
+    """
+    if origin is not None and origin_filed(origin):
+        return Delivery(0, ALREADY_DELIVERED_WORDS.format(origin=origin), [])
+    result = route_and_deliver(sender, to, body, header_note, forward=forward)
+    if result.exit == 0 and origin is not None:
+        problem = file_origin(origin)
+        if problem is not None:
+            result = Delivery(result.exit, result.words, result.warnings + [problem])
+    return result
+
+
+def origin_argument(text):
+    """argparse's check of `tc send --origin`: `text` when it matches ORIGIN_PATTERN with a C0 sender, else a usage error (exit 9).
+
+    @interacts  none; string work only.
+    @deps       valid_name; argparse; ORIGIN_PATTERN.
+    @complexity O(c) over c characters of `text`.
+    @alloc      none.
+    """
+    found = ORIGIN_PATTERN.fullmatch(text)
+    if found is None or not valid_name(found.group(3)):
+        raise argparse.ArgumentTypeError(f'bad origin id "{printable(text)}": <32 hex digits>-<number>-<sender>')
+    return text
+
+
+def print_delivery(result):
+    """Print a Delivery as tc send does (C2), then exit with its code when it is not 0.
+
+    Words to stdout on exit 0, else to stderr; every warning to stderr.
+
+    @interacts  writes to stdout and stderr; exits on a non-zero code.
+    @deps       sys.
+    @complexity O(w) over w characters printed.
+    @alloc      none.
+    """
+    print(result.words, file=sys.stdout if result.exit == 0 else sys.stderr)
+    for warning in result.warnings:
+        print(warning, file=sys.stderr)
+    if result.exit != 0:
+        sys.exit(result.exit)
 
 
 def cmd_send(args):
@@ -2535,14 +2696,23 @@ def cmd_send(args):
     The route's Delivery decides the rest: words to stdout on exit 0, else
     to stderr; every warning to stderr; then its exit code.
 
+    SSH S3 (Claude Opus 5.5, unreviewed): `--origin <id>` (D25), which a
+    far tc's ssh route puts on the remote command. A far key with no
+    forced command runs tc send itself, so send files the id as the gate
+    does (deliver_once): an id already filed is `already delivered`,
+    exit 0, nothing written. A bad id shape is a usage error, exit 9
+    (origin_argument).
+
     @interacts  checks both names first (C0, exit 6, nothing written); reads
                 the body (stdin when no text is given) and refuses one over
                 SEND_BODY_MAX_BYTES (exit 8) or empty (exit 1) before any
-                number is taken; then route_and_deliver (the card, the
-                inbox lock for a local delivery, one lock_deadline for
-                every lock wait, the route, which writes the message);
-                prints.
-    @deps       require_names, read_body, refuse, route_and_deliver, Delivery.
+                number is taken; then deliver_once (the origin's filing,
+                when given; route_and_deliver: the card, the inbox lock
+                for a local delivery, one lock_deadline for every lock
+                wait, the route, which writes the message); prints
+                (print_delivery).
+    @deps       require_names, read_body, refuse, deliver_once,
+                print_delivery.
     @complexity O(b) over b bytes of body, at most SEND_BODY_MAX_BYTES,
                 plus the route's own work.
     @alloc      the body string, freed on exit; whatever the route keeps.
@@ -2552,12 +2722,9 @@ def cmd_send(args):
     body = read_body(args.message)
     if not body.strip():
         refuse("tc send: empty message", EXIT_REFUSED)  # CARDS fix round 1 (Claude Opus 5.5, unreviewed)
-    result = route_and_deliver(args.sender, args.to, body)  # SSH task 0 (Claude Opus 5.5, unreviewed): D18
-    print(result.words, file=sys.stdout if result.exit == 0 else sys.stderr)
-    for warning in result.warnings:
-        print(warning, file=sys.stderr)
-    if result.exit != 0:
-        sys.exit(result.exit)
+    # SSH task 0 (Claude Opus 5.5, unreviewed): D18; SSH S3: at most once per origin id (D25).
+    origin = getattr(args, "origin", None)  # an in-process caller's Namespace may leave it out
+    print_delivery(deliver_once(args.sender, args.to, body, origin=origin))
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, every message
@@ -4920,10 +5087,121 @@ def cmd_flush(args):
         sys.exit(EXIT_QUEUED)
 
 
+# ---------- gate: the forced command for inbound ssh (C3, D16, D18, D25) ----------
+# SSH S3 (Claude Opus 5.5, unreviewed).
+
+# A far command the gate allows (gate_command): its shape, "send" or
+# "health"; for a send, the far side's --from (checked, then ignored), the
+# --to and the --origin id (None when not given).
+GateCommand = collections.namedtuple("GateCommand", "shape sender to origin")
+
+
+def gate_command(text):
+    """The far side's command `text` (SSH_ORIGINAL_COMMAND) as a GateCommand when it is one of C3's two shapes, else None.
+
+    Split with shlex.split, never by a shell; the first word, the far
+    side's path to its own tc, is ignored. Allowed, word for word:
+    `send --from <name> --to <name>`, optionally followed by `--origin
+    <id>` (D25), both names valid under C0 and the id matching
+    ORIGIN_PATTERN with a C0 sender; or `health --json`. Anything else,
+    a quote left open, no text at all, or one word more or less, is None.
+
+    @interacts  none; string work only.
+    @deps       valid_name; shlex; ORIGIN_PATTERN, GATE_HEALTH_WORDS,
+                GateCommand.
+    @complexity O(c) over c characters of `text`.
+    @alloc      the split words and one GateCommand, returned.
+    """
+    if text is None:
+        return None
+    try:
+        words = shlex.split(text)
+    except ValueError:
+        return None
+    rest = words[1:]
+    if rest == GATE_HEALTH_WORDS:
+        return GateCommand("health", None, None, None)
+    if len(rest) not in (5, 7) or rest[0] != "send" or rest[1] != "--from" or rest[3] != "--to":
+        return None
+    sender, to, origin = rest[2], rest[4], None
+    if len(rest) == 7:
+        if rest[5] != "--origin":
+            return None
+        origin = rest[6]
+        found = ORIGIN_PATTERN.fullmatch(origin)
+        if found is None or not valid_name(found.group(3)):
+            return None
+    if not (valid_name(sender) and valid_name(to)):
+        return None
+    return GateCommand("send", sender, to, origin)
+
+
+def cmd_gate(args):
+    """`tc gate --as <name>`: what one far key may do here, as the forced command in authorized_keys (C3).
+
+    It reads SSH_ORIGINAL_COMMAND (gate_command) and nothing else of the
+    far side's but the body on stdin. A send shape delivers the body as
+    from the `--as` name, never the far --from, with the header note `via
+    ssh gate, key <as>`, through the router (deliver_once, then
+    route_and_deliver, with forward False), so a codex name is rung and
+    the inbox lock taken as for any send (D16), and a name whose card
+    says ssh is refused, exit 7, `tc gate: <name> is not a local name;
+    the gate does not forward` (D18). With --origin, an id already filed
+    is `already delivered`, exit 0, and the id is filed once its message
+    is delivered (D25). The size limit holds (exit 8, C0), and an empty
+    body is refused, exit 1. A health shape prints `tc health --json`'s
+    snapshot without its `cards` key and without a GPU query (D16, D18).
+    Anything else: `tc gate: refused`, exit 7, nothing written.
+
+    It starts no shell and no program but the codex ring, reached through
+    the router for a card that says codex (D18): an argv list, a checked
+    thread id and a fixed line that never holds the body.
+
+    @interacts  checks --as (C0, exit 6); reads SSH_ORIGINAL_COMMAND; for
+                a send, reads the body from stdin (read_body) and
+                delivers it (deliver_once: see route_and_deliver and the
+                routes it reaches, local and codex); for health, reads
+                /proc and mail/ (health_snapshot); prints; on a refusal
+                one line to stderr and exit 7.
+    @deps       require_names, gate_command, read_body, refuse,
+                deliver_once, print_delivery, health_snapshot; json, os;
+                GATE_REFUSED_WORDS, GATE_HEADER_NOTE, EXIT_GATE_REFUSED,
+                EXIT_REFUSED.
+    @complexity O(c + b) over c characters of the far command and b bytes
+                of body, plus the route's own work; or health_snapshot's,
+                less its cards.
+    @alloc      the split command and the body, freed on exit; whatever
+                the route keeps.
+    """
+    require_names(args.as_name)
+    command = gate_command(os.environ.get("SSH_ORIGINAL_COMMAND"))
+    if command is None:
+        refuse(GATE_REFUSED_WORDS, EXIT_GATE_REFUSED)
+    if command.shape == "health":
+        print(json.dumps(health_snapshot(cards=False, gpu=False), indent=2))
+        return
+    body = read_body(None)
+    if not body.strip():
+        refuse("tc gate: empty message; nothing written", EXIT_REFUSED)
+    print_delivery(deliver_once(args.as_name, command.to, body, GATE_HEADER_NOTE.format(key=args.as_name),
+                                origin=command.origin, forward=False))
+
+
 # ---------- health: machine, sessions, listeners, mail ----------
 
-def machine_stats():
-    """Load, memory and GPU right now. GPU is None when nvidia-smi is absent."""
+def machine_stats(gpu=True):
+    """Load, memory and GPU right now. GPU is None when nvidia-smi is absent, or when `gpu` is False.
+
+    SSH S3 (Claude Opus 5.5, unreviewed): `gpu` False never asks
+    nvidia-smi, so the gate's health runs no program (D18).
+
+    @interacts  reads the load average and /proc/meminfo; runs nvidia-smi
+                once (gpu_stats) only when `gpu` is True.
+    @deps       gpu_stats; os.
+    @complexity O(l) over l lines of /proc/meminfo (about fifty), plus
+                one nvidia-smi run when asked.
+    @alloc      one dict, returned.
+    """
     load1 = os.getloadavg()[0]
     cores = os.cpu_count() or 1
     info = {}
@@ -4933,7 +5211,7 @@ def machine_stats():
             info[key] = int(rest.split()[0])
     mem_pct = 100.0 * info["MemAvailable"] / info["MemTotal"]
     return {"load1": round(load1, 2), "cores": cores,
-            "mem_avail_pct": round(mem_pct, 1), "gpus": gpu_stats()}
+            "mem_avail_pct": round(mem_pct, 1), "gpus": gpu_stats() if gpu else None}
 
 
 def gpu_stats():
@@ -5175,8 +5453,14 @@ def cards_summary():
     return out
 
 
-def health_snapshot():
+def health_snapshot(cards=True, gpu=True):
     """One snapshot of the machine, sessions, listeners, watchers, mail and cards.
+
+    SSH S3 (Claude Opus 5.5, unreviewed): the gate's `health --json`
+    passes both False. `cards` False leaves the `cards` key out, so a far
+    key never reads account labels or ssh targets (D16); `gpu` False
+    never runs nvidia-smi (machine_stats), so the gate runs no program
+    but the codex ring (D18), and `gpus` is null.
 
     `shared_group` (SHARED H1, Claude Opus 5.5, unreviewed) is the group
     the mailbox is shared with, or null when it is private (C4).
@@ -5194,8 +5478,9 @@ def health_snapshot():
     `unread` or `newest_mail_age_s` is null when tc could not see into
     that inbox or its read/ (mailbox_summary, the audit's LOW-2).
 
-    @interacts  reads /proc, mail/, status/, cards/ and ROOT/.shared; may
-                run nvidia-smi (machine_stats). Writes nothing.
+    @interacts  reads /proc, mail/, status/, cards/ (only when `cards`)
+                and ROOT/.shared; may run nvidia-smi (machine_stats, only
+                when `gpu`). Writes nothing.
     @deps       now_iso, machine_stats, session_counts, listeners,
                 mailbox_summary, cards_summary, shared_group.
     @complexity O(p + k + n + m + c): p processes, k lines in /proc/locks,
@@ -5208,10 +5493,13 @@ def health_snapshot():
         group, problem = shared_group(), None
     except ValueError as err:
         group, problem = None, str(err)
-    return {"time": now_iso(), "machine": machine_stats(), "sessions": session_counts(),
+    snap = {"time": now_iso(), "machine": machine_stats(gpu), "sessions": session_counts(),
             "listeners": listeners("wait"), "watchers": listeners("watch"),
-            "mail": mailbox_summary(), "cards": cards_summary(),
-            "shared_group": group, "shared_problem": problem}  # SHARED H1 (Claude Opus 5.5, unreviewed): C4
+            "mail": mailbox_summary()}
+    if cards:  # SSH S3 (Claude Opus 5.5, unreviewed): D16, never for the gate
+        snap["cards"] = cards_summary()
+    snap["shared_group"], snap["shared_problem"] = group, problem  # SHARED H1 (Claude Opus 5.5, unreviewed): C4
+    return snap
 
 
 def _gpu_text(gpus):
@@ -5415,6 +5703,8 @@ def main():
     s = sub.add_parser("send", help="send a message (text arg or stdin)")
     s.add_argument("--from", dest="sender", required=True)
     s.add_argument("--to", required=True)
+    s.add_argument("--origin", type=origin_argument,  # SSH S3 (Claude Opus 5.5, unreviewed): D25
+                   help="the origin id a far tc's ssh route sends; an id already filed is not delivered twice")
     s.add_argument("message", nargs="?")
     s.set_defaults(fn=cmd_send)
 
@@ -5482,6 +5772,11 @@ def main():
     fl = sub.add_parser("flush", help="send your ssh mail waiting in the outbox, oldest first for each target")
     fl.add_argument("--to", help="only the target this name's card points at")
     fl.set_defaults(fn=cmd_flush)
+
+    # SSH S3 (Claude Opus 5.5, unreviewed): tc gate (C3), only ever a forced command in authorized_keys.
+    gt = sub.add_parser("gate", help="the forced command for one far ssh key: deliver mail as --as, or health")
+    gt.add_argument("--as", dest="as_name", required=True, help="the name every message through this key is from")
+    gt.set_defaults(fn=cmd_gate)
 
     # SHARED H1 (Claude Opus 5.5, unreviewed): tc init --shared --group <g> (C4).
     ini = sub.add_parser("init", help="share this mailbox with a group of Linux users (one per account)")
