@@ -145,9 +145,12 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             file (tens of KB).
 @alloc      per feed(): tc.mailbox_summary builds m path and stat objects; here
             one Message per message file, each message listed once more
-            under its recipient, the per-pair counts, and the returned
-            dict (n nodes, at most W wires, l + n + c(c-1)/2 links); all
-            freed when the caller drops them. Held across calls: the
+            under its recipient, and for each message a short-lived sorted
+            pair (a list and two tuples) and a default count dict, which
+            is kept only for a pair's first message as the per-pair
+            counts; then the returned dict (n nodes, at most W wires,
+            l + n + c(c-1)/2 links); all freed when the caller drops them.
+            Held across calls: the
             loaded tc module and last_listening_at, one float per name
             seen listening, pruned past DOWN_WINDOW_S on every feed(), and
             the names of cards found nested too deep, one each. The server
@@ -910,9 +913,11 @@ class Board:
                     tc.POLL_SECONDS.
         @complexity O(k + m log m + n + c^2) per poll; the module block
                     names each term.
-        @alloc      the per-poll objects the module block lists, and the
-                    returned dict; last_listening_at gains one float per
-                    name listening now and drops each past DOWN_WINDOW_S.
+        @alloc      the per-poll objects the module block lists (a Message,
+                    a sorted pair and a default count dict per message
+                    among them), and the returned dict; last_listening_at
+                    gains one float per name listening now and drops each
+                    past DOWN_WINDOW_S.
         """
         now = self.clock()
         snap = self.snapshot()

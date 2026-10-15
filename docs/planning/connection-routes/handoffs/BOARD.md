@@ -354,10 +354,10 @@ found one MEDIUM and LOWs. The look the owner approved is kept.
   cannot write, and the file never calls join. The header says that, and
   why. Moving its claude cards to `tc join` would change the tests, so it
   is left for the architect.
-- Out of the work set and now stale: `qa/human/board-live.md` lines 35 to
-  37 say the browser check starts five listeners and makes `d` down, and
-  line 48 checks `d`'s wire only. It starts six and makes `d` and `e2`
-  down, and checks both wires' gaps in pixels. For the architect.
+- `qa/human/board-live.md` was out of this round's work set, and its
+  browser check lines then said five listeners and `d` down only. The
+  architect brought them up to date at the merge (`7daf64a`): six
+  listeners, `d` and `e2` down, both wires' gaps read in pixels.
 
 ## What was not built
 
@@ -794,3 +794,226 @@ and this file.
   rebinding page; the Host check is tested with a forged header.
 - RSS over hours of real polling; the leak test covers 1,000 calls.
 - `compare.html` (unchanged; it frames `demo.html`).
+
+## P4 phase fix
+
+Model:  Claude Opus 5.5 (the P4 phase fixer), 2026-10-15
+Status: unreviewed
+Brief:  audits/2026-10-14-2344-full/fixes/round-1.md, from that audit's
+        synthesis (the ids below are its ids)
+Branch: Claude-Development-TheConnection-P4FIX, from the dev branch at
+        86f2061, in ~/TheConnection-lanes/p4fix
+
+| Part | Commit | Subject |
+|---|---|---|
+| (a) item 1 | `a48f3db` | Take every inferred edge on a cycle out before roles and levels |
+| (b) item 2 | `3f01a97` | Read a listener that mail woke as working or woken, never down (D24) |
+| (c) items 3, 4 | `ea493c1` | Keep routed runs between polls, and wrap long names in the phone outline |
+| (d) items 5, 6, 20 | `986bdfa` | Ship the board's two faces, and make the browser check prove the root jump |
+| (e) items 7 to 14 | `9095578` | Harden serve.py's feed and refusals, and name an unknown count and a damaged token |
+| (f) items 15 to 19 | the commit that adds this section | Make the board's words, tags and test names true, and keep the stale line in view |
+
+No amend, reset or rebase. Nothing pushed or merged. `tc`,
+`tests/_root.py`, `CLAUDE.md`, `README.md` and the plan files were not
+edited. Above this section only the line about `qa/human/board-live.md`
+under Fix round 4 changed (item 15).
+
+**What changed, item by item.**
+1. HIGH-1. `board/serve.py` drop_inferred_cycles and hierarchy: every
+   inferred edge on a cycle is taken out before roles_of and levels_of
+   read the parents; a cycle made only of cards keeps its break at the
+   first name.
+2. MEDIUM-1, D24. serve.py after_listening and WOKEN_GRACE_S (120):
+   `down`, `woken` or `working` for a name seen listening and not
+   listening now; tc's POLL_SECONDS is the slack for the wake. look.js
+   STATES gains `◔ working` and `△ woken · not read`; the pill counts
+   woken as a warning; a woken or down node's status reads `last
+   status:`; both legends carry the line on the one case it cannot see;
+   theme.css gives woken a heavier solid border and bold words. The demo
+   shows both (`b` working, `y1` woken).
+3. MEDIUM-2. look.js createRouteCache, drawnKey, boardView's `routes`
+   and patchBoard's skip; routeAround keeps one flag per grid edge.
+4. MEDIUM-3. theme.css `.tc-row-title`, `.tc-row-role`,
+   `.tc-group-head`, `.tc-root-btn` wrap inside the window.
+5. MEDIUM-4. tests/board-browser-check.mjs jumpToZ: z's heading out of
+   view at a 400 px viewport first, a dispatched click, then a scroll and
+   the heading in view.
+6. D26. board/fonts/ holds the four woff2 subsets and the two licenses
+   as fetched (sha256 matched the brief's list); theme.css declares them
+   with @font-face; serve.py's allow list has the six files by exact key,
+   and STATIC_PATHS builds every path from its key.
+7. LOW-2. serve.py Board.snapshot asks mailbox_summary once more on
+   FileNotFoundError.
+8. LOW-3. serve.py: `unread` may be null, with tc's `mail_problem` in a
+   new node key, `unread_problem`, only beside a null (a counted inbox
+   with a problem keeps its count and no reason); `last_mail_age_s` is
+   never under 0. look.js unreadWords: `unread unknown`.
+9. LOW-4. serve.py scan_messages and message_names: no linked folder is
+   listed (O_NOFOLLOW, O_DIRECTORY) and only regular files count.
+10. LOW-5. serve.py load_tc compiles tc's source in memory; no bytecode
+    cache is read or written.
+11. LOW-8. serve.py FeedHandler.send_error: every refusal is empty.
+12. LOW-13. serve.py scan_messages keys messages by recipient and number.
+13. LOW-14. serve.py BoardServer.handle_error: one line, no traceback.
+14. LOW-15, LOW-16. serve.py main refuses `--port 80` (exit 2, in
+    words); look.js tokenProblem and CONN_WORDS.tokenDamaged, used by
+    live.html.
+15. LOW-6, LOW-7. The header of tests/test_board_server.py, the line
+    above in this file, qa/human/board-live.md's new inbox line,
+    tests/test_board_feed.py's router lines (and one in
+    tests/test_board_leak.py), and every review-process comment in the
+    board tests.
+16. LOW-18, LOW-19. theme.css: `.tc-win` clips with `overflow: clip`, so
+    `.tc-stale` sticks to the top of the screen; the legend, the theme
+    comment and both QA scripts say dash-dot.
+17. LOW-21, LOW-22. tests/test_board_feed.py's main test takes its clock
+    from the message files' own times; the browser check settles on the
+    window saying live and two animation frames, and SETTLE_MS is gone.
+18. LOW-11, LOW-12, LOW-17, LOW-29. feed()'s @alloc names the per-message
+    pair and count dict; the routing @complexity carries the real sizes
+    and the cache (in part (c)); layoutLevels says when the extent can
+    pass the width; load_tc names five paths and the in-memory compile
+    (in part (e)).
+19. LOW-25, LOW-26. createFakeKit, createFakeDoc, createPollerRig;
+    assert_nodes.
+20. The browser check, headless with this tree's tc: green after item 6
+    with the request watch on, and twice more on the final code;
+    `--self-test` green.
+
+**Measured (item 3).** On this machine with Node 22 and look.js run
+alone: the first draw of 20 Claude peers on one account (190 native
+lines, every one routed) took 127 to 149 ms at load 0.5 and 191 to 213 ms
+at load 16, against the test's FIRST_DRAW_BUDGET_MS of 2,000. Before the
+grid edge flags it took 175 ms at load 0.5. A poll that only aged the
+mail took 150 ms before (190 searches again) and 0.04 to 0.07 ms after.
+On the 14-name test feed at 1152 px: X 79 and Y 101 lines, b 46
+obstacles, a 64 pieces kept off, g 31,916 states; each search popped the
+same states before and after, so the routes are the same.
+
+**Mutations and their red lines.** Each applied by hand, seen red,
+restored; the assertion line only.
+- 1, the old cycle break (no drop_inferred_cycles): `AssertionError:
+  {... 'zed': ('orchestrator', 'inferred', 2, 'mid')} != {... 'zed':
+  ('worker', 'declared', 2, 'mid')}` in all six orders, and `AssertionError:
+  0 != 4 : c is not drawn under f: case 11 of seed 20261015`.
+- 2, `down` for every name that stopped listening: `AssertionError: {'b':
+  ('down', None), 'c': ('down', None)} != {'b': ('working', None), 'c':
+  ('down', None)}` and `{'s1': 'down', 's2': 'down', 'q': 'down', 'd':
+  'down'} != {... 'working', 'working', 'woken', 'down'}`; a woken end
+  marking the wire down: `the wire to a woken session is drawn as the
+  dead wire`, `true !== false`.
+- 3, no route reuse: `a wire that stopped flowing set off a route
+  search`; no age-only skip: `a poll that only aged the mail laid the
+  board out again`.
+- 4, the old outline CSS: `FAIL every session on screen (16): missing:
+  orchestrator_..._a, ..._b`, `FAIL no row, group heading or root button
+  past the window's right edge (374 px): tc-root-btn ... ends at 493`,
+  `FAIL each 64-character name's role words are on screen`.
+- 5, a root button that does nothing: `FAIL the root link for z brings
+  z's tree into view: before the click z's heading at 913 to 933 in a
+  400 px viewport, scrollY 0; after it ... scrollY 0`.
+- 6, the Google @import put back: `FAIL the page asked no host but
+  127.0.0.1: asked: https://fonts.googleapis.com/...`; the fonts off the
+  allow list: `AssertionError: 404 != 200 : jetbrains-mono-latin-ext-wght-normal.woff2`
+  and `not ok 28 - theme.css names no other host ...`.
+- 7, no retry: `FileNotFoundError: [Errno 2] No such file or directory:
+  '000001-from-a.md'` out of feed().
+- 8, the reason dropped: `{'b': (None, None, None), ...} != {'b': (None,
+  'made-up reason: cannot list this inbox', None), ...}`; the reason
+  copied beside a count: `... 'c': (2, 'made-up reason: ...', 0) ... !=
+  ... 'c': (2, None, 0)`; a blank for null on the page: `+ '', -
+  'unread unknown'`.
+- 9, links followed: `Lists differ: [('a', 'b', 1), ('x', 'ghost', 2),
+  ('w', 'c', 3), ('y', 'b', 4)] != [('a', 'b', 1)]`.
+- 10, an import's loader: `AssertionError: True is not false : loading
+  tc wrote a bytecode cache beside it`.
+- 11, http.server's own send_error: `AssertionError: b'Content-Length: 0'
+  not found in b"HTTP/1.0 400 Bad request syntax ... Content-Length: 371"`
+  (and the same for 414 and 431).
+- 12, no dedupe: `Lists differ: [('a', 'b', 5), ('a', 'b', 5)] != [('a',
+  'b', 5)]`.
+- 13, socketserver's own handle_error: `AssertionError: 'Traceback'
+  unexpectedly found in '... Exception occurred during processing of
+  request ...'`.
+- 14, port 80 let through: `AssertionError: main() went past its usage
+  check`; no Latin-1 check: `+ null - 'token damaged · copy the URL
+  serve.py printed again'`.
+- 16, no `position: sticky`: `FAIL a stale board says so where the
+  reader is looking, scrolled down: stale line at -824 to -798 in a 400 px
+  viewport at scrollY 895`; the legend back to `long dash`: `theme.css
+  draws .tc-wire.kind-native as dash-dot; the legend says: ...`.
+- 17, the old main test with 11 s of slow listener proofs:
+  `AssertionError: {'a': ('listening', ...), 'b': ('listening', ...)} !=
+  {'a': ('writing', ...), 'b': ('writing', ...)}`; the new one stays
+  green with the same delay. The window never saying live: `check
+  failed: page.waitForFunction: Timeout 10000ms exceeded.`
+
+**Verify commands and their output**, in this worktree before the last
+commit: `python3 -m py_compile tc board/serve.py && node --check
+board/look.js` clean; `node --test tests/*.test.mjs` 59 pass, 0 fail
+(52 before); `python3 -m unittest discover -s tests -p 'test_*.py'` 153
+OK (140 before), with the two known `ResourceWarning` lines from
+`tests/test_health.py`; `NODE_PATH=<a Playwright install>/node_modules
+node tests/board-browser-check.mjs` (Playwright 1.63, Chromium 153)
+`result: PASS`, 45 rows at the end, in four runs after item 6, the last
+two on the final code (one run between them failed on the check's own
+console count, the stale check's 500s judged as page errors, and was
+fixed by judging the console first); `--self-test` `self-test: PASS`.
+`check_voice.py` and `check_american.py` were clean on both QA scripts
+and this file.
+
+**Where this round differs from its brief, and what it decided.**
+- A wire to a woken session is drawn as any mail wire is (the mail that
+  woke it flows to it, then rests solid); only `down` dots a wire. The
+  warning is on the box (glyph, words, a 3 px solid border) and the pill.
+- The demo's `d` now has 0 unread: a down name with unread mail cannot
+  happen under D24 (that mail would have woken it).
+- The browser check keeps every message to `d` and `e2` old, and ages
+  the mail once before making them down: under D24, mail that reached
+  them after they were seen listening reads as a wake.
+- The two long names are a root over a worker, so the phone shows one in
+  a row, a group heading and a root button; the roots line now reads `3
+  orchestrators: a, <long name>, z`.
+- tokenProblem calls only a character outside Latin-1 damage: any other
+  wrong token rides in the header and gets 401, `token refused`.
+- The route key also holds the connectors and the tree wires, since
+  routeAround keeps off them; and the grid edge flags cache the
+  alongside check as well as pieceFree.
+- The property test runs 600 seeded cases, not "a few hundred" exactly,
+  so at least 20 build the cycle shape (27 do).
+- Line 142 above still says the native pair is joined by `a long dash`;
+  the brief keeps that part of this file as it is. The line is dash-dot.
+
+**For the architect.** C5's node shape gains `unread_problem`, and
+`unread` may be null (item 8); C6's allow list gains the six files under
+`fonts/` (item 6); C5 still shows the SourceFileLoader load, which
+load_tc no longer uses (item 10). contracts.md was not edited.
+
+**Not in this round** (the brief's list): LOW-1, LOW-23, LOW-24, LOW-31
+and LOW-32 are the architect's (CLAUDE.md, tc, the plan); LOW-30 is the
+DOCS lane's README. LOW-10 (the poll lists inboxes three times) waits for
+SHARED's mailbox_summary. LOW-20 (siblings leave their relay's tree with
+no hints) is a design question for a2; inference changed only for item
+1. LOW-27 and LOW-28 stay: drawWire and removeBoard are the look kit's
+API, and kind, route and last_mail_age_s are C5 keys. Every DEBT stays a
+DEBT; DEBT-1 is now D25 and lands after the SSH lane.
+
+**Not verified.**
+- A real phone, Safari and Firefox: the browser check is headless
+  Chromium only, so the faces, the sticky stale line, `overflow: clip`
+  and the wrapped long names were seen there alone.
+- The Daylight look's woken border (the warn token is blue there) in a
+  browser; the check opens the dark look.
+- A real session's wake on a live board, and a session that crashes after
+  reading (it reads working until DOWN_WINDOW_S, as D24 says).
+- Port 80 was never bound; the test stops main() at its usage check.
+- The hang-up line with a real browser closing a tab; the test resets a
+  raw socket.
+- FIRST_DRAW_BUDGET_MS is a time on one machine; a much slower one could
+  pass the routing and still fail the budget.
+- The mutation run that put the Google @import back made real requests
+  to fonts.googleapis.com and fonts.gstatic.com from this machine, once
+  per page, during that run only.
+- `test_a_recent_sender_with_no_listener_is_writing_then_idle` still
+  reads the wall clock after a send, the same shape as LOW-21 with a
+  smaller window; it was not in the brief.

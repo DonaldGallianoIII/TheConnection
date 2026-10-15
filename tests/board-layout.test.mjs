@@ -3,24 +3,26 @@
  * feed JSON the way board/serve.py's feed() gives them (the values match
  * tests/test_board_feed.py's expectations): roots side by side in name
  * order, levels top to bottom, no two boxes overlapping, the cycle laid out,
- * and each title carrying its role word. Round 1 adds a2's legibility
- * check: fourteen names on a 1152 px desktop canvas and a 358 px phone
+ * and each title carrying its role word. The board reads at the owner's
+ * size: fourteen names on a 1152 px desktop canvas and a 358 px phone
  * window, every box inside the width with no overlap and no text under
- * MIN_TEXT_PX, read against theme.css's own font sizes; and createFit,
- * which sizes the board from the ResizeObserver entry. Round 2 adds the
- * frame growing to the board, and on the 14-name feeds at both widths: no
- * wire or connector entering a node box, no label on a label or a box, and
- * two boxes in one row joined straight across. Since then: a parent's mail
- * (or native line) runs beside its connector and shares no piece of it,
- * and two parents' connectors share no piece (a relay over a relay whose
- * workers wrap, at a 1180 px window and a 700 px stage); the switch
- * between graph and outline has two breakpoints; the outline is brought up
- * to date in place (a fake document counts its writes) and heads no tree
- * of one; the legend names the quiet wire and the inferred thin line; a
- * down wire whose siblings' wires share its run is drawn after every solid
- * and dashed one, on a knockout in the canvas's face (createKit on the
- * fake document); and a tree wire clears both port rings at the widest
- * node border.
+ * MIN_TEXT_PX, read against theme.css's own font sizes; createFit sizes
+ * the board from the ResizeObserver entry and grows its frame to the
+ * board. On the 14-name feeds at both widths: no wire or connector
+ * entering a node box, no label on a label or a box, and two boxes in one
+ * row joined straight across. A parent's mail (or native line) runs beside
+ * its connector and shares no piece of it, and two parents' connectors
+ * share no piece (a relay over a relay whose workers wrap, at a 1180 px
+ * window and a 700 px stage); the switch between graph and outline has two
+ * breakpoints; the outline is brought up to date in place (a fake document
+ * counts its writes) and heads no tree of one; the legend names the quiet
+ * wire and the inferred thin line, and calls each patterned line what
+ * theme.css draws; a down wire whose siblings' wires share its run is drawn
+ * after every solid and dashed one, on a knockout in the canvas's face
+ * (createKit on the fake document); a tree wire clears both port rings at
+ * the widest node border; routes are searched once per routed pair and
+ * never on a poll that only aged the mail, and 20 Claude peers on one
+ * account draw within a time budget; and theme.css asks no other host.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
@@ -144,7 +146,7 @@ test('an empty feed lays out nothing; fitTransform never enlarges or shrinks pas
   assert.equal(big.k, 1);
   assert.equal(big.x, (10000 - lay.extent.w) / 2, 'a board that fits is not centered');
   assert.equal(fitTransform(1, 1, lay.extent, 24).k, CONFIG.MIN_FIT_SCALE);
-  // Round 1: the floor is the scale at which the smallest board text is MIN_TEXT_PX.
+  // The floor is the scale at which the smallest board text is MIN_TEXT_PX.
   assert.equal(CONFIG.MIN_FIT_SCALE, CONFIG.MIN_TEXT_PX / CONFIG.BOARD_TEXT_MIN_PX);
 });
 
@@ -177,8 +179,8 @@ test('the demo shows every state, every line kind, and a wire for every scripted
 });
 
 // Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
-// a2, for Donald (MEDIUM-1): the board reads at his real size, about 14
-// names, on a desktop and on a phone. The canvas inside .tc-win at its
+// The board reads at the owner's real size, about 14 names, on a desktop
+// and on a phone. The canvas inside .tc-win at its
 // 1180 px cap is 1152 px (theme.css: 1180 less two 1 px borders, 12 px body
 // padding each side, and the canvas's 1 px borders). 358 is a 390 px phone
 // less the page's two 16 px gutters. Height does not limit the scale: a
@@ -193,8 +195,8 @@ const FOURTEEN = {
     ...Array.from({ length: 13 }, (_, i) => n(`w${i + 1}`, 'worker', 'declared', 1, 'hub'))],
   peers: Array.from({ length: 14 }, (_, i) => n(`p${i + 1}`, 'peer', 'inferred', 0, null)),
 };
-// The text drawn inside the board's view, so scaled with it (round 2 adds
-// the headings over the trees).
+// The text drawn inside the board's view, so scaled with it, the headings
+// over the trees too.
 const BOARD_TEXT = ['.tc-node-title', '.tc-node-role', '.tc-node-sub', '.tc-node-note', '.tc-node-badge', '.tc-wire-label', '.tc-head'];
 const CSS = readFileSync(new URL('../board/theme.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
 
@@ -294,7 +296,7 @@ test('createFit takes the canvas size from the ResizeObserver entry, never from 
   assert.equal(canvas.view.style.height, `${extent.h}px`);
   assert.equal(Number(attrs.height), extent.h, 'the wire layer is not the board\'s height');
   // Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
-  // Round 2, item 1: the frame grows to the board's height, so the page
+  // The frame grows to the board's height, so the page
   // scrolls to every box; a height-only resize lays nothing out again.
   assert.equal(canvas.frame.style.height, `${extent.h + FIT_PADDING}px`, 'the frame does not grow to the board');
   const laidOut = board.view;
@@ -307,8 +309,8 @@ test('createFit takes the canvas size from the ResizeObserver entry, never from 
 });
 
 // Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
-// Round 2, items 2 and 3, from the architect's screenshots: wires looped
-// through boxes and labels sat on each other and on node text. The
+// Wires once looped through boxes, and labels sat on each other and on
+// node text. The
 // 14-name feeds at the desktop and phone widths, with every pair's newest
 // message fresh, so every mail wire flows and wants a label (the worst
 // case for labels). `mixed` is the screenshot's own shape.
@@ -622,8 +624,8 @@ test('every connector trunk serves one parent: a over b and x, b over b1 to b5, 
 });
 
 // Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
-// Round 2, item 5: the second orchestrator is reachable at a glance. A
-// list of roots at the top, and a heading over each root's tree.
+// The second orchestrator is reachable at a glance: a list of roots at
+// the top, and a heading over each root's tree.
 
 test('the roots list names each root by role, orchestrators first, in words', () => {
   assert.deepEqual(rootsList(ROUTED.mixed), [
@@ -660,7 +662,7 @@ test('each root\'s tree starts with a heading naming its root, over the whole tr
   }
 });
 
-// a2's direction for the phone: the outline view, one row per session,
+// On a phone the board draws the outline view, one row per session,
 // indented by level under its parent, each tree headed by its root, then
 // the recent traffic. The 14-name feed at 358 px.
 
@@ -777,7 +779,7 @@ test('the switch between graph and outline has two breakpoints, so a stage near 
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @complexity O(1) per element, O(k) per insert over k siblings  @alloc one object per element
  */
-function fakeDoc() {
+function createFakeDoc() {
   const make = (tag) => {
     const e = {
       tag, className: '', dataset: {}, hidden: false, title: '', children: [], parentNode: null, writes: 0, text: '', scrolled: 0,
@@ -828,7 +830,7 @@ const everyEl = (e) => [e, ...e.children.flatMap(everyEl)];
 // The phone's outline was rebuilt whenever a traffic age ticked, which
 // lost a selection and a screen reader's place. C5 and C6: never rebuild.
 test('the outline is brought up to date in place: an age tick rewrites only traffic words; a new session adds one row', () => {
-  const doc = fakeDoc();
+  const doc = createFakeDoc();
   const canvas = { outline: doc.createElement('div') };
   const kit = createKit(doc, canvas);
   const aged = (age, feed = ROUTED.mixed) => ({ ...feed, wires: feed.wires.map((w) => ({ ...w, age_s: age })) });
@@ -895,7 +897,7 @@ test('a relay over w1 to w4 it has mailed, w2 down, at 1152 px: the down wire is
   assert.equal(view.edges['mailbox:a>w2'].down, true, 'w2\'s wire is not down');
   assert.ok(sharedPiece(view.edges['mailbox:a>w2'].points, view.edges['mailbox:a>w1'].points),
     'a>w1 and a>w2 share no piece, so the shape tests nothing');
-  const doc = fakeDoc();
+  const doc = createFakeDoc();
   const canvas = createCanvas(doc, doc.createElement('div'));
   const board = createBoard(createKit(doc, canvas));
   // Drawn with w2 listening first, then w2 goes down, as on a live board:
@@ -925,6 +927,23 @@ test('a relay over w1 to w4 it has mailed, w2 down, at 1152 px: the down wire is
   assert.ok(face && cssRule('.tc-knockout').includes(`stroke: ${face[1].trim()}`), 'the knockout is not the canvas\'s own face');
   assert.match(cssRule('.tc-knockout'), /stroke-width:\s*calc\(var\(--tc-wire-w\) \+ var\(--tc-wire-w-knockout-pad\)\)/);
   assert.match(CSS, /--tc-wire-w-knockout-pad:\s*var\(--tc-wire-w\);/, 'the knockout is not one quiet wire wider than its wire');
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// For a colorblind reader a line's dash pattern is the channel, so the
+// legend's word for each patterned line names the pattern theme.css draws.
+test('the legend calls each patterned line what theme.css draws: dash-dot for native, dotted for no listener', () => {
+  const dashes = (selector) => (cssRule(selector).match(/stroke-dasharray:\s*([^;]+);/) || [])[1] || '';
+  const shapeOf = (pattern) => {
+    const v = pattern.trim().split(/\s+/).map(Number);
+    if (v.length === 4 && v[0] > v[2]) return 'dash-dot';
+    if (v.length === 2 && 2 * v[0] <= v[1]) return 'dotted';
+    return `a pattern with no word (${pattern})`;
+  };
+  for (const [selector, means] of [['.tc-wire.kind-native', 'native'], ['.tc-wire.down', 'no listener']]) {
+    const word = shapeOf(dashes(selector));
+    assert.ok(LEGEND_WORDS.graph.includes(`${word}: ${means}`), `theme.css draws ${selector} as ${word}; the legend says: ${LEGEND_WORDS.graph}`);
+  }
 });
 
 // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.

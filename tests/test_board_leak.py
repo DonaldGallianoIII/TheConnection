@@ -149,7 +149,7 @@ class FeedLeakTest(unittest.TestCase):
             (root.path / "cards").mkdir()
             (root.path / "cards" / "cx.json").write_text(
                 '{"version": 1, "name": "cx", "kind": "codex", "route": "codex", "reports_to": "a"}')
-            # Nothing is sent TO cx: its codex card would make CARDS' router
+            # Nothing is sent TO cx: its codex card would make tc's router
             # ring `codex`. Sending from it routes by the recipient alone.
             for sender, to in (("cx", "a"), ("a", "far"), ("far", "a")):
                 code, out, err = root.tc("send", "--from", sender, "--to", to, "leak run")

@@ -7,8 +7,10 @@ window's 1180 px cap, one of them over a relay that is an orchestrator too),
 and every state and every role reads without color.
 
 Updated for the shapes demo by Claude Opus 5.5 (the BOARD lane agent),
-2026-10-14, and for routing, labels, headings, the outline, native badges
-and wires beside their tree lines by Claude Opus 5.5 (the BOARD fixer).
+2026-10-14, for routing, labels, headings, the outline, native badges
+and wires beside their tree lines by Claude Opus 5.5 (the BOARD fixer),
+and for D24's working and woken states and the dash-dot line by Claude
+Opus 5.5 (the P4 phase fixer), 2026-10-15.
 Status: unreviewed, not yet run by a person. `tests/board-browser-check.mjs` measures the same page frame on
 the live board (see `qa/human/board-live.md`); this script is the demo's.
 
@@ -70,9 +72,9 @@ the live board (see `qa/human/board-live.md`); this script is the demo's.
    - The tree's thin lines carry no words. Hover one: `docs reports to a`,
      or, where no card says so, `d under b · inferred from mail`. The legend
      names the thin line.
-   - A long-dash line joins `b` and `docs`, side to side, with no words on
+   - A dash-dot line joins `b` and `docs`, side to side, with no words on
      the line; the badges on both boxes say it in words. Hover the line:
-     `b and docs · native · not observed`. The legend names the long dash,
+     `b and docs · native · not observed`. The legend names the dash-dot line,
      and the thicker quiet mail line (`thick line: mail, none in the last
      10 s`), and says the thin line is `reports to, or inferred from
      mail`.

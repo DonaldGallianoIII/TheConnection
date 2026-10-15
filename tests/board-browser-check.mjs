@@ -32,7 +32,8 @@
  * tree into view: at a short viewport z's heading must start out of view,
  * and the click must scroll the page and bring it in), a request to any
  * host but 127.0.0.1 or one of the board's two faces not loaded from
- * serve.py (D26), an outline row, group heading or root button past the
+ * serve.py (D26), a stale line out of view on a page scrolled down while
+ * the feed fails, an outline row, group heading or root button past the
  * window's right edge, a long name's role words off screen on the phone,
  * an ellipsis or cut words in the pill or the footer, a
  * native pair whose two sessions do not both say `native with <the other> ·
@@ -192,6 +193,8 @@ const JUMP_VIEW_H = 400;
 // D26: the page asks no host but the one serve.py binds. Requests by these
 // schemes count; data: and blob: URLs never leave the page.
 const HOME_HOST = '127.0.0.1';
+// The status the stale check makes every feed answer give.
+const HTTP_SERVER_ERROR = 500;
 const WEB_SCHEMES = ['http:', 'https:', 'ws:', 'wss:'];
 // The board's two faces, shipped in board/fonts/ (theme.css @font-face).
 const FACES = ['Space Grotesk', 'JetBrains Mono'];
@@ -239,7 +242,6 @@ const SERVER_START_MS = 10000;
 const PROOF_MS = 5000;
 const PROOF_STEP_MS = 100;
 const DRAWN_MS = 10000;
-const SETTLE_MS = 800;
 const STOP_MS = 5000;
 const SPACES_IN_JSON = 0;
 // A shell's code for a process ended by a signal: this plus its number.
@@ -799,9 +801,36 @@ async function jumpToZ(page, view) {
 }
 
 /**
+ * Scroll the page to its bottom, past the roots list, make every later feed
+ * answer 500, and wait for the window to say stale; then the stale line
+ * must be on screen with its words, though the top of the page is not.
+ * Run last on a page: its feed never answers again.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+ * @complexity O(1), plus up to one poll's wait  @alloc a few small objects
+ */
+async function staleInView(page) {
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await page.route('**/feed', (route) => route.fulfill({ status: HTTP_SERVER_ERROR, body: '' }));
+  await page.waitForSelector('.tc-win[data-conn="stale"]', { state: 'attached', timeout: DRAWN_MS });
+  return page.evaluate(() => {
+    const roots = document.querySelector('.tc-roots').getBoundingClientRect();
+    const line = document.querySelector('.tc-stale');
+    const r = line.getBoundingClientRect();
+    const words = line.textContent;
+    const where = `stale line at ${r.top.toFixed(0)} to ${r.bottom.toFixed(0)} in a ${innerHeight} px viewport at scrollY ${scrollY}, `
+      + `roots list bottom at ${roots.bottom.toFixed(0)}, words "${words}"`;
+    if (roots.bottom >= 0) return { ok: false, detail: `precondition: the page is not scrolled past the roots list; ${where}` };
+    return { ok: words.startsWith('stale · last answer') && r.top >= 0 && r.bottom <= innerHeight && r.height > 0, detail: where };
+  });
+}
+
+/**
  * Open one view: color (measured and saved; on the desktop one more
- * screenshot, kept in memory, for the down wires' pixels), then grayscale
- * (saved). `halt` is called after each await: it throws once a signal has
+ * screenshot, kept in memory, for the down wires' pixels; then the root
+ * jump and, last, the stale line on a page scrolled down), then grayscale
+ * (saved). Each page is settled on signals (its faces loaded, the window
+ * saying live, two animation frames), and every request it makes is
+ * watched. `halt` is called after each await: it throws once a signal has
  * begun cleanup, so a stopped run goes no further.
  * @complexity two page loads, plus one screenshot decoded in O(P) over its
  *             P pixels on the desktop
@@ -830,6 +859,14 @@ async function runView(browser, url, root, view, shots, halt) {
     halt();
     await page.evaluate(() => document.fonts.ready);
     halt();
+    // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    // Settled on signals, not a fixed sleep: the window says a good answer
+    // was drawn (data-conn live), then two animation frames let the layout
+    // and the resize observer's redraw finish.
+    await page.waitForFunction(() => document.querySelector('.tc-win').dataset.conn === 'live', null, { timeout: DRAWN_MS });
+    halt();
+    await page.evaluate(() => new Promise((done) => { requestAnimationFrame(() => requestAnimationFrame(done)); }));
+    halt();
     const faces = await page.evaluate((families) => families.map((family) => ({
       family,
       check: document.fonts.check(`12px "${family}"`),
@@ -839,8 +876,6 @@ async function runView(browser, url, root, view, shots, halt) {
     const prefix = gray ? 'grayscale page: ' : '';
     results.rows.push([`${prefix}the board's own faces load (${FACES.join(', ')})`, faces.every((f) => f.check && f.loaded > 0),
       faces.map((f) => `${f.family}: check ${f.check}, ${f.loaded} loaded`).join('; ')]);
-    await page.waitForTimeout(SETTLE_MS);
-    halt();
     const file = join(shots, `board-${view.label}-${gray ? 'gray' : 'color'}.png`);
     await page.screenshot({ path: file, fullPage: true });
     halt();
@@ -859,6 +894,11 @@ async function runView(browser, url, root, view, shots, halt) {
       const jump = await jumpToZ(page, view);
       halt();
       results.rows.push(...judge(view, m, errors, jump));
+      // Last on the page: from here every feed answers 500, which the
+      // console reports, so the console was judged first.
+      const stale = await staleInView(page);
+      halt();
+      results.rows.push(['a stale board says so where the reader is looking, scrolled down', stale.ok, stale.detail]);
       results.pill = m.pill;
       results.counts = { labels: m.labels.length, wires: m.wires, heads: m.heads.length };
     } else {

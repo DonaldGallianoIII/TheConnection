@@ -1,7 +1,9 @@
 # QA: the live board
 
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14; fix rounds by
-        Claude Opus 5.5 (the BOARD fixer)
+        Claude Opus 5.5 (the BOARD fixer); the P4 phase fix (D24's states,
+        long names, the fonts, the stale line) by Claude Opus 5.5 (the P4
+        phase fixer), 2026-10-15
 Status: unreviewed. Written, not yet run by a person.
 
 What this checks: `board/serve.py` serves the live board on 127.0.0.1 only,
@@ -104,9 +106,9 @@ NODE_PATH=<a Playwright install>/node_modules node tests/board-browser-check.mjs
 A name gets a box once it has an inbox (it was sent mail, or ran
 `tc wait`) or a card. A listener wakes and exits when mail reaches it, the
 same as in a real session, so each send to `b` or `c` below is followed by
-re-arming that listener. Once the CARDS lane's router is in `tc`, a first
-send to a name may also print `new inbox: nobody has joined as <name>` on
-stderr; that is expected here. Send nothing to `cx` or `far` after step 11:
+re-arming that listener. A first send to a name with no inbox and no
+card also prints `new inbox: nobody has joined as <name>` on stderr; that
+is expected here. Send nothing to `cx` or `far` after step 11:
 their cards route mail to `codex` and `ssh`, which this script never runs.
 
 6. In terminal 4: `./tc send --from b --to a "ready"`
@@ -176,11 +178,11 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     - `r` appears as a root too. Its third line reads
       `reports to ghost · not found`.
     - The roots list at the top now names `a`, `far` and `r`.
-    - `far` and `r` are both Claude cards on account `home`, so a long-dash
+    - `far` and `r` are both Claude cards on account `home`, so a dash-dot
       line joins them, side to side, with no words on the line. Each box
       grows a dashed badge in words: `far`'s reads `native with r · not
       observed`, `r`'s `native with far · not observed`. Hover the line:
-      `far and r · native · not observed`. The legend names the long dash.
+      `far and r · native · not observed`. The legend names the dash-dot line.
 12. Post a status: `./tc status c "reviewing the parser"`.
     - Within 3 s `c`'s third line reads `reviewing the parser`.
 
@@ -226,7 +228,7 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       dotted wire runs beside `c`'s thin tree line, never on it, so the
       gaps between its dots show.
     - The tree's lines are thin and solid, with no words; the `native` line
-      is long-dashed, with no words, and the badges on `far` and `r` say
+      is dash-dot, with no words, and the badges on `far` and `r` say
       `native` in words. A quiet mail line is thicker than a tree line.
       The footer's legend names each kind of line in words, the quiet mail
       line too (`thick line: mail, none in the last 10 s`).
@@ -298,6 +300,9 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     - Within about 6 s a dashed line over the board reads `stale · last
       answer N s ago`, the pill reads the same with `is serve.py running?`,
       and no wire's dashes move: nothing looks live.
+    - Scroll to the bottom of the board. The stale line stays at the top of
+      the screen, on its own face. Narrow to phone width and scroll the
+      outline: the same.
     - Restart the server with the same command and open the new URL it
       prints (the token is new). Nothing reads `✕ no listener`,
       `◔ working` or `△ woken · not read` until a listener has been seen

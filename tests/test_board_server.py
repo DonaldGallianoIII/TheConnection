@@ -1,16 +1,19 @@
 """
 Tests for board/serve.py's server (C6): the token on /feed, the Host check,
-GET and HEAD only, the static allow list, and a socket bound to 127.0.0.1.
-Round 1 adds the whole-request deadline (a client that trickles one byte at
-a time is dropped) and the cap on connections served at once.
+GET and HEAD only, the static allow list (the fonts too), and a socket
+bound to 127.0.0.1; the whole-request deadline (a client that trickles one
+byte at a time is dropped) and the cap on connections served at once;
+every refusal with no body, http.server's own too; one stderr line, never
+a traceback, for a client that hangs up mid-answer; and `--port 80`
+refused at start.
 
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
 
 The server runs in this process, on a thread, on a port the OS picks
-(port 0). This lane's tests/_root.py cannot start a script other than tc
-as a child; the dev branch's can (start(argv=...), built for BOARD B2), so
-once BOARD merges these tests could start serve.py as a child instead.
+(port 0), so a test can swap its Board's feed for a stand-in and move
+serve.REQUEST_DEADLINE_S. tests/_root.py can start serve.py as a child
+too (start(argv=...)); no test here needs that yet.
 
 @interacts  starts one BoardServer per test on 127.0.0.1 and a free port,
             in a daemon thread, and shuts it down and closes its socket in

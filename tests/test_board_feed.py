@@ -7,16 +7,15 @@ body mode 000 and the feed still works.
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
 
-Cards are written by hand in C1's shape on every tree, with or without
-CARDS' `tc join`: some are codex and ssh cards (a codex join needs a
-Codex thread id in its environment, and an ssh card comes from `tc card`),
-and writing every card one way
-keeps each test the same on either tc. tests/board-browser-check.mjs is
-the one that writes its cards with `tc join` when the tree's tc has it.
-The main test sends its mail with real `tc send`, between names with no
-card, so the file names the feed parses are tc's own. No test sends to a
-name with a codex or ssh card: once CARDS' router is in tc, that send
-rings `codex` or is refused. The shape tests write message files by hand
+Cards are written by hand in C1's shape: some are codex and ssh cards (a
+codex join needs a Codex thread id in its environment, and an ssh card
+comes from `tc card`), and writing every card one way keeps the tests
+alike. tests/board-browser-check.mjs is the one that writes its cards
+with `tc join`. The main test sends its mail with real `tc send`, between
+names with no card, so the file names the feed parses are tc's own. No
+test sends to a name with a codex or ssh card: tc's router rings `codex`
+for the one and refuses the other until the ssh route is built. The
+shape tests write message files by hand
 in tc's layout (`NNNNNN-from-<sender>.md` under `to-<name>/read/`, a .tmp
 renamed, mail/.seq raised), and the feed reads only their names.
 
@@ -342,19 +341,21 @@ class FeedTest(unittest.TestCase):
     def test_states_pids_wires_and_down_with_unreadable_bodies(self):
         """Two listeners, a codex card, an ssh card and three messages; then one listener dies.
 
-        A feed at the real time: both listeners sent inside the writing
-        window, so both read writing and keep their pids (D15: writing
-        comes first). First feed, its clock past the window: four nodes in
-        states listening, listening, doorbell, remote; the pids are the
-        harness's; three wires with the right from, to and seq. The feeds
-        write nothing. Second feed on the same Board, 20 s later on its
-        clock, after b's listener is killed: b is down. A new Board has
-        seen nobody listening, so b is idle there.
+        A feed RECENT_SEND_S after the newest send, on a fake clock set
+        from the message files' own times (so two slow listener proofs
+        cannot carry it past the window): both listeners sent inside the
+        writing window, so both read writing and keep their pids (D15:
+        writing comes first). First feed, its clock past the window: four
+        nodes in states listening, listening, doorbell, remote; the pids
+        are the harness's; three wires with the right from, to and seq. The
+        feeds write nothing. Second feed on the same Board, 20 s later on
+        its clock, after b's listener is killed with no new mail: b is
+        down. A new Board has seen nobody listening, so b is idle there.
 
-        The three messages run between a and b only. Once CARDS' router is
-        in tc, a send to a name with a codex card rings `codex` and one to
-        an ssh card is refused until the SSH lane builds that route, so no
-        test sends to cx or far; a card alone makes their nodes.
+        The three messages run between a and b only: tc's router rings
+        `codex` for a name with a codex card and refuses one with an ssh
+        card until the ssh route is built, so no test sends to cx or far;
+        a card alone makes their nodes.
 
         Must reject a feed that opens message bodies: every body is mode
         000 before the first feed.
@@ -385,11 +386,10 @@ class FeedTest(unittest.TestCase):
             with self.assertRaises(PermissionError, msg=f"{bodies[0]} is still readable"):
                 bodies[0].read_bytes()
 
-            clock = FakeClock(time.time())
+            clock = FakeClock(max(body.stat().st_mtime for body in bodies) + RECENT_SEND_S)
             board = serve.Board(root=root.path, clock=clock)
             with root.listener("a", LISTENER_TIMEOUT_SECONDS) as pid_a:
                 with root.listener("b", LISTENER_TIMEOUT_SECONDS) as pid_b:
-                    clock.now = time.time()
                     before = every_path(root.path)
                     inside = board.feed()
                     # Past the window, so the senders read listening.
@@ -774,7 +774,7 @@ class ShapesTest(unittest.TestCase):
         check_parents_match_walk(self, feed)
         return feed
 
-    def assertNodes(self, feed, expected):
+    def assert_nodes(self, feed, expected):
         """Each named node has exactly these (role, role_source, level, parent).
 
         @interacts  none.
@@ -791,12 +791,12 @@ class ShapesTest(unittest.TestCase):
         """b, c, d report to a: a orchestrator at 0, the rest workers at 1, all declared.
 
         @interacts  one shape root.
-        @deps       shape, assertNodes.
+        @deps       shape, assert_nodes.
         @complexity O(1).
         @alloc      one feed.
         """
         feed = self.shape(cards=[("a", None), ("b", "a"), ("c", "a"), ("d", "a")])
-        self.assertNodes(feed, {
+        self.assert_nodes(feed, {
             "a": ("orchestrator", "declared", 0, None),
             "b": ("worker", "declared", 1, "a"),
             "c": ("worker", "declared", 1, "a"),
@@ -807,12 +807,12 @@ class ShapesTest(unittest.TestCase):
         """b reports to a; c and d to b: levels 0, 1, 2, 2; a and b orchestrators.
 
         @interacts  one shape root.
-        @deps       shape, assertNodes.
+        @deps       shape, assert_nodes.
         @complexity O(1).
         @alloc      one feed.
         """
         feed = self.shape(cards=[("a", None), ("b", "a"), ("c", "b"), ("d", "b")])
-        self.assertNodes(feed, {
+        self.assert_nodes(feed, {
             "a": ("orchestrator", "declared", 0, None),
             "b": ("orchestrator", "declared", 1, "a"),
             "c": ("worker", "declared", 2, "b"),
@@ -826,12 +826,12 @@ class ShapesTest(unittest.TestCase):
         partner is b, is drawn as b's worker. A change here is a decision.
 
         @interacts  one shape root.
-        @deps       shape, assertNodes.
+        @deps       shape, assert_nodes.
         @complexity O(1).
         @alloc      one feed.
         """
         feed = self.shape(talks=[("a", "b"), ("b", "c"), ("b", "d")])
-        self.assertNodes(feed, {
+        self.assert_nodes(feed, {
             "b": ("orchestrator", "inferred", 0, None),
             "a": ("worker", "inferred", 1, "b"),
             "c": ("worker", "inferred", 1, "b"),
@@ -845,13 +845,13 @@ class ShapesTest(unittest.TestCase):
         reject a feed that picks one root for the whole board.
 
         @interacts  one shape root.
-        @deps       shape, assertNodes.
+        @deps       shape, assert_nodes.
         @complexity O(1).
         @alloc      one feed.
         """
         feed = self.shape(cards=[("x1", "x"), ("x2", "x")],
                           talks=[("x", "x1"), ("x", "x2"), ("y", "y1"), ("y", "y2"), ("x", "y")])
-        self.assertNodes(feed, {
+        self.assert_nodes(feed, {
             "x": ("orchestrator", "declared", 0, None),
             "y": ("orchestrator", "inferred", 0, None),
             "x1": ("worker", "declared", 1, "x"),
@@ -898,7 +898,7 @@ class ShapesTest(unittest.TestCase):
         (D15); its reports_to still names q.
 
         @interacts  one shape root.
-        @deps       shape, assertNodes.
+        @deps       shape, assert_nodes.
         @complexity O(1).
         @alloc      one feed.
         """
@@ -912,7 +912,7 @@ class ShapesTest(unittest.TestCase):
         """r reports to ghost, which is no node: r is a root and keeps the name.
 
         @interacts  one shape root.
-        @deps       shape, assertNodes.
+        @deps       shape, assert_nodes.
         @complexity O(1).
         @alloc      one feed.
         """
@@ -935,14 +935,14 @@ class ShapesTest(unittest.TestCase):
         order draws the same either way; z is the order that goes red.
 
         @interacts  two shape roots.
-        @deps       shape, assertNodes.
+        @deps       shape, assert_nodes.
         @complexity O(1).
         @alloc      two feeds.
         """
         for top in ("z", "a"):
             with self.subTest(top=top):
                 feed = self.shape(cards=[("b", top)], talks=[(top, "b"), ("b", "x")])
-                self.assertNodes(feed, {
+                self.assert_nodes(feed, {
                     top: ("orchestrator", "declared", 0, None),
                     "b": ("orchestrator", "inferred", 1, top),
                     "x": ("worker", "inferred", 2, "b"),
@@ -963,7 +963,7 @@ class ShapesTest(unittest.TestCase):
         edge, declared or not, and roles read from the uncut edge.
 
         @interacts  six shape roots.
-        @deps       shape, assertNodes, itertools.
+        @deps       shape, assert_nodes, itertools.
         @complexity O(1): six roots of three names.
         @alloc      six feeds.
         """
@@ -971,7 +971,7 @@ class ShapesTest(unittest.TestCase):
             with self.subTest(top=top, middle=middle, bottom=bottom):
                 feed = self.shape(cards=[(top, None), (middle, top), (bottom, middle)],
                                   talks=[(bottom, middle), (top, bottom)])
-                self.assertNodes(feed, {
+                self.assert_nodes(feed, {
                     top: ("orchestrator", "declared", 0, None),
                     middle: ("orchestrator", "declared", 1, top),
                     bottom: ("worker", "declared", 2, middle),
@@ -989,13 +989,13 @@ class ShapesTest(unittest.TestCase):
         under x, the parent it only mails.
 
         @interacts  one shape root.
-        @deps       shape, assertNodes.
+        @deps       shape, assert_nodes.
         @complexity O(1).
         @alloc      one feed.
         """
         feed = self.shape(cards=[("b", "a"), ("a2", "a")],
                           talks=[("a", "b"), ("a", "a2"), ("x", "b"), ("x", "x1"), ("x", "x2")])
-        self.assertNodes(feed, {
+        self.assert_nodes(feed, {
             "a": ("orchestrator", "declared", 0, None),
             "b": ("worker", "declared", 1, "a"),
             "x": ("orchestrator", "inferred", 0, None),

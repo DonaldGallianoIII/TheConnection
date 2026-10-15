@@ -676,7 +676,7 @@ export const LEGEND_WORDS = Object.freeze({
     + `traffic: newest first, arrow toward the reader · ${WAKE_WORDS}`,
   graph: 'thin line: reports to, or inferred from mail · '
     + `thick line: mail, none in the last ${CONFIG.FLOW_AGE_S} s · `
-    + 'dashes, arrow and words: mail now, arrow at the reader · long dash: native, not observed · dotted: no listener · '
+    + 'dashes, arrow and words: mail now, arrow at the reader · dash-dot: native, not observed · dotted: no listener · '
     + WAKE_WORDS,
   empty: 'no sessions yet · send a message or start a listener',
 });
@@ -870,9 +870,15 @@ function badgesOf(feed, known) {
  * LAYOUT_INDENT under it while a box still fits. Root trees fill rows the
  * same way: LAYOUT_ROOT_GAP apart side by side, LAYOUT_ROW_GAP apart one
  * under another. Each subtree keeps a band no other box enters, so no two
- * boxes overlap, and the extent is at most `width` whenever one box and
- * the margins fit in it. Every map is keyed with no prototype (or is a
- * Map), so a node named __proto__ lays out like any other.
+ * boxes overlap. The extent stays within `width` whenever one box and the
+ * margins fit in it and the tree is not both deep and bushy: each level
+ * with two or more children keeps a lane out of its children's room, and
+ * once a level's room is under NODE_W + LAYOUT_LANE its children's blocks
+ * run past it. A tree about ten levels deep with two children at each
+ * level outgrows a 560 px stage that way, and the canvas clips its right
+ * edge; no board the owner runs comes near that. Every map is keyed with
+ * no prototype (or is a Map), so a node named __proto__ lays out like any
+ * other.
  *
  * Each box is NODE_H tall plus BADGE_H per badge line (badgesOf); `heights`
  * and `badges` say so. Each root's tree starts with a band HEAD_H +
@@ -1649,8 +1655,8 @@ export function outlineView(feed) {
  *   pair's newest wire is at most FLOW_AGE_S old; quiet, it is a solid line
  *   with no label. It is down when either end is down; a woken end (D24)
  *   never makes it down: the mail that woke it is drawn as any mail is.
- * - a native link with no mailbox link on its pair: the same runs, long
- *   dashed, no label; its words, `native · not observed`, are in its
+ * - a native link with no mailbox link on its pair: the same runs,
+ *   dash-dot, no label; its words, `native · not observed`, are in its
  *   title, on both boxes' badges and in the legend. On a pair with mail
  *   too, they go in the mail wire's title and on the badges, and no second
  *   line is drawn. On account `unknown` (D15) a native link draws nothing.

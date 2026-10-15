@@ -233,7 +233,9 @@
   background: var(--tc-bg);
   border: 1px solid var(--tc-line);
   border-radius: var(--tc-radius-win);
-  overflow: hidden;
+  /* Clips like hidden, but makes no scroll box, so the stale line can
+   * stick to the top of the screen (P4 phase fixer, 2026-10-15). */
+  overflow: clip;
   display: flex;
   flex-direction: column;
   box-shadow: var(--tc-shadow-win);
@@ -314,8 +316,14 @@
 /* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * While the feed is stale the line over the board says so in words
  * (`stale · last answer N s ago`), in a dashed frame, and no wire's
- * dashes move: nothing looks live that is not (look.js createWindow). */
+ * dashes move: nothing looks live that is not (look.js createWindow).
+ * The line sticks to the top of the screen on its own face, so a board or
+ * an outline scrolled down still shows it (P4 phase fixer, 2026-10-15). */
 .tc-stale {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--tc-bg);
   font-family: var(--tc-mono);
   font-size: 12px;
   font-weight: 700;
@@ -570,8 +578,8 @@
 /* Model: Claude Opus 5.5 (the BOARD lane agent and the BOARD fixer),
  * 2026-10-14. Status: unreviewed. The tree's connector is thin and solid,
  * from a parent's bottom to its child's top, under every wire, with no
- * words on the board (the legend names it); native is a long dash, its
- * words in its title and the legend. */
+ * words on the board (the legend names it); native is dash-dot, its words
+ * in its title and the legend. */
 .tc-wire.kind-tree { stroke: var(--tc-muted); stroke-width: 1.25px; opacity: .8; }
 .tc-wire.kind-native { stroke: var(--tc-muted); stroke-width: var(--tc-wire-w-native); stroke-dasharray: 10 4 2 4; opacity: .8; }
 /* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:

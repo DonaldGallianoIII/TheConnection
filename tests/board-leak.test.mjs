@@ -23,7 +23,7 @@ const FEEDS = 500;
  * A fake drawing kit that keeps every handle it ever made, by id.
  * @complexity O(1) per call  @alloc one handle per create
  */
-function fakeKit() {
+function createFakeKit() {
   const kit = {
     live: new Set(),
     made: [],
@@ -71,7 +71,7 @@ function churn(i) {
 }
 
 test('500 feeds that add and remove nodes leave the board at its starting size, holding nothing removed', () => {
-  const kit = fakeKit();
+  const kit = createFakeKit();
   const board = createBoard(kit);
   patchBoard(board, BASE);
   const start = { nodes: board.nodes.size, edges: board.edges.size, live: kit.live.size };

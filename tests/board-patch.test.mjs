@@ -1,17 +1,19 @@
 /**
  * Tests for the live board's diff and patch in board/look.js: patchBoard
  * keeps what stays, removes what went and adds what came, through a fake
- * drawing kit, so no DOM library is needed. Also the two new states, what
- * boardView draws for a feed's wires and links, and the pill's words. Round
- * 1 adds names that are Object.prototype keys, a pair with a mailbox wire
- * and a native line (since round 2, one path with the native words in its
- * title), a down node's stale status, the tree's own connector in place
- * of the reports_to hint (round 2), and the page's poll loop
+ * drawing kit, so no DOM library is needed. Also C5's states (D24's working
+ * and woken among them, with the pill and the wire they get), what
+ * boardView draws for a feed's wires and links, and the pill's words;
+ * names that are Object.prototype keys; a pair with a mailbox wire and a
+ * native line (one path with the native words in its title); a down
+ * node's stale status; the tree's own connector in place of the
+ * reports_to hint; an unread count tc could not take (`unread unknown`);
+ * a token that cannot ride in a header; and the page's poll loop
  * (createPoller) on fake timers and a fake fetch that the test settles by
- * hand, so no real clock or network is read. Since then: the badge lines
- * on a native pair's boxes and outline rows, with mail or without and
- * never on account `unknown`, and on a reports_to cycle's root; and the
- * poller's stale line over the board once an answer is late or refused.
+ * hand, so no real clock or network is read. Then the badge lines on a
+ * native pair's boxes and outline rows, with mail or without and never on
+ * account `unknown`, and on a reports_to cycle's root; and the poller's
+ * stale line over the board once an answer is late or refused.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
@@ -32,7 +34,7 @@ import {
  * A fake drawing kit: counts create calls and keeps every live handle.
  * @complexity O(1) per call  @alloc one handle per create, dropped on remove()
  */
-function fakeKit() {
+function createFakeKit() {
   const kit = {
     created: { nodes: 0, edges: 0 },
     live: new Set(),
@@ -132,7 +134,7 @@ test('a woken session warns in its own glyph and words and its wire is not the d
 });
 
 test('patchBoard keeps what stays, drops what went, adds what came, and rebuilds nothing', () => {
-  const kit = fakeKit();
+  const kit = createFakeKit();
   const board = createBoard(kit);
   patchBoard(board, FEED_A);
   assert.deepEqual(kit.created, { nodes: 4, edges: 2 });
@@ -183,7 +185,7 @@ test('a reply flows back: the arrow sits at the start, at the reader', () => {
   assert.deepEqual([wire.flow, wire.back, wire.arrow, wire.label], [true, true, 'start', 'b → a · #9']);
 });
 
-// Round 2 (a2's direction): the tree draws its own thin connector, parent's
+// The tree draws its own thin connector, parent's
 // out port to child's in port, with no label; reports_to links draw nothing
 // of their own; a native line has no label, its words in its title.
 test('the tree draws its own connector, with no label; native words go in the title; a reports_to to nobody is a note', () => {
@@ -256,7 +258,7 @@ test('nodes named __proto__, constructor and toString lay out and draw like any 
   const wire = view.edges['mailbox:__proto__>constructor'];
   assert.ok(wire && wire.flow, 'the wire from __proto__ to constructor does not flow');
   for (const at of wire.points) assert.ok(Number.isFinite(at.x) && Number.isFinite(at.y), 'a wire point is not finite');
-  const kit = fakeKit();
+  const kit = createFakeKit();
   patchBoard(createBoard(kit), feed);
   assert.deepEqual(kit.created, { nodes: 4, edges: 2 });
 });
@@ -320,7 +322,7 @@ test('both boxes and both outline rows of a native pair say native with the othe
   }
   const rows = Object.fromEntries(outlineView(NATIVE_FEED).groups.flatMap((g) => g.rows).map((r) => [r.id, r.badges]));
   assert.deepEqual(rows, NATIVE_WORDS, 'the outline\'s lines');
-  assert.equal(Object.values(view.edges).filter((e) => e.kind === 'native').length, 3, 'a native pair with no mail lost its long dash');
+  assert.equal(Object.values(view.edges).filter((e) => e.kind === 'native').length, 3, 'a native pair with no mail lost its dash-dot line');
 });
 
 test('a reports_to cycle\'s root says whom it reports to, on a badge and in the outline', () => {
@@ -437,7 +439,7 @@ const okAnswer = (feed) => ({ status: 200, ok: true, json: async () => feed });
 const flush = () => new Promise((resolve) => { setImmediate(resolve); });
 
 /** A poller on fake timers and a fake fetch, recording what it reports. @complexity O(1)  @alloc one poller */
-function rig() {
+function createPollerRig() {
   const timers = createFakeTimers();
   const net = createFakeFetch();
   const seen = [];
@@ -450,7 +452,7 @@ function rig() {
 }
 
 test('the poll loop asks one request at a time, drops a late one, and says so in words, never live', async () => {
-  const { timers, net, seen, pills, poller } = rig();
+  const { timers, net, seen, pills, poller } = createPollerRig();
   poller.start();
   assert.equal(net.calls.length, 1);
   net.calls[0].resolve(okAnswer(FEED_A));
@@ -487,7 +489,7 @@ test('the poll loop asks one request at a time, drops a late one, and says so in
 });
 
 test('before any answer the pill says no answer, and a 401 says the token was refused', async () => {
-  const { timers, net, pills, poller } = rig();
+  const { timers, net, pills, poller } = createPollerRig();
   poller.start();
   timers.advance(TIMEOUT_MS);
   await flush();
@@ -534,7 +536,7 @@ test('once a board is drawn, a late or refused answer says stale over the board,
 });
 
 test('stop clears every timer and aborts the request in flight; start polls again (pagehide, pageshow)', async () => {
-  const { timers, net, seen, pills, poller } = rig();
+  const { timers, net, seen, pills, poller } = createPollerRig();
   poller.start();
   assert.equal(timers.pending.size, 1, 'no deadline on the request in flight');
   poller.stop();
