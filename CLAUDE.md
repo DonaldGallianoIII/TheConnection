@@ -102,8 +102,9 @@ The connection routes plan, run in lanes and waves
 (`docs/planning/connection-routes/00-index.md` section 4). Wave 0, GROUND
 (this file, `docs/known-bugs/` and `tests/_root.py`), merged into the dev
 branch at `a029bda`, CORE at `f5f6923`, CARDS at `4f35efc` and BOARD at
-`a2953cb`. As of 2026-10-14, SHARED (wave 2) is in its fix round; SSH
-and DOCS come after it.
+`a2953cb`, with the P4 phase review's fixes at `eb3e187`. As of
+2026-10-15, SHARED (wave 2) is in its fix round; SSH and DOCS come after
+it.
 
 ### Off limits
 
@@ -328,6 +329,7 @@ post-merge fixes, and the P0 phase review (D9) closed with a fix round at
 `ab7bd31`. CORE (P1) merged at `f5f6923`, the K2 recorder fix at
 `62d8a6d`, CARDS (P2) at `4f35efc`, and BOARD (P4) at `a2953cb`: the
 live board (`python3 board/serve.py`, a token in the printed URL; a
-headless check in `tests/board-browser-check.mjs`). As of 2026-10-14 the
+headless check in `tests/board-browser-check.mjs`). The P4 phase review
+(D9) closed with two fix rounds merged at `eb3e187`. As of 2026-10-15 the
 shared mailbox (SHARED) is in its fix round; the `ssh` route and the docs
 are not built. `main` stays the owner's alone.

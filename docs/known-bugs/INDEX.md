@@ -41,15 +41,34 @@ and its count goes up.
 |---|---|---|---|
 | [`listener-reported-live-without-the-lock`](listener-reported-live-without-the-lock.md) | MEDIUM | 1 | A Codex worker said "listening" about a background job its host had already killed. |
 | [`test-claimed-that-is-not-in-the-tree`](test-claimed-that-is-not-in-the-tree.md) | MEDIUM | 2 | Two commit messages say 8 mailbox tests pass; the repo never held them. |
+| [`lane-built-to-a-contract-the-base-has-revised`](lane-built-to-a-contract-the-base-has-revised.md) | HIGH | 1 | A base-branch ruling changed three feed rules the board lane had built from its own contract copy; the lane's tests pinned the old rules. |
+| [`placeholder-value-matched-as-a-real-value`](placeholder-value-matched-as-a-real-value.md) | HIGH | 1 | The feed dropped only a missing account, so every card on the default "unknown" account was linked to every other as sharing one. |
+| [`inferred-edge-inverts-a-declared-one`](inferred-edge-inverts-a-declared-one.md) | HIGH | 2 | An inferred parent closed a cycle through declared ones, and a cycle break by name order drew the declared top under its own worker. |
+| [`fit-to-screen-scales-text-below-legible`](fit-to-screen-scales-text-below-legible.md) | MEDIUM | 1 | The board shrank to fit instead of wrapping, so seven sessions put role words under 8 px and fourteen at phone width could not be read. |
+| [`poll-without-a-deadline-shows-stale-as-live`](poll-without-a-deadline-shows-stale-as-live.md) | MEDIUM | 1 | A suspended server left the live board saying "live" and "listening" for minutes, because its fetch had no timeout. |
+| [`two-edges-on-one-pair-share-a-path`](two-edges-on-one-pair-share-a-path.md) | MEDIUM | 2 | Two strokes on one pair drew on one path, so labels overprinted and the dotted "down" cue was hidden: mailbox over native, then a mail wire over its tree connector. |
+| [`plain-object-keyed-by-outside-names`](plain-object-keyed-by-outside-names.md) | MEDIUM | 1 | A session named `__proto__` vanished from the board and turned every position after it into NaN, because the layout keyed plain objects by name. |
+| [`liveness-gap-by-design-read-as-down`](liveness-gap-by-design-read-as-down.md) | MEDIUM | 1 | A session woken by mail read "no listener" for its whole turn, because the board called any lock lost within 600 s down. |
+| [`path-search-rerun-per-pair-on-every-poll`](path-search-rerun-per-pair-on-every-poll.md) | MEDIUM | 1 | The board re-ran its A* router for every routed pair on every 3 s poll with nothing cached, so shared-account boards stall (estimated, not measured). |
+| [`outside-text-clipped-by-overflow-hidden`](outside-text-clipped-by-overflow-hidden.md) | MEDIUM | 1 | A long session name had no break point in the phone outline, so it ran off the row and its role words were clipped away. |
 
 ## The shared catalog
 
-Both entries are forms of two entries in the shared known-bugs catalog:
-`check-that-passes-by-not-checking` and `written-claim-outlives-the-code`.
-Each detail file says how.
+The first two entries are forms of two entries in the shared known-bugs
+catalog: `check-that-passes-by-not-checking` and
+`written-claim-outlives-the-code`. Each detail file says how.
 
 The copy of the catalog in the owner's conventions folder does not hold
 either slug yet. Its closest file is
 `~/Conventions/code/known-bugs/any-language/tests-and-checks.md`, which has
 an entry titled "A check that passes by not checking." about error guards
 and missing fixtures. It has nothing for `written-claim-outlives-the-code`.
+
+The ten board entries added on 2026-10-15 each name their closest shared
+entry, or say none fits. Two lean on "A check that passes by not
+checking.", three on "The non-color encoding runs out.", one on "Async
+reentrant void call." and one on "No render pause on blur, or when
+nothing can change." Three have no shared entry at all:
+`inferred-edge-inverts-a-declared-one`,
+`plain-object-keyed-by-outside-names` and
+`liveness-gap-by-design-read-as-down`.
