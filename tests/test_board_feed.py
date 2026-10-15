@@ -250,8 +250,9 @@ def put_message(root, seq, sender, to, unread=False):
 
     The file is mail/to-<to>/read/NNNNNN-from-<sender>.md (or, with
     `unread`, mail/to-<to>/NNNNNN-from-<sender>.md, still in the inbox),
-    written to a .tmp sibling and renamed, and mail/.seq is raised to `seq`
-    under its flock, as tc's send does. For mail to or from any name,
+    written to a .tmp sibling and renamed (tc's send links instead, with the
+    same file at the end), and mail/.seq is raised to `seq` under its
+    flock. For mail to or from any name,
     including one whose card would route a real send elsewhere.
 
     @interacts  writes one message file and mail/.seq, making

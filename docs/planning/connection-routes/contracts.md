@@ -74,7 +74,7 @@ over SSH (C3). A leading dash would read as an option there.
 ## C1. The address card
 
 One JSON file per name: `cards/<name>.json` under `ROOT`. Written whole to
-a `.tmp` and renamed, like a message.
+a `.tmp` and renamed into place.
 
 ```json
 {
@@ -173,7 +173,13 @@ then prints each of `warnings` to stderr whatever the exit, then exits with
 `exit`. A route named on a card that is not in `ROUTES` answers `tc send:
 route <route> is not built yet; nothing sent`, exit 1, nothing written.
 
-- `deliver_local`: today's behavior. Seq under flock, write `.tmp`, rename.
+- `deliver_local`: seq under flock, write `.tmp`, then hard-link it to the
+  message name and remove the `.tmp` name, so a message never replaces
+  another (D20). A taken message name, a name already in `read/`, or a
+  taken `.tmp` name takes the next number, all within
+  `PUBLISH_MAX_TRIES` and the command's one lock deadline; out of tries
+  is exit 10 (D23). It takes an optional `deadline` keyword beside C2's
+  four arguments.
   If the inbox did not exist before **and the name has no card**, add the
   warning `new inbox: nobody has joined as <to>` (open item O1). A card is
   the record of a join, so a joined name gets no warning on its first mail,
@@ -350,11 +356,12 @@ For a separate Linux user per account on one machine.
   group `g` (`os.getgroups()`); creates `mail/`, `status/`, `cards/` and
   `outbox/` if they are missing, so no other user ever has to create a
   top folder inside a ROOT the first user owns (D19); then sets group
-  `g` and mode `2775` on
-  `mail/`, `status/`, `cards/`, `outbox/` and every folder under them,
-  sets group `g` and mode `0664` on every file already under them
-  (`mail/.seq` and the lock files included), and writes `ROOT/.shared`
-  holding the group name.
+  `g` and the mode for each entry's place: `3775` on the four, `3770` on
+  an inbox and its `read/`, `2775` on any other folder; `0664` on
+  `mail/.seq`, the locks and the ring marker, `0640` on every message,
+  card and status file; and writes `ROOT/.shared` at `0644`, holding the
+  group name. It names and leaves the same entries as a member's rerun
+  (below), and exits 1 once the rest is done if it left any.
 - **Nobody can swap ROOT** (D21, D23). Init makes a missing ROOT `0755`
   and refuses a ROOT that its group or anyone may write. It then walks
   every folder from ROOT up to `/` and refuses, with words naming the
@@ -367,24 +374,40 @@ For a separate Linux user per account on one machine.
   would pass the init user's own first init). A member's rerun on the
   init user's ROOT is refused with words that name that user as the one
   who ran init and accuse no one. Then tc fixes the running user's own
-  entries itself (D29): each opened with `O_NOFOLLOW|O_NONBLOCK`, checked
-  with `fstat` to be this user's own regular file or folder, and changed
-  with `fchown` and `fchmod` on that open file, never by path; a link or
-  anything else is skipped and named. It changes nothing else (never the
-  group setting, never `.shared`) and prints what it fixed. tc prints no
-  shell lines to paste: a pasted `chgrp` or `chmod` follows a link, and
-  the owner of the folder holding the entry could swap one in first
-  (D21, D23, D29).
+  entries itself (D29).
+  - After the walk, init opens ROOT once, by its path, and goes on only
+    when it is the folder the walk judged (on a member's rerun, the init
+    user's own); otherwise it refuses, exit 1, nothing changed. From
+    there it reaches the four, each folder under them, each entry and
+    `.shared` by name in the open folder above it, never by path, so
+    renaming ROOT or any folder after the walk leads nowhere. It enters
+    a folder only when `fstat` finds the folder `lstat` found there.
+  - It changes an entry (opened `O_NOFOLLOW|O_NONBLOCK`, then `fchown`
+    and `fchmod` on that open file) only when `fstat` finds the entry the
+    walk found, it is this user's own regular file or folder, and, for a
+    file, it has one name. A link, anything else, a file with a second
+    name, a folder or entry that changed, a folder more than
+    `WALK_MAX_DEPTH` (8) deep and a folder it may list but not search are
+    skipped and named. It changes nothing else (never the group setting,
+    never `.shared`) and prints what it fixed.
+  - tc prints no `chgrp` or `chmod` line for an entry under the four: a
+    pasted line follows a link the folder's owner could swap in first.
+    The only command line init prints is D23's `chmod g-w,o-w` advice to
+    the owner of ROOT or a folder above it (D21, D23, D29).
+  - Every other command still reaches ROOT by its path; only init pins
+    it.
 - **A held lock costs a failed send, never a hang** (D20, D23). `mail/.seq`
   and the inbox locks are group-writable, so a member can hold one. tc
   waits at most `LOCK_WAIT_SECONDS` per command for them, then exits 10
   with nothing written.
 - While `.shared` exists, `tc` sets `os.umask(0o002)` before it writes
-  anything, so every file and lock it makes is group-writable, and the
-  setgid folders give them group `g`. Any folder `tc` creates later
-  (`cards/`, `status/`, `outbox/`, an inbox and its `read/`) gets group
-  `g` and mode `2775` as it is made. Init only reaches the folders that
-  exist at the time (D16).
+  anything, and the setgid folders give what it makes group `g`. Files
+  whose mode tc sets itself (messages, cards, status files at `0640`)
+  keep that mode; the umask cannot add bits. Any folder `tc` creates
+  later gets group `g` and the mode for its place as it is made (`3775`
+  for one of the four, `3770` for an inbox and its `read/`, `2775`
+  otherwise). Init only reaches the folders that exist at the time
+  (D16).
 - **No planted links** (D17). The shared folders are group-writable, so
   one member could plant a link where another user's tc opens a file.
   - Every file tc opens by name (the wait, watch and inbox locks,
@@ -426,8 +449,8 @@ For a separate Linux user per account on one machine.
      deleted under shared mode: `mail/.seq`, the lock files, and the ring
      marker (whose contents carry its state: pending, timed out, or
      clear, instead of being removed). The worst a member can do through
-     them is make a send fail or ring once more; never read, lose or
-     alter mail.
+     them is make a send fail, or a ring come once more or once fewer;
+     never read, lose or alter mail.
   6. `.shared` is `0644`, owned by whoever ran init and writable by that
      user only (D21), so no other member can change which group
      everyone's tc uses.

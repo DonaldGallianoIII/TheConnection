@@ -54,8 +54,9 @@ Two ideas carry the whole tool.
 1. **The folder is the transport.** `mail/to-<name>/NNNNNN-from-<sender>.md`
    is unread mail. `tc read` moves it to `read/`, which is the history. A
    counter in `mail/.seq`, under `flock`, numbers every message. A message is
-   written to a `.tmp` sibling and renamed, so a reader never sees half a
-   file.
+   written to a `.tmp` sibling, hard-linked to its name and the `.tmp` name
+   removed, so a reader never sees half a file and a message never replaces
+   another.
 2. **The lock is the proof of life.** `tc wait <name>` holds an exclusive
    `flock` on `mail/.wait-<name>.lock` for as long as it runs, and the kernel
    drops it the moment the process dies. `tc health` reads `/proc/locks` to

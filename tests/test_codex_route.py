@@ -19,6 +19,11 @@ mail/.ring-pending-<to> and the next send rings again; one flock per inbox
 plus rename in `tc read`; the ring runs after the lock is released; a
 thread_id of any other shape never reaches codex's argv.
 
+D20 (SHARED fix round 1, Claude Opus 5.5, unreviewed): the marker is never
+removed. A ring that exits 0, or a codex join with nothing waiting,
+rewrites it as `clear`, so the D14 and D16 tests read its state
+(marker_state), not whether it exists.
+
 @interacts  runs ../tc through tests/_root.py under a throwaway TC_ROOT,
             with a fake `codex` that records its argv. Some tests hold an
             inbox lock themselves and read /proc/locks to see a child
@@ -193,6 +198,17 @@ CLOCK_FORMAT = "%H:%M:%S"
 # that failed fast.
 TIMED_OUT_STATE = "timed out"
 FAILED_STATE = "failed"
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 5. The marker
+# is never removed; its first line carries its state. These are the other
+# states the tests read: a ring under way, a join that found mail waiting,
+# and nothing owed.
+RINGING_STATE = "ringing"
+JOINED_STATE = "joined with unread mail"
+CLEAR_STATE = "clear"
+# A marker this user may read and not write: owner, group and others read
+# only. Since D20 tc rewrites the marker in place, so this, not a folder at
+# a .tmp name, is how a test makes it unwritable.
+READ_ONLY_FILE_MODE = 0o444
 # Where the patched clock stands: this far after the timeout (inside the
 # window), and this far past the window's end.
 INSIDE_WINDOW_SECONDS = 10
@@ -385,6 +401,25 @@ def clock(seconds):
     return datetime.datetime.fromtimestamp(seconds).strftime(CLOCK_FORMAT)
 
 
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 5.
+def marker_state(marker):
+    """The first line of the ring marker at `marker` (its state), or None when nothing is there.
+
+    Since D20 the marker is never removed: a ring that exits 0, or a codex
+    join with nothing waiting, rewrites it as CLEAR_STATE. So the tests
+    read its state, not whether it exists.
+
+    @interacts  reads `marker`. Writes nothing.
+    @deps       pathlib.
+    @complexity O(1): one short file.
+    @alloc      the file's text, freed on return.
+    """
+    try:
+        return marker.read_text().partition("\n")[0]
+    except FileNotFoundError:
+        return None
+
+
 def load_tc(root, where=None):
     """Load ../tc as a module with TC_ROOT set to `root` (or `where`, inside it), without running main().
 
@@ -496,14 +531,14 @@ class CodexRouteTest(unittest.TestCase):
             self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
             recorded = calls()
             landed = sorted(p.name for p in (root.path / "mail" / "to-c").glob("*.md"))
-            marked = (root.path / "mail" / ".ring-pending-c").exists()
+            marked = marker_state(root.path / "mail" / ".ring-pending-c")
         self.assertEqual(code, 0, f"a failed ring failed the send: exit {code}: {err}")
         self.assertTrue(out.startswith("sent #1 to c: "), out)
         self.assertNotIn("rang codex", out)
         self.assertIn(RING_FAILED_WORDS.format(to="c", reason="fake codex: no thread t1") + "\n", err)
         self.assertEqual(len(recorded), 1)
         self.assertEqual(landed, ["000001-from-a.md"])
-        self.assertTrue(marked, "a failed ring left no mail/.ring-pending-c")
+        self.assertEqual(marked, FAILED_STATE, "a failed ring left no pending mail/.ring-pending-c")
 
     # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14.
     def test_a_failed_ring_leaves_a_marker_and_the_next_send_rings(self):
@@ -524,20 +559,20 @@ class CodexRouteTest(unittest.TestCase):
             self.join_codex(root)
             marker = root.path / "mail" / ".ring-pending-c"
             first = root.tc("send", "--from", "a", "--to", "c", "one")
-            marked = marker.exists()
+            marked = marker_state(marker)
             second = root.tc("send", "--from", "b", "--to", "c", "two")
-            cleared = not marker.exists()
+            cleared = marker_state(marker)
             record = folder.parent / "calls.jsonl"
             self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
             recorded = calls()
         self.assertEqual(first[0], 0, f"first send exited {first[0]}: {first[2]}")
         self.assertIn(RING_FAILED_WORDS.format(to="c", reason="fake codex: no thread t1") + "\n", first[2])
-        self.assertTrue(marked, "the failed ring left no marker")
+        self.assertEqual(marked, FAILED_STATE, "the failed ring left no pending marker")
         self.assertEqual(second[0], 0, f"second send exited {second[0]}: {second[2]}")
         self.assertEqual([call["argv"] for call in recorded],
                          [ring_argv(root, 1, "c", "a"), ring_argv(root, 2, "c", "b")])
         self.assertTrue(second[1].endswith(RANG_WORDS.format(to="c") + "\n"), second[1])
-        self.assertTrue(cleared, "a ring that exited 0 left the marker")
+        self.assertEqual(cleared, CLEAR_STATE, "a ring that exited 0 left the marker pending")
 
     def test_a_slow_ring_never_holds_up_a_read(self):
         """A fake that sleeps 5 s: a `tc read` of c started during the ring returns within 1 s.
@@ -658,7 +693,7 @@ class CodexRouteTest(unittest.TestCase):
                     code, out, err = root.tc("send", "--from", "a", "--to", "d", "hi")
                     rang_bad = record.exists()
                     landed = sorted(p.name for p in (root.path / "mail" / "to-d").glob("*.md"))
-                    marked = (root.path / "mail" / ".ring-pending-d").exists()
+                    marked = marker_state(root.path / "mail" / ".ring-pending-d")
                     self.join_codex(root)
                     root.tc("send", "--from", "a", "--to", "c", "hi")
                     self.assertTrue(record.exists(), f"{record} missing: the fake codex is not reachable")
@@ -667,7 +702,7 @@ class CodexRouteTest(unittest.TestCase):
                 self.assertIn(RING_FAILED_WORDS.format(to="d", reason=NOT_A_THREAD_ID), err)
                 self.assertFalse(rang_bad, f"codex ran for thread_id {value!r}")
                 self.assertEqual(landed, ["000001-from-a.md"])
-                self.assertTrue(marked, "no marker after a ring that could not be tried")
+                self.assertEqual(marked, FAILED_STATE, "no pending marker after a ring that could not be tried")
                 self.assertEqual([call["argv"][2] for call in recorded], [THREAD])
 
     def test_join_refuses_a_codex_thread_id_of_another_shape(self):
@@ -686,34 +721,46 @@ class CodexRouteTest(unittest.TestCase):
         self.assertEqual(after, [], f"a refused join wrote {after}")
 
     def test_a_marker_that_cannot_be_written_is_said(self):
-        """In process: when the marker's .tmp cannot be made, the warning says a later send may not ring.
+        """In process: when the marker cannot be written, the warning says a later send may not ring.
 
-        A folder sits where the .tmp would go. The send still exits 0 with
-        the mail in the inbox; the warning does not promise a ring it
-        cannot keep.
+        SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 changed how.
+        tc rewrites the marker in place, so the marker is a regular file
+        that says clear, at READ_ONLY_FILE_MODE (before D20 a folder sat at
+        the .tmp's name). The send still exits 0 with the mail in the
+        inbox, the marker is left as it was, no .tmp is left, and the
+        warning does not promise a ring it cannot keep. Skipped as root,
+        which may write any file.
 
-        @interacts  loads tc in process; makes one folder in mail/; runs
-                    deliver_codex once with PATH set to the root's (the
-                    harness's fake first) for that call.
-        @deps       load_tc, _root.TcRoot.fake_bin; unittest.mock.
+        @interacts  loads tc in process; makes mail/ and one read-only
+                    marker; runs deliver_codex once with PATH set to the
+                    root's (the harness's fake first) for that call.
+        @deps       load_tc, marker_state, _root.TcRoot.fake_bin;
+                    unittest.mock.
         @complexity O(1).
         @alloc      one TcRoot and one module.
         """
+        if os.geteuid() == 0:
+            self.skipTest("root may write a read-only file, so the marker cannot be made unwritable")
         card = {"name": "c", "kind": "codex", "route": "codex", "thread_id": THREAD}
         with _root.TcRoot() as root:
             folder, calls = root.fake_bin("codex", CODEX_QUEUE_EXIT["unknown thread"],
                                           stderr=FAKE_UNKNOWN_THREAD_STDERR)
             tc = load_tc(root)
-            (root.path / "mail" / f".ring-pending-c.{os.getpid()}.tmp").mkdir(parents=True)
+            marker = root.path / "mail" / ".ring-pending-c"
+            marker.parent.mkdir()
+            marker.write_text(f"{CLEAR_STATE}\n")
+            marker.chmod(READ_ONLY_FILE_MODE)
             with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}):
                 got = tc.deliver_codex(card, "a", "c", "hi")
             record = folder.parent / "calls.jsonl"
             self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
             landed = sorted(p.name for p in (root.path / "mail" / "to-c").glob("*.md"))
-            marked = (root.path / "mail" / ".ring-pending-c").exists()
+            marked = marker_state(marker)
+            left = sorted(p.name for p in marker.parent.glob(".ring-pending-c.*"))
         self.assertEqual(got.exit, 0)
         self.assertEqual(landed, ["000001-from-a.md"])
-        self.assertFalse(marked)
+        self.assertEqual(marked, CLEAR_STATE, "an unwritable marker changed")
+        self.assertEqual(left, [], "a marker write left a file behind")
         said = [w for w in got.warnings if w.startswith("ring failed for c: ")]
         self.assertEqual(len(said), 1, got.warnings)
         self.assertIn("could not be written", said[0])
@@ -1037,12 +1084,12 @@ class CodexRouteTest(unittest.TestCase):
             code, out, err = root.tc("send", "--from", "a", "--to", "c", "hi", env=env)
             self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
             landed = sorted(p.name for p in (root.path / "mail" / "to-c").glob("*.md"))
-            marked = (root.path / "mail" / ".ring-pending-c").exists()
+            marked = marker_state(root.path / "mail" / ".ring-pending-c")
         self.assertEqual(code, 0, f"odd bytes from codex failed the send: exit {code}")
         self.assertIn("not utf-8; the mail is in its inbox; the next send to c rings again\n", err)
         self.assertNotIn("Traceback", err)
         self.assertEqual(landed, ["000001-from-a.md"])
-        self.assertTrue(marked)
+        self.assertEqual(marked, FAILED_STATE)
 
     # Phase fix round 1 (Claude Opus 5.5, unreviewed): D16 C1, mail before a join.
     def test_mail_from_before_a_codex_join_is_rung_by_the_next_send(self):
@@ -1067,20 +1114,20 @@ class CodexRouteTest(unittest.TestCase):
             first = root.tc("send", "--from", "a", "--to", "cx", "one")
             rang_before_join = record.exists()
             joined = root.tc("join", "cx", env={"CODEX_THREAD_ID": THREAD, "CLAUDECODE": None})
-            marked = marker.exists()
+            marked = marker_state(marker)
             second = root.tc("send", "--from", "a", "--to", "cx", "two")
             ran = record.exists()
             recorded = calls()
-            cleared = not marker.exists()
+            cleared = marker_state(marker)
         self.assertEqual(first[0], 0, f"first send exited {first[0]}: {first[2]}")
         self.assertFalse(rang_before_join, "a send to a name with no card rang codex")
         self.assertEqual(joined, (0, "joined as cx (codex, account unknown, route codex)\n"
                                      + WAITING_WORDS.format(n=1, to="cx"), ""))
-        self.assertTrue(marked, "the join left no marker with mail waiting")
+        self.assertEqual(marked, JOINED_STATE, "the join left no pending marker with mail waiting")
         self.assertTrue(ran, f"{record} missing: the fake codex never ran, so no send rang cx")
         self.assertEqual(second[0], 0, f"second send exited {second[0]}: {second[2]}")
         self.assertEqual([call["argv"] for call in recorded], [ring_argv(root, 2, "cx", "a")])
-        self.assertTrue(cleared, "a ring that exited 0 left the marker")
+        self.assertEqual(cleared, CLEAR_STATE, "a ring that exited 0 left the marker pending")
 
     def test_a_rejoin_on_a_new_thread_is_rung_by_the_next_send(self):
         """A ring to t1 exits 0; cx rejoins on t2 with that mail unread; the next send rings t2.
@@ -1131,14 +1178,14 @@ class CodexRouteTest(unittest.TestCase):
             killed = root.tc("send", "--from", "a", "--to", "c", "one", env=env)
             self.assertTrue(record.exists(), f"{record} missing: the killing fake never ran")
             kill_own_fake(json.loads(record.read_text().splitlines()[0])["pid"], record)
-            marked = marker.exists()
+            marked = marker_state(marker)
             folder, calls = root.fake_bin("codex", CODEX_QUEUE_EXIT["queued"])
             after = root.tc("send", "--from", "b", "--to", "c", "two")
             ran = (folder.parent / "calls.jsonl").exists()
             recorded = calls()
             landed = sorted(p.name for p in (root.path / "mail" / "to-c").glob("*.md"))
         self.assertEqual(killed[0], -signal.SIGKILL, f"the fake did not kill the send mid-ring: {killed}")
-        self.assertTrue(marked, "a send killed mid-ring left no marker")
+        self.assertEqual(marked, RINGING_STATE, "a send killed mid-ring left no pending marker")
         self.assertTrue(ran, "the second fake codex never ran, so the next send did not ring")
         self.assertEqual(after[0], 0, f"the next send exited {after[0]}: {after[2]}")
         self.assertEqual([call["argv"] for call in recorded], [ring_argv(root, 2, "c", "b")])
@@ -1180,14 +1227,14 @@ class CodexRouteTest(unittest.TestCase):
                     mock.patch.object(tc, "wall_clock", lambda: stamp + INSIDE_WINDOW_SECONDS):
                 held = tc.deliver_codex(card, "a", "c", "two")
             rang_inside = calls()
-            kept = (marker.stat().st_mtime, marker.read_text().splitlines()[0]) if marker.exists() else None
+            kept = (marker.stat().st_mtime, marker_state(marker)) if marker.exists() else None
             with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}), \
                     mock.patch.object(tc, "wall_clock",
                                       lambda: stamp + RING_BACKOFF_SECONDS + PAST_WINDOW_SECONDS):
                 rang = tc.deliver_codex(card, "a", "c", "three")
             self.assertTrue((folder.parent / "calls.jsonl").exists(), "the harness fake codex never ran")
             recorded = calls()
-            cleared = not marker.exists()
+            cleared = marker_state(marker)
             landed = sorted(p.name for p in (root.path / "mail" / "to-c").glob("*.md"))
         until = clock(stamp + RING_BACKOFF_SECONDS)
         self.assertEqual(timed_out.exit, 0)
@@ -1201,7 +1248,7 @@ class CodexRouteTest(unittest.TestCase):
         self.assertEqual(rang.exit, 0)
         self.assertEqual([call["argv"] for call in recorded], [ring_argv(root, 3, "c", "a")])
         self.assertTrue(rang.words.endswith(RANG_WORDS.format(to="c")), rang.words)
-        self.assertTrue(cleared, "a ring that exited 0 left the marker")
+        self.assertEqual(cleared, CLEAR_STATE, "a ring that exited 0 left the marker pending")
         self.assertEqual(landed, ["000001-from-a.md", "000002-from-a.md", "000003-from-a.md"])
 
     def test_a_ring_that_fails_fast_holds_nothing_back(self):

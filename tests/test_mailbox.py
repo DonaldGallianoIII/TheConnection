@@ -20,14 +20,17 @@ joined will warn there (open item O1). No test depends on `tc read` or
             first wait (proven in /proc/locks, killed by its own pid in the
             harness's teardown). K2 loads tc as a module with TC_ROOT set
             to the test's root before the load, and wraps os.open,
-            builtins.open, pathlib.Path.write_text and Path.rename for one
-            in-process send, all restored as the send returns or raises.
+            builtins.open, pathlib.Path.write_text, Path.rename and os.link
+            for one in-process send, all restored as the send returns or
+            raises.
             K3 takes an flock on the root's mail/.seq itself and reads
             /proc/locks to prove each send is blocked on it. K5 sets
             message file times with os.utime. Reads and writes only inside
-            each test's temp folder.
-@deps       python3 stdlib (builtins, contextlib, fcntl, importlib, io, os,
-            pathlib, re, shlex, subprocess, sys, time, unittest,
+            each test's temp folder. At import, K3's block ceiling reads
+            LOCK_WAIT_SECONDS from ../tc's source (tc_constant; SHARED fix
+            round 3, Claude Opus 5.5, unreviewed), which runs nothing.
+@deps       python3 stdlib (ast, builtins, contextlib, fcntl, importlib, io,
+            os, pathlib, re, shlex, subprocess, sys, time, unittest,
             unittest.mock); tests/_root.py; ../tc; Linux only (flock,
             /proc/locks).
 @complexity O(1) tc commands per test, except K3: S = SENDERS = 50
@@ -41,6 +44,7 @@ joined will warn there (open item O1). No test depends on `tc read` or
             is kept between tests.
 """
 
+import ast
 import builtins
 import contextlib
 import fcntl
@@ -64,6 +68,25 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import _root  # noqa: E402  (needs the path line above)
+
+
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-4, K3 reads tc's bound.
+def tc_constant(name):
+    """The value of the module constant `name` in ../tc, read from its source, never run.
+
+    For a test bound that must sit under one of tc's own, so it follows tc
+    instead of a copy. Raises LookupError when tc has no such constant.
+
+    @interacts  reads ../tc's source. Writes nothing; runs nothing of tc.
+    @deps       ast, pathlib; HERE.
+    @complexity O(s) over s bytes of tc's source (under 200 KB).
+    @alloc      the source and its syntax tree, freed on return.
+    """
+    for node in ast.parse((HERE.parent / "tc").read_text()).body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == name for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise LookupError(f"tc has no constant {name}")
+
 
 # Made-up mailbox names. b gets mail; c is a name with none; d holds a
 # listener in K4.
@@ -117,7 +140,18 @@ SENDERS = 50
 # then all must finish within SENDERS_FINISH_CEILING_SECONDS of the release.
 # Together they keep the check under the brief's 10 s. Measured on the
 # owner's machine at a load near 16 on 32 cores: about 0.2 s.
-SENDERS_BLOCK_CEILING_SECONDS = 6
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-4. Each
+# sender gives up LOCK_WAIT_SECONDS after it starts waiting (tc's bounded
+# wait, D20, D23), so the block ceiling sits that bound less
+# SENDERS_RELEASE_MARGIN_SECONDS (room for the release and 50 quick turns at
+# the counter), read from tc rather than copied so the two never drift.
+# SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's LOW-6. The
+# ceiling counts from just before the first spawn, and each sender's own
+# bound starts later, after its launch, so the ceiling always ends first. A
+# slow start then fails here, by count of senders blocked, never by a first
+# sender giving up and the test blaming tc for not waiting.
+SENDERS_RELEASE_MARGIN_SECONDS = 1
+SENDERS_BLOCK_CEILING_SECONDS = tc_constant("LOCK_WAIT_SECONDS") - SENDERS_RELEASE_MARGIN_SECONDS
 SENDERS_FINISH_CEILING_SECONDS = 3
 
 # /proc/locks columns for a blocked waiter:
@@ -284,12 +318,21 @@ class MailboxTest(unittest.TestCase):
     @alloc      one TcRoot per test, two in K3.
     """
 
-    def wait_until_blocked(self, procs, seq, ceiling, what):
+    def wait_until_blocked(self, procs, seq, ceiling, what, deadline=None):
         """Return once every child in `procs` is blocked on the flock of `seq`.
 
         Fails the test if a child exits first (it finished while the lock
         was held, so it never waited for it), or if `ceiling` seconds pass
         first. Polls /proc/locks every LOCK_POLL_SECONDS; never a bare sleep.
+        SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's
+        LOW-6. `deadline`, a time.monotonic() value the caller took
+        `ceiling` seconds ahead (K3's fifty, before their first spawn),
+        counts the ceiling from then; None counts it from this call.
+        SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's LOW-3
+        (audits/2026-10-15-0201-quick). Each poll tests the deadline
+        before it looks for a finished child. So spawns slower than a
+        sender's own bound fail by count of senders blocked, never by a
+        sender that gave up past its bound being blamed for not waiting.
 
         @interacts  reads /proc/locks; reads a finished child's output.
         @deps       lock_waiters, said, time.
@@ -298,20 +341,21 @@ class MailboxTest(unittest.TestCase):
         @alloc      one set of pids per poll, freed as it goes.
         """
         pids = {proc.pid for proc in procs}
-        deadline = time.monotonic() + ceiling
+        if deadline is None:
+            deadline = time.monotonic() + ceiling
         while True:
             waiting = lock_waiters(seq) & pids
             if waiting == pids:
                 return
+            if time.monotonic() >= deadline:  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): LOW-3, before a finished child
+                self.fail(f"{what}: {len(waiting)} of {len(pids)} sends blocked on {seq} "
+                          f"within {ceiling} s")
             done = [proc for proc in procs if proc.poll() is not None]
             if done:
                 proc = done[0]
                 out, err = proc.communicate()
                 self.fail(f"{what}: pid {proc.pid} finished while the test held {seq}, so it "
                           f"never waited for the lock{said(proc.args[2:], proc.returncode, out, err)}")
-            if time.monotonic() >= deadline:
-                self.fail(f"{what}: {len(waiting)} of {len(pids)} sends blocked on {seq} "
-                          f"within {ceiling} s")
             time.sleep(LOCK_POLL_SECONDS)
 
     def test_k1_a_message_is_read_once(self):
@@ -349,7 +393,7 @@ class MailboxTest(unittest.TestCase):
 
     # K2 fix (Claude Opus 5.5, unreviewed): records every way tc can create a file.
     def test_k2_a_message_appears_only_whole(self):
-        """K2. One in-process send: the .md is made only by a rename from a .tmp sibling.
+        """K2. One in-process send: the .md is made only by a rename or a hard link from a .tmp sibling.
 
         White box. tc is loaded as a module under this root. For the one
         send, each way tc can create a file is wrapped to record it, so the
@@ -357,29 +401,32 @@ class MailboxTest(unittest.TestCase):
         write_new_file goes this way), builtins.open given a path in a mode
         that creates, and Path.write_text. Each record holds the name and
         whether anything was at it before the call. Path.rename is wrapped
-        too. At the rename that makes the message, the test records whether
-        the final name already existed, the .tmp's bytes, and what unread()
-        lists right then, while the .tmp sits in the inbox.
+        too, and so is os.link (SHARED fix round 2, Claude Opus 5.5,
+        unreviewed: tc now links the .tmp to the final name, which never
+        replaces a file, D20). At the rename or link that makes the
+        message, the test records whether the final name already existed,
+        the .tmp's bytes, and what unread() lists right then, while the
+        .tmp sits in the inbox.
 
         Then: the recorder saw at least one creation; none was the final
-        name; one rename made the final name, from a sibling ending .tmp
-        that a recorded creation made fresh; the final name did not exist
-        before it; unread() at that moment listed no .tmp. A recorder that
-        misses how tc writes fails loudly, never passes. Must reject a send
-        that writes the final name directly: it fails every run, not by
-        timing luck.
+        name; one rename or link made the final name, from a sibling
+        ending .tmp that a recorded creation made fresh; the final name did
+        not exist before it; unread() at that moment listed no .tmp. A
+        recorder that misses how tc writes fails loudly, never passes. Must
+        reject a send that writes the final name directly: it fails every
+        run, not by timing luck.
 
         @interacts  loads tc as a module; wraps os.open, builtins.open,
-                    Path.write_text and Path.rename for the send only, all
-                    restored when main() returns or raises; runs tc's main()
-                    in process with sys.argv patched and stdout and stderr
-                    captured.
+                    Path.write_text, Path.rename and os.link for the send
+                    only, all restored when main() returns or raises; runs
+                    tc's main() in process with sys.argv patched and stdout
+                    and stderr captured.
         @deps       load_tc, named, CREATING_MODE_LETTERS; builtins,
                     contextlib, io, os, unittest.mock.
         @complexity O(c + u + n): c creations recorded (the .seq file, any
-                    lock file, the .tmp: under ten), and one rename that
-                    lists u unread files (none here) and reads the .tmp's
-                    n bytes.
+                    lock file, the .tmp: under ten), and one rename or link
+                    that lists u unread files (none here) and reads the
+                    .tmp's n bytes.
         @alloc      the module, two small lists of records; one TcRoot,
                     removed on exit.
         """
@@ -394,6 +441,7 @@ class MailboxTest(unittest.TestCase):
             real_open = builtins.open
             real_write_text = pathlib.Path.write_text
             real_rename = pathlib.Path.rename
+            real_link = os.link
 
             def created(how, path):
                 """Record that `how` is about to create `path`, and whether anything is there now.
@@ -469,8 +517,31 @@ class MailboxTest(unittest.TestCase):
                 })
                 return real_rename(path, target)
 
+            # SHARED fix round 2 (Claude Opus 5.5, unreviewed): a send publishes with os.link (D20).
+            def link(src, dst, *args, **kwargs):
+                """Record the state at this moment, as rename() does, then link as the real os.link does.
+
+                @interacts  reads the source file, lstats the target, and
+                            lists the inbox through tc's unread(); links
+                            through the real call.
+                @deps       named; os, pathlib; tc.unread.
+                @complexity O(u + n) over u unread files and n bytes of the
+                            source.
+                @alloc      one dict per call.
+                """
+                source = pathlib.Path(os.fsdecode(src))
+                renames.append({
+                    "src": named(src),
+                    "dst": named(dst),
+                    "dst_existed": os.path.lexists(dst),
+                    "src_bytes": source.read_bytes() if source.is_file() else None,
+                    "unread": [p.name for p in tc.unread(B)],
+                })
+                return real_link(src, dst, *args, **kwargs)
+
             wrapped = ((os, "open", os_open), (builtins, "open", builtin_open),
-                       (pathlib.Path, "write_text", write_text), (pathlib.Path, "rename", rename))
+                       (pathlib.Path, "write_text", write_text), (pathlib.Path, "rename", rename),
+                       (os, "link", link))
             argv = ["tc", "send", "--from", A, "--to", B, BODY]
             out, err = io.StringIO(), io.StringIO()
             code = 0
@@ -487,7 +558,7 @@ class MailboxTest(unittest.TestCase):
                 except SystemExit as stop:
                     code = 0 if stop.code is None else stop.code
             ran = (f"\nin process: tc main() with argv {argv[1:]}{said(argv[1:], code, out.getvalue(), err.getvalue())}"
-                   f"\nfile creations: {creations}\nrename calls: {renames}")
+                   f"\nfile creations: {creations}\nrename and link calls: {renames}")
 
             self.assertEqual(code, 0, ran)
             finals = sorted(box.glob("*.md"))
@@ -501,12 +572,12 @@ class MailboxTest(unittest.TestCase):
             created_paths = [c["path"] for c in creations]
             self.assertNotIn(final, created_paths, f"send created the final name {final.name} directly{ran}")
             made = [r for r in renames if r["dst"] == final]
-            self.assertEqual(len(made), 1, f"{final.name} was not made by exactly one rename{ran}")
+            self.assertEqual(len(made), 1, f"{final.name} was not made by exactly one rename or link{ran}")
             made = made[0]
             self.assertEqual(made["src"].parent, final.parent,
-                             f"the rename's source is not a sibling of {final.name}{ran}")
+                             f"the source is not a sibling of {final.name}{ran}")
             self.assertTrue(made["src"].name.endswith(".tmp"),
-                            f"the rename's source {made['src'].name} does not end .tmp{ran}")
+                            f"the source {made['src'].name} does not end .tmp{ran}")
             # Proves the creation record sees tc's writes, whichever API
             # made them, so "never created the final name" cannot pass by
             # not checking.
@@ -519,9 +590,9 @@ class MailboxTest(unittest.TestCase):
                                 f"something was already at {made['src'].name} when tc created it, "
                                 f"so no recorded creation made it{ran}")
             self.assertFalse(made["dst_existed"],
-                             f"{final.name} existed before the rename, so it was not made by it{ran}")
+                             f"{final.name} existed before the rename or link, so it was not made by it{ran}")
             self.assertEqual(made["src_bytes"], finals[0].read_bytes(),
-                             f"the .tmp at the rename differs from the final file: not whole{ran}")
+                             f"the .tmp at the rename or link differs from the final file: not whole{ran}")
             self.assertEqual([n for n in made["unread"] if n.endswith(".tmp")], [],
                              f"unread() listed a .tmp while it sat in the inbox{ran}")
             after = [p.name for p in tc.unread(B)]
@@ -602,9 +673,11 @@ class MailboxTest(unittest.TestCase):
                      for i in range(1, SENDERS + 1)]
             with open(seq, "a+") as held:
                 fcntl.flock(held, fcntl.LOCK_EX)
+                # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-6, the block ceiling counts from before the first spawn.
+                deadline = time.monotonic() + SENDERS_BLOCK_CEILING_SECONDS
                 procs = [root.start(*args) for args in sends]
                 self.wait_until_blocked(procs, seq, SENDERS_BLOCK_CEILING_SECONDS,
-                                        f"{SENDERS} senders to {B}")
+                                        f"{SENDERS} senders to {B}", deadline=deadline)
                 fcntl.flock(held, fcntl.LOCK_UN)
             deadline = time.monotonic() + SENDERS_FINISH_CEILING_SECONDS
             numbers, failed = [], []

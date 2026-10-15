@@ -14,9 +14,12 @@ Status: unreviewed
             first, put back after) and call cmd_send or deliver_local in
             process, so they write under that root only. Two tests hold
             the inbox lock themselves and read /proc/locks, to see how a
-            local send takes it. One plants a symlink at a message's .tmp
+            local send takes it; the one that holds it shared also loads
+            tc the same way to read LOCK_WAIT_SECONDS (SHARED fix round 3,
+            Claude Opus 5.5, unreviewed). One plants a symlink at a message's .tmp
             name, pointing at a file in the harness's temp folder, which
-            the send must refuse to write through.
+            the send must never write through; since SHARED fix round 5
+            (Claude Opus 5.5, unreviewed) the send takes the next number.
 @deps       python3 stdlib (argparse, contextlib, fcntl, importlib, io,
             json, os, pathlib, subprocess, sys, unittest); tests/_root.py;
             FINISH_CEILING_SECONDS and wait_until_blocked from
@@ -58,7 +61,11 @@ EXIT_TOO_LARGE = 8
 NEW_INBOX_WORDS = "new inbox: nobody has joined as {name}\n"
 # A send that shares the inbox lock with the test lands at once; this much
 # is room for a loaded machine, not a wait anyone expects.
-SHARED_SEND_CEILING_SECONDS = 5
+# SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-11. The
+# ceiling is tc's LOCK_WAIT_SECONDS, read from tc in the test, less this
+# margin, so a send that asked for the lock alone is still waiting when
+# the ceiling ends, rather than giving up first with exit 10.
+SHARED_SEND_MARGIN_SECONDS = 1
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the refusals' words,
 # written here. The not-built refusal reads like the other two.
 NOT_BUILT_WORDS = "tc send: route {route} is not built yet; nothing sent\n"
@@ -349,16 +356,24 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(got.exit, 0)
         self.assertEqual(got.warnings, [], "a joined name got the new-inbox warning")
 
-    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a link at a message's .tmp is refused.
-    def test_a_link_planted_at_the_message_tmp_is_refused(self):
-        """A link at the next message's .tmp name: the send exits 1 with words, and nothing is written through it.
+    # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a link at a message's .tmp is never written through.
+    # SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's DEBT-1, renamed from
+    # test_a_link_planted_at_the_message_tmp_is_refused: the taken .tmp now takes the next number.
+    def test_a_link_planted_at_the_message_tmp_is_never_written_through(self):
+        """A link at the next message's .tmp name: the send never writes through it; it lands at the number after, exit 0, and the link is still a link to its target, unchanged byte for byte.
 
         Must reject a .tmp written with Path.write_text, which follows the
-        link and writes the message into the file it points at.
+        link and writes the message into the file it points at. SHARED fix
+        round 5 (Claude Opus 5.5, unreviewed): the audit's DEBT-1
+        (audits/2026-10-15-0201-quick). Must also reject the old exit 1:
+        one planted name refused the send, and the ssh route would file a
+        far 1 as final (C3). A taken .tmp takes the next number, as a
+        taken message name does.
 
         @interacts  two sends; one symlink and one file planted in the temp
-                    folder, outside TC_ROOT's mailbox.
-        @deps       _root.TcRoot.tc.
+                    folder, outside TC_ROOT's mailbox; reads the link and
+                    its target and lists the inbox.
+        @deps       _root.TcRoot.tc; os.
         @complexity O(1).
         @alloc      one TcRoot.
         """
@@ -369,14 +384,18 @@ class RouterTest(unittest.TestCase):
             link = root.path / "mail" / "to-b" / "000002-from-a.tmp"
             link.symlink_to(outside)
             code, out, err = root.tc("send", "--from", "a", "--to", "b", "two")
-            kept = outside.read_text()
-            still_a_link = link.is_symlink()
-            landed = sorted(p.name for p in (root.path / "mail" / "to-b").glob("*.md"))
-        self.assertEqual(code, EXIT_REFUSED, f"exited {code}: {err}")
-        self.assertEqual(err, f"tc send: could not create {link} (File exists); nothing sent\n")
-        self.assertEqual(kept, "untouched\n", "the send wrote through the planted link")
-        self.assertTrue(still_a_link)
-        self.assertEqual(landed, ["000001-from-a.md"])
+            kept = outside.read_bytes()
+            still_a_link = link.is_symlink() and os.readlink(link) == str(outside)
+            box = root.path / "mail" / "to-b"
+            landed = sorted(p.name for p in box.glob("*.md"))
+            third = (box / "000003-from-a.md").read_text() if (box / "000003-from-a.md").exists() else ""
+        self.assertEqual(code, 0, f"exited {code}: {err}")
+        self.assertEqual(err, "")
+        self.assertIn("sent #3 to b", out)
+        self.assertEqual(kept, b"untouched\n", "the send wrote through the planted link")
+        self.assertTrue(still_a_link, "the planted link was replaced or moved")
+        self.assertEqual(landed, ["000001-from-a.md", "000003-from-a.md"])
+        self.assertIn("two", third)
 
     def test_a_local_card_delivers_where_to_says_and_reports_to_routes_nothing(self):
         """b joins as a Claude reporting to a; mail from c to b lands in to-b only (No hub, D7).
@@ -452,24 +471,33 @@ class RouterTest(unittest.TestCase):
 
         Local senders share the lock, so many senders to one inbox queue on
         mail/.seq as before (CORE's K3), never on each other here. Must
-        reject a local send that takes the lock alone.
+        reject a local send that takes the lock alone. SHARED fix round 3
+        (Claude Opus 5.5, unreviewed): the ceiling sits under tc's bounded
+        wait (LOCK_WAIT_SECONDS, read from tc), so such a send is still
+        waiting when it ends and fails with these words, not with tc's.
 
-        @interacts  holds mail/.box-b.lock shared; one background send.
-        @deps       fcntl, subprocess; _root.TcRoot.start.
+        @interacts  loads tc in process (TC_ROOT set to the harness root
+                    first, put back after) to read LOCK_WAIT_SECONDS;
+                    holds mail/.box-b.lock shared; one background send.
+        @deps       load_tc, fcntl, subprocess; _root.TcRoot.start;
+                    SHARED_SEND_MARGIN_SECONDS.
         @complexity O(1).
-        @alloc      one TcRoot, one open lock file, one background child.
+        @alloc      one TcRoot, one module, one open lock file, one
+                    background child.
         """
         with _root.TcRoot() as root:
+            ceiling = load_tc(root).LOCK_WAIT_SECONDS - SHARED_SEND_MARGIN_SECONDS
             lock = root.path / "mail" / ".box-b.lock"
             lock.parent.mkdir()
             with open(lock, "a") as held:
                 fcntl.flock(held, fcntl.LOCK_SH)
                 proc = root.start("send", "--from", "a", "--to", "b", "hi")
                 try:
-                    out, err = proc.communicate(timeout=SHARED_SEND_CEILING_SECONDS)
+                    out, err = proc.communicate(timeout=ceiling)
                 except subprocess.TimeoutExpired:
-                    self.fail(f"the send still waited {SHARED_SEND_CEILING_SECONDS} s on a lock "
-                              f"the test held shared: it took the lock alone")
+                    self.fail(f"the send still waited {ceiling} s on a lock the test held shared, under "
+                              f"tc's own {ceiling + SHARED_SEND_MARGIN_SECONDS} s bound: it asked for the "
+                              f"lock alone")
             landed = sorted(p.name for p in (root.path / "mail" / "to-b").glob("*.md"))
         self.assertEqual(proc.returncode, 0, err)
         self.assertEqual(landed, ["000001-from-a.md"])
