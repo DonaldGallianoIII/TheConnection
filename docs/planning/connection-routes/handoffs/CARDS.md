@@ -514,10 +514,15 @@ names the fix: record `os.open` too, as
 `test_a_card_is_written_through_a_tmp_and_renamed` now does. K2 is not
 in this lane's work set, so it is left for the architect or CORE.
 
+Settled before merge (architect note): `62d8a6d` on the dev branch
+widened K2's recorder to `os.open`, `open()` and `Path.write_text`, and
+a trial merge of the dev branch with this lane ran 97 tests OK. CARDS
+merged at `4f35efc` with K2 green.
+
 ## Not verified
 
-- CORE's K2 after merge: it fails (see "Verify, fix round 1"). The other
-  seven pass against this `tc` in a scratch copy.
+- CORE's K2 after merge: settled by `62d8a6d` before the merge (see the
+  architect note under "Verify, fix round 1").
 - Real `codex`. The argv, the flags `--thread` and `--message`, and the
   exit codes come from the plan (C2, D3), not from a run; the fixture's
   label says so. Every codex test ran against a fake or with `Popen`

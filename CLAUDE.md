@@ -1,6 +1,7 @@
 # TheConnection, project guide
 
-Model:  Claude Opus 5.5 (the GROUND lane agent), 2026-10-14
+Model:  Claude Opus 5.5 (the GROUND lane agent), 2026-10-14; kept
+        current at each merge by the architect session (Claude Opus 5.5)
 Status: unreviewed
 
 > **First instruction:** read this whole file before responding to any request.
@@ -89,8 +90,9 @@ Two ideas carry the whole tool.
   keep the old paths. New tests build on the shared harness, `tests/_root.py`.
 - `tc` is one file that several lanes edit. Each lane adds its own functions
   and touches only the shared spots named in `00-index.md` section 4: the
-  `ROUTES` table (planned, contract C2), the argparse block in `main()`, and
-  the module doc block's `@interacts` line.
+  `ROUTES` table (contract C2, built by CARDS), the argparse block in
+  `main()`, and the module doc block's `@interacts` line, plus the merged
+  spots `00-index.md` section 4 lists.
 
 ### Current focus
 
@@ -130,7 +132,7 @@ docs/known-bugs/                   INDEX.md plus one detail file per entry. See 
 docs/planning/connection-routes/   the plan: 00-index, contracts, phases, decisions, handoffs/, pauses/
 mail/to-<name>/NNNNNN-from-X.md    unread messages (gitignored)
 mail/to-<name>/read/               read messages, kept as history
-mail/.box-<name>.lock              the inbox lock: send's count plus write, read's glob plus rename (D14)
+mail/.box-<name>.lock              the inbox lock: send's count plus write, read's glob plus rename, tc card's check plus write (D14)
 mail/.ring-pending-<name>          a failed codex ring; the next send rings again (D14)
 cards/<name>.json                  one address card per name: kind, account, route (gitignored)
 status/<name>.md                   each side's latest status (gitignored)

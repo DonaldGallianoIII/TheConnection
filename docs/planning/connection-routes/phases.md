@@ -155,7 +155,8 @@ the fake-codex tests always.
 - **Do:** `ROUTES` (local and codex only), `Delivery(exit, words,
   warnings)`, `deliver_local`; the size limit (C0); the new-inbox warning;
   read and peek create nothing for an unknown name; a card naming a route
-  not in `ROUTES` answers `route <route> is not built yet`, exit 1.
+  not in `ROUTES` answers `tc send: route <route> is not built yet;
+  nothing sent`, exit 1.
 - **Test:** a send to a name with no card behaves exactly as K1 (run CORE's
   tests against this branch at review); a first send to `nobody` exits 0,
   prints the send line on stdout and the warning on stderr; a second send
@@ -220,7 +221,10 @@ Exit: mail crosses to a second machine and back by hand (QA, D4), and a
 key behind `tc gate` can deliver mail and nothing else.
 
 ### S1. `deliver_ssh` and the outbox (C3)
-- **Files:** `tc`, `tests/test_ssh_route.py`.
+- **Files:** `tc`, `tests/test_ssh_route.py`, and the not-built route
+  tests in `tests/test_router.py` and `tests/test_cards.py` that adding
+  `"ssh"` to `ROUTES` turns red (they become ssh-route tests, or go to
+  a route that stays unbuilt).
 - **Test:** with a fake `ssh` exiting 0: the recorded argv is exactly the C3
   list, `-T` present and `--` right before the target; the body is the
   fake's stdin and not in its argv; exit 0. A name containing a quote:
@@ -256,7 +260,10 @@ key behind `tc gate` can deliver mail and nothing else.
   says `via ssh gate, key homebox-b`. Refused with exit 7 and nothing
   written: `rm -rf /`; `/x/tc send --from a --to b; id`; `/x/tc read b`;
   `/x/tc send --from a --to ../b`; `env TC_ROOT=/tmp /x/tc send ...`; an
-  empty command; `tc gate` with no `--as`. A body over 1 MiB: exit 8.
+  empty command. `tc gate` with no `--as` is a usage error: exit 9 (D12),
+  nothing written. A body over 1 MiB: exit 8. A gated send to a name
+  with a codex card rings it (fake codex asserted called), and a gated
+  `health --json` has no `cards` key (D16).
   Must reject: a gate that runs anything else. Two checks: in process,
   patch `subprocess.*`, `os.system`, `os.spawn*`, `os.exec*`,
   `os.posix_spawn*` and `os.fork` to raise; and out of process, run the
@@ -278,8 +285,10 @@ mailbox (human QA, D4); modes are right by test.
   sent after is mode `0664`; a message and `mail/.seq` written **before**
   init are `0664` after it; `.shared` holds the group name. A group the
   user is not in: refused, nothing changed. `tc health` says `mailbox shared with
-  group <g>`. Must reject: files at `0644` after init (the umask not set
-  before the first write).
+  group <g>`. A folder tc makes after init (`cards/` on a first join, a new
+  inbox and its `read/` on a first send) has mode `2775` and group `g`
+  (D16). Must reject: files at `0644` after init (the umask not set
+  before the first write); a later folder without setgid.
 - **Verify:** `python3 -m unittest tests.test_shared -v`.
 
 ---

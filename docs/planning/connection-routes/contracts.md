@@ -4,7 +4,7 @@ Model:  Claude Opus 5.5 (the TheConnection architect session)
 Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
-        pauses (D15) the same day.
+        pauses (D15) and the P1 and P2 phase review (D16) the same day.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
 Date:   2026-10-14
@@ -123,7 +123,13 @@ Commands:
   card for the session it runs in, prints `joined as <name> (<kind>,
   account <account>, route <route>)`, plus `, reports to <N>` when given. A name that already has a card is overwritten and `joined_at`
   reset (a restarted session rejoins). `--kind codex` with no
-  `CODEX_THREAD_ID`: refused, exit 1, with the words why.
+  `CODEX_THREAD_ID`: refused, exit 1, with the words why. A join that
+  writes a codex card does it under the inbox lock and, when unread mail
+  is already waiting (sent before the join, or rung to a thread that has
+  since died), writes `mail/.ring-pending-<name>` so the next send rings
+  the new thread, and prints `<n> unread waiting for <name>: run tc read
+  <name>` (D16). With nothing waiting, it removes any old marker, so an
+  old thread's backoff never delays the new thread's first ring.
 - `tc card <name> --ssh user@host [--remote-tc PATH] [--account L]
   [--reports-to N] [--force]` writes a card for a name that lives on another machine. If
   `mail/to-<name>/` holds unread mail here, refused with words naming the
@@ -161,8 +167,8 @@ Delivery = collections.namedtuple("Delivery", "exit words warnings")
 
 `send` prints `words` to stdout when `exit` is 0 and to stderr otherwise,
 then prints each of `warnings` to stderr whatever the exit, then exits with
-`exit`. A route named on a card that is not in `ROUTES` answers `route
-<route> is not built yet`, exit 1, nothing written.
+`exit`. A route named on a card that is not in `ROUTES` answers `tc send:
+route <route> is not built yet; nothing sent`, exit 1, nothing written.
 
 - `deliver_local`: today's behavior. Seq under flock, write `.tmp`, rename.
   If the inbox did not exist before **and the name has no card**, add the
@@ -176,20 +182,34 @@ then prints each of `warnings` to stderr whatever the exit, then exits with
      `deliver_local`, and decide to ring when the count was 0 **or** the
      marker exists. Release the lock.
   2. Outside the lock, ring:
-     `codex queue --thread <thread_id> --message "MAIL: <n> unread for <to>. Run: <tc path> read <to>, act on it, reply with <tc path> send --from <to> --to <sender>."`
+     `codex queue --thread <thread_id> --message "MAIL: <n> unread for <to>. Run: TC_ROOT=<root> <tc path> read <to>, act on it, reply with TC_ROOT=<root> <tc path> send --from <to> --to <sender>."`
+     (root and path quoted with `shlex.quote`). The marker is written
+     **before** the ring (D16), so a sender killed mid-ring leaves it.
      with stdin from `/dev/null` and a timeout of `CODEX_RING_SECONDS`
      (30). The ring never runs under the lock, so a slow ring cannot
      block a `tc read`.
-  3. Exit 0: remove the marker if present, and add the word line `rang
-     codex <to> (queued; delivered when its turn ends or the session is
-     resumed)`. Any other exit or a timeout: write the marker (`.tmp`
-     then rename) and add the warning `ring failed for <to>: <first stderr
-     line>; the mail is in its inbox; the next send to <to> rings again`.
+  3. Exit 0: remove the marker, and add the word line `rang codex <to>
+     (queued; delivered when its turn ends or the session is resumed)`.
+     Any other exit: keep the marker and add the warning `ring failed for
+     <to>: <first stderr line>; the mail is in its inbox; the next send to
+     <to> rings again`. A timeout: keep the marker, record in it that the
+     ring timed out (its mtime is the time), and warn `ring failed for
+     <to>: timed out; the mail is in its inbox; a send after HH:MM:SS
+     rings again`, since the backoff (step 4) holds the next sends.
+  4. **Backoff after a timeout** (D16): a send that finds a timed-out
+     marker younger than `RING_BACKOFF_SECONDS` (300) skips the ring,
+     keeps the marker and warns `ring pending for <to>: the last ring
+     timed out at HH:MM:SS; a send after HH:MM:SS rings again`. A relay
+     sending ten messages to a dead Codex would otherwise wait 30 s on
+     each. A fast failure (a non-zero exit, not a timeout) starts no
+     backoff.
   **The send still exits 0**: the mail landed. A card whose `thread_id` is
   not a string matching `[A-Za-z0-9][A-Za-z0-9._-]*` is not rung: the
   warning says `its card's thread_id is not a thread id`, and the marker is
-  written. Two senders racing an empty inbox may both ring; accepted, and
-  said in the doc block.
+  written. Two senders racing an empty inbox may both ring, and with the
+  marker written before the ring, two quick sends may both ring: two
+  doorbells, one read. Accepted, and said in the doc block, so nobody
+  fixes it back into a lost wake.
 
 `tc read` holds the same inbox lock from its glob of the inbox to its
 last rename into `read/`, so a send cannot land a message between them
@@ -255,10 +275,12 @@ command="/home/you/TheConnection/tc gate --as homebox-b",no-pty,no-port-forwardi
 
 - `<any> send --from <name> --to <name>`, both names valid under C0. The
   far side's `--from` is **ignored**: the message is delivered as from the
-  `--as` name, through `deliver_local` with `header_note = "via ssh gate,
-  key <as>"`. A key can never speak as the relay or any other local name.
-  Size limit (C0) applies.
-- `<any> health --json`. Runs `cmd_health`.
+  `--as` name, **through the router** (C2) with the inbox lock and
+  `header_note = "via ssh gate, key <as>"`, so a gated message to a codex
+  name is rung and a card's route is respected (D16). A key can never
+  speak as the relay or any other local name. Size limit (C0) applies.
+- `<any> health --json`. Runs `cmd_health` **without the `cards` key**: a
+  far key never reads account labels or ssh targets (D16).
 
 Anything else: stderr `tc gate: refused`, exit 7, nothing written. The gate
 never starts a shell and never runs another program.
@@ -281,7 +303,10 @@ For a separate Linux user per account on one machine.
   holding the group name.
 - While `.shared` exists, `tc` sets `os.umask(0o002)` before it writes
   anything, so every file and lock it makes is group-writable, and the
-  setgid folders give them group `g`.
+  setgid folders give them group `g`. Any folder `tc` creates later
+  (`cards/`, `status/`, `outbox/`, an inbox and its `read/`) gets group
+  `g` and mode `2775` as it is made. Init only reaches the folders that
+  exist at the time (D16).
 - `tc health` says `mailbox shared with group <g>` or `mailbox private`.
 
 ## C5. The board feed

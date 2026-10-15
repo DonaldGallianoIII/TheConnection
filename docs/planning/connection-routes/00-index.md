@@ -4,8 +4,10 @@ Model:  Claude Opus 5.5 (the TheConnection architect session), from
         Donald's asks of 2026-10-14 and the plan shape a planning
         session (Claude Fable 5.1) sent the same day
 Status: draft. Reviewed once by the planning session (Claude Fable
-        5.1, 2026-10-14, 24 findings, all folded in). Nothing here is
-        built. Every item marked default is Donald's to confirm or
+        5.1, 2026-10-14, 24 findings, all folded in). Being built: P0,
+        P1 and P2 are merged into the dev branch; P4 (BOARD) is in its
+        fix round; P3 and P5 are not started (CLAUDE.md's Status has the
+        commits). Every item marked default is Donald's to confirm or
         overrule (section 11).
 Date:   2026-10-14
 
@@ -79,7 +81,7 @@ What gets built:
 - **An outbox** for mail the ssh route could not deliver, and `tc flush`.
 - **The live board**: a stdlib server on 127.0.0.1 with a token, feeding the
   board look real mailbox state.
-- **Tests** for the core mailbox, which today has none in the tree.
+- **Tests** for the core mailbox (CORE, merged at `f5f6923`).
 - **The README** rewritten around the rule above, a "which route am I" chart,
   and one section per route. `JOIN.md` for Claude, `JOIN-CODEX.md` for Codex.
 
@@ -141,8 +143,12 @@ one file every lane touches.
 **Shared files.** `tc` is one file, and CARDS, SSH and SHARED all edit it.
 Each lane adds its own functions and touches only these shared spots, one
 line each where it can: the `ROUTES` table (C2), the argparse block in
-`main()`, the module doc block's `@interacts` line. The architect resolves
-those at merge. BOARD never edits `tc`: `board/serve.py` loads it as a
+`main()`, the module doc block's `@interacts` line. In the merged code
+from CARDS on, also: `main()`'s start (SHARED's umask must run before any
+write), the exit-code constants, `write_new_file` and `inbox_lock` (SHARED
+needs both to honor the group and setgid; the SSH gate needs the lock),
+and the route tests in `tests/test_router.py` that assert `ssh` is not
+built (SSH flips them). The architect resolves those at merge. BOARD never edits `tc`: `board/serve.py` loads it as a
 module (C5). Any other file two lanes both need is a pause (rule 10).
 
 ## 5. Contracts
