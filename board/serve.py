@@ -17,17 +17,19 @@ mailbox is tc's: TC_ROOT if set, else the folder tc lives in.
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
 
-Where each feed key comes from. `snap` is tc.health_snapshot(). At this
-lane's base it returns time, machine, sessions, listeners, watchers and
-mail; CARDS adds a `cards` key, and others may follow. feed() reads only
-the keys below and ignores the rest, and never takes cards from health:
+Where each feed key comes from. `snap` is Board.snapshot(): the parts of
+tc's health the feed needs, built here from tc.now_iso(), machine_now(),
+tc.listeners("wait") and tc.mailbox_summary(), never the full
+tc.health_snapshot(). That one also runs nvidia-smi, which can take tc's
+GPU_QUERY_TIMEOUT_SECONDS (longer than the page waits for an answer),
+reads every process's stat and cmdline, and on the merged tc reads every
+card again; the feed uses none of those, so a poll never waits on a GPU
+query. Cards never come from tc's health:
 
   at                       snap["time"] (tc's now_iso(): local time, seconds)
-  machine.load1            snap["machine"]["load1"]
-  machine.cores            snap["machine"]["cores"]
-  machine.mem_avail_pct    snap["machine"]["mem_avail_pct"]
-                           (snap's "gpus", "sessions" and "watchers" are not
-                           in C5 and are dropped)
+  machine.load1            snap["machine"]["load1"]: machine_now(), the
+  machine.cores            numbers and rounding of tc's machine_stats
+  machine.mem_avail_pct    without its GPU query
   nodes[].id               a name with an inbox (a key of snap["mail"]) or a
                            card (cards/<name>.json), sorted
   nodes[].listener_pid     snap["listeners"][name]: the pid tc read from
@@ -76,11 +78,13 @@ partner is a lower relay is drawn as that relay's `worker`, marked
 `inferred`. `tc join <name> --reports-to <relay>` fixes it.
 
 @interacts  loads ../tc as a module with TC_ROOT set for the load only,
-            then calls tc.health_snapshot(), which reads /proc (meminfo,
-            locks, each process's stat and cmdline), runs nvidia-smi when
-            it exists, and globs and stats mail/ and status/ under tc's
-            ROOT. Reads cards/*.json and the head of status/<name>.md; lists
-            mail/to-*/ and mail/to-*/read/ and stats a few message files.
+            then calls tc.now_iso(), tc.listeners("wait") (reads
+            /proc/locks, globs mail/.wait-*.lock) and tc.mailbox_summary()
+            (globs and stats mail/ and status/ under tc's ROOT); reads the
+            load average and /proc/meminfo itself. Never runs nvidia-smi
+            and never scans the process list. Reads cards/*.json and the
+            head of status/<name>.md; lists mail/to-*/ and mail/to-*/read/
+            and stats a few message files.
             Opens no message body. Writes nothing to the mailbox; the first
             load of tc may write tc's bytecode cache (__pycache__/ beside
             tc), as any import of it does. main() binds one
@@ -94,21 +98,21 @@ partner is a lower relay is drawn as that relay's `worker`, marked
 @deps       python3 stdlib (argparse, collections, heapq, hmac, http.server,
             importlib, io, json, os, pathlib, re, secrets, signal, stat,
             sys, threading, time, urllib.parse); ../tc; Linux (/proc via tc).
-@complexity feed(), per poll: O(p + k + m log W + n + c^2). tc's health
-            snapshot is O(p + k + m), more than the O(p + k + n) tc's header
-            gives, because its mailbox_summary stats every message file: p
-            processes (hundreds), k lines in /proc/locks (tens), m message
-            files (about 800 after two weeks of heavy use, and only growing,
-            since read/ is kept). Here: every inbox listed again and each
-            of the m names matched once (no body read); the last
-            WIRE_HISTORY picked in O(m log W), W = 50; W + n + l more stats
-            for n names (single digits to tens) and l linked pairs (at most
-            n^2/2, tens in practice); levels in O(n + e), e parent edges (at
-            most n); and c(c-1)/2 native links over c claude cards on one
-            named account. In all m + W + n + l stats per poll. One request:
-            O(1) to route, plus one feed() or one read of a board file (tens
-            of KB).
-@alloc      per feed(): tc's snapshot builds m path and stat objects; here
+@complexity feed(), per poll: O(k + m log W + n + c^2). The snapshot:
+            tc.listeners is O(k + n), k lines in /proc/locks (tens) and n
+            names (single digits to tens); tc.mailbox_summary is O(n + m),
+            since it stats every message file, m of them (about 800 after
+            two weeks of heavy use, and only growing, since read/ is kept).
+            Here: every inbox listed again and each of the m names matched
+            once (no body read); the last WIRE_HISTORY picked in
+            O(m log W), W = 50; W + n + l more stats for l linked pairs (at
+            most n^2/2, tens in practice); each card read once, c cards;
+            levels in O(n + e), e parent edges (at most n); and c(c-1)/2
+            native links over the claude cards on one named account. In
+            all m + W + n + l stats per poll, and no child process. One
+            request: O(1) to route, plus one feed() or one read of a board
+            file (tens of KB).
+@alloc      per feed(): tc.mailbox_summary builds m path and stat objects; here
             one Message per message file, the per-pair counts, and the
             returned dict (n nodes, at most W wires, l + n + c(c-1)/2
             links); all freed when the caller drops them. Held across calls: the
@@ -165,10 +169,18 @@ WIRE_HISTORY = 50
 # pair of peers, and a relay needs a second partner to be one.
 HUB_MIN_PARTNERS = 2
 # A card is a few hundred bytes (C1). The board reads at most this much of a
-# file in cards/ and skips a bigger one, which is not a card. This bounds the
-# board's own read only: once CARDS merges, tc's health snapshot reads every
-# card whole on every poll (cards_summary), so a huge file costs that read.
+# file in cards/ and skips a bigger one, which is not a card. The merged tc
+# caps its own card reads at the same 65,536 bytes; feed() never calls tc's
+# card readers (Board.snapshot takes only the parts it needs), so each poll
+# reads each card once, here.
 CARD_READ_MAX_BYTES = 65536
+# Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+# machine_now() gives C5's machine keys as tc's machine_stats does: load to
+# two places, free memory as a percent to one, from /proc/meminfo.
+LOAD_ROUND_DIGITS = 2
+MEM_PCT_ROUND_DIGITS = 1
+PERCENT = 100.0
+MEMINFO_PATH = "/proc/meminfo"
 
 # The server (C6). 8780 because 8765 was taken on the owner's machine on
 # 2026-10-14 (O7); --port moves it, and port 0 lets the OS pick.
@@ -266,6 +278,30 @@ def load_tc(root=None):
             else:
                 os.environ["TC_ROOT"] = old
     return tc
+
+
+# Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+def machine_now():
+    """C5's machine keys right now: load1, cores and mem_avail_pct.
+
+    The same numbers and rounding as tc's machine_stats, without its GPU
+    query: machine_stats runs nvidia-smi, which may take up to tc's
+    GPU_QUERY_TIMEOUT_SECONDS, and the feed has no GPU key.
+
+    @interacts  reads the load average and /proc/meminfo.
+    @deps       os.
+    @complexity O(1): one short /proc file.
+    @alloc      one small dict, returned.
+    """
+    info = {}
+    with open(MEMINFO_PATH) as meminfo:
+        for line in meminfo:
+            key, _, rest = line.partition(":")
+            fields = rest.split()
+            if fields and fields[0].isdigit():
+                info[key] = int(fields[0])
+    return {"load1": round(os.getloadavg()[0], LOAD_ROUND_DIGITS), "cores": os.cpu_count() or 1,
+            "mem_avail_pct": round(PERCENT * info["MemAvailable"] / info["MemTotal"], MEM_PCT_ROUND_DIGITS)}
 
 
 def read_regular(path, limit):
@@ -600,7 +636,8 @@ class Board:
 
         feed() skips such a card on every poll, never answering 500 for it;
         the line names the file once per Board, so a poll every 3 s does
-        not repeat it.
+        not repeat it. The name is printed escaped (repr), since anyone who
+        can write to cards/ chooses it.
 
         @interacts  writes one line to stderr, the first time per file name.
         @deps       sys.
@@ -611,25 +648,48 @@ class Board:
         if file_name in self.nested_cards:
             return
         self.nested_cards.add(file_name)
-        print(f"serve.py: skipped cards/{file_name}: nested past Python's recursion limit",
+        # repr() escapes any control character in the name, so a planted
+        # file name cannot write escape sequences to this terminal.
+        print(f"serve.py: skipped {'cards/' + file_name!r}: nested past Python's recursion limit",
               file=sys.stderr, flush=True)
+
+    # Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+    def snapshot(self):
+        """The parts of tc's health the feed reads: time, machine, listeners, mail.
+
+        Built from tc.now_iso(), machine_now(), tc.listeners("wait") and
+        tc.mailbox_summary(), in tc.health_snapshot()'s shape, instead of
+        calling tc.health_snapshot(), which also runs nvidia-smi (up to
+        tc's GPU_QUERY_TIMEOUT_SECONDS), scans every process and, on the
+        merged tc, reads every card: none of which the feed uses.
+
+        @interacts  see the module block: /proc/locks, the lock files, mail/
+                    and status/ through tc; the load average and
+                    /proc/meminfo through machine_now.
+        @deps       tc.now_iso, tc.listeners, tc.mailbox_summary;
+                    machine_now.
+        @complexity O(k + n + m): k lines in /proc/locks, n names, m message
+                    files.
+        @alloc      one dict, returned.
+        """
+        return {"time": self.tc.now_iso(), "machine": machine_now(),
+                "listeners": self.tc.listeners("wait"), "mail": self.tc.mailbox_summary()}
 
     def feed(self):
         """One C5 feed object for the mailbox as it is now.
 
         @interacts  see the module block; updates last_listening_at and,
                     through note_nested, nested_cards.
-        @deps       tc.health_snapshot, read_cards, scan_messages,
-                    status_preview, file_age, parents_of, roles_of,
-                    levels_of, note_nested.
-        @complexity O(p + k + m log W + n + c^2) per poll; the module block
+        @deps       snapshot, read_cards, scan_messages, status_preview,
+                    file_age, parents_of, roles_of, levels_of, note_nested.
+        @complexity O(k + m log W + n + c^2) per poll; the module block
                     names each term.
         @alloc      the per-poll objects the module block lists, and the
                     returned dict; last_listening_at gains one float per
                     name listening now and drops each past DOWN_WINDOW_S.
         """
         now = self.clock()
-        snap = self.tc.health_snapshot()
+        snap = self.snapshot()
         pids = snap["listeners"]
         for name, pid in pids.items():
             if pid:

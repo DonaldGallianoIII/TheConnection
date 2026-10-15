@@ -64,8 +64,10 @@ import {
 // C6 and O7: a wire moves within 3 s of a send, and one feed costs the
 // server tens of ms, so a poll this often is cheap.
 const POLL_MS = 3000;
-// A feed answers in tens of ms. One still out after this is late: the pill
-// says so, and the request is dropped before the next poll would be due.
+// A feed answers in tens of ms: serve.py runs no GPU query and scans no
+// process list for it (serve.py Board.snapshot). One still out after this
+// is late: the pill says so, and the request is dropped before the next
+// poll would be due, so it stays under POLL_MS.
 const FETCH_TIMEOUT_MS = 2500;
 // Room under the board in its frame. The board's smallest text is at
 // MIN_TEXT_PX already, so it never scales down: it wraps to the canvas's

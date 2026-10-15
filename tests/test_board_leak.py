@@ -8,21 +8,21 @@ Status: unreviewed
 
 RSS is read from VmRSS in /proc/self/status, the way the listener's flat
 13 MB was measured. During the 1,000 calls PATH holds only a fake
-`nvidia-smi` that prints one GPU line: tc's health snapshot still starts a
-child every call, as it does with a GPU present, and the run takes seconds
-instead of the minutes the real tool needs.
+`nvidia-smi` that prints one GPU line. feed() never runs it (serve.py's
+Board.snapshot takes no GPU reading); one direct tc.machine_stats() call
+proves the fake is found.
 
 @interacts  one TcRoot with mail (sent by tc and written by hand), a card
             and one proven listener; one Board on it; os.environ["PATH"]
             patched for the run; reads /proc/self/status and lists
-            /proc/self/fd. The second test swaps the Board's
-            tc.health_snapshot for a stand-in that names one new listener
+            /proc/self/fd. The second test swaps the Board's snapshot
+            (Board.snapshot) for a stand-in that names one new listener
             per call.
 @deps       python3 stdlib (gc, importlib, os, pathlib, sys, unittest,
             unittest.mock); tests/_root.py; board/serve.py; ../tc.
 @complexity first test: 1,000 feed() calls over about 23 names and 43
-            messages, each O(n + m + e) plus tc's snapshot and one fake
-            child (about 10 ms here). Second: 1,000 feed() calls over an
+            messages, each O(n + m + e) plus Board.snapshot's parts of tc's
+            health (no child process). Second: 1,000 feed() calls over an
             empty mailbox, under a second in all.
 @alloc      one TcRoot and one Board per test, released at its end.
 """
@@ -193,7 +193,7 @@ class FeedLeakTest(unittest.TestCase):
         it would hold all 1,000 names by the end.
 
         @interacts  1,000 feed() calls over an empty mailbox, with
-                    tc.health_snapshot swapped for a stand-in.
+                    Board.snapshot swapped for a stand-in.
         @deps       _root.TcRoot, serve.Board, unittest.mock.
         @complexity O(FEED_CALLS * PRUNED_MAP_MAX) for the prune checks.
         @alloc      one TcRoot, removed on exit.
@@ -217,7 +217,7 @@ class FeedLeakTest(unittest.TestCase):
         biggest = 0
         with _root.TcRoot() as root:
             board = serve.Board(root=root.path, clock=lambda: clock["now"])
-            with mock.patch.object(board.tc, "health_snapshot", stand_in):
+            with mock.patch.object(board, "snapshot", stand_in):
                 for i in range(FEED_CALLS):
                     clock["now"] = i * NAME_STEP_S
                     listening.clear()

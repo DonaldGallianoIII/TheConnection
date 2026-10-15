@@ -21,15 +21,17 @@ renamed, mail/.seq raised), and the feed reads only their names.
             module; each Board loads tc with TC_ROOT set to the test's root.
             Writes cards, status lines and message files in that root only.
 @deps       python3 stdlib (contextlib, fcntl, importlib, io, json, os,
-            pathlib, sys, threading, time, unittest, unittest.mock);
+            pathlib, shlex, sys, threading, time, unittest, unittest.mock);
             tests/_root.py; board/serve.py; ../tc.
 @complexity O(1) per test: at most 52 message files, 9 names, two
             listeners, and a few feed() calls, each O(n + m + e) in serve.py
-            plus tc's health snapshot (tens of ms, most of it nvidia-smi
-            when present). The D15 state test swaps the snapshot for a
-            stand-in, so it starts no listener and no child. The hostile
-            mailbox tests make a FIFO, a looping link and a symlink in
-            their own root only.
+            plus Board.snapshot's parts of tc's health (milliseconds, no
+            GPU query). The D15 state test swaps the snapshot for a
+            stand-in, so it starts no listener and no child. The GPU test
+            puts a fake nvidia-smi on PATH and runs it once, through
+            tc.machine_stats. The hostile mailbox tests make a FIFO, a
+            looping link, a symlink and a card named with an escape
+            sequence in their own root only.
 @alloc      one TcRoot per test, removed when its context exits; the feeds
             are plain dicts dropped at the end of each test.
 """
@@ -41,6 +43,7 @@ import io
 import json
 import os
 import pathlib
+import shlex
 import sys
 import threading
 import time
@@ -91,6 +94,12 @@ ACCOUNT_UNKNOWN = "unknown"
 NESTED_DEPTH = 60000
 # A feed that meets a FIFO must still return within this long.
 FEED_CEILING_S = 2
+# Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+# The fake nvidia-smi a test puts on PATH: owner may run it, all may read.
+FAKE_EXE_MODE = 0o755
+# A card file name with an escape sequence in it (ESC [ 2 J clears a
+# terminal), legal on Linux, illegal under C0.
+ESCAPE_CARD_NAME = "deep\x1b[2J.json"
 
 
 def load_serve():
@@ -398,7 +407,7 @@ class FeedTest(unittest.TestCase):
     def test_state_order_follows_d15(self):
         """D15's order: writing, down, listening, doorbell, remote, idle; the first match wins.
 
-        One Board, a stand-in health snapshot that names the listeners, and
+        One Board, a stand-in snapshot that names the listeners, and
         message files aged by hand against a fake clock. Feed 1 sees w1,
         w2, d1, d2, l1 and l2 listening. Feed 2, 20 s later: w1 (still
         listening) and w2 (stopped) each sent 3 s ago and read writing; d1
@@ -412,7 +421,7 @@ class FeedTest(unittest.TestCase):
         listener is in last_listening_at, so l1 would read down.
 
         @interacts  five cards and three message files in a fresh TcRoot;
-                    three feed() calls with tc.health_snapshot swapped for a
+                    three feed() calls with Board.snapshot swapped for a
                     stand-in.
         @deps       _root.TcRoot, write_card, put_message, age_file,
                     serve.Board, unittest.mock.
@@ -423,7 +432,7 @@ class FeedTest(unittest.TestCase):
         listening = {}
 
         def stand_in():
-            """A health snapshot in tc's shape naming `listening` and an inbox for each name.
+            """A snapshot in Board.snapshot's shape naming `listening` and an inbox for each name.
 
             @interacts  reads `listening`.
             @deps       none.
@@ -454,7 +463,7 @@ class FeedTest(unittest.TestCase):
                            route=route, thread_id="t1" if route == "codex" else None)
             clock = FakeClock(FAKE_NOW)
             board = serve.Board(root=root.path, clock=clock)
-            with mock.patch.object(board.tc, "health_snapshot", stand_in):
+            with mock.patch.object(board, "snapshot", stand_in):
                 listening.update(dict.fromkeys(("w1", "w2", "d1", "d2", "l1", "l2"), STAND_IN_PID))
                 board.feed()
                 clock.now += PAST_WRITING_S
@@ -497,6 +506,45 @@ class FeedTest(unittest.TestCase):
         self.assertEqual(by_id(feed)["f"]["state"], "idle", json.dumps(feed["nodes"]))
         self.assertEqual([(w["from"], w["age_s"]) for w in feed["wires"]], [("f", None)])
         self.assertEqual([link["last_age_s"] for link in feed["links"] if link["kind"] == "mailbox"], [None])
+
+    # Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+    def test_a_feed_runs_no_gpu_query(self):
+        """A fake nvidia-smi on PATH records each run: tc's machine_stats runs it, feed() never does.
+
+        tc's health snapshot waits up to GPU_QUERY_TIMEOUT_SECONDS for
+        nvidia-smi, longer than the page waits for an answer. Must reject a
+        feed built from tc.health_snapshot(): the fake's record would exist
+        after feed(). The control call to tc.machine_stats() proves the fake
+        is found on PATH, so the check cannot pass by not checking.
+
+        @interacts  one card and one fake nvidia-smi in a fresh TcRoot;
+                    PATH patched for the test; one feed() and one
+                    tc.machine_stats().
+        @deps       _root.TcRoot, write_card, serve.Board, unittest.mock,
+                    shlex.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            write_card(root.path, "a")
+            folder = root.base / "gpu"
+            folder.mkdir()
+            record = root.base / "gpu-ran"
+            fake = folder / "nvidia-smi"
+            fake.write_text(f"#!/bin/sh\necho ran >> {shlex.quote(str(record))}\necho '30, 5'\n")
+            fake.chmod(FAKE_EXE_MODE)
+            board = serve.Board(root=root.path)
+            with mock.patch.dict(os.environ, {"PATH": f"{folder}{os.pathsep}{os.environ.get('PATH', '')}"}):
+                feed = board.feed()
+                ran_in_feed = record.exists()
+                gpus = board.tc.machine_stats()["gpus"]
+                ran_in_control = record.exists()
+        self.assertFalse(ran_in_feed, "feed() ran nvidia-smi")
+        self.assertTrue(ran_in_control, "the fake nvidia-smi was never found, so the check proves nothing")
+        self.assertEqual(gpus, [{"temp_c": 30, "util_pct": 5}])
+        self.assertEqual(set(feed["machine"]), {"load1", "cores", "mem_avail_pct"})
+        self.assertEqual(feed["machine"]["cores"], os.cpu_count() or 1)
+        self.assertEqual([node["id"] for node in feed["nodes"]], ["a"])
 
 
 class ShapesTest(unittest.TestCase):
@@ -833,6 +881,31 @@ class HostileMailboxTest(unittest.TestCase):
         lines = err.getvalue().splitlines()
         self.assertEqual(len(lines), 1, f"stderr lines: {lines}")
         self.assertIn("cards/deep.json", lines[0])
+
+    # Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+    def test_a_nested_card_is_named_escaped_on_stderr(self):
+        """A nested card whose file name holds an escape sequence is named with it escaped.
+
+        Anyone who can write to cards/ chooses the name, and serve.py's
+        terminal would run the sequence. Must reject a raw print of the
+        name: the ESC byte would reach stderr.
+
+        @interacts  one card and one nested card in a fresh TcRoot; one
+                    feed() with stderr captured.
+        @deps       _root.TcRoot, write_card, serve.Board, contextlib.
+        @complexity O(NESTED_DEPTH) for the one json.loads.
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            write_card(root.path, "a")
+            (root.path / "cards" / ESCAPE_CARD_NAME).write_text("[" * NESTED_DEPTH)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                serve.Board(root=root.path).feed()
+        lines = err.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, f"stderr lines: {lines!r}")
+        self.assertNotIn("\x1b", lines[0], f"the escape reached stderr raw: {lines[0]!r}")
+        self.assertIn(repr("cards/" + ESCAPE_CARD_NAME), lines[0])
 
     def test_one_bad_inbox_entry_skips_only_itself(self):
         """mail/to-loop is a link to itself; the messages between a and b still make wires and a link.
