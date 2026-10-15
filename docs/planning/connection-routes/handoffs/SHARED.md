@@ -3,7 +3,9 @@
 Model:  Claude Opus 5.5 (the SHARED lane agent)
 Status: unreviewed. Fix round 1 done (audit
         `audits/2026-10-14-2100-standard`, brief `fixes/round-1.md`).
-        The D21 round done (the SHARED fixer, Claude Opus 5.5).
+        The D21 round done (the SHARED fixer, Claude Opus 5.5). Fix
+        round 2 done (audit `audits/2026-10-14-2259-quick`, brief
+        `fixes/round-2.md`, the SHARED fixer, Claude Opus 5.5).
 Date:   2026-10-14
 Branch: Claude-Development-TheConnection-SHARED, from
         Claude-Development-TheConnection at c8708e5 (after P0, P1 and P2
@@ -27,12 +29,20 @@ Where:  ~/TheConnection-lanes/shared
 | Round 1 (e) | `b36d4fc` | Bring the SHARED handoff and both pauses up to D19 and D20, and add route-shared QA |
 | D21 | `f04944d` | Build D21: .shared is the init user's alone, and a shared send needs a card |
 | D21, second | `e9f27eb` | Refuse another member's init before it changes anything, settle .shared at 0644, and date status files by lstat |
-| D21, third | the commit that changes this file | Refuse a member's init over an unreadable .shared before it changes anything, and name another user's 0664 .shared |
+| D21, third | `0620372` | Refuse a member's init over an unreadable .shared before it changes anything, and name another user's 0664 .shared |
+| Round 2 (a) | `3e4f07f` | Never let a set-back mail/.seq replace a message, and never let a held lock hang tc (D20) |
+| Round 2 (b) | `3d5d8be` | Init never makes or leaves ROOT group-writable, and two joins of one name cannot both claim it (D21) |
+| Round 2 (c) | the commit that changes this file | Say what tc health cannot see, never a silent 0 or a traceback; true doc blocks, handoff and QA words |
 
 The extra commit is one the brief did not list: writing step 13 of
 `route-shared.md` (step 18 since the D21 round) showed that a read which
 could move nothing still printed `no unread mail`. No amend, reset or
 rebase. Nothing pushed or merged.
+
+Round 2's three commits change `tc`, `tests/test_shared.py`,
+`qa/human/route-shared.md` and this file, plus one change to CORE's
+`tests/test_mailbox.py` (K2 records `os.link`), which the brief allows
+for that change only. `tests/test_codex_route.py` needed no change.
 
 The three D21 commits change `tc`, `tests/test_shared.py`,
 `qa/human/route-shared.md` and this file, nothing else. The second
@@ -65,7 +75,7 @@ function added or changed has `@interacts`, `@deps`, `@complexity` and
   required (a missing one is a usage error, exit 9). A group this
   machine lacks, or one the user is not in (`os.getgroups()` plus the
   effective group), is refused, exit 1, before anything is touched.
-- Init makes ROOT (not shared: no group, no mode), then `mail/`,
+- Init makes ROOT (not shared: no group; 0755 since round 2, below), then `mail/`,
   `status/`, `cards/` and `outbox/` when missing (D19). A ROOT it cannot
   reach is refused with words on search access, not a traceback. It then
   walks the four (`shared_entries`), one entry at a time, and gives each
@@ -98,7 +108,10 @@ function added or changed has `@interacts`, `@deps`, `@complexity` and
 - `tc health` ends with `mailbox shared with group <g>` or `mailbox
   private`. `health_snapshot()` carries `shared_group` (the name, or
   null) and `shared_problem` (why `.shared` is unreadable, or null); it
-  never raises on a bad `.shared`, so BOARD's feed keeps answering.
+  never raises on a bad `.shared`, so `tc health` answers when `.shared`
+  turns unreadable after `main()` read it, and so does a caller that
+  loads tc as a module. BOARD's feed never calls it: it builds from
+  `listeners()` and `mailbox_summary()` (round 2, the audit's LOW-5).
 
 **D17, no planted links.**
 
@@ -219,15 +232,68 @@ until D21 ruled on them.
   unreadable, and `tc watch` does not call `health_snapshot`, so the
   block does not claim either.
 
-**Tests.** `tests/test_shared.py`, 39 tests in seven classes, each on
+**Round 2: D20's bound and D21's ROOT** (audit
+`audits/2026-10-14-2259-quick`, brief `fixes/round-2.md`). Every new
+block in `tc` carries a `SHARED fix round 2 (Claude Opus 5.5,
+unreviewed)` comment.
+
+- No lost mail (MEDIUM-1, commit a). `deliver_local` hard-links the
+  finished `.tmp` to the message's name (`os.link` fails on anything
+  there, where a rename replaced it), then removes the `.tmp`. A name
+  already taken in the inbox, or in its `read/` (where `tc read`
+  renames), takes the next number, up to `PUBLISH_MAX_TRIES` (100), then
+  refuses with words saying `mail/.seq` may have been set back. One
+  code path, private or shared. Any other link failure refuses with
+  words; the old rename raised a traceback and left the `.tmp` when
+  another user owned the name.
+- No hang (MEDIUM-3, commit a). `flock_within` waits at most
+  `LOCK_WAIT_SECONDS` (3) for a flock: the wait sits in the kernel's
+  queue as a plain flock does, and a one-shot `SIGALRM` timer cuts it
+  off. `next_seq` and `inbox_lock` then refuse, exit 1, `tc: another
+  process is holding <what>'s lock; try again` (`<what>` is the
+  `mail/.seq` path, or the name for an inbox lock), with nothing
+  written. Send, read, a codex join, `tc card` and the codex route all
+  come through those two. `write_ring_marker` returns the same words,
+  which its callers already say as a marker they could not write: the
+  synthesis's unreviewed note on the marker's flock, covered. The wait
+  and watch locks still refuse at once.
+- ROOT (MEDIUM-2, commit b). Init makes a missing ROOT, and each missing
+  folder above it, at `ROOT_MODE` 0755 under `ROOT_UMASK` 022, before
+  the shared umask. It refuses a ROOT its group or anyone may write
+  without the sticky bit, before anything changes, and tells ROOT's
+  owner to run `chmod g-w,o-w <ROOT>` first.
+- The claim (LOW-1, commit b). `claim_inbox` makes the inbox, then
+  `read/`, each by an mkdir as the joiner, and looks at the owner after
+  each, so the loser of two joins at once is refused with the taken
+  words and makes nothing inside the winner's inbox.
+- What health cannot see (LOW-2, LOW-4 and one item from BOARD's
+  review, commit c). `message_files` lists with `os.listdir` (pathlib's
+  glob hid a listing error) and returns a third value, the problem, when
+  it could not list the folder or `lstat` an entry; an entry it could
+  not look at (any `OSError` but gone) is skipped with words, never a
+  traceback. `mailbox_summary` gives such an inbox `unread` null (or
+  `newest_mail_age_s` null, for `read/`) and a new key, `mail_problem`,
+  with the reason. `tc health` prints `unread unknown` and the reason,
+  and its last line says `mailbox shared, group unknown: <why>` when
+  `health_snapshot` reports `shared_problem`, never `mailbox private`.
+- Doc blocks (LOW-3, commit c). `mailbox_summary`'s block no longer
+  claims what the board counts: the board reads `mail/` on its own for
+  its wires and links, and nothing in tc governs that.
+
+**Tests.** `tests/test_shared.py`, 48 tests in ten classes (39 in seven
+before round 2), each on
 `tests/_root.py`. Every class inherits `UmaskTestCase`, so each test
 runs under umask 022 and a tc that never sets its own writes 0644 and
 fails. `SharedTest` (H1, 4), `NoPlantedLinksTest` (D17, 5),
 `RegularFilesOnlyTest` (D19 and the status age, 5),
 `NobodyTouchesAnotherMembersMailTest` (D20, 8), `InitAndRefusalsTest`
 (init, make_folder and the refusals' words, 8),
-`SharedIsTheInitUsersAndDeliveryNeedsACardTest` (D21, 8) and
-`GroupsToTestTest` (1). The mode tests run once with the
+`SharedIsTheInitUsersAndDeliveryNeedsACardTest` (D21, 8),
+`NoLostMailNoHangTest` (round 2, 3), `RootAndClaimTest` (round 2, 3),
+`HealthSaysWhatItCannotSeeTest` (round 2, 3) and `GroupsToTestTest` (1).
+The round 2 lock test runs its seven cases at once, each child under a
+timeout, so it costs about two waits and a broken tc fails it instead of
+hanging the suite. The mode tests run once with the
 user's primary group and once with a supplementary group; a user with no
 named supplementary group gets that run as a skipped subtest with its
 reason, never a silent absence. One user cannot prove another user's
@@ -257,6 +323,13 @@ Node 22). Each command's result line:
 | D21, second | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 145 tests`, `OK` |
 | D21, third | `python3 -m unittest tests.test_shared -v` | `Ran 39 tests`, `OK` |
 | D21, third | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 147 tests`, `OK` |
+| Round 2 (a) | `python3 -m unittest tests.test_shared -v` | `Ran 42 tests`, `OK` |
+| Round 2 (a) | `python3 -m unittest tests.test_mailbox -v` | `Ran 8 tests`, `OK` |
+| Round 2 (a) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 150 tests`, `OK` |
+| Round 2 (b) | `python3 -m unittest tests.test_shared -v` | `Ran 45 tests`, `OK` |
+| Round 2 (b) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 153 tests`, `OK` |
+| Round 2 (c) | `python3 -m unittest tests.test_shared -v` | `Ran 48 tests`, `OK` |
+| Round 2 (c) | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 156 tests`, `OK` |
 | each | `node --test tests/*.test.mjs` | `# tests 8`, `# pass 8`, `# fail 0` |
 
 The base, `c8708e5`, ran 108 Python tests and 8 Node tests, all passing.
@@ -349,6 +422,39 @@ the walk, and that test is now
 | the same, on the other-group case | `test_a_members_init_with_another_group_after_joining_changes_nothing` | `{'mai[16 chars]045, <gid2>), 'outbox': ('folder', 2045, <gid2>), ...} != {'mai[16 chars]045, <gid1>), ...}` |
 | no line for another user's 0664 `.shared` (extra) | `test_a_members_same_group_rerun_leaves_another_users_0664_shared_and_says_so` | `'' != 'tc init: .../.shar[56 chars]it\n'` |
 
+Round 2, on the code of the commit named, each run against its one
+test. 509 is 0775 and 493 is 0755.
+
+| Item | Mutation | Red |
+|---|---|---|
+| 1 (a) | the publish back to a rename | `b'# #6 ... after the set back\n' != b'# #6 ... the unread one\n' : a send after mail/.seq was set back replaced unread #6` (private and shared) |
+| 1 (a) | no `read/` check before the link | `b'# #1 ... second\n' != b'# #1 ... first, read\n' : a read replaced read/#1 after mail/.seq was set back` (private and shared) |
+| 1 (a) | K2's own (CORE's): the final name written directly | `PosixPath('.../000001-from-a.md') unexpectedly found in [...] : send created the final name 000001-from-a.md directly` |
+| 3 (a) | no timer: a blocking flock at all three sites | `send, inbox lock: tc still waited 6 s on a lock this test held: it hangs` |
+| 3 (a) | `next_seq` alone takes a blocking flock | `send, mail/.seq: tc still waited 6 s on a lock this test held: it hangs` |
+| 3 (a) | `inbox_lock` alone takes a blocking flock | `send, inbox lock: tc still waited 6 s on a lock this test held: it hangs` |
+| 3 (a) | `write_ring_marker` alone takes a blocking flock | `codex send, ring marker: tc still waited 9 s on a lock this test held: it hangs` |
+| 2 (b) | ROOT made after the shared umask, as before | `{'made': 509, 'made/root': 509} != {'made': 493, 'made/root': 493} : init made ROOT or a folder above it group-writable` |
+| 2 (b) | no refusal of a writable ROOT | `0 != 1` (init shared the 0775 ROOT) |
+| 4 (b) | no owner check after the mkdir | `SystemExit not raised` |
+| 5 (c) | the listing back to pathlib's glob | `0 is not None : tc health counted an inbox it could not list` |
+| BOARD (c) | `message_files`' lstat catches `FileNotFoundError` only | `1 != 0 : Traceback ... PermissionError: [Errno 13] Permission denied: '.../mail/to-b/000001-from-a.md'` |
+| 7 (c) | the last line reads `shared_group` only | `'mailbox private' == 'mailbox private' : tc health called a shared mailbox private` |
+
+The brief's own form for item 3, a `LOCK_NB` poll, was run the same way
+as evidence, not as a mutation: the new lock test passes under it, and
+five existing tests in four files go red, each because it proves a tc
+process is blocked on the lock in `/proc/locks`. K3 in
+`tests/test_mailbox.py`, both checks: `... finished while the test held
+.../mail/.seq, so it never waited for the lock`.
+`test_a_codex_send_waits_for_the_inbox_lock` and
+`test_read_holds_the_inbox_lock_from_glob_to_rename`
+(`tests/test_codex_route.py`), `test_a_local_send_waits_for_a_held_inbox_lock`
+(`tests/test_router.py`) and
+`test_tc_card_counts_and_writes_under_the_inbox_lock`
+(`tests/test_cards.py`): `tc exited 1 while the test held .box-<x>.lock,
+so it never waited for the lock`. Assumption 20 says why the timer.
+
 ## Assumptions
 
 1. **Sticky on the four and on every inbox.** D17 put it on `mail/`,
@@ -413,6 +519,37 @@ the walk, and that test is now
     skip.** It names the mode and the owner whose rerun tightens it, and
     leaves the exit code alone. A `.shared` at 0640 or tighter (not
     writable by the group) gets no line.
+20. **Round 2's bounded wait is a timer on a blocking flock, not the
+    brief's `LOCK_NB` poll.** The bound, the name `LOCK_WAIT_SECONDS`,
+    the words, exit 1 and every caller are as the brief asks; only the
+    poll step is gone. A poll never sits in the kernel's queue, so it
+    breaks five tests in CORE's, CARDS' and the codex route's files that
+    prove a waiter in `/proc/locks` (the evidence under Mutations), and
+    those files are outside this work set. Signal handlers belong to the
+    main thread, so `flock_within` runs only there; tc is one thread, and
+    BOARD calls none of the three locked paths.
+21. **`LOCK_WAIT_SECONDS` is 3.** An honest holder keeps a lock for
+    milliseconds. K3's first sender waits for the other 49 to block
+    before the test lets go (measured near 0.2 s on the owner's
+    machine), so 3 s keeps that check far from its edge, and a refused
+    command answers quickly.
+22. **The no-replace check covers `read/` too.** The synthesis's
+    MEDIUM-1 names `tc read`'s rename into `read/` as the same replace.
+    A send now skips a number whose name is in `read/`, so a set-back
+    counter never makes a later read replace history. `cmd_read` itself
+    is unchanged.
+23. **The ring marker's flock is bounded too**, which the brief did not
+    list and the synthesis asked about. A held marker costs a codex send
+    at most two waits (before and after the ring); the mail lands and
+    the send says the marker could not be cleared.
+24. **The test for BOARD's `message_files` item uses mode 0640, not
+    0740.** The test user owns the inbox, and at 0740 the owner keeps
+    search, so `tc health` answers (checked by hand). 0640 gives the
+    running user read without search, which is what a member sees in
+    an owner's 0740 inbox, and it raised `PermissionError` before the
+    fix.
+25. **`mail_problem` is a new key in each `tc health --json` mail
+    entry, and `unread` may be null.** The contract names neither.
 
 ## Pauses
 
@@ -450,14 +587,41 @@ the architect's yes, and the one the second added (an unreadable
    `contracts.md` does not list wait, read, peek, log, status or init
    (REC-18). `README.md:9` and `JOIN.md`'s `~/TheConnection/tc` (REC-17,
    REC-19) are DOCS's.
-5. **For the merge with BOARD.** `health_snapshot()` has two keys more
-   than at `c8708e5`: `shared_group` and `shared_problem`.
+5. **For the merge with BOARD** (round 2, the audit's LOW-5). BOARD's
+   feed calls `listeners()` and `mailbox_summary()`, not
+   `health_snapshot()`. What it inherits from SHARED: a linked inbox, and
+   a lock that is not a regular file, drop out; counts are regular files
+   only; a status file that is a link, or not a regular file, has a null
+   age; each mail entry has a new `mail_problem` key, and its `unread` is
+   null when tc could not list the inbox or look at an entry in it
+   (`newest_mail_age_s` is null the same way for `read/`). BOARD's
+   `look.js` tests `n.unread > 0`, so a null shows no count rather than a
+   wrong one; whether the board should say "unknown" is BOARD's call. On
+   a shared mailbox a user outside the group cannot list a 3770 inbox or
+   read a 0640 card, so the board belongs to a group member.
+   `health_snapshot()` itself has two keys more than at `c8708e5`:
+   `shared_group` and `shared_problem`.
 6. **For the architect: `tc watch` and `health_snapshot`.** The ask was
    to say `health_snapshot` stops raising so that `tc health` and `tc
    watch` keep answering. `tc watch` never calls it (only `cmd_health`
    does), and `main()` refuses `tc health` on a `.shared` already
    unreadable before the snapshot runs. The block says the true, smaller
    reason instead.
+7. **For the architect, round 2.** `CLAUDE.md`'s Architecture says a
+   message is "written to a `.tmp` sibling and renamed"; it is linked
+   now, then the `.tmp` removed. C4 item 5's "the worst a member can do
+   through them is make a send fail or ring once more" now holds for
+   `mail/.seq`, the inbox locks and the marker. The synthesis's LOW-6
+   (dev `contracts.md` C1 and C2 and `phases.md` still say the marker is
+   removed) was not in this brief and stays open.
+8. **Spotted in round 2, not fixed.** `check_inbox` catches only
+   `FileNotFoundError` on its `lstat` of `read/`: an inbox its owner
+   left readable without search makes another member's send, read, peek
+   or wait for that name raise `PermissionError` (a traceback), the same
+   family as BOARD's item, which asked only for health and the feed.
+   And `unread_count` counts what it can see: an entry it cannot look at
+   is not counted for the codex route's ring decision or `tc card`'s
+   refusal.
 
 ## Not verified
 
@@ -486,3 +650,10 @@ the architect's yes, and the one the second added (an unreadable
   `tests/test_codex_route.py`. Not run as root here.
 - The codex ring across Linux users (the known limit). Real `codex` and
   real `ssh` were never run.
+- Round 2: steps 27 to 29 of `route-shared.md` (a second user setting
+  `mail/.seq` back, ROOT refused, a second user holding a lock) are not
+  run; the tests stand one user in for the member. The case where the
+  timer fires at the instant the flock is granted (`flock_within` lets
+  go and refuses) is reasoned from the code, not tested. A refused
+  link for any reason but `EEXIST` (the "could not publish" words) has
+  no test.

@@ -2,14 +2,18 @@
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
         steps (6, 7, 13 to 15, and 22) added by the SHARED fixer, Claude
-        Opus 5.5
+        Opus 5.5; step 25's words and steps 27 to 29 added in round 2 by
+        the SHARED fixer, Claude Opus 5.5
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
 can send, wait and read. Neither can delete, rename or rewrite the other's
 unread mail (D20). Only the user who ran init can change the group, and a
 send to a name nobody joined is refused even when an inbox is there
-(D21). A planted link is never printed (D19). The tests in
+(D21). A planted link is never printed (D19). A member who sets
+`mail/.seq` back or holds a lock can make the other's command fail, never
+lose a message or hang it, and init never shares a ROOT the group may
+write (round 2). The tests in
 `tests/test_shared.py` prove the modes, the owners and the checks tc
 makes, but one user cannot prove another user's refusals. This script
 does, by hand.
@@ -33,8 +37,9 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
    `sudo mkdir /srv/tc-shared`, `sudo chown ann:ann /srv/tc-shared`,
    `sudo chmod 0755 /srv/tc-shared`.
    - Do not give it group `tcshare` with group write. A member could then
-     rename `mail/` itself, or replace `.shared`. ben needs search access
-     on every folder from `/` down to it, which `/srv` gives.
+     rename `mail/` itself, or replace `.shared`; init refuses such a
+     ROOT (step 28). ben needs search access on every folder from `/`
+     down to it, which `/srv` gives.
 4. In every terminal below: `export TC_ROOT=/srv/tc-shared`.
 
 ## ann shares the mailbox
@@ -188,14 +193,61 @@ fail or ring once more, never read, lose or alter mail.
 24. As ben: `ln -s /home/ann/.profile
     /srv/tc-shared/mail/to-ann/000099-from-ben.md` (any file only ann can
     read will do).
-25. As ann: `tc peek ann`, then `tc read ann`, then `tc log`.
-    - None of them prints a line of the linked file. Each names
-      `000099-from-ben.md not shown (it is a symlink, which tc never
-      follows)` on stderr and exits 1 after printing the rest. `tc read`
-      says `left in place` and leaves the link in `mail/to-ann/`.
+25. As ann: `tc peek ann`, then `tc read ann`, then `tc log`. None of
+    them prints a line of the linked file, and each exits 1 after
+    printing the rest.
+    - `tc peek ann` prints `0 unread for ann` on stdout, and on stderr
+      `tc peek: /srv/tc-shared/mail/to-ann/000099-from-ben.md not shown
+      (it is a symlink, which tc never follows)`.
+    - `tc read ann` prints `no unread mail for ann` on stdout (nothing
+      else is waiting), and on stderr `tc read:
+      /srv/tc-shared/mail/to-ann/000099-from-ben.md not shown and left in
+      place (it is a symlink, which tc never follows)`. The link stays in
+      `mail/to-ann/`.
+    - `tc log` prints the history on stdout, and on stderr `tc log:
+      /srv/tc-shared/mail/to-ann/000099-from-ben.md not shown (it is a
+      symlink, which tc never follows)`.
 26. As ann: `rm /srv/tc-shared/mail/to-ann/000099-from-ben.md`.
     - It works: ann owns her inbox. ben could also remove his own link.
 
+## A member's worst is a failed command (D20, D21, round 2)
+
+27. A member sets `mail/.seq` back, and no unread mail is lost. As ann:
+    `tc send --from ann --to ben "kept one"`. Call the number it prints
+    N. As ben: `echo <N minus 1> > /srv/tc-shared/mail/.seq`, so the next
+    number names ann's unread message. As ann: `tc send --from ann --to
+    ben "after the set back"`.
+    - It exits 0 and prints `sent #<N plus 1> to ben: ...`: the number
+      past the one already taken, never N again.
+    - `ls -l /srv/tc-shared/mail/to-ben` shows both messages from ann.
+    - As ben: `tc read ben` prints `kept one` and `after the set back`,
+      each whole.
+28. Init refuses a ROOT the group may write. As ann: `chmod g+w
+    /srv/tc-shared`, then `tc init --shared --group tcshare`.
+    - It exits 1 with one line, `tc init: /srv/tc-shared is 0775: its
+      group or anyone may write it and it is not sticky, so any member
+      could rename .shared or mail/ in it and change the group. Its
+      owner, ann, runs chmod g-w,o-w /srv/tc-shared first. Nothing
+      changed.`
+    - As ann: `chmod g-w,o-w /srv/tc-shared`, then the same init again.
+      It exits 0.
+29. A member holds a lock, and the other's command fails in about 3
+    seconds instead of hanging.
+    - As ben: `( flock 9 && sleep 60 ) 9< /srv/tc-shared/mail/.seq &`.
+      The shell opens the counter read-only, which the group may, and
+      holds its lock for a minute.
+    - As ann, at once: `cat /srv/tc-shared/mail/.seq`, then `time tc
+      send --from ann --to ben "while ben holds the counter"`. It exits 1
+      after about 3 seconds with `tc: another process is holding
+      /srv/tc-shared/mail/.seq's lock; try again`. `ls
+      /srv/tc-shared/mail/to-ben` shows no new message, and a second `cat`
+      prints the same number.
+    - As ben: `kill %1`. As ann: the same send now exits 0.
+    - As ben: `( flock 9 && sleep 60 ) 9< /srv/tc-shared/mail/.box-ann.lock
+      &`. As ann: `time tc read ann`. It exits 1 after about 3 seconds
+      with `tc: another process is holding ann's lock; try again`, and
+      moves nothing. As ben: `kill %1`.
+
 ## Afterward
 
-27. The mailbox and the group stay until you remove them yourself.
+30. The mailbox and the group stay until you remove them yourself.

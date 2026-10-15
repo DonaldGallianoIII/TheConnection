@@ -1230,7 +1230,7 @@ def real_folder(path):
 
 
 def message_files(folder):
-    """The *.md entries in `folder` as (messages, skipped): (path, lstat result) for each regular file, by name; (path, why) for the rest (D19).
+    """The *.md entries in `folder` as (messages, skipped, problem): (path, lstat result) for each regular file, by name; (path, why) for the rest (D19); words when a count from them is not the whole truth, else None.
 
     Checked with lstat, never followed: a symlink, a FIFO or a folder
     named like a message is skipped, so read, peek, log, wait and the
@@ -1238,25 +1238,46 @@ def message_files(folder):
     nothing, and an entry gone before its lstat is left out. The caller
     makes sure `folder` itself is a real folder.
 
+    SHARED fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-2
+    and BOARD's review. The folder is listed with os.listdir, not
+    pathlib's glob, which says nothing when it cannot list: a folder this
+    user may not read holds no messages, and `problem` says why. An entry
+    lstat cannot reach (any OSError but gone: a folder its owner left
+    readable without search, say) is skipped with words and named in
+    `problem`, never a traceback. So `problem` None means every entry was
+    looked at. read, peek and log name the skipped ones; mailbox_summary
+    reports a count it cannot know as unknown, with `problem`.
+
     @interacts  lists `folder` and lstats each *.md entry. Writes nothing.
     @deps       os, stat, pathlib.
     @complexity O(e) over e *.md entries: single digits in an inbox; a
                 read/ is the history (hundreds to thousands), listed only
                 by log and health.
-    @alloc      two lists, returned.
+    @alloc      two lists and at most one string, returned.
     """
     messages, skipped = [], []
-    for path in sorted(folder.glob("*.md")):
+    try:  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): a folder tc could not list is said, never a silent 0
+        names = os.listdir(folder)
+    except FileNotFoundError:
+        return messages, skipped, None
+    except OSError as err:
+        return messages, skipped, f"tc could not list {folder} ({err.strerror})"
+    problem = None
+    for path in sorted(folder / name for name in names if name.endswith(".md")):
         try:
             st = os.lstat(path)
         except FileNotFoundError:
+            continue
+        except OSError as err:  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): from BOARD's review
+            skipped.append((path, f"tc could not look at it ({err.strerror})"))
+            problem = problem or f"tc could not look at {path} ({err.strerror})"
             continue
         if stat.S_ISREG(st.st_mode):
             messages.append((path, st))
         else:
             skipped.append((path, "it is a symlink, which tc never follows" if stat.S_ISLNK(st.st_mode)
                             else "it is not a regular file"))
-    return messages, skipped
+    return messages, skipped, problem
 
 
 def inbox_messages(name, shared=None):
@@ -1275,7 +1296,7 @@ def inbox_messages(name, shared=None):
     """
     if shared is None:
         shared = mailbox_share() is not None
-    messages, skipped = message_files(inbox(name, shared))
+    messages, skipped, _ = message_files(inbox(name, shared))  # an entry tc could not look at is in skipped
     return [path for path, _ in messages], skipped
 
 
@@ -1759,7 +1780,7 @@ def cmd_log(args):
                 if folder == box:
                     break
                 continue
-            messages, bad = message_files(folder)
+            messages, bad, _ = message_files(folder)  # an entry tc could not look at is in bad
             every += [path for path, _ in messages]
             skipped += bad
     every.sort(key=lambda p: p.name)
@@ -1780,6 +1801,10 @@ def unread_count(name):
     (Claude Opus 5.5, unreviewed): only a real folder counts (lstat), so a
     linked inbox holds 0, as send, read and wait refuse it; and only
     regular files count (message_files), as `tc read` moves only those.
+    SHARED fix round 2 (Claude Opus 5.5, unreviewed): an entry lstat
+    cannot reach is not counted, and an inbox this user cannot list
+    holds 0 here (message_files), never a traceback; only
+    mailbox_summary reports such a count as unknown.
 
     @interacts  lstats mail/to-<name>; lists it and lstats each *.md
                 entry. Writes nothing.
@@ -2930,14 +2955,27 @@ def _age(seconds):
 
 
 def mailbox_summary():
-    """Each inbox's unread count, the age of its newest mail and of its status, by name.
+    """Each inbox's unread count, the age of its newest mail and of its status, and why a count is unknown, by name.
 
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): an inbox is a real
     folder at mail/to-<name> (lstat). A linked one is left out, as send,
-    read and wait refuse it, so tc health and the board never count or
-    date a folder outside the mailbox. Only regular *.md files count
-    (message_files), unread and in a read/ that is itself a real folder;
-    their ages come from lstat, never through a link.
+    read and wait refuse it, so this never counts or dates a folder
+    outside the mailbox. Only regular *.md files count (message_files),
+    unread and in a read/ that is itself a real folder; their ages come
+    from lstat, never through a link. SHARED fix round 2 (Claude Opus
+    5.5, unreviewed): the audit's LOW-3. That holds for what this
+    returns, which tc health shows and any caller may read. The board
+    also reads mail/ on its own (its wires and links); that reading is
+    the board's, and nothing here governs it.
+
+    SHARED fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-2
+    and BOARD's review, never a silent 0. When tc cannot list an inbox (a
+    3770 inbox seen by a user outside the group), or cannot lstat an entry
+    in it (an inbox its owner left readable without search), `unread` is
+    None and `mail_problem` says why. When the same goes for read/ (or
+    read/ itself cannot be looked at), `newest_mail_age_s` is None and
+    `mail_problem` says why. `mail_problem` is None when every entry was
+    looked at. Nothing here raises for an inbox it cannot see into.
 
     SHARED, from BOARD's review (Claude Opus 5.5, unreviewed): a status
     file's age comes from lstat too. A link there, or anything that is
@@ -2947,7 +2985,8 @@ def mailbox_summary():
     stop tc health.
 
     @interacts  lists mail/; lstats each inbox, its read/, each *.md
-                entry and each name's status file. Writes nothing.
+                entry and each name's status file; lists each inbox and
+                read/ (message_files). Writes nothing.
     @deps       real_folder, message_files; os, stat, time; MAIL, STATUS.
     @complexity O(n + m) over n inboxes (a few dozen) and m message files
                 in every inbox and read/ (hundreds to thousands, growing
@@ -2961,17 +3000,29 @@ def mailbox_summary():
         if not real_folder(box):
             continue
         name = box.name[len("to-"):]
-        unread = message_files(box)[0]
-        history = message_files(box / "read")[0] if real_folder(box / "read") else []
-        newest = max((st.st_mtime for _, st in unread + history), default=None)
+        unread, _, unread_problem = message_files(box)  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): LOW-2
+        read = box / "read"
+        try:
+            read_is_folder, history_problem = stat.S_ISDIR(os.lstat(read).st_mode), None
+        except FileNotFoundError:
+            read_is_folder, history_problem = False, None
+        except OSError as err:
+            read_is_folder, history_problem = False, f"tc could not look at {read} ({err.strerror})"
+        if read_is_folder:
+            history, _, history_problem = message_files(read)
+        else:
+            history = []
+        problem = unread_problem or history_problem
+        newest = None if problem else max((st.st_mtime for _, st in unread + history), default=None)
         try:  # SHARED, from BOARD's review (Claude Opus 5.5, unreviewed): lstat, never through a link
             st = os.lstat(STATUS / f"{name}.md")
         except OSError:
             st = None
         out[name] = {
-            "unread": len(unread),
+            "unread": None if unread_problem else len(unread),
             "newest_mail_age_s": None if newest is None else round(now - newest),
             "status_age_s": round(now - st.st_mtime) if st is not None and stat.S_ISREG(st.st_mode) else None,
+            "mail_problem": problem,
         }
     return out
 
@@ -3016,7 +3067,10 @@ def health_snapshot():
     already unreadable, before this runs, but one that turns unreadable
     after main() read it still gets an answer, not a traceback, and so
     does any caller that loads tc as a module (the tests do). tc watch
-    does not call this.
+    does not call this. SHARED fix round 2 (Claude Opus 5.5,
+    unreviewed): each `mail` entry carries `mail_problem`, and its
+    `unread` or `newest_mail_age_s` is null when tc could not see into
+    that inbox or its read/ (mailbox_summary, the audit's LOW-2).
 
     @interacts  reads /proc, mail/, status/, cards/ and ROOT/.shared; may
                 run nvidia-smi (machine_stats). Writes nothing.
@@ -3069,6 +3123,13 @@ def cmd_health(args):
     is escaped by json.dumps. The last line says `mailbox shared with
     group <g>` or `mailbox private` (C4).
 
+    SHARED fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-4
+    and LOW-2. When health_snapshot reports `shared_problem` (.shared
+    turned unreadable after main() read it), the last line is `mailbox
+    shared, group unknown: <why>`, never `mailbox private`. An inbox whose
+    count mailbox_summary could not know reads `unread unknown`, then the
+    reason, never `0 unread`.
+
     @interacts  see health_snapshot; prints to stdout.
     @deps       health_snapshot, describe_card, printable, _who, _age,
                 _gpu_text; json.
@@ -3094,15 +3155,22 @@ def cmd_health(args):
     print("cards      " + ("\n           ".join(cards) if cards else "none"))
     rows = []
     for name, b in snap["mail"].items():
-        bits = [f"{b['unread']} unread"]
+        bits = ["unread unknown" if b["unread"] is None else f"{b['unread']} unread"]  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): LOW-2
         if b["newest_mail_age_s"] is not None:
             bits.append(f"last mail {_age(b['newest_mail_age_s'])} ago")
         if b["status_age_s"] is not None:
             bits.append(f"status {_age(b['status_age_s'])} ago")
+        if b["mail_problem"] is not None:
+            bits.append(printable(b["mail_problem"]))
         rows.append(f"{printable(name)}: " + ", ".join(bits))  # Phase fix round 1 (Claude Opus 5.5, unreviewed)
     print("mail       " + ("\n           ".join(rows) if rows else "empty"))
-    group = snap["shared_group"]  # SHARED H1 (Claude Opus 5.5, unreviewed): C4
-    print(f"mailbox shared with group {printable(group)}" if group is not None else "mailbox private")
+    group, problem = snap["shared_group"], snap["shared_problem"]  # SHARED H1 (Claude Opus 5.5, unreviewed): C4
+    if group is not None:
+        print(f"mailbox shared with group {printable(group)}")
+    elif problem is not None:  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): LOW-4
+        print(f"mailbox shared, group unknown: {printable(problem)}")
+    else:
+        print("mailbox private")
 
 
 # ---------- watch: heartbeat and alerts that wake the session ----------

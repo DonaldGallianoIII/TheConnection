@@ -258,6 +258,13 @@ GROUP_WRITABLE_ROOT_MODE = 0o775
 STICKY_GROUP_WRITABLE_ROOT_MODE = 0o1775
 # What init tells ROOT's owner to run before it shares a writable ROOT.
 CHMOD_WORDS = "chmod g-w,o-w {root} first. Nothing changed."
+# An inbox its owner may read but not search: the running user then sees
+# what a member sees in an owner's 0740 inbox (group read, no search).
+READ_NO_SEARCH_MODE = 0o640
+# What tc health says for an inbox count it could not know.
+UNKNOWN_WORDS = "unread unknown"
+# What tc health's last line starts with when .shared turned unreadable.
+GROUP_UNKNOWN_WORDS = "mailbox shared, group unknown: "
 
 
 def user_groups():
@@ -2238,6 +2245,115 @@ class RootAndClaimTest(UmaskTestCase):
         self.assertEqual(stop.exception.code, EXIT_REFUSED)
         self.assertIn(TAKEN_INBOX_WORDS, said.getvalue())
         self.assertEqual(inside, [], "the losing join made read/ inside the other joiner's inbox")
+
+
+class HealthSaysWhatItCannotSeeTest(UmaskTestCase):
+    """tc health never gives a silent 0 for an inbox it cannot see into, never dies on one, and never says `mailbox private` over an unreadable .shared.
+
+    The audit's LOW-2 and LOW-4 (audits/2026-10-14-2259-quick), and one
+    item from BOARD's review. One user stands in for a member by taking
+    access away from an inbox it owns. Skipped as root, who reads
+    anything.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, UmaskTestCase, load_tc; argparse,
+                contextlib, io, json.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per test.
+    """
+
+    def health_with_inbox_mode(self, mode):
+        """Mail for b and c, then mail/to-b set to `mode`: (tc health --json, tc health), with to-b's mode put back after.
+
+        @interacts  two sends; one chmod by hand and back; two tc health
+                    runs.
+        @deps       _root.TcRoot.tc; OWNER_FOLDER_MODE.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            for name in ("b", "c"):
+                root.tc("send", "--from", "a", "--to", name, REAL_TEXT)
+            box = root.path / "mail" / "to-b"
+            box.chmod(mode)
+            try:
+                return root.tc("health", "--json"), root.tc("health")
+            finally:
+                box.chmod(OWNER_FOLDER_MODE)
+
+    def test_an_inbox_tc_cannot_list_is_unknown_with_the_reason_never_0(self):
+        """mail/to-b at no access: tc health --json gives b unread null and a reason, c still 1; tc health says `unread unknown` for b.
+
+        Must reject a count from a listing pathlib's glob gave up on in
+        silence (b would read 0 unread, as a 3770 inbox does for a board
+        run outside the group).
+
+        @interacts  see health_with_inbox_mode.
+        @deps       health_with_inbox_mode; json; NO_ACCESS_MODE,
+                    UNKNOWN_WORDS.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root lists any folder")
+        (code, out, err), (text_code, text, text_err) = self.health_with_inbox_mode(NO_ACCESS_MODE)
+        self.assertEqual(code, 0, err)
+        mail = json.loads(out)["mail"]
+        self.assertIsNone(mail["b"]["unread"], "tc health counted an inbox it could not list")
+        self.assertIn("could not list", mail["b"]["mail_problem"])
+        self.assertIn(os.strerror(errno.EACCES), mail["b"]["mail_problem"])
+        self.assertEqual((mail["c"]["unread"], mail["c"]["mail_problem"]), (1, None))
+        self.assertEqual(text_code, 0, text_err)
+        self.assertIn(f"b: {UNKNOWN_WORDS}", text)
+
+    def test_an_inbox_readable_without_search_leaves_health_answering(self):
+        """mail/to-b readable without search (each lstat in it is refused): tc health --json and tc health exit 0, and b's count is unknown with the reason.
+
+        From BOARD's review: an owner who gives their inbox group read
+        without group search makes message_files' lstat raise
+        PermissionError for every member, and tc health (and the board's
+        feed) die with a traceback. Must reject an lstat that catches
+        only FileNotFoundError.
+
+        @interacts  see health_with_inbox_mode.
+        @deps       health_with_inbox_mode; json; READ_NO_SEARCH_MODE,
+                    UNKNOWN_WORDS.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root searches any folder")
+        (code, out, err), (text_code, text, text_err) = self.health_with_inbox_mode(READ_NO_SEARCH_MODE)
+        self.assertEqual(code, 0, err)
+        mail = json.loads(out)["mail"]
+        self.assertIsNone(mail["b"]["unread"], "tc health counted an inbox whose entries it could not look at")
+        self.assertIn("could not look at", mail["b"]["mail_problem"])
+        self.assertEqual(mail["c"]["unread"], 1)
+        self.assertEqual(text_code, 0, text_err)
+        self.assertIn(f"b: {UNKNOWN_WORDS}", text)
+
+    def test_health_words_say_the_shared_problem_never_private(self):
+        """In process, .shared of two lines (as if it turned unreadable after main() read it): cmd_health's last line names the problem and never says `mailbox private`.
+
+        Must reject a last line that reads only shared_group, which is
+        null here (LOW-4).
+
+        @interacts  writes .shared by hand; loads tc in process and runs
+                    cmd_health with stdout captured (reads /proc).
+        @deps       _root.TcRoot, load_tc; argparse, contextlib, io;
+                    tc.cmd_health; GROUP_UNKNOWN_WORDS.
+        @complexity O(p) over p processes on the machine (hundreds).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            (root.path / ".shared").write_text("one\ntwo\n")
+            tc = load_tc(root)
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                tc.cmd_health(argparse.Namespace(json=False))
+        last = printed.getvalue().splitlines()[-1]
+        self.assertNotEqual(last, "mailbox private", "tc health called a shared mailbox private")
+        self.assertTrue(last.startswith(GROUP_UNKNOWN_WORDS), last)
+        self.assertIn("names no group", last)
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1.
