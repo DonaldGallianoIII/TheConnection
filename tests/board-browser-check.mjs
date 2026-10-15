@@ -12,9 +12,12 @@
  * written by `tc join` when this tree's tc has it (it says which), else by
  * hand. p1 and p2 share a named account and mail each other, and e2 and e3
  * share another and do not, so the board draws both kinds of native pair.
- * The mail is sent with this tree's tc. Five listeners start with
- * `tc wait --timeout`, each proven by `tc health`; then `d`'s is seen by
- * the feed and stopped by its pid, so `d` is a down worker. It starts
+ * The mail is sent with this tree's tc. Six listeners start with
+ * `tc wait --timeout`, each proven by `tc health`; then `d`'s and `e2`'s
+ * are seen by the feed and stopped by their pids, so both are down
+ * workers: `d` is b's only child on its side, and `e2` sits in a's wrapped
+ * row, so its wire shares a stretch with a's quiet wire to `b` and its
+ * flowing one to `e3`. It starts
  * board/serve.py on a port the OS picks, under its own time limit, opens
  * the board at 1280 x 900 and 390 x 844, and fails on any of: a console
  * error, sideways scroll, drawn text under 11 px, a session missing from the
@@ -27,7 +30,9 @@
  * tree into view), an ellipsis or cut words in the pill or the footer, a
  * native pair whose two sessions do not both say `native with <the other> ·
  * not observed` in full, and (on the desktop) a down worker's wire that is
- * not dotted or that another stroke lies on. It saves four screenshots
+ * not dotted, that a wire other than a dotted one is painted over, that
+ * has no knockout in the canvas's face right under it, or whose gaps show
+ * anything but the canvas in a screenshot. It saves four screenshots
  * (each size in color and in grayscale) to a temp folder it prints, never
  * into the repo. Every line it prints goes through masked(), so the board's
  * token never shows, an error's URL included.
@@ -55,22 +60,28 @@
  *             screenshots) and leaves both there; runs this tree's ./tc
  *             (join when it has it, send, read, status, health) against
  *             that mailbox, with the session's own CLAUDE and CODEX
- *             variables left out of a join; starts five `tc wait` children
+ *             variables left out of a join; starts six `tc wait` children
  *             and one board/serve.py child and stops each by its own pid;
  *             asks serve.py's /feed twice with the token; starts one
  *             headless Chromium and closes it; sets file times on the
  *             mailbox's messages so the newest wires flow while the page is
- *             open; listens for SIGTERM and SIGINT. --self-test writes a
+ *             open; takes one more screenshot per desktop page, kept in
+ *             memory, to read the down wires' pixels; listens for SIGTERM
+ *             and SIGINT. --self-test writes a
  *             fake playwright module to a temp folder, runs this file as a
  *             child five times, signals or kills three of them, and stops
  *             anything they left by its pid
  * @deps       Node 18+, Playwright (any recent version; 1.63 on the owner's
  *             machine), python3, ./tc, board/serve.py
- * @complexity O(v * (b^2 + w * s * b + o * s')) per view over b <= 14 boxes,
- *             w wires and s samples along each, and o strokes checked
- *             against the s' samples of the down wire; a run takes seconds
- *             (the self-test, five runs without a browser, tens of seconds)
- * @alloc      one browser, one page at a time, four screenshots on disk
+ * @complexity O(v * (b^2 + w * s * b + d * s' * c)) per view over b <= 14
+ *             boxes, w wires and s samples along each, and the s' samples
+ *             along each of the d = 2 down wires, each tested against c
+ *             boxes, ports and labels (tens); decoding one screenshot is
+ *             O(P) over its P pixels (about 1280 x 1800); a run takes
+ *             seconds (the self-test, five runs without a browser, tens of
+ *             seconds)
+ * @alloc      one browser, one page at a time, four screenshots on disk and
+ *             one decoded screenshot per desktop page in memory
  */
 import { createRequire } from 'node:module';
 import { spawn, execFileSync } from 'node:child_process';
@@ -78,6 +89,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, utime
 import { tmpdir, constants } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inflateSync } from 'node:zlib';
 
 const HERE = fileURLToPath(import.meta.url);
 const REPO = join(dirname(HERE), '..');
@@ -114,12 +126,18 @@ const FRESH_FROM_SEQ = 10;
 // the fresh ones flow and only their senders read writing.
 const OLD_AGE_S = 600;
 const MS_PER_S = 1000;
-// d reads its mail too, since a `tc wait` with mail waiting exits at once.
-const READERS = ['a', 'b', 'c', 'z', 'd'];
-const LISTENERS = ['a', 'b', 'c', 'z', 'd'];
-// The worker made down: its listener is seen by the feed, then stopped.
-const DOWN = 'd';
-const DOWN_EDGE = 'mailbox:b>d';
+// d and e2 read their mail too, since a `tc wait` with mail waiting exits
+// at once.
+const READERS = ['a', 'b', 'c', 'z', 'd', 'e2'];
+const LISTENERS = ['a', 'b', 'c', 'z', 'd', 'e2'];
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// The workers made down, each with the wire to it: its listener is seen by
+// the feed, then stopped. d is b's only child on its side. e2 is in a's
+// wrapped row, so its wire shares the parent's end with a's quiet wire to b
+// and nearly all its run with a's flowing wire to e3: its dots must still
+// show nothing but the canvas between them.
+const DOWN_EDGES = { d: 'mailbox:b>d', e2: 'mailbox:a>e2' };
+const DOWN = Object.keys(DOWN_EDGES);
 // A listener outlives the run on its own if no cleanup ran.
 const LISTEN_TIMEOUT_S = 120;
 // serve.py's own limit, for a run killed outright: an alarm set before
@@ -151,12 +169,36 @@ const OVERLAP_PX = 1;
 const WIRE_INSIDE_PX = 2;
 // Samples along each wire, this many px of path apart.
 const WIRE_STEP_PX = 2;
-// Samples along the down wire, for the strokes that may lie on it.
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// A down wire's pixels, read along its middle from a screenshot taken with
+// the animations stopped, one sample every DOTTED_STEP_PX of path. A sample
+// more than INK_LUMA steps of luma (of 255) off the canvas's own face is
+// ink. A dot is 2 px long (theme.css: stroke-dasharray 2 5), so a run of
+// ink longer than DOT_INK_MAX_PX (a dot and a px of antialiasing at each
+// end) means something else shows in a gap, and a run of canvas longer than
+// GAP_MAX_PX (a 5 px gap and the same) means the dots are gone. END_SKIP_PX
+// at each end is left out: there the arrowhead (ARROW_BACKOFF 15 of a 10
+// unit marker 7 stroke widths of 2.5 px wide, so it reaches 26.25 px back)
+// and the boxes' port rings and shadows sit on the wire. A sample within
+// COVER_PX of a node box, a port ring or a wire label is left out too: those
+// are drawn over every wire.
 const DOTTED_STEP_PX = 1;
-// A stroke that crosses the down wire covers about its own width of it (2.5
-// px at most); a run of the down wire longer than this inside another
-// stroke means that stroke lies along it.
-const CROSSING_MAX_PX = 6;
+const INK_LUMA = 16;
+const DOT_INK_MAX_PX = 4;
+const GAP_MAX_PX = 7;
+const END_SKIP_PX = 28;
+const COVER_PX = 2;
+// Rec. 709 luma weights, red, green and blue.
+const LUMA = [0.2126, 0.7152, 0.0722];
+// What this check reads of a PNG (the PNG specification): the 8 byte
+// signature; in each chunk, the type 4 bytes in and the data 8 bytes in,
+// with 12 bytes round the data (length, type, CRC); the IHDR fields'
+// offsets, 8 bits per channel, no interlace, the channels of color types 2
+// (RGB) and 6 (RGBA), and the five row filters.
+const PNG = Object.freeze({
+  SIGNATURE: 8, TYPE_AT: 4, DATA_AT: 8, CHUNK_ROUND: 12, WIDTH_AT: 0, HEIGHT_AT: 4, DEPTH_AT: 8, COLOR_AT: 9, INTERLACE_AT: 12,
+  DEPTH: 8, CHANNELS: { 2: 3, 6: 4 }, NONE: 0, SUB: 1, UP: 2, AVERAGE: 3, PAETH: 4,
+});
 // Setup and settle times. The page polls every 3 s and draws the first
 // answer at once; fonts may come from the network.
 const SERVER_START_MS = 10000;
@@ -331,21 +373,26 @@ async function askFeed(url) {
 }
 
 /**
- * Make DOWN a down worker the real way: the feed sees its listener, the
- * listener is stopped by its pid, tc health shows no pid, and the feed then
- * says down.
+ * Make each of DOWN a down worker the real way: the feed sees its
+ * listener, the listener is stopped by its pid, tc health shows no pid,
+ * and the feed then says down.
  * @complexity two feeds and O(PROOF_MS / PROOF_STEP_MS) health calls  @alloc two parsed feeds
- * @returns {Promise<number>}  the stopped listener's pid
+ * @returns {Promise<number[]>}  the stopped listeners' pids, in DOWN's order
  */
 async function makeDown(root, url, listenerOf) {
-  const seen = (await askFeed(url)).nodes.find((n) => n.id === DOWN);
-  if (!seen || !seen.listener_pid) throw new Error(`the feed never saw ${DOWN} listening`);
-  const child = listenerOf.get(DOWN);
-  await stop(child);
-  await healthUntil(root, (l) => !l[DOWN], `${DOWN}'s listener gone`);
-  const after = (await askFeed(url)).nodes.find((n) => n.id === DOWN);
-  if (!after || after.state !== 'down') throw new Error(`the feed says ${DOWN} is ${after && after.state}, not down`);
-  return child.pid;
+  const seen = (await askFeed(url)).nodes;
+  for (const name of DOWN) {
+    const node = seen.find((n) => n.id === name);
+    if (!node || !node.listener_pid) throw new Error(`the feed never saw ${name} listening`);
+  }
+  for (const name of DOWN) await stop(listenerOf.get(name));
+  await healthUntil(root, (l) => DOWN.every((name) => !l[name]), `${DOWN.join(' and ')}'s listeners gone`);
+  const after = (await askFeed(url)).nodes;
+  for (const name of DOWN) {
+    const node = after.find((n) => n.id === name);
+    if (!node || node.state !== 'down') throw new Error(`the feed says ${name} is ${node && node.state}, not down`);
+  }
+  return DOWN.map((name) => listenerOf.get(name).pid);
 }
 
 /** Stop a child by its own pid and wait for it to exit. @complexity O(1)  @alloc one promise */
@@ -359,10 +406,11 @@ async function stop(child) {
 
 /**
  * Everything the checks read from one open page, measured in the page.
- * @complexity O(b^2 + w * s * b + o * s') in the page  @alloc one plain object
+ * @complexity O(b^2 + w * s * b + d * s' * c) in the page (see the module
+ *             block)  @alloc one plain object, with s' points per down wire
  */
 function measure(page, names) {
-  return page.evaluate(({ names, wireStep, insidePx, downEdge, dottedStep, crossMax }) => {
+  return page.evaluate(({ names, wireStep, insidePx, downEdges, dottedStep, endSkip, coverPx }) => {
     const visible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     // On screen means reachable: drawn, and not cut off by an ancestor that
     // clips without scrolling (overflow hidden or clip).
@@ -450,34 +498,45 @@ function measure(page, names) {
         if (hit) { out.wireHits.push(`${p.dataset.edge || p.getAttribute('class')} through ${hit.name}`); break; }
       }
     }
-    // The down worker's wire: dotted, and no other stroke along it. Each
-    // other stroke is tested solid (its dashes taken off for the test, then
-    // put back), so a dashed wire on it cannot slip through its own gaps.
-    out.dotted = null;
-    const down = drawn.find((p) => p.dataset.edge === downEdge);
-    if (down) {
-      const dash = getComputedStyle(down).strokeDasharray;
-      let worst = { run: 0, by: 'nothing' };
-      const len = down.getTotalLength();
-      for (const o of drawn) {
-        if (o === down) continue;
-        const kept = o.style.strokeDasharray;
-        o.style.strokeDasharray = 'none';
-        let run = 0;
-        let longest = 0;
-        for (let s = 0; s <= len; s += dottedStep) {
-          const at = down.getPointAtLength(s);
-          if (o.isPointInStroke(new DOMPoint(at.x, at.y))) longest = Math.max(longest, (run += dottedStep));
-          else run = 0;
+    // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+    // Each down worker's wire: its class and dashes; every wire painted
+    // after it (document order is paint order in SVG), which may only be
+    // another dotted one; the path right before it, which must be its
+    // knockout; and the page points along its middle where its pixels are
+    // read, in document px (the screenshot is the full page). Points near
+    // either end, or under a box, a port ring or a label, are left out.
+    const canvasFace = getComputedStyle(document.querySelector('.tc-canvas')).backgroundColor;
+    const covers = [...document.querySelectorAll('.tc-node, .tc-port, .tc-wire-label-back')].filter(visible)
+      .map((el) => box(el.getBoundingClientRect())).filter((b) => b.right > b.left && b.bottom > b.top);
+    const strokes = [...document.querySelectorAll('path.tc-wire')].filter((p) => p.getAttribute('d'));
+    out.downs = downEdges.map((id) => {
+      const p = drawn.find((x) => x.dataset.edge === id);
+      if (!p) return { id, drawn: false };
+      const cs = getComputedStyle(p);
+      const over = strokes.slice(strokes.indexOf(p) + 1).filter((o) => !o.classList.contains('down'))
+        .map((o) => o.dataset.edge || o.getAttribute('class'));
+      const k = p.previousElementSibling;
+      const knock = k && k.matches('path.tc-knockout') && k.getAttribute('d') === p.getAttribute('d')
+        ? { stroke: getComputedStyle(k).stroke, width: parseFloat(getComputedStyle(k).strokeWidth), opacity: Number(getComputedStyle(k).opacity) }
+        : null;
+      const ctm = p.getScreenCTM();
+      const len = p.getTotalLength();
+      const samples = [];
+      let covered = 0;
+      for (let s = endSkip; s <= len - endSkip; s += dottedStep) {
+        const at = p.getPointAtLength(s);
+        const q = new DOMPoint(at.x, at.y).matrixTransform(ctm);
+        if (covers.some((b) => q.x > b.left - coverPx && q.x < b.right + coverPx && q.y > b.top - coverPx && q.y < b.bottom + coverPx)) {
+          covered += 1;
+          continue;
         }
-        o.style.strokeDasharray = kept;
-        if (longest > worst.run) worst = { run: longest, by: o.dataset.edge || o.getAttribute('class') };
+        samples.push([q.x + scrollX, q.y + scrollY, s]);
       }
-      out.dotted = {
-        ok: down.classList.contains('down') && !!dash && dash !== 'none' && worst.run <= crossMax,
-        detail: `class "${down.getAttribute('class')}", dasharray ${dash}; the longest stretch under another stroke is ${worst.run} px (${worst.by})`,
+      return {
+        id, drawn: true, cls: p.getAttribute('class'), dash: cs.strokeDasharray, width: parseFloat(cs.strokeWidth),
+        over, knock, canvasFace, samples, covered, pageW: document.documentElement.scrollWidth,
       };
-    }
+    });
     const rect = win.getBoundingClientRect();
     const bodyCs = getComputedStyle(document.body);
     out.winH = rect.height;
@@ -493,7 +552,88 @@ function measure(page, names) {
       .map((el) => `${el.className}: ${el.textContent.slice(0, 40)}`);
     out.foot = document.querySelector('.tc-foot').textContent;
     return out;
-  }, { names, wireStep: WIRE_STEP_PX, insidePx: WIRE_INSIDE_PX, downEdge: DOWN_EDGE, dottedStep: DOTTED_STEP_PX, crossMax: CROSSING_MAX_PX });
+  }, {
+    names, wireStep: WIRE_STEP_PX, insidePx: WIRE_INSIDE_PX, downEdges: Object.values(DOWN_EDGES), dottedStep: DOTTED_STEP_PX,
+    endSkip: END_SKIP_PX, coverPx: COVER_PX,
+  });
+}
+
+/**
+ * A PNG's pixels, from Playwright's screenshot buffer: 8-bit RGB or RGBA,
+ * not interlaced, which is what Chromium writes. Throws on anything else.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * @complexity O(P) over the image's P bytes  @alloc the inflated rows and one pixel buffer
+ * @returns {{ width, height, channels, px: Buffer }}
+ */
+function decodePng(buf) {
+  let at = PNG.SIGNATURE;
+  let head = null;
+  const data = [];
+  while (at < buf.length) {
+    const len = buf.readUInt32BE(at);
+    const type = buf.toString('latin1', at + PNG.TYPE_AT, at + PNG.DATA_AT);
+    const body = buf.subarray(at + PNG.DATA_AT, at + PNG.DATA_AT + len);
+    if (type === 'IHDR') head = body;
+    else if (type === 'IDAT') data.push(body);
+    else if (type === 'IEND') break;
+    at += PNG.CHUNK_ROUND + len;
+  }
+  const channels = head && PNG.CHANNELS[head[PNG.COLOR_AT]];
+  if (!channels || head[PNG.DEPTH_AT] !== PNG.DEPTH || head[PNG.INTERLACE_AT] !== 0) throw new Error('the screenshot is not an 8-bit RGB or RGBA PNG');
+  const width = head.readUInt32BE(PNG.WIDTH_AT);
+  const height = head.readUInt32BE(PNG.HEIGHT_AT);
+  const raw = inflateSync(Buffer.concat(data));
+  const stride = width * channels;
+  const px = Buffer.alloc(height * stride);
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[y * (stride + 1)];
+    for (let i = 0; i < stride; i += 1) {
+      const left = i >= channels ? px[y * stride + i - channels] : 0;
+      const up = y ? px[(y - 1) * stride + i] : 0;
+      const corner = y && i >= channels ? px[(y - 1) * stride + i - channels] : 0;
+      let add = 0;
+      if (filter === PNG.SUB) add = left;
+      else if (filter === PNG.UP) add = up;
+      else if (filter === PNG.AVERAGE) add = (left + up) >> 1;
+      else if (filter === PNG.PAETH) {
+        const guess = left + up - corner;
+        const [dl, du, dc] = [Math.abs(guess - left), Math.abs(guess - up), Math.abs(guess - corner)];
+        add = dl <= du && dl <= dc ? left : du <= dc ? up : corner;
+      }
+      px[y * stride + i] = (raw[y * (stride + 1) + 1 + i] + add) & 0xff;
+    }
+  }
+  return { width, height, channels, px };
+}
+
+/** The luma of red, green and blue, 0 to 255. @complexity O(1)  @alloc none */
+const lumaOf = (r, g, b) => LUMA[0] * r + LUMA[1] * g + LUMA[2] * b;
+
+/**
+ * Along one down wire's samples: how many were read, the longest run of
+ * ink and the longest run of canvas, each in px of path. A run breaks where
+ * a sample was left out (near an end, or under a box, a port or a label).
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * @complexity O(s) over s samples  @alloc one small object
+ */
+function readDots(shot, down) {
+  const face = lumaOf(...down.canvasFace.match(/\d+/g).slice(0, LUMA.length).map(Number));
+  const scale = shot.width / down.pageW;
+  let [ink, gap, longestInk, longestGap, inked, last] = [0, 0, 0, 0, 0, null];
+  for (const [x, y, s] of down.samples) {
+    if (last === null || s - last > DOTTED_STEP_PX) [ink, gap] = [0, 0];
+    last = s;
+    const i = (Math.floor(y * scale) * shot.width + Math.floor(x * scale)) * shot.channels;
+    if (Math.abs(lumaOf(shot.px[i], shot.px[i + 1], shot.px[i + 2]) - face) > INK_LUMA) {
+      inked += 1;
+      [ink, gap] = [ink + DOTTED_STEP_PX, 0];
+    } else {
+      [ink, gap] = [0, gap + DOTTED_STEP_PX];
+    }
+    longestInk = Math.max(longestInk, ink);
+    longestGap = Math.max(longestGap, gap);
+  }
+  return { read: down.samples.length, inked, longestInk, longestGap };
 }
 
 /** True when two page boxes overlap by more than OVERLAP_PX. @complexity O(1)  @alloc none */
@@ -548,8 +688,22 @@ function judge(view, m, errors, jump) {
   check(`each native pair says native with the other, not observed (${Object.keys(NATIVE_WORDS).join(', ')})`,
     badgeMiss.length === 0, badgeMiss.join('; '));
   if (view.expect === 'graph') {
-    check(`the down worker's wire (${DOWN_EDGE}) is dotted and no other stroke lies on it`, !!m.dotted && m.dotted.ok,
-      m.dotted ? m.dotted.detail : `no wire ${DOWN_EDGE} drawn`);
+    for (const d of m.downs) {
+      if (!d.drawn) {
+        check(`the down worker's wire (${d.id}) is dotted and shows only the canvas in its gaps`, false, `no wire ${d.id} drawn`);
+        continue;
+      }
+      const dots = d.dots;
+      const knockOk = !!d.knock && d.knock.stroke === d.canvasFace && d.knock.width > d.width && d.knock.opacity === 1;
+      const ok = /\bdown\b/.test(d.cls) && !!d.dash && d.dash !== 'none' && d.over.length === 0 && knockOk
+        && dots.read > 0 && dots.longestInk <= DOT_INK_MAX_PX && dots.longestGap <= GAP_MAX_PX;
+      check(`the down worker's wire (${d.id}) is dotted and shows only the canvas in its gaps (${dots.read} px read, `
+        + `longest ink ${dots.longestInk} px, longest gap ${dots.longestGap} px)`, ok,
+      `class "${d.cls}", dasharray ${d.dash}; painted over it: ${d.over.join(', ') || 'nothing'}; knockout: `
+        + `${d.knock ? `${d.knock.width} px ${d.knock.stroke} at opacity ${d.knock.opacity} under a ${d.width} px wire on a ${d.canvasFace} canvas` : 'none'}; `
+        + `${dots.read} px read (${d.covered} under a box, port or label): longest ink run ${dots.longestInk} px (most ${DOT_INK_MAX_PX}), `
+        + `longest gap ${dots.longestGap} px (most ${GAP_MAX_PX}), ${dots.inked} px of ink`);
+    }
   }
   return rows;
 }
@@ -572,8 +726,12 @@ async function jumpToZ(page) {
 }
 
 /**
- * Open one view: color (measured and saved), then grayscale (saved).
- * @complexity two page loads  @alloc two pages, closed
+ * Open one view: color (measured and saved; on the desktop one more
+ * screenshot, kept in memory, for the down wires' pixels), then grayscale
+ * (saved).
+ * @complexity two page loads, plus one screenshot decoded in O(P) over its
+ *             P pixels on the desktop
+ * @alloc      two pages, closed; one decoded screenshot, dropped on return
  */
 async function runView(browser, url, root, view, shots) {
   const results = { rows: [], files: [] };
@@ -593,6 +751,13 @@ async function runView(browser, url, root, view, shots) {
     results.files.push(file);
     if (!gray) {
       const m = await measure(page, NAMES);
+      // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+      // The down wires' pixels, from a full-page screenshot kept in memory,
+      // taken with the animations stopped so a flowing down wire's dots sit still.
+      if (view.expect === 'graph') {
+        const shot = decodePng(await page.screenshot({ fullPage: true, animations: 'disabled' }));
+        for (const d of m.downs) if (d.drawn) d.dots = readDots(shot, d);
+      }
       const jump = await jumpToZ(page);
       results.rows.push(...judge(view, m, errors, jump));
       results.pill = m.pill;
@@ -648,8 +813,9 @@ async function check(chromium) {
     say(`listeners proven by tc health: ${proven.join(' ')}`);
     const url = await startServer(root, children);
     say(`serve.py: ${url} (pid ${children.at(-1).pid}; it ends by itself ${process.env[SERVE_LIMIT_ENV] || SERVE_LIMIT_S} s after start)`);
-    const downPid = await makeDown(root, url, listenerOf);
-    say(`down worker: ${DOWN} (the feed saw its listener; pid ${downPid} stopped; tc health shows none; the feed says down)`);
+    const downPids = await makeDown(root, url, listenerOf);
+    say(`down workers: ${DOWN.join(', ')} (the feed saw their listeners; pids ${downPids.join(' ')} stopped; tc health shows none; `
+      + 'the feed says down)');
     const shots = mkdtempSync(join(tmpdir(), 'tc-board-shots-'));
     browser = await chromium.launch({ headless: true, args: ['--password-store=basic'], handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false });
     say(`browser: chromium ${browser.version()}`);

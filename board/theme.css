@@ -87,6 +87,13 @@
   --tc-bar-w: 5px;
   --tc-port: 12px;
   --tc-wire-w: 2.5px;
+  /* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
+   * unreviewed. A native line's width, and how much wider than its wire a
+   * dotted or dashed wire's knockout is: one quiet wire's width, so a quiet
+   * wire lying along it is hidden with room to spare and the gaps between
+   * its dots or dashes show the canvas (look.js drawEdge). */
+  --tc-wire-w-native: 1.5px;
+  --tc-wire-w-knockout-pad: var(--tc-wire-w);
   --tc-dash: 7px;
   --tc-gap: 5px;
   --tc-flow-speed: 0.9s;
@@ -501,7 +508,14 @@
  * words on the board (the legend names it); native is a long dash, its
  * words in its title and the legend. */
 .tc-wire.kind-tree { stroke: var(--tc-muted); stroke-width: 1.25px; opacity: .8; }
-.tc-wire.kind-native { stroke: var(--tc-muted); stroke-width: 1.5px; stroke-dasharray: 10 4 2 4; opacity: .8; }
+.tc-wire.kind-native { stroke: var(--tc-muted); stroke-width: var(--tc-wire-w-native); stroke-dasharray: 10 4 2 4; opacity: .8; }
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
+ * unreviewed. The knockout under a dotted or dashed wire: the same run in
+ * the canvas's own face, --tc-wire-w-knockout-pad wider than the wire,
+ * drawn over every solid wire and connector (and, under a dotted wire,
+ * every dashed one), so nothing but the canvas shows in the wire's gaps. */
+.tc-knockout { fill: none; stroke: var(--tc-inset); stroke-width: calc(var(--tc-wire-w) + var(--tc-wire-w-knockout-pad)); }
+.tc-knockout.kind-native { stroke-width: calc(var(--tc-wire-w-native) + var(--tc-wire-w-knockout-pad)); }
 .tc-arrow { fill: var(--tc-cyan); }
 /* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
  * unreviewed. A label's backing: the canvas's own face, so a label that

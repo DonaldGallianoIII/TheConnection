@@ -34,7 +34,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   layoutLevels, layoutWidth, roleTitle, fitTransform, boardView, createBoard, createFit, createKit, levelPort, rootsList,
-  outlineView, STATES, CONFIG, LEGEND_WORDS,
+  outlineView, createCanvas, patchBoard, STATES, CONFIG, LEGEND_WORDS,
 } from '../board/look.js';
 
 /** One feed node with the fields the layout reads. @complexity O(1)  @alloc one object */
@@ -679,17 +679,23 @@ test('the switch between graph and outline has two breakpoints, so a stage near 
 });
 
 /**
- * A fake document for createKit's outline: elements with children, words
- * and attributes, each counting the writes to its words, so a test can
- * tell an element kept from one made new, and words kept from words
- * written again.
+ * A fake document for createKit's outline and its board: elements with
+ * children, words and attributes, each counting the writes to its words,
+ * so a test can tell an element kept from one made new, and words kept
+ * from words written again. Attributes (an SVG element's class, d and
+ * data-edge) live in `attrs`.
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @complexity O(1) per element, O(k) per insert over k siblings  @alloc one object per element
  */
 function fakeDoc() {
   const make = (tag) => {
     const e = {
-      tag, className: '', dataset: {}, style: {}, hidden: false, title: '', children: [], parentNode: null, writes: 0, text: '', scrolled: 0,
+      tag, className: '', dataset: {}, hidden: false, title: '', children: [], parentNode: null, writes: 0, text: '', scrolled: 0,
+      attrs: {},
+      style: { setProperty(name, value) { this[name] = value; } },
+      setAttribute(name, value) { e.attrs[name] = String(value); },
+      getAttribute(name) { return Object.hasOwn(e.attrs, name) ? e.attrs[name] : null; },
+      removeAttribute(name) { delete e.attrs[name]; },
       get textContent() { return e.children.length ? e.children.map((c) => c.textContent).join('') : e.text; },
       set textContent(v) {
         e.writes += 1;
@@ -697,6 +703,8 @@ function fakeDoc() {
         e.children = [];
         e.text = String(v);
       },
+      get firstChild() { return e.children[0] || null; },
+      get nextSibling() { return e.parentNode ? e.parentNode.children[e.parentNode.children.indexOf(e) + 1] || null : null; },
       get lastElementChild() { return e.children.at(-1) || null; },
       append(...kids) { for (const k of kids) e.insertBefore(k, null); },
       insertBefore(k, ref) {
@@ -765,4 +773,66 @@ test('the legend names the quiet mail wire and says the thin line may be inferre
   const rule = (selector) => [...CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(([, sel]) => sel.trim() === selector);
   assert.match((rule('.tc-node-role') || [])[2] || '', /white-space:\s*pre/, 'the role words drop their leading space');
   assert.match((rule('.tc-win[data-conn="stale"] .tc-wire.flow') || [])[2] || '', /animation:\s*none/, 'a stale board keeps its dashes moving');
+});
+
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// Siblings' tree wires share the parent's end of their runs, so a quiet
+// sibling's solid wire lay along a down worker's dotted one and filled its
+// gaps: `dotted: no listener` read solid. A dotted or dashed wire is now
+// drawn over every solid one, on a knockout in the canvas's own face.
+const SIBLINGS = ['w1', 'w2', 'w3', 'w4'];
+
+/**
+ * A relay over w1 to w4, each mailed by it: long ago (a quiet wire) but w4
+ * just now (a flowing one). w2 is in state `w2State`.
+ * @complexity O(1)  @alloc one feed
+ */
+function siblingsFeed(w2State) {
+  return {
+    nodes: [fed('a', 'orchestrator', 'declared', 0, null),
+      ...SIBLINGS.map((id) => fed(id, 'worker', 'declared', 1, 'a', { reports_to: 'a', state: id === 'w2' ? w2State : 'listening' }))],
+    links: SIBLINGS.map((id) => ({ from: 'a', to: id, kind: 'mailbox' })),
+    wires: SIBLINGS.map((id, i) => ({ from: 'a', to: id, seq: i + 1, age_s: id === 'w4' ? 0 : CONFIG.FLOW_AGE_S + 1 })),
+  };
+}
+
+/** The body of theme.css's rule for exactly `selector`, or ''. @complexity O(c) over c characters  @alloc one list */
+const cssRule = (selector) => ([...CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(([, sel]) => sel.trim() === selector) || [])[2] || '';
+
+test('a relay over w1 to w4 it has mailed, w2 down, at 1152 px: the down wire is drawn after every solid wire, on a knockout', () => {
+  const width = layoutWidth(DESK_W);
+  const view = boardView(siblingsFeed('down'), width);
+  assert.equal(view.edges['mailbox:a>w2'].down, true, 'w2\'s wire is not down');
+  assert.ok(sharedPiece(view.edges['mailbox:a>w2'].points, view.edges['mailbox:a>w1'].points),
+    'a>w1 and a>w2 share no piece, so the shape tests nothing');
+  const doc = fakeDoc();
+  const canvas = createCanvas(doc, doc.createElement('div'));
+  const board = createBoard(createKit(doc, canvas));
+  // Drawn with w2 listening first, then w2 goes down, as on a live board:
+  // its wire was made before w3's and w4's, so creation order alone would
+  // leave it under them.
+  patchBoard(board, siblingsFeed('listening'), width);
+  patchBoard(board, siblingsFeed('down'), width);
+  // Every path that draws (a root's connector is an empty path), in paint order.
+  const order = everyEl(canvas.wires).filter((e) => e.tag === 'path' && e.getAttribute('d') && /\btc-(wire|knockout)\b/.test(e.getAttribute('class') || ''));
+  const name = (e) => e.getAttribute('data-edge') || e.getAttribute('class');
+  const at = order.findIndex((e) => e.getAttribute('data-edge') === 'mailbox:a>w2');
+  assert.match(order[at].getAttribute('class'), /\bdown\b/, 'w2\'s wire is not drawn dotted');
+  const wires = order.filter((e) => /\btc-wire\b/.test(e.getAttribute('class')));
+  const solid = wires.filter((e) => !/\b(flow|down|kind-native)\b/.test(e.getAttribute('class')));
+  const dashed = wires.filter((e) => /\b(flow|kind-native)\b/.test(e.getAttribute('class')) && !/\bdown\b/.test(e.getAttribute('class')));
+  assert.equal(solid.length, SIBLINGS.length + 2, `solid strokes: ${solid.map(name).join(', ')} (four connectors, a>w1 and a>w3)`);
+  assert.deepEqual(dashed.map(name), ['mailbox:a>w4']);
+  const over = [...solid, ...dashed].filter((e) => order.indexOf(e) > at).map(name);
+  assert.deepEqual(over, [], `drawn over the down wire: ${over.join(', ')}`);
+  const knock = order[at - 1];
+  assert.ok(knock && /^tc-knockout\b/.test(knock.getAttribute('class')) && knock.getAttribute('d') === order[at].getAttribute('d'),
+    'the down wire has no knockout right under it');
+  // Each dashed wire has its own knockout; a solid one has none.
+  assert.equal(order.filter((e) => /^tc-knockout\b/.test(e.getAttribute('class'))).length, 2, 'not one knockout per dotted or dashed wire');
+  // theme.css paints the knockout in the canvas's own face, wider than its wire.
+  const face = cssRule('.tc-canvas').match(/background:\s*([^;]+);/);
+  assert.ok(face && cssRule('.tc-knockout').includes(`stroke: ${face[1].trim()}`), 'the knockout is not the canvas\'s own face');
+  assert.match(cssRule('.tc-knockout'), /stroke-width:\s*calc\(var\(--tc-wire-w\) \+ var\(--tc-wire-w-knockout-pad\)\)/);
+  assert.match(CSS, /--tc-wire-w-knockout-pad:\s*var\(--tc-wire-w\);/, 'the knockout is not one quiet wire wider than its wire');
 });

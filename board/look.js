@@ -10,6 +10,8 @@
  * routeTreeWire, routeAround), a parent and child's wire beside their
  * connector, never on it, and every label is placed clear of boxes and
  * other labels (placeLabels); the routing section states the one rule. A
+ * dotted or dashed wire is drawn over every solid one, on a knockout in the
+ * canvas's color, so no other stroke shows in its gaps (drawEdge). A
  * native pair's boxes and a reports_to cycle's root carry badge lines in
  * words (badgesOf). Each root's tree starts with a heading, rootsList and
  * createRoots make the list of roots at the top of the page, and on a
@@ -42,9 +44,10 @@
  *             points; outlineView is O(n log n + r log r); rootsList and
  *             pillText are O(n) after the sort; createPoller is O(1) per poll
  * @alloc      one element tree (with one line per badge), one connector
- *             path and one heading per node, one path with its title and
- *             one label with its backing per wire, each released by its
- *             own remove(); the outline's
+ *             path and one heading per node, one path with its title, one
+ *             knockout path and one label with its backing per wire, each
+ *             released by its own remove(); one group per wire layer in
+ *             the canvas; the outline's
  *             element tree, replaced when the outline changes; one button
  *             per root in the roots list, replaced when the roots change.
  *             removeBoard clears the DOM
@@ -368,6 +371,13 @@ export function setFooter(doc, foot, items) {
   }));
 }
 
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// The wire layer's groups, in the order they are painted, bottom to top:
+// solid lines (a quiet mail wire), then dashed ones (a flowing wire, a
+// native line), then dotted ones (a wire to a session with no listener).
+// See wireLayer.
+const WIRE_LAYERS = Object.freeze(['plain', 'dashed', 'down']);
+
 /**
  * Canvas: a stage holding the frame the board draws in, which holds the
  * view (a wire layer in SVG and a node layer), and the outline a phone
@@ -376,11 +386,14 @@ export function setFooter(doc, foot, items) {
  * board's laid out height and the page scrolls, never sideways; nothing
  * sits over it (the legend is in the footer).
  * createFit watches the stage, which keeps the width the board may use.
- * The wire layer ends with a group for the wires' labels, so every label
- * is drawn over every wire.
+ * The wire layer holds, after its defs, one group per WIRE_LAYERS entry
+ * (`layers`, painted in that order, so a dotted wire is over every dashed
+ * one and both are over every solid one), then a group for the wires'
+ * labels, so every label is drawn over every wire.
  * @interacts  appends to parent
- * @complexity O(1)  @alloc one canvas subtree with an arrow marker def
- * @returns {{ root, frame, view, wires, labels, outline }}
+ * @complexity O(1)  @alloc one canvas subtree with an arrow marker def and
+ *             one group per wire layer
+ * @returns {{ root, frame, view, wires, layers: { plain, dashed, down }, labels, outline }}
  */
 export function createCanvas(doc, parent) {
   const root = el(doc, 'div', 'tc-stage');
@@ -394,14 +407,16 @@ export function createCanvas(doc, parent) {
   });
   marker.append(svg(doc, 'path', { d: 'M 0 0 L 10 5 L 0 10 z', class: 'tc-arrow' }));
   defs.append(marker);
+  const layers = {};
+  for (const name of WIRE_LAYERS) layers[name] = svg(doc, 'g', { class: `tc-layer-${name}` });
   const labels = svg(doc, 'g', { class: 'tc-labels' });
-  wires.append(defs, labels);
+  wires.append(defs, ...WIRE_LAYERS.map((name) => layers[name]), labels);
   view.append(wires);
   frame.append(view);
   const outline = el(doc, 'div', 'tc-outline');
   root.append(frame, outline);
   parent.append(root);
-  return { root, frame, view, wires, labels, outline };
+  return { root, frame, view, wires, layers, labels, outline };
 }
 
 /**
@@ -962,7 +977,10 @@ export function layoutWidth(canvasWidth) {
 // turning only in gaps the layout keeps empty (routeTree); so a line into
 // a port always comes from that box's parent. Their mail wire, or their
 // native line, runs TREE_WIRE_OFFSET beside that connector and never on it
-// (routeTreeWire), so the connector never fills its dots or dashes. Every
+// (routeTreeWire), so the connector never fills its dots or dashes.
+// Siblings' wires may share a stretch; there drawEdge paints a dotted or
+// dashed wire over the solid ones on a knockout, so no stroke fills its
+// gaps whatever the shape. Every
 // other pair (siblings, a child and a grandparent, two trees, two peers)
 // joins a side of one box to a side of the other by the shortest such run
 // with the fewest bends through the room round the boxes, keeping
@@ -1052,7 +1070,8 @@ function offsetRun(points, d, side) {
  * first level piece runs on the parent's side of the connector's. So the
  * wires to a parent's children on its two sides keep apart; two children
  * on one side share the parent's end of their wires, as their connectors
- * share theirs.
+ * share theirs, and drawEdge's layers and knockout keep a dotted or dashed
+ * wire's gaps clear on that shared stretch.
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @interacts  none; pure
  * @complexity O(1)  @alloc two lists of at most six points
@@ -1744,29 +1763,64 @@ export function patchBoard(board, feed, width) {
 }
 
 /**
+ * The layer an edge view is drawn in (WIRE_LAYERS): 'down' for a wire with
+ * an end that has no listener (dotted), 'dashed' for a flowing wire or a
+ * native line, 'plain' for a quiet mail wire (solid).
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * @complexity O(1)  @alloc none
+ */
+function wireLayer(v) {
+  if (v.down) return 'down';
+  return v.flow || v.kind === 'native' ? 'dashed' : 'plain';
+}
+
+/**
  * One edge view as SVG: a path along its run with rounded bends
  * (roundedPath), its words in a title (shown on hover), and its label,
  * where placeLabels put one, centered in that box on an opaque backing of
- * the box's size, in canvas.labels, so it reads over any wire.
- * @interacts  puts the path before canvas.labels and the label and its
- *             backing in it; remove() takes all three out
- * @complexity O(p) per call over p points  @alloc one path with a title, one rect and one text element
- * @returns {{ path, label, back, update(view), remove() }}
+ * the box's size, in canvas.labels, so it reads over any wire. The path
+ * goes in its wireLayer's group of canvas.layers, and moves when its
+ * layer changes. A dotted or dashed wire has a knockout right under it: a
+ * path on the same run in the canvas's own color, wider than the wire
+ * (theme.css .tc-knockout), so whatever its layer paints over (every solid
+ * wire and connector, and for a dotted wire every dashed one) is hidden
+ * along it, and its gaps show the canvas. Siblings' wires share the
+ * parent's end of their runs (routeTreeWire), so this holds whatever the
+ * shape; a solid wire under a dotted one shows again where it turns away.
+ * @interacts  puts the path (and, while it is dotted or dashed, its
+ *             knockout) in one of canvas.layers, and the label and its
+ *             backing in canvas.labels; remove() takes all four out
+ * @complexity O(p) per call over p points
+ * @alloc      one path with a title, one knockout path, one rect and one
+ *             text element
+ * @returns {{ path, knock, label, update(view), remove() }}
  */
 export function drawEdge(doc, canvas, view) {
+  // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+  const knock = svg(doc, 'path', { class: 'tc-knockout' });
   const path = svg(doc, 'path', { class: 'tc-wire' });
   const tip = svg(doc, 'title');
   path.append(tip);
   const back = svg(doc, 'rect', { class: 'tc-wire-label-back' });
   const label = svg(doc, 'text', { class: 'tc-wire-label', 'text-anchor': 'middle', 'dominant-baseline': 'central' });
-  canvas.wires.insertBefore(path, canvas.labels);
   canvas.labels.append(back, label);
+  let layer = null;
   const edge = {
-    path, label,
+    path, knock, label,
     update(v) {
-      path.setAttribute('d', roundedPath(v.points, CONFIG.ROUTE_CLEAR));
+      const d = roundedPath(v.points, CONFIG.ROUTE_CLEAR);
+      path.setAttribute('d', d);
       path.setAttribute('class', ['tc-wire', `kind-${v.kind}`, v.flow && 'flow', v.back && 'back', v.down && 'down'].filter(Boolean).join(' '));
       path.setAttribute('data-edge', v.id);
+      knock.setAttribute('d', d);
+      knock.setAttribute('class', `tc-knockout kind-${v.kind}`);
+      const next = wireLayer(v);
+      if (next !== layer) {
+        layer = next;
+        knock.remove();
+        if (layer === 'plain') canvas.layers.plain.append(path);
+        else canvas.layers[layer].append(knock, path);
+      }
       path.removeAttribute('marker-end');
       path.removeAttribute('marker-start');
       if (v.arrow) path.setAttribute(`marker-${v.arrow}`, 'url(#tc-arrow)');
@@ -1781,6 +1835,7 @@ export function drawEdge(doc, canvas, view) {
     },
     remove() {
       path.remove();
+      knock.remove();
       back.remove();
       label.remove();
     },
@@ -1792,9 +1847,10 @@ export function drawEdge(doc, canvas, view) {
 /**
  * The DOM kit patchBoard draws through: nodes with createNode (ports on the
  * top and bottom edges), each with its connector from its parent as a thin
- * path under every wire (first in the layer, with its words as a title)
- * and, on a root, the heading over its tree; and edges with drawEdge, all
- * on `canvas`. A node's reveal() scrolls its heading (or its box) to the
+ * path under every wire (right after the wire layer's defs, before every
+ * group of canvas.layers, with its words as a title) and, on a root, the
+ * heading over its tree; and edges with drawEdge (each in its layer, a
+ * dotted or dashed one on its knockout), all on `canvas`. A node's reveal() scrolls its heading (or its box) to the
  * top of the view. drawOutline(model) brings canvas.outline to outlineView's
  * model in place: each group, row and traffic line keeps its element from
  * one call to the next, only words that changed are written, and an
@@ -1810,7 +1866,8 @@ export function drawEdge(doc, canvas, view) {
  *             as drawEdge; drawOutline O(n + t) over n rows and t traffic
  *             lines
  * @alloc      one node subtree, one connector path and one heading per
- *             node, or one edge's elements per create; drawOutline one
+ *             node, or one edge's elements (drawEdge's, its knockout
+ *             included) per create; drawOutline one
  *             element tree per new group, row or traffic line, each kept
  *             until its group, row or line leaves the model
  */

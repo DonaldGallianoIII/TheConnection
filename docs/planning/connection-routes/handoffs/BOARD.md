@@ -120,7 +120,13 @@ under b · inferred from mail`) are its hover title, and a feed's
 reports_to links draw nothing of their own. A parent and child's mail
 wire, or native line, runs `TREE_WIRE_OFFSET` (8 px) beside that
 connector, never on it, so the connector never fills a dotted or dashed
-wire's gaps; every other pair is routed side to side round the boxes. A
+wire's gaps; every other pair is routed side to side round the boxes.
+Since fix round 4 the wire layer paints solid wires, then dashed ones
+(flowing mail, native lines), then dotted ones (no listener), each in its
+own group (`WIRE_LAYERS`), and a dotted or dashed wire has a knockout
+under it, the same run in the canvas's face and one quiet wire wider
+(`--tc-wire-w-knockout-pad`), so nothing but the canvas shows in its gaps
+wherever another wire lies along it. A
 fresh wire flows toward its reader with `from → to · #seq` beside it,
 never on it; a quiet one is a thicker solid line with no words. Both boxes
 of a native pair carry a dashed badge in words, `native with <the other> ·
@@ -281,10 +287,13 @@ changed. For the architect to accept or send back.
 
 **Known limits.**
 - Two children on one side of a parent share the parent's end of their
-  wires, as their connectors share theirs; there a dashed wire over a quiet
-  one reads solid. In the browser check the down worker `d` has no sibling
-  on its side (`c` is left of `b`, `d` right). A lane per child does not
-  fit the 56 px gap under a parent with many children.
+  wires, as their connectors share theirs. Since fix round 4 a dotted or
+  dashed wire is painted over every solid one on a knockout, so its
+  pattern reads there (fix round 4, item 1); the solid wire it covers is
+  hidden along the shared stretch and shows again where it turns off, and
+  of two dashed wires on one stretch the later drawn shows. A dotted wire
+  is always on top. A lane per child does not fit the 56 px gap under a
+  parent with many children.
 - Every parent and child pair with mail now draws two lines, the thin
   connector and the mail wire beside it. The tree's shape is as approved.
 - Dev C5 says the feed is built from `health_snapshot()`; it is now built
