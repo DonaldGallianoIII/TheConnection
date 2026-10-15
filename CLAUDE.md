@@ -233,6 +233,14 @@ differs from the plan's.
    Tests put a fake on `PATH` that records its argv. The fake must be
    asserted called, or the test passes by not checking. Donald runs the
    real ones, in the human QA scripts.
+   One exception (D30, Donald, 2026-10-15): the architect session alone
+   may run real `ssh` to the owner's laptop for the SSH lane's
+   two-machine QA (`tc gate`, the outbox, `tc flush`), in its own scratch
+   folder there, with light runs, touching nothing else on that machine,
+   removing what it set up, and asking first before any change to an ssh
+   config, a key, `authorized_keys` or a Windows setting. Results are
+   scrubbed of machine names, aliases and addresses. Lane agents and
+   fixers never run real `ssh`.
 6. **A listener is proven, not claimed.** Start `tc wait` only in the
    background with a timeout, and prove it by `tc health` naming its pid
    (it reads `/proc/locks`). "Listening" without that is a false claim
