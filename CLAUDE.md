@@ -103,9 +103,8 @@ The connection routes plan, run in lanes and waves
 (`docs/planning/connection-routes/00-index.md` section 4). Wave 0, GROUND
 (this file, `docs/known-bugs/` and `tests/_root.py`), merged into the dev
 branch at `a029bda`, CORE at `f5f6923`, CARDS at `4f35efc` and BOARD at
-`a2953cb`, with the P4 phase review's fixes at `eb3e187`. As of
-2026-10-15, SHARED (wave 2) is in its fix round; SSH and DOCS come after
-it.
+`a2953cb`, with the P4 phase review's fixes at `eb3e187`, and SHARED
+(wave 2) at `84b97d2`. As of 2026-10-15, SSH is next, then DOCS.
 
 ### Off limits
 
@@ -140,6 +139,7 @@ mail/to-<name>/read/               read messages, kept as history
 mail/.box-<name>.lock              the inbox lock: send's count plus write, read's glob plus rename, tc card's check plus write (D14)
 mail/.ring-pending-<name>          the codex ring's state: pending, timed out or clear; never removed (D14, D16, D20)
 cards/<name>.json                  one address card per name: kind, account, route (gitignored)
+.shared                            the group a shared mailbox uses, 0644, written by init (gitignored)
 status/<name>.md                   each side's latest status (gitignored)
 ```
 
@@ -324,7 +324,8 @@ names.
 The tool runs today on one machine: send, read, peek, wait (with
 `--keepalive`), status, log, health and watch; join, card and cards for
 address cards; a router in send with the `local` and `codex` routes;
-plus the live board (`python3 board/serve.py`).
+`init --shared` for a mailbox several Linux users share; plus the live
+board (`python3 board/serve.py`).
 `tests/test_mailbox.py` (CORE, K1 to K8) tests send, read, peek, wait,
 log, status and the counter, each test proven by a hand mutation of
 `tc`.
@@ -339,6 +340,8 @@ post-merge fixes, and the P0 phase review (D9) closed with a fix round at
 `62d8a6d`, CARDS (P2) at `4f35efc`, and BOARD (P4) at `a2953cb`: the
 live board (`python3 board/serve.py`, a token in the printed URL; a
 headless check in `tests/board-browser-check.mjs`). The P4 phase review
-(D9) closed with two fix rounds merged at `eb3e187`. As of 2026-10-15 the
-shared mailbox (SHARED) is in its fix round; the `ssh` route and the docs
-are not built. `main` stays the owner's alone.
+(D9) closed with two fix rounds merged at `eb3e187`. The shared mailbox
+(SHARED, P3's first half) merged at `84b97d2` after eight review rounds;
+its two-user walk (`qa/human/route-shared.md`) is the owner's and not
+yet run by a person. As of 2026-10-15 the `ssh` route and the docs are
+not built. `main` stays the owner's alone.

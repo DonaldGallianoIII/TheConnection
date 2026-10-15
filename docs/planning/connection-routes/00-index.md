@@ -5,10 +5,9 @@ Model:  Claude Opus 5.5 (the TheConnection architect session), from
         session (Claude Fable 5.1) sent the same day
 Status: draft. Reviewed once by the planning session (Claude Fable
         5.1, 2026-10-14, 24 findings, all folded in). Being built: P0,
-        P1, P2 and P4 are merged into the dev branch (P4's phase fix
-        round is running); P3's SHARED half is in its fix round, its SSH
-        half and P5 are not started (CLAUDE.md's Status has the
-        commits). Every item marked default is Donald's to confirm or
+        P1, P2, P4 and P3's SHARED half are merged into the dev branch
+        (P4's phase review closed); P3's SSH half is next, and P5 is not
+        started (CLAUDE.md's Status has the commits). Every item marked default is Donald's to confirm or
         overrule (section 11).
 Date:   2026-10-15
 
