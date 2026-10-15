@@ -25,6 +25,7 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   outbox/<user>/to-<name>/NNNNNN-from-<sender>.md  an ssh message waiting to go (C3, D25)
   outbox/<user>/to-<name>/sent/, refused/  ssh messages the far tc took, or refused (+ .stderr note)
   outbox/<user>/.send-<key>.lock           that user's send lock for one ssh target, 0600 (D33)
+  outbox/<user>/.rang-<name>               that user's own last ring of codex name <name>, its mtime the time, 0600 (D36)
   outbox/.origin-token                     this mailbox's random origin token (D25)
   mail/.origins/<user>/<key-name>/<id>     an ssh message's origin id, filed as it lands, empty (D25, D33)
 
@@ -53,7 +54,14 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             and run `nvidia-smi` when it exists. They never signal or touch
             another process. `send` to a codex card runs `codex queue` (C2)
             in a session of its own, and kills that one process group if the
-            ring times out. While ROOT/.shared exists (C4) every command
+            ring times out; it also rings whenever this Linux user's own
+            last ring to that name, outbox/<user>/.rang-<name>, is
+            RING_BACKOFF_SECONDS old or older, whatever the
+            group-writable marker says, and writes that record before
+            each ring, and a retry of a message the far gate already
+            delivered runs the same decision (P3 fix round 1b, Claude
+            Opus 5.5, unreviewed: D35 (2), D36 (1), the audit's LOW-1).
+            While ROOT/.shared exists (C4) every command
             runs under umask 002 and every folder tc makes gets the group
             it names and mode 2775 (make_folder, D16), or 3775 (sticky,
             D17) for mail/, status/, cards/ and outbox/ themselves, or
@@ -238,7 +246,9 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             or its refused/ (with a .stderr note beside a refused one;
             the branch, SSH fix round 1, D32); one origin token per
             mailbox and one send lock per user per ssh target, in that
-            user's branch, made on first use and kept; one empty filing
+            user's branch, made on first use and kept (and, P3 fix round
+            1b, one last-ring record per user per codex name that user
+            rang, kept: an empty file whose mtime is the time); one empty filing
             per origin id delivered here, kept (SSH S3), under
             mail/.origins/<user>/<key-name>/, one folder per user and
             per key name, made on first use and kept (SSH fix round 1,
@@ -889,6 +899,16 @@ ALREADY_WORDS = {"wait": "ALREADY LISTENING: another `tc wait {name}` is running
 # only tc join makes an inbox there (D20), so the words say to rejoin.
 NO_INBOX_LISTEN_WORDS = ("tc {kind}: {name} has a card but no inbox on this shared mailbox; nothing made. Run "
                          "tc join {name}, which makes it.")
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (2) and D36 (1), the
+# doorbell can't be switched off (C2 item 5). Each sender's own record of
+# its last ring to a codex name, directly in that Linux user's outbox
+# branch ({to} is the name): its mtime is the time, set from wall_clock,
+# and it is written before the ring, as the marker is. No other member can
+# write in a branch (D33), so only its sender can make its last ring look
+# newer, and a member can hold off only their own rings.
+RANG_RECORD_NAME = ".rang-{to}"
+# Its mode: its sender's alone, as the send lock's.
+RANG_RECORD_MODE = 0o600
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -1683,7 +1703,7 @@ def shared_folder_mode(path, uid=None):
 
 
 def shared_file_mode(path, uid=None):
-    """The mode init gives a file under the shared folders: SHARED_WRITABLE_FILE_MODE directly in mail/, WAKE_LOCK_MODE for a wait or watch lock in an inbox, SEND_LOCK_MODE for a send lock in its owner's outbox branch, else SHARED_OWNED_FILE_MODE.
+    """The mode init gives a file under the shared folders: SHARED_WRITABLE_FILE_MODE directly in mail/, WAKE_LOCK_MODE for a wait or watch lock in an inbox, SEND_LOCK_MODE for a send lock and RANG_RECORD_MODE for a last-ring record in its owner's outbox branch, else SHARED_OWNED_FILE_MODE.
 
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 items 2 and 5.
     The files directly in mail/ are the ones every member must write
@@ -1698,13 +1718,16 @@ def shared_file_mode(path, uid=None):
     SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 2. A send lock
     (a name SEND_LOCK_NAME gives, directly in the outbox branch of `uid`,
     None for this process's user) is its owner's alone, so no member can
-    open it and hold its flock.
+    open it and hold its flock. P3 fix round 1b (Claude Opus 5.5,
+    unreviewed): so is a last-ring record (a name RANG_RECORD_NAME gives,
+    directly in its owner's branch; C2 item 5).
 
     @interacts  reads the user database (branch_user) for a file directly
                 in an outbox branch. Writes nothing.
     @deps       branch_user; pathlib; ROOT, MAIL, OUTBOX_NAME,
-                SEND_LOCK_NAME, WAKE_LOCK_NAMES, SHARED_WRITABLE_FILE_MODE,
-                SHARED_OWNED_FILE_MODE, SEND_LOCK_MODE, WAKE_LOCK_MODE.
+                SEND_LOCK_NAME, RANG_RECORD_NAME, WAKE_LOCK_NAMES,
+                SHARED_WRITABLE_FILE_MODE, SHARED_OWNED_FILE_MODE,
+                SEND_LOCK_MODE, RANG_RECORD_MODE, WAKE_LOCK_MODE.
     @complexity O(1), and at most one user lookup.
     @alloc      none.
     """
@@ -1716,6 +1739,9 @@ def shared_file_mode(path, uid=None):
     if (path.parent.parent == ROOT / OUTBOX_NAME and path.name.startswith(lead) and path.name.endswith(tail)
             and path.parent.name == branch_user(uid)):  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 2
         return SEND_LOCK_MODE
+    if (path.parent.parent == ROOT / OUTBOX_NAME and path.name.startswith(RANG_RECORD_NAME.partition("{to}")[0])
+            and path.parent.name == branch_user(uid)):  # P3 fix round 1b (Claude Opus 5.5, unreviewed): C2 item 5
+        return RANG_RECORD_MODE
     return SHARED_OWNED_FILE_MODE
 
 
@@ -3516,17 +3542,36 @@ def deliver_once(sender, to, body, header_note=None, *, origin=None, forward=Tru
     that never calls it (ssh, through a key with no forced command)
     gets its filing after it returns exit 0, as before.
 
+    P3 fix round 1b (Claude Opus 5.5, unreviewed): the audit's LOW-1
+    (option B). An id already filed for a name whose card says codex runs
+    the same ring decision as a fresh landing for that name, with nothing
+    landing (ring_doorbell, `already`), so a far gate killed after it
+    filed the id and before its ring is rung by the near side's retry.
+    The answer is still exit 0, `already delivered`, with the ring's line
+    or warning after it. A card that cannot be read rings nothing: the
+    retry is never refused for it.
+
     @interacts  opens mail/.origins/<user>/<sender>/ and lstats
-                <origin> there (origin_filed); then see route_and_deliver;
-                once the message lands, makes its filing (file_origin).
-    @deps       origin_filed, route_and_deliver, file_origin, Delivery;
-                ALREADY_DELIVERED_WORDS.
-    @complexity O(1) here, plus route_and_deliver's.
+                <origin> there (origin_filed); for an id already filed,
+                reads cards/<to>.json and, for a codex card, see
+                ring_doorbell; else see route_and_deliver; once the
+                message lands, makes its filing (file_origin).
+    @deps       origin_filed, read_card, ring_doorbell, route_and_deliver,
+                file_origin, Delivery; ALREADY_DELIVERED_WORDS.
+    @complexity O(1) here, plus route_and_deliver's, or ring_doorbell's
+                for an id already filed for a codex name.
     @alloc      one Delivery, returned; one filing per delivered origin,
                 kept.
     """
     if origin is not None and origin_filed(origin, sender):
-        return Delivery(0, ALREADY_DELIVERED_WORDS.format(origin=origin), [])
+        already = Delivery(0, ALREADY_DELIVERED_WORDS.format(origin=origin), [])
+        try:  # P3 fix round 1b (Claude Opus 5.5, unreviewed): LOW-1, the same ring rule as a fresh landing
+            card = read_card(to)
+        except ValueError:
+            return already
+        if card is not None and card.get("route") == "codex":
+            return ring_doorbell(card, sender, to, already=already)
+        return already
     filed = []
 
     def landed():
@@ -5479,6 +5524,103 @@ def ring_backoff(marker):
     return None
 
 
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (2) and D36 (1), each
+# sender's own last-ring record (C2 item 5).
+def rang_long_ago(to):
+    """True when this Linux user's own last ring to `to` was RING_BACKOFF_SECONDS ago or more, or its record says nothing a send can trust: missing, unreadable, not this user's own regular file, or dated after now (the clock was set back). False only when this user rang `to` less than RING_BACKOFF_SECONDS ago.
+
+    The record is outbox/<user>/RANG_RECORD_NAME, its mtime the time of
+    the ring, read against wall_clock() (C2 item 5). The branch is opened
+    by its path with FOLDER_FLAGS (its last name never followed; outbox/
+    is the init user's, D34) and must be a folder this user owns; the
+    record is lstat()ed by name in it, never followed. Whatever cannot be
+    trusted counts as old: a ring too many, never a lost wake (D14).
+
+    @interacts  opens and fstats this user's outbox branch, lstats one
+                name in it; reads this process's user id and the clock
+                (wall_clock). Writes nothing.
+    @deps       outbox_branch, wall_clock; os, stat; FOLDER_FLAGS,
+                RANG_RECORD_NAME, RING_BACKOFF_SECONDS.
+    @complexity O(1).
+    @alloc      one descriptor, closed before return.
+    """
+    try:
+        fd = os.open(outbox_branch(), FOLDER_FLAGS)
+    except OSError:
+        return True
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
+            return True
+        try:
+            record = os.stat(RANG_RECORD_NAME.format(to=to), dir_fd=fd, follow_symlinks=False)
+        except OSError:
+            return True
+    finally:
+        os.close(fd)
+    if not stat.S_ISREG(record.st_mode) or record.st_uid != os.geteuid():
+        return True
+    age = wall_clock() - record.st_mtime
+    return age < 0 or age >= RING_BACKOFF_SECONDS
+
+
+def write_rang_record(to):
+    """Write this Linux user's own last-ring record for `to`, outbox/<user>/RANG_RECORD_NAME, its mtime set to wall_clock(): None when written, else a warning in words. A send calls it before it rings, as it writes the marker (C2 item 5).
+
+    The branch is made or found and checked by D33's branch checks
+    (claim_branch: this user's own real folder, and under a shared
+    mailbox in its group with no group write), then opened by its path
+    with FOLDER_FLAGS and judged again on its descriptor (branch_problem).
+    The record is opened by name in it with O_NOFOLLOW and O_NONBLOCK,
+    made at RANG_RECORD_MODE (an own one at another mode is set to it
+    through its descriptor), and its time is set through the descriptor.
+    A squatted branch, or a record that cannot be written, is a warning:
+    the next send from this user finds it missing or old and rings, a
+    ring too many, never a lost wake (D14).
+
+    @interacts  reads ROOT/.shared and the group database, makes or finds
+                outbox/ and this user's branch (claim_branch); opens and
+                fstats the branch; creates or opens the record by name in
+                it, may fchmod it, and sets its times; reads the clock
+                (wall_clock).
+    @deps       outbox_branch, claim_branch, branch_problem, wall_clock;
+                os, stat; FOLDER_FLAGS, RANG_RECORD_NAME, RANG_RECORD_MODE.
+    @complexity O(1), plus claim_branch's (at most two levels).
+    @alloc      the record, made on the first ring and kept (an empty file
+                whose mtime is the time); two descriptors, closed before
+                return; the words, on a failure.
+    """
+    branch = outbox_branch()
+    path = branch / RANG_RECORD_NAME.format(to=to)
+    lost = f"so this user's next send to {to} rings again"
+    try:
+        share = claim_branch(branch)
+        fd = os.open(branch, FOLDER_FLAGS)
+    except OSError as err:
+        return f"{path} could not be written ({err.strerror}), {lost}"
+    try:
+        problem = branch_problem(branch, os.fstat(fd), share, True)
+        if problem is not None:
+            return f"{path} could not be written ({problem}), {lost}"
+        record = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, RANG_RECORD_MODE,
+                         dir_fd=fd)
+        try:
+            st = os.fstat(record)
+            if not stat.S_ISREG(st.st_mode):
+                return f"{path} could not be written (it is not a regular file), {lost}"
+            if stat.S_IMODE(st.st_mode) != RANG_RECORD_MODE:
+                os.fchmod(record, RANG_RECORD_MODE)
+            now = wall_clock()
+            os.utime(record, (now, now))
+        finally:
+            os.close(record)
+    except OSError as err:
+        return f"{path} could not be written ({err.strerror}), {lost}"
+    finally:
+        os.close(fd)
+    return None
+
+
 # CARDS R4 (Claude Opus 5.5, unreviewed): the codex route, a doorbell (D3).
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14, a failed ring is never lost.
 # Phase fix round 1 (Claude Opus 5.5, unreviewed): D16, the marker before the
@@ -5538,76 +5680,130 @@ def deliver_codex(card, sender, to, body, header_note=None, *, deadline=None, on
     private inbox the send makes (it was not there to pin) is counted
     after in its own descriptor, opened then.
 
-    @interacts  holds mail/.box-<to>.lock while it lstats the marker,
-                reads ROOT/.shared and opens mail/, the inbox and its
-                read/ once (pinned_inbox), counts the inbox's messages in
-                its descriptor (before and after; after, in one opened
-                then when this send made the inbox), reads and stats
-                mail/.ring-pending-<to>, writes the message through
-                deliver_local in the same open inbox and, when a ring is
-                owed, the marker (write_ring_marker); closes the inbox's
-                descriptors before the ring. SHARED fix round 3 (Claude Opus 5.5,
-                unreviewed): one lock_deadline, taken before the inbox
-                lock and passed to deliver_local, bounds the inbox lock
-                and mail/.seq together; either held past it by another
-                process refuses, exit 10, nothing landed or rung
-                (inbox_lock, next_seq, D20, D23). SHARED fix round 4
-                (Claude Opus 5.5, unreviewed): the audit's LOW-3.
-                `deadline`, a keyword C2's route signature leaves out
-                (as deliver_local's), is the command's lock_deadline from
-                cmd_send, so a local send whose card turned codex under
-                its lock never waits two bounds; None takes one here, so
-                a call with C2's arguments alone works as before. The marker's flock held
-                past LOCK_WAIT_SECONDS skips that write, said as a marker
-                that could not be written or cleared. Then rings through
-                ring_codex (one `codex queue` run, at most
-                CODEX_RING_SECONDS) and rewrites the marker: RING_CLEAR on
-                exit 0, else the failure. Reads the clock through
-                wall_clock.
+    P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (2), D36 (1) and
+    the audit's MEDIUM-1, the doorbell can't be switched off (C2 item 5).
+    The steps above, and the ring, are ring_doorbell's, which a retry of a
+    message the far gate already delivered shares (the audit's LOW-1). A
+    send also rings whenever this sender's own last ring to `to` is
+    RING_BACKOFF_SECONDS old or more, whatever the marker says; see
+    ring_doorbell's block for the rule and its cost.
+
+    @interacts  see ring_doorbell, with this send's message written
+                through deliver_local in the inbox ring_doorbell opened.
+    @deps       ring_doorbell, deliver_local.
+    @complexity as ring_doorbell's, plus O(b) over b bytes of body.
+    @alloc      as ring_doorbell's; one message file, kept.
+    """
+    def land(inbox):
+        return deliver_local(card, sender, to, body, header_note, deadline=deadline, on_landed=on_landed, inbox=inbox)
+    return ring_doorbell(card, sender, to, land, deadline=deadline)
+
+
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (2) and D36 (1), the
+# ring decision a fresh landing and a gate's retry share (C2 item 5, LOW-1).
+def ring_doorbell(card, sender, to, land=None, *, deadline=None, already=None):
+    """The codex route's doorbell for `to` (its `card`), after a landing: a Delivery. `land`, given the open Inbox, lands this send's message and returns its Delivery (a fresh send, deliver_codex); None means nothing lands now and `already` is the Delivery to answer with (a retry whose origin id the far gate already filed, deliver_once).
+
+    Under mail/.box-<to>.lock, held alone (D14): read the marker, open the
+    inbox once (pinned_inbox), count, land, count again, and decide. A
+    fresh landing rings (C2 steps 1 to 5) when the inbox held no unread
+    mail before it, or the marker says a ring is owed (ring_owed), unless
+    a timed-out ring holds the backoff (ring_backoff); and, whatever the
+    marker says (clear, timed out, or freshly touched), whenever this
+    sender's own last ring to `to` is RING_BACKOFF_SECONDS old or older,
+    or its record is missing, unreadable or dated after now
+    (rang_long_ago, D35 (2), D36 (1)). The marker is group-writable, so
+    its words and its time can be forged by any member; the record is in
+    this Linux user's own branch, which only it can write, so a member
+    can hold off only their own rings. The cost, accepted: at most one
+    ring per sender per name per backoff while unread mail waits, and on
+    a dead Codex one CODEX_RING_SECONDS wait per sender per backoff
+    instead of one in all.
+
+    A retry (the audit's LOW-1) runs the same rule with nothing landing:
+    step 1's "the inbox held nothing before" has no before, so it reads
+    False, and a ring needs unread mail now. So a far gate killed after
+    it filed the origin id and before its ring is rung by the near side's
+    retry (the marker it wrote before the ring says owed), and a retry
+    after a ring that went through rings nothing. A retry never refuses:
+    a bad marker or inbox only skips the ring, with a warning for the
+    marker, and the retry still answers `already`.
+
+    When a ring is owed, the marker is written (RING_RINGING) and this
+    sender's record (write_rang_record, D33's branch checks) before the
+    lock is released, so a sender killed mid-ring leaves both for the
+    next send; two quick sends may both ring: two doorbells, one read,
+    harmless, and what keeps a wake from being lost. The ring runs after
+    the lock is released (ring_codex), so a slow ring never holds up a
+    tc read, and the marker is rewritten by the outcome: RING_CLEAR on
+    exit 0, RING_TIMED_OUT (the backoff) or RING_FAILED. A fresh send with
+    a symlink, FIFO or anything but a regular file at the marker's name
+    is refused, Delivery exit 1, nothing sent (D17, D19).
+
+    @interacts  holds mail/.box-<to>.lock (inbox_lock: busy past
+                `deadline`, exit 10, nothing landed or rung) while it
+                lstats and reads the marker, opens mail/, the inbox and
+                its read/ (pinned_inbox, refusing a bad one for a fresh
+                send only), counts the inbox's messages in its descriptor,
+                calls `land`, opens this user's outbox branch and lstats
+                its record (rang_long_ago), and when a ring is owed writes
+                the marker (write_ring_marker) and the record
+                (write_rang_record: may make outbox/ and the branch);
+                then, released, rings (ring_codex: one `codex queue` run,
+                at most CODEX_RING_SECONDS) and rewrites the marker. Reads
+                the clock through wall_clock.
     @deps       lock_deadline, inbox_lock, ring_marker_problem,
-                pinned_inbox, unread_count, ring_owed, deliver_local,
-                ring_backoff, write_ring_marker, ring_codex, clock_words,
-                wall_clock, Delivery; RING_RINGING, RING_FAILED,
-                RING_TIMED_OUT, RING_CLEAR, RING_BACKOFF_SECONDS,
-                EXIT_REFUSED.
-    @complexity O(U + u log u + b) over U names in the inbox, the u of
-                them that are messages (listed and counted twice) and b
-                bytes of body, plus one codex run of at most
-                CODEX_RING_SECONDS; no run while a backoff holds. The inbox
+                pinned_inbox, unread_count, ring_owed, ring_backoff,
+                rang_long_ago, write_ring_marker, write_rang_record,
+                ring_codex, clock_words, wall_clock, Delivery;
+                RING_RINGING, RING_FAILED, RING_TIMED_OUT, RING_CLEAR,
+                RING_BACKOFF_SECONDS, EXIT_REFUSED.
+    @complexity O(U + u log u) over U names in the inbox and the u of
+                them that are messages (listed and counted twice), plus
+                `land`'s, plus one codex run of at most CODEX_RING_SECONDS
+                per ring: at most one per sender per name per
+                RING_BACKOFF_SECONDS while mail waits unread. The inbox
                 lock and mail/.seq wait at most LOCK_WAIT_SECONDS in all
                 (one deadline); each marker write, before and after the
                 ring, at most LOCK_WAIT_SECONDS of its own.
-    @alloc      the ring's words, freed on return; one message file, kept;
-                the marker file, kept (never removed, D20); two
+    @alloc      the ring's words, freed on return; the marker file and
+                this sender's record, kept (never removed); two
                 descriptors while the lock is held.
     """
     marker = MAIL / f".ring-pending-{to}"
+    fresh = land is not None
     if deadline is None:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-3, the command's own when given
         deadline = lock_deadline()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one per command
     with inbox_lock(to, deadline=deadline):
         bad = ring_marker_problem(marker)  # SHARED D17 (Claude Opus 5.5, unreviewed): a planted link; D19 a FIFO
         if bad is not None:
-            return Delivery(EXIT_REFUSED, f"tc send: {marker} {bad}; nothing sent", [])
-        with pinned_inbox(to) as inbox:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, one folder
+            if fresh:
+                return Delivery(EXIT_REFUSED, f"tc send: {marker} {bad}; nothing sent", [])
+            return Delivery(already.exit, already.words, already.warnings + [f"{marker} {bad}, so {to} was not rung"])
+        with pinned_inbox(to, check=fresh) as inbox:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, one folder
             waiting = unread_count(to, inbox)
             owed = ring_owed(marker)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, the state, not the file
             held = ring_backoff(marker) if owed else None
-            landed = deliver_local(card, sender, to, body, header_note, deadline=deadline, on_landed=on_landed,
-                                   inbox=inbox)
+            landed = land(inbox) if fresh else already
             # A private inbox this send made was not there to pin: it is counted in its own, fresh.
-            count = unread_count(to, inbox if inbox.box.fd is not None else None)
-        ring = landed.exit == 0 and held is None and (owed or not waiting)
+            count = unread_count(to, inbox if inbox.box.fd is not None else None) if fresh else waiting
+        old = landed.exit == 0 and count > 0 and rang_long_ago(to)  # P3 fix round 1b (Claude Opus 5.5, unreviewed): C2 item 5
+        if fresh:
+            ring = landed.exit == 0 and ((held is None and (owed or not waiting)) or old)
+        else:
+            ring = count > 0 and ((owed and held is None) or old)
+        record = None
         if ring:
             write_ring_marker(to, RING_RINGING, f"a send from {sender} is ringing")
+            record = write_rang_record(to)  # P3 fix round 1b (Claude Opus 5.5, unreviewed): before the ring, as the marker
     if landed.exit != 0:
         return landed
-    words, warnings = [landed.words], list(landed.warnings)
-    if held is not None:
-        warnings.append(f"ring pending for {to}: the last ring timed out at {clock_words(held)}; "
-                        f"a send after {clock_words(held + RING_BACKOFF_SECONDS)} rings again")
-        return Delivery(landed.exit, landed.words, warnings)
+    words, warnings = [landed.words], list(landed.warnings) + ([record] if record is not None else [])
     if not ring:
-        return landed
+        if held is not None and count > 0:
+            warnings.append(f"ring pending for {to}: the last ring timed out at {clock_words(held)}; "
+                            f"a send after {clock_words(held + RING_BACKOFF_SECONDS)} rings again")
+        return Delivery(landed.exit, landed.words, warnings)
     failure = ring_codex(card, sender, to, count)
     if failure is None:
         words.append(f"rang codex {to} (queued; delivered when its turn ends or the session is resumed)")

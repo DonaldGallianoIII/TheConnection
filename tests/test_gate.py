@@ -36,10 +36,15 @@ that the fake is reachable.
             member's; one with os.fstat patched so this user's folder in
             mail/.origins/ reads as another member's. One class shares the
             mailbox with the user's own primary group (tc init --shared).
+            P3 fix round 1b (Claude Opus 5.5, unreviewed): one test puts a
+            fake of its own first that kills the gate ringing it, by that
+            gate's pid once its command line is checked, and the test
+            then kills the fake by its own pid in case.
 @deps       python3 stdlib (argparse, contextlib, fcntl, io, json, os,
-            pathlib, shlex, shutil, stat, subprocess, sys, unittest,
-            unittest.mock); tests/_root.py; load_tc, ring_argv and THREAD
-            from test_codex_route.py; files_under from test_router.py;
+            pathlib, shlex, shutil, signal, stat, subprocess, sys,
+            unittest, unittest.mock); tests/_root.py; load_tc, ring_argv,
+            THREAD, own_fake and kill_own_fake from test_codex_route.py;
+            files_under from test_router.py;
             UmaskTestCase, owner_patched_fstat and primary_group from
             test_shared.py; login from test_ssh_route.py; ../tc.
 @complexity O(1) per test: one to fifteen tc runs, each under a second.
@@ -58,6 +63,7 @@ import os
 import pathlib
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -71,7 +77,8 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import _root  # noqa: E402  (needs the path line above)
-from test_codex_route import FINISH_CEILING_SECONDS, THREAD, load_tc, ring_argv  # noqa: E402
+from test_codex_route import (FINISH_CEILING_SECONDS, THREAD, kill_own_fake, load_tc, own_fake,  # noqa: E402
+                              ring_argv)
 from test_router import files_under  # noqa: E402
 from test_shared import UmaskTestCase, owner_patched_fstat, primary_group  # noqa: E402
 from test_ssh_route import login  # noqa: E402
@@ -83,6 +90,22 @@ REFUSED_WORDS = "tc gate: refused\n"
 NO_FORWARD_WORDS = "tc gate: {name} is not a local name; the gate does not forward\n"
 HEADER_NOTE = f", via ssh gate, key {KEY}"
 ALREADY_WORDS = "already delivered (origin {origin})\n"
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): the audit's LOW-1. The
+# ring's word line for c, and a fake codex that records its call and its
+# parent's pid, then sends SIGKILL to that parent, the `tc gate` ringing
+# it, as a dropped connection or a crash would end it mid-ring. It kills
+# only a parent whose command line holds the tc path TC and "gate".
+RANG_WORDS = "rang codex c (queued; delivered when its turn ends or the session is resumed)"
+KILLING_GATE_FAKE_BODY = """import json, os, signal, sys
+parent = os.getppid()
+with open(RECORD + ".tmp", "w") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "pid": os.getpid(), "parent": parent}) + "\\n")
+os.replace(RECORD + ".tmp", RECORD)
+with open(f"/proc/{parent}/cmdline", "rb") as f:
+    words = f.read().split(b"\\0")
+if TC.encode() in words and b"gate" in words:
+    os.kill(parent, signal.SIGKILL)
+"""
 TOO_LARGE_WORDS = "tc send: message over 1 MiB; this is a mailbox for words\n"
 NOT_UTF8_WORDS = "tc send: message is not valid UTF-8 text; nothing written\n"
 MAX_BYTES = 1048576
@@ -471,6 +494,48 @@ class GateTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(rang, 1)
         self.assertEqual(seen, "filed\n", "the ring ran before the origin id was filed")
+
+    # P3 fix round 1b (Claude Opus 5.5, unreviewed): the audit's LOW-1, option B.
+    def test_a_retry_after_a_gate_killed_before_its_ring_rings_once_and_lands_nothing_twice(self):
+        """c joined as codex: a gated send with --origin lands, files its id, and its gate is killed mid-ring; the near side's retry of the same id answers `already delivered`, exit 0, and rings c once (the fake asserted called); a second retry rings nothing; one message landed.
+
+        A retry runs the same ring decision as a fresh landing (the
+        marker the killed gate wrote before its ring says owed). Must
+        reject a retry that answers `already delivered` and rings nothing
+        (the Codex thread would wait for an unrelated send), and one that
+        rings on every retry.
+
+        @interacts  one join; one gate run with PATH putting this file's
+                    killing fake first (it kills that gate by its pid,
+                    checked by its command line); two more gate runs
+                    finding the harness fake first.
+        @deps       gate, filing, ring_argv; own_fake and kill_own_fake
+                    from test_codex_route.py; _root.TcRoot.tc, fake_bin;
+                    json, signal.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("codex", 0)
+            env, killing = own_fake(root, KILLING_GATE_FAKE_BODY, TC=str(_root.TC.resolve()))
+            root.tc("join", "c", env={"CODEX_THREAD_ID": THREAD})
+            command = f"/x/tc send --from a --to c --origin {ORIGIN}"
+            killed = gate(root, command, "hi", env=env)
+            self.assertTrue(killing.exists(), f"{killing} missing: the killing fake never ran")
+            kill_own_fake(json.loads(killing.read_text().splitlines()[0])["pid"], killing)
+            filed = filing(root, KEY, ORIGIN).exists()
+            retry = gate(root, command, "hi")
+            again = gate(root, command, "hi")
+            record = folder.parent / "calls.jsonl"
+            self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
+            rang = calls()
+            landed = sorted(p.name for p in (root.path / "mail" / "to-c").glob("*.md"))
+        self.assertEqual(killed[0], -signal.SIGKILL, f"the fake did not kill the gate mid-ring: {killed}")
+        self.assertTrue(filed, "the killed gate never filed the origin id")
+        self.assertEqual(retry, (0, f"{ALREADY_WORDS.format(origin=ORIGIN)}{RANG_WORDS}\n", ""))
+        self.assertEqual(again, (0, ALREADY_WORDS.format(origin=ORIGIN), ""))
+        self.assertEqual([call["argv"] for call in rang], [ring_argv(root, 1, "c", KEY)])
+        self.assertEqual(landed, [f"000001-from-{KEY}.md"])
 
     def test_a_file_planted_at_the_origins_folders_name_is_a_warning_after_delivery(self):
         """A regular file at mail/.origins (a member's touch): a gated send with --origin delivers, exits 0, warns that the id could not be filed, and prints no traceback.
