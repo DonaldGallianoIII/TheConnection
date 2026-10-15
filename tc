@@ -36,7 +36,9 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             rewritten, D20). A send to a name with no card, whether or not
             an inbox is there (D21), or to an inbox its card's owner does
             not own, is refused, exit 1 (D20). `init` reads the group
-            database, makes the four when missing (D19), sets the group
+            database, makes a missing ROOT 0755 and refuses a ROOT its
+            group or anyone may write that is not sticky (D21, SHARED fix
+            round 2), makes the four when missing (D19), sets the group
             and mode of every folder and file under them that is not right
             yet, then writes .shared at 0644, owner-write only (D21),
             unless it already names the group; then its owner's rerun
@@ -250,6 +252,16 @@ SHARED_MARKER_MODE = 0o644
 # D21's words for who may change a shared mailbox's group, with the
 # login name of the user who owns .shared.
 INIT_USER_WORDS = "only the user who ran init ({owner}) can change the group"
+# SHARED fix round 2 (Claude Opus 5.5, unreviewed): D21, ROOT never
+# group-writable. .shared and mail/ live directly in ROOT, and in a folder
+# its group may write (without the sticky bit) any member may rename
+# either and put its own in place. So init makes a missing ROOT, and its
+# missing parents, at this mode: everyone may search it, only its owner
+# may write it.
+ROOT_MODE = 0o755
+# The umask init makes ROOT under, so the missing parents come out
+# ROOT_MODE too, whatever umask the user logged in with.
+ROOT_UMASK = 0o022
 # The folders a shared mailbox shares, by name under ROOT (C4). outbox/ is
 # the ssh route's (C3); init reaches it whenever it is there.
 SHARED_FOLDER_NAMES = ("mail", "status", "cards", "outbox")
@@ -914,13 +926,22 @@ def claim_inbox(name):
     already owns is kept as it is, and a missing read/ is made. A folder
     made here gets group g and SHARED_INBOX_MODE (make_folder).
 
+    SHARED fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-1.
+    Two joins of one unclaimed name at once cannot both claim it. The
+    inbox is made first, then read/, each by an mkdir as this user (which
+    only one process can win), and after each the owner of what is there
+    is looked at: a folder another user owns is refused with the same
+    words, so the loser stops before it makes anything inside the
+    winner's inbox.
+
     @interacts  lstats cards/<name>.json, mail/to-<name> and its read/
                 (check_inbox); reads this process's user id and the user
-                database; makes the missing folders (make_folder); on a
-                refusal one line to stderr and exit 1.
+                database; makes the missing folders (make_folder) and
+                lstats each after; on a refusal one line to stderr and
+                exit 1.
     @deps       check_inbox, make_folder, refuse, user_name; os; MAIL,
                 CARDS, EXIT_REFUSED.
-    @complexity O(1): three lstat calls and at most two new folders.
+    @complexity O(1): five lstat calls and at most two new folders.
     @alloc      the stat results, freed on return.
     """
     me = os.geteuid()
@@ -933,15 +954,21 @@ def claim_inbox(name):
         refuse(f"tc join: {card} belongs to {user_name(owner)}; under a shared mailbox only its owner "
                f"can replace it. No card written; pick another name, or ask {user_name(owner)}.",
                EXIT_REFUSED)
+
+    def refuse_taken(path, uid):
+        refuse(f"tc join: {path} belongs to {user_name(uid)}; under a shared mailbox an inbox "
+               f"belongs to its recipient, so {name} is taken here. No card written; pick another "
+               f"name, or ask {user_name(uid)}.", EXIT_REFUSED)
     box = MAIL / f"to-{name}"
     box_st, read_st = check_inbox(name, False)
     for path, st in ((box, box_st), (box / "read", read_st)):
         if st is not None and st.st_uid != me:
-            refuse(f"tc join: {path} belongs to {user_name(st.st_uid)}; under a shared mailbox an inbox "
-                   f"belongs to its recipient, so {name} is taken here. No card written; pick another "
-                   f"name, or ask {user_name(st.st_uid)}.", EXIT_REFUSED)
-    if read_st is None:
-        make_folder(box / "read")
+            refuse_taken(path, st.st_uid)
+    for path in (box, box / "read"):  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): LOW-1, make, then look
+        make_folder(path)
+        owner = os.lstat(path).st_uid
+        if owner != me:
+            refuse_taken(path, owner)
 
 
 # SHARED D21 (Claude Opus 5.5, unreviewed): .shared belongs to the user who ran init.
@@ -1040,10 +1067,19 @@ def cmd_init(args):
 
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19 and the audit's
     LOW-2 to LOW-4 and LOW-7. Init first makes ROOT (it is not shared:
-    no group, no mode) and then mail/, status/, cards/ and outbox/ when
+    no group) and then mail/, status/, cards/ and outbox/ when
     they are missing, so no other user ever has to make a top folder in a
     ROOT the first user owns. ROOT it cannot reach is refused with words
-    on search access, nothing changed. Entries already right are left
+    on search access, nothing changed.
+
+    SHARED fix round 2 (Claude Opus 5.5, unreviewed): D21 and the audit's
+    MEDIUM-2. A missing ROOT, and any missing folder above it, is made
+    ROOT_MODE (0755) under ROOT_UMASK, before the shared umask is set, so
+    init never makes ROOT group-writable. A ROOT its group or anyone may
+    write, without the sticky bit, is refused before anything changes
+    (exit 1): any member could rename .shared or mail/ in it. The words
+    tell its owner to run `chmod g-w,o-w <ROOT>` first. A sticky ROOT
+    passes, since there only an entry's owner may rename it. Entries already right are left
     alone (share_entry), so a rerun on a live mailbox is clean, and a top
     folder whose own change failed is still walked (shared_entries). The
     skipped lines print before anything else is said. When .shared
@@ -1054,8 +1090,11 @@ def cmd_init(args):
     @interacts  reads the group database and this process's groups;
                 reads ROOT/.shared (shared_group) and, unless it names g,
                 lstats it for its owner and reads the user database
-                (marker_other_owner); sets its umask (SHARED_UMASK); makes
-                ROOT and its missing parents, and each missing top folder;
+                (marker_other_owner); makes a missing ROOT and its missing
+                parents at ROOT_MODE under ROOT_UMASK, stats ROOT and
+                refuses one its group or anyone may write that is not
+                sticky (reading the user database for its owner); sets
+                its umask (SHARED_UMASK); makes each missing top folder;
                 walks the four folders and opens, fstats and changes each
                 entry (shared_entries); when .shared names g, opens it and
                 sets its mode if this user owns it, or says one line if
@@ -1065,9 +1104,10 @@ def cmd_init(args):
                 rename fails. Prints one line, plus one stderr line per
                 skipped entry, first.
     @deps       shared_entries, shared_group, marker_other_owner,
-                settle_marker_mode, write_new_file, refuse, printable; grp,
-                os, sys; SHARED_FOLDER_NAMES, SHARED_MARKER_NAME,
-                SHARED_MARKER_MODE, INIT_USER_WORDS, SHARED_UMASK.
+                settle_marker_mode, write_new_file, refuse, printable,
+                user_name; grp, os, stat, sys; SHARED_FOLDER_NAMES,
+                SHARED_MARKER_NAME, SHARED_MARKER_MODE, INIT_USER_WORDS,
+                SHARED_UMASK, ROOT_MODE, ROOT_UMASK.
     @complexity O(f) over f folders and files under the four folders: the
                 inboxes and every read/ (hundreds to thousands, growing
                 with the history).
@@ -1095,12 +1135,21 @@ def cmd_init(args):
     if owner is not None and isinstance(current, str):
         refuse(f"tc init: may not change {marker}; the mailbox stays shared with group "
                f"{printable(current)}; {INIT_USER_WORDS.format(owner=owner)}. Nothing changed.", EXIT_REFUSED)
-    os.umask(SHARED_UMASK)
+    # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D21, ROOT is never made or left group-writable.
+    os.umask(ROOT_UMASK)
     try:
-        os.makedirs(ROOT, exist_ok=True)  # ROOT itself is not shared: no group, no mode
+        os.makedirs(ROOT, mode=ROOT_MODE, exist_ok=True)  # ROOT itself is not shared: no group
+        root_st = os.stat(ROOT)
     except OSError as err:
         refuse(f"tc init: cannot reach {ROOT} ({err.strerror}); this user needs search (x) access on "
                f"every folder from / down to it. Nothing changed.", EXIT_REFUSED)
+    root_mode = stat.S_IMODE(root_st.st_mode)
+    if root_mode & (stat.S_IWGRP | stat.S_IWOTH) and not root_mode & stat.S_ISVTX:
+        refuse(f"tc init: {ROOT} is {root_mode:04o}: its group or anyone may write it and it is not "
+               f"sticky, so any member could rename .shared or mail/ in it and change the group. Its "
+               f"owner, {user_name(root_st.st_uid)}, runs chmod g-w,o-w {ROOT} first. Nothing changed.",
+               EXIT_REFUSED)
+    os.umask(SHARED_UMASK)
     done, skipped = {"folder": 0, "file": 0}, []
     for top in (ROOT / name for name in SHARED_FOLDER_NAMES):
         try:

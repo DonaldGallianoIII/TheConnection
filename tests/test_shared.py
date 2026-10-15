@@ -245,6 +245,19 @@ LOCK_HELD_WORDS = "another process is holding {what}'s lock"
 # The number a member sets mail/.seq back to, so the next send's number
 # names a message already there.
 SET_BACK_SEQ = 5
+# The mode init gives a ROOT it makes, and each missing folder above it:
+# everyone may search it, only its owner may write it (D21).
+ROOT_MODE = 0o755
+# A login umask that leaves group write on, as many Linux systems give a
+# user with a group of their own. Under it, a folder made without a umask
+# of tc's own comes out 0775.
+GROUP_WRITE_UMASK = 0o002
+# A ROOT its group may write: init refuses it. With the sticky bit, init
+# takes it (only an entry's owner may rename an entry there).
+GROUP_WRITABLE_ROOT_MODE = 0o775
+STICKY_GROUP_WRITABLE_ROOT_MODE = 0o1775
+# What init tells ROOT's owner to run before it shares a writable ROOT.
+CHMOD_WORDS = "chmod g-w,o-w {root} first. Nothing changed."
 
 
 def user_groups():
@@ -566,11 +579,14 @@ def landed(root):
     return sorted(str(p.relative_to(root.path)) for p in [*mail.glob("to-*/*.md"), *mail.glob("to-*/read/*.md")])
 
 
-def load_tc(root):
-    """Load ../tc as a module with TC_ROOT set to the harness root, without running main().
+def load_tc(root, path=None):
+    """Load ../tc as a module with TC_ROOT set to the harness root (or `path`, a folder inside the root's temp folder), without running main().
 
     tc reads TC_ROOT once, at import, so it is set before the load and the
-    old value is put back after (CLAUDE.md, Key patterns).
+    old value is put back after (CLAUDE.md, Key patterns). SHARED fix
+    round 2 (Claude Opus 5.5, unreviewed): `path` lets a test point tc at
+    a ROOT that does not exist yet; the caller keeps it under root.base,
+    so the root's own cleanup removes whatever tc makes there.
 
     @interacts  sets and restores os.environ["TC_ROOT"]; runs tc's top
                 level (constants only, no disk writes).
@@ -579,7 +595,7 @@ def load_tc(root):
     @alloc      one module object, returned.
     """
     old = os.environ.get("TC_ROOT")
-    os.environ["TC_ROOT"] = str(root.path)
+    os.environ["TC_ROOT"] = str(path if path is not None else root.path)
     try:
         loader = importlib.machinery.SourceFileLoader("tc_shared_under_test", str(_root.TC))
         mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
@@ -2094,6 +2110,134 @@ class NoLostMailNoHangTest(UmaskTestCase):
                 self.assertEqual(err, f"tc: {LOCK_HELD_WORDS.format(what=what)}; try again\n")
                 self.assertEqual(after, before, "a refused command changed the root")
                 self.assertEqual(rang, 0, "a refused codex send rang")
+
+
+class RootAndClaimTest(UmaskTestCase):
+    """D21's ROOT and the audit's LOW-1: init never makes or leaves ROOT group-writable, and of two joins of one name at once only one claims the inbox.
+
+    The audit's MEDIUM-2 and LOW-1 (audits/2026-10-14-2259-quick). One
+    Linux user cannot run a second join, so the other joiner's mkdir is
+    made by a patched os.mkdir, and its ownership is what a patched
+    os.lstat reports.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, UmaskTestCase, primary_group, tree, load_tc,
+                run_init, owner_patched_lstat.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per test.
+    """
+
+    def test_init_makes_a_missing_root_and_its_missing_parent_0755(self):
+        """In process, under a login umask of 002, TC_ROOT two folders below one that exists: init exits 0, and ROOT and the folder above it are both 0755.
+
+        Must reject a ROOT made after the shared umask (002): it comes out
+        0775, and with ROOT's group the share group any member could
+        rename .shared and change the group (D21). The parent catches a
+        makedirs that passes 0755 for ROOT but leaves the parents to the
+        umask.
+
+        @interacts  sets this process's umask (UmaskTestCase puts it
+                    back); loads tc in process pointed at a missing ROOT
+                    under the root's temp folder and runs cmd_init; lstats
+                    ROOT and its parent.
+        @deps       _root.TcRoot, primary_group, load_tc, run_init;
+                    GROUP_WRITE_UMASK, ROOT_MODE, SHARED_TOP_FOLDER_MODE.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        label, name, gid = primary_group()
+        with _root.TcRoot() as root:
+            target = root.base / "made" / "root"
+            tc = load_tc(root, target)
+            os.umask(GROUP_WRITE_UMASK)
+            code, out, err = run_init(tc, name)
+            modes = {str(p.relative_to(root.base)): stat.S_IMODE(os.lstat(p).st_mode)
+                     for p in (target.parent, target)}
+            mail = stat.S_IMODE(os.lstat(target / "mail").st_mode) if os.path.lexists(target / "mail") else None
+            marker = (target / ".shared").read_text() if os.path.lexists(target / ".shared") else None
+        self.assertEqual(modes, {"made": ROOT_MODE, "made/root": ROOT_MODE},
+                         "init made ROOT or a folder above it group-writable")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(mail, SHARED_TOP_FOLDER_MODE)
+        self.assertEqual(marker, f"{name}\n")
+
+    def test_a_group_writable_root_is_refused_and_nothing_changes_unless_it_is_sticky(self):
+        """ROOT set to 0775 after a send: init exits 1, tells ROOT's owner to run chmod g-w,o-w on it, writes no .shared and changes no entry; set to 1775 (sticky), init exits 0.
+
+        Must reject an init that shares a ROOT any member may write: a
+        member could rename .shared or mail/ in it and put its own in
+        place (D21).
+
+        @interacts  a send; ROOT chmodded by hand and put back; two inits;
+                    stats every entry under ROOT before and after.
+        @deps       _root.TcRoot.tc, primary_group, tree;
+                    GROUP_WRITABLE_ROOT_MODE,
+                    STICKY_GROUP_WRITABLE_ROOT_MODE, CHMOD_WORDS.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        label, name, gid = primary_group()
+        with _root.TcRoot() as root:
+            root.tc("send", "--from", "a", "--to", "b", "hi")
+            mode = stat.S_IMODE(os.lstat(root.path).st_mode)
+            try:
+                root.path.chmod(GROUP_WRITABLE_ROOT_MODE)
+                before = tree(root.path, under=None)
+                refused = root.tc("init", "--shared", "--group", name)
+                after = tree(root.path, under=None)
+                left = stat.S_IMODE(os.lstat(root.path).st_mode)
+                root.path.chmod(STICKY_GROUP_WRITABLE_ROOT_MODE)
+                sticky = root.tc("init", "--shared", "--group", name)
+                shared = (root.path / ".shared").exists()
+            finally:
+                root.path.chmod(mode)
+        self.assertEqual(refused[0], EXIT_REFUSED, refused[2])
+        self.assertIn(CHMOD_WORDS.format(root=root.path), refused[2])
+        self.assertEqual(after, before, "a refused init changed an entry")
+        self.assertNotIn(".shared", after)
+        self.assertEqual(left, GROUP_WRITABLE_ROOT_MODE, "a refused init changed ROOT's mode")
+        self.assertEqual(sticky[0], 0, sticky[2])
+        self.assertTrue(shared, "init refused a sticky ROOT")
+
+    def test_of_two_joins_of_one_name_at_once_the_loser_is_refused_and_makes_nothing(self):
+        """In process, shared: another joiner's mkdir of mail/to-x lands just before this join's (patched os.mkdir), and lstat reports it as that user's: claim_inbox exits 1 with the taken words and makes no read/ inside it.
+
+        Must reject a claim that takes the other joiner's inbox as made
+        (make_folder accepts a folder another process just made) and goes
+        on to make read/ in it: the inbox and its read/ would have two
+        owners, and every send, read and wait for x would be refused.
+
+        @interacts  init; loads tc in process and runs claim_inbox with
+                    os.mkdir and os.lstat wrapped and stderr captured.
+        @deps       _root.TcRoot.tc, primary_group, load_tc,
+                    owner_patched_lstat; contextlib, errno, io,
+                    unittest.mock; tc.claim_inbox.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        label, name, gid = primary_group()
+        with _root.TcRoot() as root:
+            self.assertEqual(root.tc("init", "--shared", "--group", name)[0], 0)
+            box = root.path / "mail" / "to-x"
+            tc = load_tc(root)
+            real_mkdir, raced = os.mkdir, []
+
+            def mkdir(path, *args, **kwargs):
+                if pathlib.Path(path) == box and not raced:
+                    raced.append(path)
+                    real_mkdir(path, *args, **kwargs)  # the other joiner's, a moment first
+                    raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(path))
+                return real_mkdir(path, *args, **kwargs)
+            said = io.StringIO()
+            with mock.patch.object(os, "mkdir", mkdir), \
+                    mock.patch.object(os, "lstat", owner_patched_lstat(box)), contextlib.redirect_stderr(said):
+                with self.assertRaises(SystemExit) as stop:
+                    tc.claim_inbox("x")
+            inside = sorted(p.name for p in box.iterdir())
+        self.assertEqual(raced, [box], "the other joiner's mkdir never ran")
+        self.assertEqual(stop.exception.code, EXIT_REFUSED)
+        self.assertIn(TAKEN_INBOX_WORDS, said.getvalue())
+        self.assertEqual(inside, [], "the losing join made read/ inside the other joiner's inbox")
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1.
