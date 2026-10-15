@@ -25,15 +25,18 @@ Where:  ~/TheConnection-lanes/shared
 | Round 1 (d) | `6139a99` | Make the supplementary run skip with a reason, and the tests' and tags' claims true |
 | Round 1, extra | `cc1b826` | Never say "no unread mail" when tc read could not move what is there |
 | Round 1 (e) | `b36d4fc` | Bring the SHARED handoff and both pauses up to D19 and D20, and add route-shared QA |
-| D21 | the commit that changes this file | Build D21: .shared is the init user's alone, and a shared send needs a card |
+| D21 | `f04944d` | Build D21: .shared is the init user's alone, and a shared send needs a card |
+| D21, second | the commit that changes this file | Refuse another member's init before it changes anything, settle .shared at 0644, and date status files by lstat |
 
 The extra commit is one the brief did not list: writing step 13 of
-`route-shared.md` (step 15 since the D21 round) showed that a read which
+`route-shared.md` (step 16 since the D21 round) showed that a read which
 could move nothing still printed `no unread mail`. No amend, reset or
 rebase. Nothing pushed or merged.
 
-The D21 round changed `tc`, `tests/test_shared.py`,
-`qa/human/route-shared.md` and this file, nothing else.
+The two D21 commits change `tc`, `tests/test_shared.py`,
+`qa/human/route-shared.md` and this file, nothing else. The second
+builds the architect's yes to both D21 decisions this handoff asked for,
+and two items from BOARD's review that land in SHARED's `tc`.
 
 Round 1 changed `tc`, `tests/test_shared.py`,
 `tests/test_codex_route.py`, this file, `pauses/SHARED-1.md`,
@@ -163,13 +166,23 @@ until D21 ruled on them.
 - `.shared` is made `SHARED_MARKER_MODE`, 0644 (a new constant): the
   user who ran init reads and writes it, every other member only reads
   it. Init's umask 002 takes no bit from it, so a rewrite on a rerun with
-  another group is 0644 too, and a rerun that finds it naming g leaves
-  it alone. tc never makes it group-writable.
-- When init may not replace `.shared` (a permission error) and another
-  user owns it, the refusal now ends its state with `; only the user who
-  ran init (<owner>) can change the group`, naming the owner. `.shared`'s
-  own owner, refused for another reason (a read-only ROOT), gets the old
-  words with no such line.
+  another group is 0644 too. tc never makes it group-writable.
+- A rerun that finds `.shared` naming g does not rewrite it, and when
+  this user owns it at another mode (0664, as init wrote it before D21)
+  sets it to 0644 through an `O_NOFOLLOW` descriptor
+  (`settle_marker_mode`, the second D21 commit, at the architect's yes).
+  Another user's `.shared` is left as it is.
+- When `.shared` names another group and another user owns it, init
+  refuses first, before it makes, walks or changes anything: one line,
+  `tc init: may not change <ROOT>/.shared; the mailbox stays shared with
+  group <h>; only the user who ran init (<owner>) can change the group.
+  Nothing changed.`, exit 1 (the second D21 commit, at the architect's
+  yes). A member's inbox, card and `mail/.seq` keep their group.
+  `init_user_words` builds the D21 line from `lstat`.
+- The same D21 line ends the old refusal after the walk when init may
+  not replace a `.shared` another user owns for another reason (an
+  unreadable one). `.shared`'s own owner, refused by a read-only ROOT,
+  gets the old words with no such line.
 - Under a shared mailbox, a local send to a name with no card is
   refused, exit 1, with exactly `tc send: nobody has joined as <name>
   on this shared mailbox`, whether or not `mail/to-<name>/` is there.
@@ -179,13 +192,29 @@ until D21 ruled on them.
   routes, as before D21. A card with no inbox keeps its rejoin words.
   A private mailbox is unchanged: O1's deliver plus warning.
 
-**Tests.** `tests/test_shared.py`, 34 tests in seven classes, each on
+**From BOARD's review, in the second D21 commit.**
+
+- `mailbox_summary` takes a status file's age from `lstat`. A link at
+  `status/<name>.md`, anything that is not a regular file, or one
+  `lstat` cannot reach has no status age (null). Before, `Path.exists()`
+  followed a link into a folder others cannot search and raised
+  PermissionError, so `tc health` died with a traceback on every run.
+- `health_snapshot`'s doc block no longer says it keeps BOARD's feed
+  answering; that feed builds from tc's parts and never calls it. It now
+  names the real reason: `tc health` answers when `.shared` turns
+  unreadable after `main()` read it, and so does a caller that loads tc
+  as a module. `main()` refuses `tc health` on a `.shared` already
+  unreadable, and `tc watch` does not call `health_snapshot`, so the
+  block does not claim either.
+
+**Tests.** `tests/test_shared.py`, 37 tests in seven classes, each on
 `tests/_root.py`. Every class inherits `UmaskTestCase`, so each test
 runs under umask 022 and a tc that never sets its own writes 0644 and
 fails. `SharedTest` (H1, 4), `NoPlantedLinksTest` (D17, 5),
-`RegularFilesOnlyTest` (D19, 4), `NobodyTouchesAnotherMembersMailTest`
-(D20, 8), `InitAndRefusalsTest` (init, make_folder and the refusals'
-words, 8), `SharedIsTheInitUsersAndDeliveryNeedsACardTest` (D21, 4) and
+`RegularFilesOnlyTest` (D19 and the status age, 5),
+`NobodyTouchesAnotherMembersMailTest` (D20, 8), `InitAndRefusalsTest`
+(init, make_folder and the refusals' words, 8),
+`SharedIsTheInitUsersAndDeliveryNeedsACardTest` (D21, 6) and
 `GroupsToTestTest` (1). The mode tests run once with the
 user's primary group and once with a supplementary group; a user with no
 named supplementary group gets that run as a skipped subtest with its
@@ -211,6 +240,8 @@ Node 22). Each command's result line:
 | `cc1b826` | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 138 tests`, `OK` |
 | D21 | `python3 -m unittest tests.test_shared -v` | `Ran 34 tests`, `OK` |
 | D21 | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 142 tests`, `OK` |
+| D21, second | `python3 -m unittest tests.test_shared -v` | `Ran 37 tests`, `OK` |
+| D21, second | `python3 -m unittest discover -s tests -p 'test_*.py'` | `Ran 145 tests`, `OK` |
 | each | `node --test tests/*.test.mjs` | `# tests 8`, `# pass 8`, `# fail 0` |
 
 The base, `c8708e5`, ran 108 Python tests and 8 Node tests, all passing.
@@ -267,9 +298,10 @@ Round 1, on the code of the commit named:
 | 8 (d) | `groups_to_test` without `skipTest` (test file) | `Expected 'skipTest' to be called once. Called 0 times.` |
 | extra | a stuck read says `no unread mail` | `'no unread mail' unexpectedly found in 'no unread mail for b\n'` |
 
-The D21 round, on this commit's code, each run against its one test in
-`SharedIsTheInitUsersAndDeliveryNeedsACardTest`. 436 is 0664 and 420 is
-0644. `<uid>`, `<group>` and `<user>` stand for this machine's values.
+The D21 round, on `f04944d`'s code, each run against its one test in
+`SharedIsTheInitUsersAndDeliveryNeedsACardTest` as it stood there. 436
+is 0664 and 420 is 0644. `<uid>`, `<gid>`, `<group>` and `<user>` stand
+for this machine's values.
 
 | Mutation | Red |
 |---|---|
@@ -278,6 +310,17 @@ The D21 round, on this commit's code, each run against its one test in
 | the card check reaches a private mailbox | `1 != 0 : tc send: nobody has joined as c on this shared mailbox` |
 | no D21 words on another member's init | `'the mailbox stays shared with group tc-test-other-group; only the user who ran init (<user>) can change the group' not found in 'tc init: could not make .../status: ...'` |
 | the D21 words for `.shared`'s own owner too | `'only the user who ran init' unexpectedly found in 'tc init: ... : told .shared's own owner to ask someone else` |
+
+The second D21 commit, on its own code. The first three are the
+architect's; the fourth reruns the D21 words after the walk against the
+reworked test, whose other-owner case is now an unreadable `.shared`.
+
+| Mutation | Test | Red |
+|---|---|---|
+| walk first, then refuse (the pre-walk check moved after the walk) | `test_a_members_init_with_another_group_after_joining_changes_nothing` | `{'mai[16 chars]045, <gid2>), 'outbox': ('folder', 2045, <gid2>), ...} != {'mai[16 chars]045, <gid1>), 'outbox': ('folder', 2045, <gid1>), ...}` |
+| leave the mode alone on a same-group rerun | `test_an_owners_same_group_rerun_sets_a_0664_shared_to_0644` | `Tuples differ: (436, '<group>\n') != (420, '<group>\n')` |
+| `Path.exists()` back in `mailbox_summary` | `test_a_status_link_into_an_unreadable_folder_leaves_health_answering` | `1 != 0 : Traceback (most recent call last): ... PermissionError: [Errno 13] Permission denied: '.../status/b.md'` |
+| no D21 words after the walk | `test_another_members_init_may_not_change_the_group_and_says_who_can` | `'.../.shared stays unreadable, so tc refuses every command but init; only the user who ran init (<user>) can change the group' not found in 'tc init: could not make .../status: ...'` |
 
 ## Assumptions
 
@@ -325,12 +368,17 @@ The D21 round, on this commit's code, each run against its one test in
     says `in group g` rather than `set to group g`.
 16. **Another member's rerun of init with the same group is not
     refused** (the D21 round). `.shared` already names g, so init leaves
-    it alone and fixes only what that member owns. The D21 words come
-    when a rewrite is needed and refused.
-17. **The D21 words go only on a permission error while another user
-    owns `.shared`**, found with `lstat`. Its own owner, refused by a
+    it alone (not rewritten, its mode not touched) and fixes only what
+    that member owns. A 0664 `.shared` stays so until its owner reruns.
+17. **The D21 words go only where another user owns `.shared`**, found
+    with `lstat`: before the walk, when it names another group; after
+    it, on a permission error replacing it. Its own owner, refused by a
     read-only ROOT, keeps the old words, and a `.shared` that is gone or
     out of reach names no owner.
+18. **The pre-walk refusal covers only a `.shared` that names a group**,
+    as the architect's ruling says. An unreadable `.shared` another user
+    owns still gets the walk, then the refusal with the D21 line (see
+    "Spotted, not fixed").
 
 ## Pauses
 
@@ -343,7 +391,11 @@ The D21 round, on this commit's code, each run against its one test in
 
 The first two items of this list in round 1 (`.shared` 0664 in its
 writer's group, and a card-less inbox under a shared mailbox still
-taking mail) are built in the D21 round, under "What was built".
+taking mail) are built in the D21 round, under "What was built". So are
+the two the first D21 commit added (another member's init regrouping
+that member's own entries before `.shared` refused it, and a pre-D21
+0664 `.shared` kept on a same-group rerun), in the second D21 commit at
+the architect's yes.
 
 1. **A rejoin keeps an inbox the joiner owns at whatever mode it has**
    (2775 from before D20). Each owner reruns init to fix their own
@@ -365,20 +417,19 @@ taking mail) are built in the D21 round, under "What was built".
    REC-19) are DOCS's.
 5. **For the merge with BOARD.** `health_snapshot()` has two keys more
    than at `c8708e5`: `shared_group` and `shared_problem`.
-6. **Another member's init with another group regroups that member's
-   own entries before `.shared` refuses it** (found in the D21 round).
-   Init walks first and writes `.shared` last. So `tc init --shared
-   --group ben`, run by ben after joining, moves ben's inbox, card and
-   anything else ben owns into group `ben`, then exits 1 with the D21
-   words. When ben made `mail/.seq`, no one outside group `ben` can send
-   until ben reruns init with g. A fix: refuse before the walk, nothing
-   changed, when `.shared` names another group and another user owns
-   it. `route-shared.md` step 7 runs the command before ben joins for
-   this reason. Ask.
-7. **A `.shared` written before D21 stays 0664 on a rerun with the same
-   group**; init rewrites it only when the group changes. No such
-   mailbox exists outside the tests, since `route-shared.md` has not
-   been run. Ask whether init should set it to 0644.
+6. **An unreadable `.shared` another user owns still gets the walk
+   first** (the second D21 commit). The pre-walk refusal needs a
+   `.shared` that names a group. When it is unreadable (two lines, a
+   link), a member's init still moves what that member owns into the
+   group asked for, then is refused with the D21 line. Rarer than the
+   case now fixed, since every other command already refuses on an
+   unreadable `.shared`. Ask whether the pre-walk refusal should cover it.
+7. **For the architect: `tc watch` and `health_snapshot`.** The ask was
+   to say `health_snapshot` stops raising so that `tc health` and `tc
+   watch` keep answering. `tc watch` never calls it (only `cmd_health`
+   does), and `main()` refuses `tc health` on a `.shared` already
+   unreadable before the snapshot runs. The block says the true, smaller
+   reason instead.
 
 ## Not verified
 
@@ -393,8 +444,12 @@ taking mail) are built in the D21 round, under "What was built".
 - The D21 cross-user cases: the kernel refusing ben's write or chmod of
   ann's `.shared`, ben's init words with a real second owner (the test
   shows them with a patched `os.lstat` and a read-only ROOT), and a
-  card-less inbox another user made. `route-shared.md` steps 6, 7 and 19
-  walk them; not run.
+  card-less inbox another user made, and a joined member's init leaving
+  that member's entries as they were. `route-shared.md` steps 6, 7, 13
+  and 20 walk them; not run.
+- `test_a_members_init_with_another_group_after_joining_changes_nothing`
+  needs a supplementary group and skips with its reason without one. It
+  ran here.
 - Five tests skip as root (a read-only file or folder cannot stop root):
   three in `InitAndRefusalsTest` and `NobodyTouchesAnotherMembersMailTest`,
   one in `SharedIsTheInitUsersAndDeliveryNeedsACardTest` and one in

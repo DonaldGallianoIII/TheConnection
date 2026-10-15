@@ -16,9 +16,11 @@ name nobody joined refused, an inbox not its card owner's refused, the
 ring marker rewritten in place; then make_folder, init and the refusals'
 words from the audit's MEDIUM-4 and LOW-1 to LOW-8. And D21 (SHARED D21,
 Claude Opus 5.5, unreviewed): .shared at 0644 after init and after its
-owner's rerun, another member's init told who may change the group, a
-shared send to an inbox with no card refused with nothing written, and a
-private one still delivered.
+owner's rerun (a 0664 one set to 0644), another member's init refused
+before it changes anything and told who may change the group, a shared
+send to an inbox with no card refused with nothing written, and a
+private one still delivered. And, from BOARD's review, a status file's
+age never taken through a link.
 
 Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14
 Status: unreviewed
@@ -56,8 +58,11 @@ the owner's human QA (D4, qa/human/route-shared.md).
             write_card and health_snapshot with os.lstat, os.fchown,
             os.fchmod, os.rename, Path.rename or share_entry wrapped.
             The D21 tests make an inbox and its read/ by hand, write
-            .shared by hand, chmod ROOT read-only and back, and load tc
-            in process to run cmd_init with os.lstat wrapped.
+            and chmod .shared by hand, chmod ROOT read-only and back, and
+            load tc in process to run cmd_init with os.lstat wrapped. The
+            status age test makes a folder outside TC_ROOT, a file in it
+            and a link to it in status/, and chmods that folder to no
+            access and back.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, grp,
             importlib, io, json, os, pathlib, stat, subprocess, sys,
             unittest, unittest.mock); tests/_root.py.
@@ -204,6 +209,16 @@ SHARED_MARKER_MODE = 0o644
 ONLY_INIT_USER_WORDS = "only the user who ran init ({owner}) can change the group"
 # The words of every refusal init makes when it may not rewrite .shared.
 INIT_USER_WORDS = "only the user who ran init"
+# The whole refusal when another member's init asks for another group:
+# made before init walks or changes anything.
+MAY_NOT_CHANGE_WORDS = "tc init: may not change {marker}; the mailbox stays shared with group {group}; {only}. Nothing changed.\n"
+# What init said for an unreadable .shared it may not replace.
+STAYS_UNREADABLE_WORDS = "{marker} stays unreadable, so tc refuses every command but init"
+# The mode init gave .shared before D21: 0666 under its umask 002.
+PRE_D21_MARKER_MODE = 0o664
+# Why a test that needs a group other than the one .shared names is skipped.
+NO_SECOND_GROUP_REASON = ("the running user has no named supplementary group, so no init can ask for a group "
+                          "other than the one .shared names")
 
 
 def user_groups():
@@ -772,9 +787,11 @@ class NoPlantedLinksTest(UmaskTestCase):
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19 and the audit's MEDIUM-5 and LOW-9.
 class RegularFilesOnlyTest(UmaskTestCase):
-    """D19: messages only from regular files, a FIFO at a lock's name refused, and no listener or count taken through a link.
+    """D19: messages only from regular files, a FIFO at a lock's name refused, and no listener, count or status age taken through a link.
 
-    None of this needs a shared mailbox: the checks hold either way.
+    None of this needs a shared mailbox: the checks hold either way. The
+    status age test is from BOARD's review (SHARED, Claude Opus 5.5,
+    unreviewed).
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, plant, landed, load_tc.
@@ -940,6 +957,40 @@ class RegularFilesOnlyTest(UmaskTestCase):
         self.assertEqual(sorted(mail), ["x"], "tc health counted a linked inbox")
         self.assertEqual(mail["x"]["unread"], 1, "tc health counted a planted link as mail")
         self.assertEqual(counts, {"x": 1, "z": 0})
+
+    # SHARED, from BOARD's review (Claude Opus 5.5, unreviewed): a status file's age through lstat.
+    def test_a_status_link_into_an_unreadable_folder_leaves_health_answering(self):
+        """status/b.md a link into a folder nobody may search, status/a.md a real file: tc health --json exits 0, a's status age is a number, b's is null.
+
+        Must reject a summary that follows the link (Path.exists() raises
+        PermissionError there, and tc health dies with a traceback on
+        every run), and one that drops real status ages.
+
+        @interacts  two sends and one status; a folder, a file in it and a
+                    link to that file made by hand, the folder chmodded to
+                    no access and back; one tc health --json.
+        @deps       _root.TcRoot.tc; json; TARGET_TEXT, NO_ACCESS_MODE,
+                    OWNER_FOLDER_MODE.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            for name in ("a", "b"):
+                root.tc("send", "--from", "x", "--to", name, REAL_TEXT)
+            root.tc("status", "a", "busy")
+            hidden = root.base / "hidden"
+            hidden.mkdir()
+            (hidden / "b.md").write_text(TARGET_TEXT)
+            (root.path / "status" / "b.md").symlink_to(hidden / "b.md")
+            hidden.chmod(NO_ACCESS_MODE)
+            try:
+                code, out, err = root.tc("health", "--json")
+            finally:
+                hidden.chmod(OWNER_FOLDER_MODE)
+        self.assertEqual(code, 0, err)
+        mail = json.loads(out)["mail"]
+        self.assertIsNotNone(mail["a"]["status_age_s"], "a real status file lost its age")
+        self.assertIsNone(mail["b"]["status_age_s"], "tc health dated a status file through a link")
 
 
 
@@ -1549,7 +1600,7 @@ class InitAndRefusalsTest(UmaskTestCase):
 # SHARED D21 (Claude Opus 5.5, unreviewed): .shared is owner-write only, and
 # shared delivery needs a card.
 class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
-    """D21: .shared at 0644 after init and its owner's rerun; another member's init told who may change the group; a shared send to a card-less inbox refused; a private one delivered.
+    """D21: .shared at 0644 after init and its owner's reruns, a 0664 one set to 0644; another member's init refused before it changes anything, and told who may change the group; a shared send to a card-less inbox refused; a private one delivered.
 
     One Linux user cannot be another member, so the other member's init
     is shown with lstat reporting another owner for .shared, and the
@@ -1558,7 +1609,8 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, groups_to_test, primary_group,
-                tree, landed, load_tc, run_init, owner_patched_lstat.
+                user_groups, tree, landed, load_tc, run_init,
+                owner_patched_lstat.
     @complexity O(1) per test.
     @alloc      one TcRoot per test and group.
     """
@@ -1592,15 +1644,18 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
                                         for step, group in steps])
 
     def test_another_members_init_may_not_change_the_group_and_says_who_can(self):
-        """ROOT read-only, .shared naming another group: init exits 1, and only when lstat reports .shared as another user's do the words say only the user who ran init, by name, can change the group. .shared is unchanged.
+        """ROOT read-only: over a .shared naming another group that this user owns, init exits 1 with no D21 line; over an unreadable .shared that lstat reports as another user's, the refusal says only the user who ran init, by name, can change the group. .shared is unchanged.
 
-        Must reject a refusal that never names who may change the group,
-        and one that tells .shared's own owner to ask someone else.
-        Skipped as root, who may write a read-only folder.
+        This is the refusal after the walk, when the rewrite fails. A
+        readable .shared naming another group and owned by another user
+        is refused before the walk (the next test). Must reject a refusal
+        that never names who may change the group, and one that tells
+        .shared's own owner to ask someone else. Skipped as root, who may
+        write a read-only folder.
 
-        @interacts  a send; writes .shared by hand; chmods ROOT read-only
-                    and back; loads tc in process and runs cmd_init twice,
-                    the second time with os.lstat wrapped.
+        @interacts  a send; writes .shared by hand twice; chmods ROOT
+                    read-only and back; loads tc in process and runs
+                    cmd_init twice, the second time with os.lstat wrapped.
         @deps       _root.TcRoot.tc, primary_group, load_tc, run_init,
                     owner_patched_lstat; unittest.mock; tc.user_name.
         @complexity O(1).
@@ -1619,6 +1674,9 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
             root.path.chmod(READ_ONLY_FOLDER_MODE)
             try:
                 own = run_init(tc, name)
+                root.path.chmod(mode)
+                marker.write_text("one\ntwo\n")  # unreadable: names no group on one line
+                root.path.chmod(READ_ONLY_FOLDER_MODE)
                 with mock.patch.object(os, "lstat", owner_patched_lstat(marker)):
                     members = run_init(tc, name)
             finally:
@@ -1628,9 +1686,73 @@ class SharedIsTheInitUsersAndDeliveryNeedsACardTest(UmaskTestCase):
         self.assertIn(STAYS_SHARED_WORDS.format(group=OTHER_GROUP), own[2])
         self.assertNotIn(INIT_USER_WORDS, own[2], "told .shared's own owner to ask someone else")
         self.assertEqual(members[0], EXIT_REFUSED, members[2])
-        self.assertIn(f"{STAYS_SHARED_WORDS.format(group=OTHER_GROUP)}; {ONLY_INIT_USER_WORDS.format(owner=other)}",
+        self.assertIn(f"{STAYS_UNREADABLE_WORDS.format(marker=marker)}; {ONLY_INIT_USER_WORDS.format(owner=other)}",
                       members[2])
-        self.assertEqual(text, f"{OTHER_GROUP}\n", "a refused init changed .shared")
+        self.assertEqual(text, "one\ntwo\n", "a refused init changed .shared")
+
+    def test_a_members_init_with_another_group_after_joining_changes_nothing(self):
+        """Shared with group g, b joined, a message, a status: an init asking for another group while lstat reports .shared as another user's exits 1 with only the D21 refusal, and every entry keeps its mode and group (b's inbox, card, mail/.seq, .shared).
+
+        Must reject an init that walks first and refuses after: it would
+        move this member's inbox, card and mail/.seq into the other group,
+        and other members could no longer send. Needs a supplementary
+        group; skipped with a reason without one.
+
+        @interacts  init, a join, a send, a status; stats the whole root
+                    and reads mail/.seq before and after; loads tc in
+                    process and runs cmd_init with os.lstat wrapped.
+        @deps       _root.TcRoot.tc, user_groups, tree, load_tc, run_init,
+                    owner_patched_lstat; unittest.mock; tc.user_name.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        found = user_groups()
+        if len(found) < 2:
+            self.skipTest(NO_SECOND_GROUP_REASON)
+        (_, first, _), (_, second, _) = found[0], found[1]
+        with _root.TcRoot() as root:
+            setup = [root.tc("init", "--shared", "--group", first),
+                     root.tc("join", "b", env={"CLAUDECODE": "1"}),
+                     root.tc("send", "--from", "a", "--to", "b", "hi"),
+                     root.tc("status", "b", "busy")]
+            marker, seq = root.path / ".shared", root.path / "mail" / ".seq"
+            before, seq_before = tree(root.path, under=None), seq.read_text()
+            tc = load_tc(root)
+            other = tc.user_name(os.lstat(marker).st_uid + 1)
+            with mock.patch.object(os, "lstat", owner_patched_lstat(marker)):
+                code, out, err = run_init(tc, second)
+            after, seq_after = tree(root.path, under=None), seq.read_text()
+        for run in setup:
+            self.assertEqual(run[0], 0, run[2])
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertEqual(err, MAY_NOT_CHANGE_WORDS.format(
+            marker=marker, group=first, only=ONLY_INIT_USER_WORDS.format(owner=other)))
+        self.assertEqual(after, before, "a refused init regrouped or changed an entry")
+        self.assertEqual(seq_after, seq_before)
+
+    def test_an_owners_same_group_rerun_sets_a_0664_shared_to_0644(self):
+        """init, then .shared set to 0664 by hand (as init wrote it before D21), then the owner's rerun with the same group: exit 0, .shared 0644, still naming the group.
+
+        Must reject a rerun that leaves a .shared written before D21
+        group-writable.
+
+        @interacts  two inits; one chmod by hand; lstats and reads .shared.
+        @deps       _root.TcRoot.tc, primary_group.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        label, name, gid = primary_group()
+        with _root.TcRoot() as root:
+            first = root.tc("init", "--shared", "--group", name)
+            marker = root.path / ".shared"
+            marker.chmod(PRE_D21_MARKER_MODE)
+            made = stat.S_IMODE(os.lstat(marker).st_mode)
+            rerun = root.tc("init", "--shared", "--group", name)
+            settled = (stat.S_IMODE(os.lstat(marker).st_mode), marker.read_text())
+        self.assertEqual(first[0], 0, first[2])
+        self.assertEqual(made, PRE_D21_MARKER_MODE, "the hand chmod did not take")
+        self.assertEqual(rerun[0], 0, rerun[2])
+        self.assertEqual(settled, (SHARED_MARKER_MODE, f"{name}\n"))
 
     def test_a_shared_send_to_an_inbox_with_no_card_is_refused_and_writes_nothing(self):
         """Shared, mail/to-c and its read/ made by hand, no card for c: a send to c exits 1 with exactly C4's words, lands nothing, leaves mail/.seq as it was; the next send takes the next number.
