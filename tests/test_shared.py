@@ -232,6 +232,10 @@ SHARED_INBOX_MODE = 0o3770
 PRIVATE_FILE_MODE = 0o644
 # The folders C4 shares, by name under the root.
 SHARED_FOLDER_NAMES = ("mail", "status", "cards", "outbox")
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3). The folder init
+# makes with the four, sticky like them, the init user's: where every
+# member's gate files its origin ids (C3, C4).
+ORIGINS_FOLDER = "mail/.origins"
 # Row 1 of the exit table: refused with words.
 EXIT_REFUSED = 1
 # Row 2: a wait that timed out. A wait with --timeout 0 makes its lock and
@@ -754,14 +758,16 @@ def shared_as(path, kind, gid):
     WAKE_LOCK_MODE (D35, P3 fix round 1b, Claude Opus 5.5, unreviewed);
     any other file (a message, a card, a status): SHARED_OWNED_FILE_MODE
     (D20). A folder: SHARED_TOP_FOLDER_MODE
-    (sticky, D17) when it is one of SHARED_FOLDER_NAMES itself,
-    SHARED_INBOX_MODE for mail/to-<name> and its read/ (D20), else
-    SHARED_FOLDER_MODE.
+    (sticky, D17) when it is one of SHARED_FOLDER_NAMES itself, or
+    mail/.origins/, which init makes too (P3 fix round 1c, Claude Opus
+    5.5, unreviewed: D36 (3)), SHARED_INBOX_MODE for mail/to-<name> and
+    its read/ (D20), else SHARED_FOLDER_MODE.
 
     @interacts  none.
-    @deps       SHARED_FOLDER_NAMES, SHARED_TOP_FOLDER_MODE, SHARED_INBOX_MODE,
-                SHARED_FOLDER_MODE, SHARED_WRITABLE_FILE_MODE,
-                SHARED_OWNED_FILE_MODE, WAKE_LOCK_NAMES, WAKE_LOCK_MODE.
+    @deps       SHARED_FOLDER_NAMES, ORIGINS_FOLDER, SHARED_TOP_FOLDER_MODE,
+                SHARED_INBOX_MODE, SHARED_FOLDER_MODE,
+                SHARED_WRITABLE_FILE_MODE, SHARED_OWNED_FILE_MODE,
+                WAKE_LOCK_NAMES, WAKE_LOCK_MODE.
     @complexity O(1).
     @alloc      the split path and one tuple, returned.
     """
@@ -771,7 +777,7 @@ def shared_as(path, kind, gid):
             return (kind, WAKE_LOCK_MODE, gid)  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1)
         writable = len(parts) == 2 and parts[0] == "mail"
         return (kind, SHARED_WRITABLE_FILE_MODE if writable else SHARED_OWNED_FILE_MODE, gid)
-    if path in SHARED_FOLDER_NAMES:
+    if path in SHARED_FOLDER_NAMES or path == ORIGINS_FOLDER:
         return (kind, SHARED_TOP_FOLDER_MODE, gid)
     inbox = parts[0] == "mail" and len(parts) in (2, 3) and parts[1].startswith("to-") and parts[2:] in ([], ["read"])
     return (kind, SHARED_INBOX_MODE if inbox else SHARED_FOLDER_MODE, gid)
@@ -787,7 +793,7 @@ class SharedTest(UmaskTestCase):
     """
 
     def test_init_shares_every_folder_and_file_already_there(self):
-        """After init, every entry has group g and its mode (shared_as: the four 3775, inboxes 3770, mail/ files 0664, the rest 0640); so has a message sent after.
+        """After init, every entry has group g and its mode (shared_as: the four and mail/.origins/, which init makes, 3775, inboxes 3770, mail/ files 0664, the rest 0640); so has a message sent after.
 
         Before init the root holds an inbox with its read/, a message,
         mail/.seq, an inbox lock, a status file and a card, all written
@@ -813,8 +819,9 @@ class SharedTest(UmaskTestCase):
                 sent = root.tc("send", "--from", "a", "--to", "b", "after")
                 later = tree(root.path)
                 self.assertEqual(sorted(after), ["cards", "cards/b.json", "mail", "mail/.box-b.lock",
-                                                 "mail/.seq", "mail/to-b", "mail/to-b/000001-from-a.md",
-                                                 "mail/to-b/read", "outbox", "status", "status/b.md"])
+                                                 ORIGINS_FOLDER, "mail/.seq", "mail/to-b",
+                                                 "mail/to-b/000001-from-a.md", "mail/to-b/read", "outbox",
+                                                 "status", "status/b.md"])
                 self.assertEqual({p: m for p, (k, m, g) in before.items() if k == "file"},
                                  {p: PRIVATE_FILE_MODE for p, (k, m, g) in before.items() if k == "file"},
                                  "files before init are not 0644: the umask never reached the child")
@@ -882,7 +889,9 @@ class SharedTest(UmaskTestCase):
 
         SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19. Init makes
         mail/, status/, cards/ and outbox/ itself, each 3775 in g, so no
-        other user has to make one in a ROOT the first user owns. The
+        other user has to make one in a ROOT the first user owns (and
+        mail/.origins/, 3775 too: P3 fix round 1c, Claude Opus 5.5,
+        unreviewed, D36 (3)). The
         inbox and its read/ then come from the first join (D20), the
         message from the first send, the status file from the first
         status, and the wait lock from a wait that times out at once (P3
@@ -903,8 +912,9 @@ class SharedTest(UmaskTestCase):
             with self.subTest(group=label), _root.TcRoot() as root:
                 code, out, err = root.tc("init", "--shared", "--group", name)
                 self.assertEqual(code, 0, f"tc init exited {code}: {err}")
-                self.assertEqual(tree(root.path), {top: ("folder", SHARED_TOP_FOLDER_MODE, gid) for top in SHARED_FOLDER_NAMES},
-                                 "init did not make the four top folders (D19)")
+                self.assertEqual(tree(root.path), {top: ("folder", SHARED_TOP_FOLDER_MODE, gid)
+                                                   for top in (*SHARED_FOLDER_NAMES, ORIGINS_FOLDER)},
+                                 "init did not make the four top folders (D19) and mail/.origins/ (D36 (3))")
                 joined = root.tc("join", "b", env={"CLAUDECODE": "1"})
                 waited = root.tc("wait", "b", "--timeout", "0")
                 runs = [joined, root.tc("send", "--from", "a", "--to", "b", "hi"),
@@ -914,7 +924,7 @@ class SharedTest(UmaskTestCase):
                     self.assertEqual(run[0], 0, run[2])
                 self.assertEqual(waited[0], EXIT_TIMEOUT, waited[2])
                 self.assertEqual(sorted(made), ["cards", "cards/b.json", "mail", "mail/.box-b.lock",
-                                                "mail/.seq", "mail/to-b", "mail/to-b/.wait.lock",
+                                                ORIGINS_FOLDER, "mail/.seq", "mail/to-b", "mail/to-b/.wait.lock",
                                                 "mail/to-b/000001-from-a.md", "mail/to-b/read", "outbox",
                                                 "status", "status/b.md"])
                 self.assertEqual(made, {p: shared_as(p, k, gid) for p, (k, m, g) in made.items()})
@@ -996,7 +1006,7 @@ class NoPlantedLinksTest(UmaskTestCase):
     """
 
     def test_the_shared_folders_carry_the_sticky_bit(self):
-        """After init, mail/, outbox/ (made by hand, as the ssh route will) and the later cards/ and status/ are 3775; inboxes and read/ are 3770 (D20); outbox/sent/ is 2775.
+        """After init, mail/, outbox/ (made by hand, as the ssh route will), the later cards/ and status/, and mail/.origins/ (init's own, D36 (3)) are 3775; inboxes and read/ are 3770 (D20); outbox/sent/ is 2775.
 
         Must reject a top folder without the sticky bit (a member could
         delete or swap another user's inbox, card or lock), and an inbox
@@ -1025,6 +1035,7 @@ class NoPlantedLinksTest(UmaskTestCase):
                 self.assertEqual(folders, {
                     "mail": (SHARED_TOP_FOLDER_MODE, gid), "outbox": (SHARED_TOP_FOLDER_MODE, gid),
                     "cards": (SHARED_TOP_FOLDER_MODE, gid), "status": (SHARED_TOP_FOLDER_MODE, gid),
+                    ORIGINS_FOLDER: (SHARED_TOP_FOLDER_MODE, gid),
                     "mail/to-b": (SHARED_INBOX_MODE, gid), "mail/to-b/read": (SHARED_INBOX_MODE, gid),
                     "mail/to-c": (SHARED_INBOX_MODE, gid), "mail/to-c/read": (SHARED_INBOX_MODE, gid),
                     "outbox/sent": (SHARED_FOLDER_MODE, gid)})

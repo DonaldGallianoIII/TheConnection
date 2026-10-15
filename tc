@@ -101,7 +101,9 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             descriptor (fchown, fchmod), never by path; it skips and
             names a link, changes nothing else, prints one line per fix
             and per skip, and exits 1 (round 6, D29). It makes the four
-            when missing (D19), sets the group
+            when missing (D19), and mail/.origins/, so it is the init
+            user's and a shared mailbox's gate never makes it (P3 fix
+            round 1c, Claude Opus 5.5, unreviewed: D36 (3)), sets the group
             and mode of every folder and file under them that is not right
             yet. Both walks start from ROOT, opened once after the walk
             and kept only when it is the folder the walk judged (and, on
@@ -254,7 +256,9 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             per origin id delivered here, kept (SSH S3), under
             mail/.origins/<user>/<key-name>/, one folder per user and
             per key name, made on first use and kept (SSH fix round 1,
-            D33).
+            D33); mail/.origins/ itself made by init on a shared mailbox
+            and by the first filing on a private one, kept (P3 fix round
+            1c, Claude Opus 5.5, unreviewed: D36 (3)).
             Nothing held in memory past one command. P3 fix round 1a
             (Claude Opus 5.5, unreviewed): D35. A command holds each inbox
             it acts on open, two descriptors, until it is done with it
@@ -865,6 +869,17 @@ GATE_HEALTH_KEYS = {
 # folder, SHARED_BRANCH_MODE under a shared mailbox, and a filing counts
 # only when every level is (open_branch).
 ORIGINS_NAME = ".origins"
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3), the audit's
+# LOW-3. On a shared mailbox only tc init makes mail/.origins/, so it is
+# the init user's (D34's one trusted owner), never the first member's whose
+# gate filed: that member could move every other member's filings aside.
+# A gate there that finds none makes nothing: the message is delivered, no
+# id is filed, and these words say who makes the folder. Until then a
+# retry of the message may be delivered twice: a duplicate, never a loss.
+ORIGINS_NOT_MADE_WORDS = ("origin {origin} was not filed: {top} is not there, and on a shared mailbox only tc init "
+                          "makes it. The user who ran init ({init}) runs tc init --shared --group {group} again to "
+                          "make it. Until then a retry of this message may be delivered twice: a duplicate, never "
+                          "a loss.")
 # C3's words for a message whose origin id is already filed: the far
 # sender's retry, after a crash or a timeout, delivers nothing twice.
 ALREADY_DELIVERED_WORDS = "already delivered (origin {origin})"
@@ -1657,21 +1672,37 @@ def shared_entries(root_fd, gid):
     the walk starts from ROOT's descriptor (pin_root), the one walker
     signature fix_own_entries uses too.
 
+    P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3), the audit's
+    LOW-3. When the walk reaches mail/ itself, judged and open, a missing
+    mail/.origins/ is made by its name in that descriptor, before mail/ is
+    listed, so the walk finds it and gives it the group and its sticky
+    mode like any folder under the four: the init user's, never the first
+    filer's. One it cannot make is yielded with why, kind None.
+    fix_own_entries, a member's rerun, makes nothing.
+
     @interacts  lstats each top in `root_fd`, lists each folder under
-                them and lstats each entry (walk_pinned); opens, fstats
-                and changes each entry (share_entry).
-    @deps       walk_pinned, share_entry.
+                them and lstats each entry (walk_pinned); makes a missing
+                mail/.origins/ in mail/'s descriptor; opens, fstats and
+                changes each entry (share_entry).
+    @deps       walk_pinned, share_entry; os; MAIL, ORIGINS_NAME.
     @complexity O(f) over f entries under the four (hundreds to
                 thousands under mail/: read/ is the history), as
                 walk_pinned.
     @alloc      as walk_pinned; one descriptor per entry, closed before
-                the next; nothing kept.
+                the next; mail/.origins/ when missing, kept.
     """
     for path, entry, _, why in walk_pinned(root_fd):
         if why is not None:
             yield path, None, why
-        else:
-            yield (path, *share_entry(entry, path, gid)[:2])  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): changed is fix_own_entries'
+            continue
+        if path == MAIL:  # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3), in the mail/ the walk judged
+            try:
+                os.mkdir(ORIGINS_NAME, dir_fd=entry)
+            except FileExistsError:
+                pass  # there already: walked and judged like any entry
+            except OSError as err:
+                yield MAIL / ORIGINS_NAME, None, f"tc could not make it ({err.strerror})"
+        yield (path, *share_entry(entry, path, gid)[:2])  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): changed is fix_own_entries'
 
 
 # SHARED D17 (Claude Opus 5.5, unreviewed): the sticky folders, opens that never
@@ -2474,6 +2505,15 @@ def cmd_init(args):
     member's rerun (refuse_walk). The walk is tc's own stack walk, which
     names a folder past WALK_MAX_DEPTH, never a traceback.
 
+    P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3), the audit's
+    LOW-3. Its walk makes mail/.origins/ when it is missing, by its name
+    in the mail/ descriptor the walk judged (shared_entries), and gives it
+    the group and SHARED_TOP_FOLDER_MODE (shared_folder_mode), so the
+    folder every member's gate files under is the init user's, D34's one
+    trusted owner, and never the first member's whose gate filed. A gate
+    on a shared mailbox never makes it (origin_folder). One it cannot
+    make is named with the skipped entries. A member's rerun makes none.
+
     @interacts  reads the group database and this process's groups;
                 reads ROOT/.shared (shared_group) and, unless it names g,
                 lstats it for its owner and reads the user database
@@ -2492,14 +2532,16 @@ def cmd_init(args):
                 fix_own_entries); else opens and fstats ROOT (pin_root);
                 sets its umask (SHARED_UMASK); makes each missing top
                 folder by its name in ROOT's descriptor; walks the four
-                folders the same way (walk_pinned) and opens, fstats and
-                changes each entry by its name in its folder's descriptor
-                (shared_entries); when .shared names g, opens it by its
-                name in ROOT's descriptor and sets its mode if this user
-                owns it, or says one line if another user's is writable
-                (settle_marker_mode); else creates .shared.<pid>.tmp at
-                SHARED_MARKER_MODE in ROOT's descriptor and renames it to
-                .shared there, removing its own .tmp if the rename fails.
+                folders the same way (walk_pinned), making a missing
+                mail/.origins/ by its name in mail/'s, and opens, fstats
+                and changes each entry by its name in its folder's
+                descriptor (shared_entries); when .shared names g, opens
+                it by its name in ROOT's descriptor and sets its mode if
+                this user owns it, or says one line if another user's is
+                writable (settle_marker_mode); else creates
+                .shared.<pid>.tmp at SHARED_MARKER_MODE in ROOT's
+                descriptor and renames it to .shared there, removing its
+                own .tmp if the rename fails.
                 Prints one line, plus one stderr line per skipped entry,
                 first, and the last refusal's line after.
     @deps       pin_root, shared_entries, shared_group, marker_other_owner,
@@ -2516,8 +2558,9 @@ def cmd_init(args):
                 (one descriptor and the subfolders not yet entered per
                 folder from a top down to the one being walked, at most
                 WALK_MAX_DEPTH), one skipped line per entry it could not
-                change, freed on exit; the four top folders when missing
-                and the .shared file, kept.
+                change, freed on exit; the four top folders and
+                mail/.origins/ (shared_entries) when missing, and the
+                .shared file, kept.
     """
     group = args.group
     try:
@@ -3400,29 +3443,43 @@ def origin_levels(scope):
     return [branch_user(), scope]
 
 
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3), the audit's LOW-3.
+class OriginsNotMade(OSError):
+    """Raised by origin_folder for a shared mailbox with no mail/.origins/, which only tc init makes there; the Share in args[0]."""
+
+
 def origin_folder(scope, make):
     """mail/.origins/ and each folder origin_levels names below it, each opened by its name in the one above: (descriptors, path, share), the last descriptor and `path` the folder the key's filings sit in, `share` the mailbox's Share or None. The caller closes every descriptor. Raises OSError, its words in strerror.
 
-    mail/.origins/ itself is made when missing and `make` (make_folder_with,
-    raising: sticky under a shared mailbox, so each member makes a folder
-    of their own in it) and opened with FOLDER_FLAGS by its path, which
-    the init user's mail/ holds; a link or anything but a folder at its
-    name is refused with words. Each level below is this user's own
-    (open_branch), so no member's folder, renamed filing or planted link
-    is ever counted or written through.
+    On a private mailbox, mail/.origins/ itself is made when missing and
+    `make` (make_folder_with, raising). It is opened with FOLDER_FLAGS by
+    its path, which the init user's mail/ holds; a link or anything but a
+    folder at its name is refused with words. Each level below is this
+    user's own (open_branch), so no member's folder, renamed filing or
+    planted link is ever counted or written through.
+
+    P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3), the audit's
+    LOW-3. On a shared mailbox only tc init makes mail/.origins/ (sticky,
+    the init user's, so each member makes a folder of their own in it and
+    nobody but the init user can move one), and this never does: one that
+    is missing raises OriginsNotMade, for file_origin's words, and nothing
+    is made. A member's own folder and key folder below it are still made
+    here when `make`.
 
     @interacts  reads ROOT/.shared and the group database
                 (share_or_raise); makes mail/.origins/ when missing and
-                `make`; opens it and each level below (open_branch).
+                `make` on a private mailbox; opens it and each level
+                below (open_branch).
     @deps       share_or_raise, make_folder_with, open_branch,
-                origin_levels; os, errno; MAIL, ORIGINS_NAME, FOLDER_FLAGS.
+                origin_levels, OriginsNotMade; os, errno; MAIL,
+                ORIGINS_NAME, FOLDER_FLAGS.
     @complexity O(1): three folders.
     @alloc      up to three descriptors, returned (or closed before
                 anything is raised).
     """
     share = share_or_raise()
     top = MAIL / ORIGINS_NAME
-    if make:
+    if make and share is None:  # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3), only a private gate makes it
         try:
             make_folder_with(top, share, raising=True)
         except FileExistsError:
@@ -3436,6 +3493,8 @@ def origin_folder(scope, make):
                 raise OSError(err.errno, f"{top} is a symlink, which tc never follows") from None
             if err.errno == errno.ENOTDIR:
                 raise OSError(err.errno, f"{top} is not a folder, so tc wrote nothing there") from None
+            if err.errno == errno.ENOENT and share is not None:  # P3 fix round 1c: D36 (3), init makes it
+                raise OriginsNotMade(share) from None
             raise
         path = top
         for depth, name in enumerate(origin_levels(scope)):
@@ -3504,11 +3563,21 @@ def file_origin(origin, scope):
     meanwhile, and that is fine; one another user made, or a failure, is
     a warning: a retry of that message would be delivered again.
 
-    @interacts  reads ROOT/.shared; makes or opens mail/.origins/ and the
-                two folders below it (origin_folder); creates one empty
-                file in the last, or lstats it.
-    @deps       origin_folder, owned_by_me; os, stat; MAIL, ORIGINS_NAME,
-                NEW_FILE_FLAGS, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE.
+    P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3), the audit's
+    LOW-3. On a shared mailbox with no mail/.origins/ (OriginsNotMade:
+    only tc init makes it there), nothing is made and the warning is
+    ORIGINS_NOT_MADE_WORDS, naming the user who ran init and the command
+    that makes it.
+
+    @interacts  reads ROOT/.shared; makes (private only) or opens
+                mail/.origins/ and makes or opens the two folders below it
+                (origin_folder); creates one empty file in the last, or
+                lstats it; for the words, lstats ROOT/.shared and reads
+                the user database (init_user_name).
+    @deps       origin_folder, owned_by_me, init_user_name, printable,
+                OriginsNotMade; os, stat; MAIL, ORIGINS_NAME,
+                NEW_FILE_FLAGS, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE,
+                ORIGINS_NOT_MADE_WORDS.
     @complexity O(1).
     @alloc      one empty file, kept: the filing; up to three descriptors,
                 closed before return; one string or none, returned.
@@ -3516,6 +3585,9 @@ def file_origin(origin, scope):
     lost = "so a retry of this message would be delivered again"
     try:
         fds, folder, share = origin_folder(scope, True)
+    except OriginsNotMade as missing:  # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3)
+        return ORIGINS_NOT_MADE_WORDS.format(origin=origin, top=MAIL / ORIGINS_NAME, init=init_user_name(),
+                                             group=printable(missing.args[0].group))
     except OSError as err:
         return f"origin {origin} could not be filed under {MAIL / ORIGINS_NAME} ({err.strerror}), {lost}"
     mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
@@ -5995,7 +6067,7 @@ def init_user_name():
 
 
 def clearer(path):
-    """Who may move the entry at `path` aside, in words: the owner of the sticky folder it sits in (outbox/ is the init user's; mail/.origins/ is its first filer's), named as the user who ran init when it is.
+    """Who may move the entry at `path` aside, in words: the owner of the sticky folder it sits in (outbox/ is the init user's; so is mail/.origins/ once init made it, P3 fix round 1c, else its first filer's), named as the user who ran init when it is.
 
     @interacts  lstats `path`'s folder (and ROOT/.shared, init_user_name);
                 reads the user database.

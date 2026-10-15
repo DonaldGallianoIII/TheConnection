@@ -84,7 +84,7 @@ from test_codex_route import (FINISH_CEILING_SECONDS, THREAD, kill_own_fake, loa
                               ring_argv)
 from test_router import files_under  # noqa: E402
 from test_shared import UmaskTestCase, owner_patched_fstat, primary_group  # noqa: E402
-from test_ssh_route import login  # noqa: E402
+from test_ssh_route import OTHER_MEMBER, login, may_make_in, may_move_or_remove, seen_as  # noqa: E402
 
 KEY = "homebox-b"
 TARGET = "u@h"
@@ -180,6 +180,23 @@ NEW_HEALTH_KEY = "added_later"
 # An inbox its owner left writable and searchable but not readable: tc
 # health cannot list it, and its mail_problem names the inbox's path.
 UNLISTABLE_MODE = 0o300
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3), the audit's
+# LOW-3. The gate's warning on a shared mailbox with no mail/.origins/,
+# written here: only tc init makes it there.
+ORIGINS_NOT_MADE_WORDS = ("origin {origin} was not filed: {top} is not there, and on a shared mailbox only tc init "
+                          "makes it. The user who ran init ({init}) runs tc init --shared --group {group} again to "
+                          "make it. Until then a retry of this message may be delivered twice: a duplicate, never "
+                          "a loss.\n")
+# Where the REC-13 test puts mail/.origins/ aside to stand for a mailbox
+# shared before round 1c, and where the owner of mail/.origins/ moves a
+# member's branch aside (tc's SQUATTED_NAME, as health's `mv -T` line
+# gives it). Made up for the test, past what tc reads.
+ORIGINS_ASIDE = ".origins-before-1c"
+BRANCH_ASIDE = ".squatted-{name}-1"
+# The member model's users (tests/test_ssh_route.py's may_*): the init
+# user is the running user; ann and ben, two other members, take the next
+# two ids, so each owns what the model says it owns.
+ANN_UID_STEP, BEN_UID_STEP = 1, 2
 
 
 def filing(root, key, origin):
@@ -249,6 +266,31 @@ def text_stdin(text):
     @alloc      one in-memory stream, returned.
     """
     return io.TextIOWrapper(io.BytesIO(text.encode("utf-8")), encoding="utf-8")
+
+
+def gate_in_process(tc, command, body="hi", key=KEY):
+    """Call tc.cmd_gate in process as `key`, with SSH_ORIGINAL_COMMAND set to `command` (unset when None) and `body` on stdin: (exit code, stdout, stderr).
+
+    P3 fix round 1c (Claude Opus 5.5, unreviewed): lifted out of
+    GateInProcessTest.run_gate, so SharedOriginsTest's second member can
+    run a gate too.
+
+    @interacts  patches os.environ and sys.stdin for the call.
+    @deps       text_stdin; contextlib, io, unittest.mock, argparse.
+    @complexity O(1), plus the gate's work.
+    @alloc      the captured output, returned.
+    """
+    env = {"SSH_ORIGINAL_COMMAND": command} if command is not None else {}
+    code = 0
+    with mock.patch.dict(os.environ, env), mock.patch.object(sys, "stdin", text_stdin(body)), \
+            contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+        if command is None:
+            os.environ.pop("SSH_ORIGINAL_COMMAND", None)
+        try:
+            tc.cmd_gate(argparse.Namespace(as_name=key))
+        except SystemExit as stop:
+            code = stop.code
+    return code, out.getvalue(), err.getvalue()
 
 
 def gate(root, command, body="hi", env=None):
@@ -681,24 +723,14 @@ class GateInProcessTest(unittest.TestCase):
     """
 
     def run_gate(self, tc, command, body="hi"):
-        """Call tc.cmd_gate in process with SSH_ORIGINAL_COMMAND and stdin set: (exit code, stdout, stderr).
+        """Call tc.cmd_gate in process as KEY (gate_in_process): (exit code, stdout, stderr).
 
-        @interacts  patches os.environ and sys.stdin for the call.
-        @deps       text_stdin; contextlib, io, unittest.mock, argparse.
+        @interacts  see gate_in_process.
+        @deps       gate_in_process.
         @complexity O(1), plus the gate's work.
         @alloc      the captured output, returned.
         """
-        env = {"SSH_ORIGINAL_COMMAND": command} if command is not None else {}
-        code = 0
-        with mock.patch.dict(os.environ, env), mock.patch.object(sys, "stdin", text_stdin(body)), \
-                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
-            if command is None:
-                os.environ.pop("SSH_ORIGINAL_COMMAND", None)
-            try:
-                tc.cmd_gate(argparse.Namespace(as_name=KEY))
-            except SystemExit as stop:
-                code = stop.code
-        return code, out.getvalue(), err.getvalue()
+        return gate_in_process(tc, command, body)
 
     def test_tc_send_refuses_a_body_that_is_not_utf8_from_stdin_or_its_argument(self):
         """In process: cmd_send with stdin bytes that are not UTF-8, its handler strict and then surrogateescape, and with a text argument holding a lone surrogate (as Python decodes such an argument): each exits 1 with the words, and nothing is written.
@@ -919,6 +951,119 @@ class SharedOriginsTest(UmaskTestCase):
         self.assertEqual(again[0], 0, again)
         self.assertNotIn("skipped", again[2])
         self.assertEqual(after, before)
+
+    # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3), the audit's LOW-3.
+    def test_init_makes_the_origins_folder_its_own_sticky_and_in_the_group(self):
+        """Shared with the user's primary group, before any gate runs: tc init has made mail/.origins/, owned by the user who ran init, 3775, in the group, and counts it among the folders it set.
+
+        Must reject a mail/.origins/ left for the first member's gate to
+        make, which would hand that member the folder owner's power over
+        every other member's filings.
+
+        @interacts  one tc init; lstats mail/.origins.
+        @deps       primary_group; os, stat.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        _, group, gid = primary_group()
+        with _root.TcRoot() as root:
+            init = root.tc("init", "--shared", "--group", group)
+            origins = root.path / "mail" / ".origins"
+            st = os.lstat(origins) if os.path.lexists(origins) else None
+        self.assertEqual(init, (0, f"mailbox shared with group {group}: 5 folders and 0 files in group {group}\n", ""))
+        self.assertIsNotNone(st, "init did not make mail/.origins/")
+        self.assertTrue(stat.S_ISDIR(st.st_mode))
+        self.assertEqual((st.st_uid, stat.S_IMODE(st.st_mode), st.st_gid), (os.geteuid(), STICKY_FOLDER_MODE, gid))
+
+    def test_a_gate_on_a_shared_mailbox_with_no_origins_folder_makes_none_and_says_who_does(self):
+        """Shared, mail/.origins/ moved aside (a mailbox shared before round 1c): a gated send with --origin delivers, exits 0, makes no mail/.origins/ and files nothing, and warns that the user who ran init runs init again to make it; once init has run again, the same id is delivered again (a duplicate, never a loss) and filed.
+
+        Must reject a gate that makes mail/.origins/ on a shared mailbox:
+        the folder would be the first filer's, not the init user's.
+
+        @interacts  tc init twice, one join, two gate runs; renames
+                    mail/.origins aside by hand.
+        @deps       primary_group, gate, filing, files_under, login; os.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        _, group, _ = primary_group()
+        with _root.TcRoot() as root:
+            root.tc("init", "--shared", "--group", group)
+            root.tc("join", "b")
+            origins = root.path / "mail" / ".origins"
+            os.rename(origins, origins.with_name(ORIGINS_ASIDE))
+            first = gate(root, f"/x/tc send --from a --to b --origin {ORIGIN}", "one")
+            made = os.path.lexists(origins)
+            after = [p for p in files_under(root) if p.startswith("mail/.origins/")]
+            again_init = root.tc("init", "--shared", "--group", group)
+            retry = gate(root, f"/x/tc send --from a --to b --origin {ORIGIN}", "one")
+            filed = filing(root, KEY, ORIGIN).exists()
+            box = root.path / "mail" / "to-b"
+            landed = sorted(p.name for p in box.glob("*.md"))
+        self.assertEqual(first, (0, f"sent #1 to b: {box / f'000001-from-{KEY}.md'}\n",
+                                 ORIGINS_NOT_MADE_WORDS.format(origin=ORIGIN, top=origins, init=login(),
+                                                               group=group)))
+        self.assertFalse(made, "a gate on a shared mailbox made mail/.origins/")
+        self.assertEqual(after, [], "a gate on a shared mailbox filed under mail/.origins/")
+        self.assertEqual(again_init[0], 0, again_init)
+        self.assertEqual(retry, (0, f"sent #2 to b: {box / f'000002-from-{KEY}.md'}\n", ""),
+                         "the retry after init was not delivered again")
+        self.assertTrue(filed, "the retry did not file its id under the folder init made")
+        self.assertEqual(landed, [f"000001-from-{KEY}.md", f"000002-from-{KEY}.md"], "a message was lost")
+
+    def test_two_members_filings_under_inits_origins_end_at_a_duplicate_never_a_drop(self):
+        """REC-13. Shared, init made mail/.origins/: ann (the running user's gate) and ben (a second member, his gate in process with branch_user patched to OTHER_MEMBER) each file an id. Under the modes now there, ben may not move, remove or plant anything in ann's branch, and may not move her branch (POSIX's rules, the member model); the one move left, the owner of mail/.origins/ (the init user, D34) moving ann's branch aside, makes ann's retry deliver again, a duplicate, while ben's retry still answers already delivered. Nothing is dropped.
+
+        Must reject a mail/.origins/ a member owns (the owner could move
+        another member's filings, and a rename into a future id would drop
+        that message) and a member's folder in it that another may write.
+
+        @interacts  tc init, one join, three gate runs and two in process
+                    (branch_user patched); lstats the filings; renames
+                    ann's branch aside by hand.
+        @deps       primary_group, gate, gate_in_process, filing, load_tc,
+                    seen_as, may_move_or_remove, may_make_in; os,
+                    unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        _, group, gid = primary_group()
+        init_uid = os.geteuid()
+        ann_uid, ben_uid = init_uid + ANN_UID_STEP, init_uid + BEN_UID_STEP
+        with _root.TcRoot() as root:
+            root.tc("init", "--shared", "--group", group)
+            root.tc("join", "b")
+            first = gate(root, f"/x/tc send --from a --to b --origin {ORIGIN}", "ann's")
+            tc = load_tc(root)
+            with mock.patch.object(tc, "branch_user", lambda uid=None: OTHER_MEMBER):
+                ben = gate_in_process(tc, f"/x/tc send --from a --to b --origin {OTHER_ORIGIN}", "ben's",
+                                      key=OTHER_KEY)
+            filed = filing(root, KEY, ORIGIN)
+            origins, branch = filed.parents[2], filed.parents[1]
+            owners = {origins: init_uid, branch: ann_uid, filed.parent: ann_uid, filed: ann_uid}
+            seen = {path: seen_as(path, owners) for path in owners}
+            ben_may = {"move ann's filing": may_move_or_remove(seen[filed], seen[filed.parent], ben_uid, {gid}),
+                       "plant in ann's key folder": may_make_in(seen[filed.parent], ben_uid, {gid}),
+                       "plant in ann's branch": may_make_in(seen[branch], ben_uid, {gid}),
+                       "move ann's branch": may_move_or_remove(seen[branch], seen[origins], ben_uid, {gid})}
+            init_may = may_move_or_remove(seen[branch], seen[origins], init_uid, {gid})
+            os.rename(branch, branch.with_name(BRANCH_ASIDE.format(name=branch.name)))
+            retry = gate(root, f"/x/tc send --from a --to b --origin {ORIGIN}", "ann's")
+            with mock.patch.object(tc, "branch_user", lambda uid=None: OTHER_MEMBER):
+                ben_retry = gate_in_process(tc, f"/x/tc send --from a --to b --origin {OTHER_ORIGIN}", "ben's",
+                                            key=OTHER_KEY)
+            box = root.path / "mail" / "to-b"
+            landed = sorted(p.name for p in box.glob("*.md"))
+        self.assertEqual((first[0], ben[0]), (0, 0), (first, ben))
+        self.assertEqual(ben_may, dict.fromkeys(ben_may, False), "a member may touch another member's filings")
+        self.assertTrue(init_may, "the member model says even the folder's owner may not move a branch")
+        self.assertEqual(retry, (0, f"sent #3 to b: {box / f'000003-from-{KEY}.md'}\n", ""),
+                         "ann's retry after her branch moved was not delivered again")
+        self.assertEqual(ben_retry, (0, ALREADY_WORDS.format(origin=OTHER_ORIGIN), ""),
+                         "ben's filing did not survive another member's branch moving")
+        self.assertEqual(landed, [f"000001-from-{KEY}.md", f"000002-from-{OTHER_KEY}.md", f"000003-from-{KEY}.md"],
+                         "a message was dropped")
 
 
 if __name__ == "__main__":
