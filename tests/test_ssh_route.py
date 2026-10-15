@@ -17,27 +17,32 @@ it watched is reachable.
 @interacts  runs ../tc through tests/_root.py under a throwaway TC_ROOT,
             with a fake `ssh` that records its argv and stdin. Some tests
             write a card by hand into cards/. Some hold this user's send
-            lock (outbox/.send-<uid>-<key>.lock) themselves and read
-            /proc/locks to see a child blocked on it. Four tests load tc
-            as a module (TC_ROOT set to the harness root first, put back
-            after) and work in process, under the root only: one calls
-            route_and_deliver with PATH set for that call to a wrapper
-            that runs the fake and then sleeps, and SSH_SEND_SECONDS
-            patched down; one calls it with owned_by_me patched so one
-            file counts as another member's (D22); one calls it with
-            deliver_ssh swapped for a recorder and lock_deadline for a
-            fixed value; one plants a file in sent/ and calls file_away.
-            One class
-            shares the mailbox with the user's own primary group (tc init
-            --shared) and reads modes and groups.
-@deps       python3 stdlib (fcntl, hashlib, json, os, pathlib, re, shlex,
-            stat, sys, unittest, unittest.mock); tests/_root.py;
+            lock (outbox/<login>/.send-<key>.lock) themselves and read
+            /proc/locks to see a child blocked on it. Some make folders,
+            a link or a file by hand in outbox/ and rename them (SSH fix
+            round 1, Claude Opus 5.5, unreviewed: D32's branches). Four
+            tests load tc as a module (TC_ROOT set to the harness root
+            first, put back after) and work in process, under the root
+            only: one calls route_and_deliver with PATH set for that call
+            to a wrapper that runs the fake and then sleeps, and
+            SSH_SEND_SECONDS patched down; one calls it with deliver_ssh
+            swapped for a recorder and lock_deadline for a fixed value;
+            one plants a file in sent/ and calls file_away; one calls
+            route_and_deliver and health_snapshot with os.lstat patched so
+            this user's branch reads as another member's. One class shares
+            the mailbox with the user's own primary group (tc init
+            --shared), reads modes and groups, and asks POSIX's rules what
+            another member may do there.
+@deps       python3 stdlib (fcntl, hashlib, json, os, pathlib, pwd, re,
+            shlex, stat, sys, unittest, unittest.mock); tests/_root.py;
             load_tc, wait_until_blocked and FINISH_CEILING_SECONDS from
-            test_codex_route.py; UmaskTestCase and primary_group from
-            test_shared.py; ../tc.
+            test_codex_route.py; UmaskTestCase, owner_patched_lstat and
+            primary_group from test_shared.py; ../tc.
 @complexity O(1) per test: one to five tc runs and as many fake calls,
-            each under a second. Two tests wait out tc's own lock bound
-            (LOCK_WAIT_SECONDS, 3 s), and the timeout test SHORT_SEND_SECONDS.
+            each under a second. One test waits out tc's own lock bound
+            (LOCK_WAIT_SECONDS, 3 s), and the timeout test
+            SHORT_SEND_SECONDS; the member model reads one lstat per
+            entry of one branch (a handful).
 @alloc      one TcRoot per test, removed when its context exits; one open
             lock file while a test holds the send lock.
 """
@@ -47,6 +52,7 @@ import hashlib
 import json
 import os
 import pathlib
+import pwd
 import re
 import shlex
 import stat
@@ -62,7 +68,7 @@ if str(HERE) not in sys.path:
 
 import _root  # noqa: E402  (needs the path line above)
 from test_codex_route import FINISH_CEILING_SECONDS, load_tc, wait_until_blocked  # noqa: E402
-from test_shared import UmaskTestCase, primary_group  # noqa: E402
+from test_shared import UmaskTestCase, owner_patched_lstat, primary_group  # noqa: E402
 
 # C3's argv before the target, written here rather than read from tc:
 # no tty, never a password prompt, the connect timeout (SSH_CONNECT_SECONDS,
@@ -72,6 +78,7 @@ TARGET = "u@h"
 OTHER_TARGET = "u@h2"
 DEFAULT_REMOTE_TC = "~/TheConnection/tc"
 # The exit table's rows this route uses.
+EXIT_REFUSED = 1
 EXIT_QUEUED = 4
 EXIT_BAD_NAME = 6
 EXIT_GATE_REFUSED = 7
@@ -91,14 +98,29 @@ FAKE_REFUSED_STDERR = "tc gate: refused\n"
 # D25's origin id: 32 hex digits of the mailbox's token, the outbox number,
 # the sender.
 TOKEN_PATTERN = re.compile(r"[0-9a-f]{32}")
-# The send lock's name: this user's id and the start of the target's
-# sha256 in hex (tc's SEND_LOCK_KEY_CHARS, written here).
+# The send lock's name: the start of the target's sha256 in hex (tc's
+# SEND_LOCK_KEY_CHARS, written here), in the user's own outbox branch.
 SEND_LOCK_KEY_CHARS = 16
-# The shared modes C4 and D22 want for the outbox, written here: each
-# outbox/to-<name>/ and its sent/ and refused/ sticky like the top folders,
-# and every file in them the owner's alone to write.
-STICKY_FOLDER_MODE = 0o3775
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): the shared modes C4, D32
+# and D33 want for the outbox, written here. outbox/ itself is sticky like
+# the other top folders; each member's branch, outbox/<user>/, and every
+# folder in it are setgid with no group write; every file in them is the
+# owner's alone to write, and the send lock the owner's alone to open.
+TOP_FOLDER_MODE = 0o3775
+BRANCH_MODE = 0o2750
 OWNED_FILE_MODE = 0o640
+SEND_LOCK_MODE = 0o600
+# A second member, for the tests that ask what another member may do: a
+# made-up login for the folders that member's first send would make, and
+# a user id the running user is not (the running user's plus one, as
+# test_shared.py's owner_patched_lstat reports another user).
+OTHER_MEMBER = "ben-member"
+# The permission bits the member model reads, as ls shows them: read,
+# write, search (x).
+MAY_READ, MAY_WRITE, MAY_SEARCH = 4, 2, 1
+# How a folder another member made at this user's branch name is moved
+# aside, written here: tc's SQUATTED_NAME with the first free count.
+ASIDE_NAME = ".squatted-{name}-1"
 # The timeout test: tc's SSH_SEND_SECONDS patched down to this, and the
 # wrapper's sleep after the fake has recorded its call, well past it. The
 # wrapper execs the sleep, so the kill at the timeout ends it.
@@ -133,15 +155,51 @@ def ssh_card(name, target=TARGET, tc=DEFAULT_REMOTE_TC):
             "reports_to": None, "joined_at": "2026-10-15T00:00:00+00:00"}
 
 
+def login():
+    """The running user's login, the name of that user's outbox branch (D32); the user id as text when the machine has no such user, as tc does.
+
+    @interacts  reads this process's user id and the user database.
+    @deps       os, pwd.
+    @complexity O(1).
+    @alloc      one short string, returned.
+    """
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        return str(os.geteuid())
+
+
+def branch(root):
+    """The running user's outbox branch under this root: outbox/<login>/ (C3, D32).
+
+    @interacts  reads the user database (login).
+    @deps       login.
+    @complexity O(1).
+    @alloc      one path, returned.
+    """
+    return root.path / "outbox" / login()
+
+
+def queue(root, to):
+    """The running user's queue for `to` under this root: outbox/<login>/to-<to>/ (C3, D32).
+
+    @interacts  reads the user database (branch).
+    @deps       branch.
+    @complexity O(1).
+    @alloc      one path, returned.
+    """
+    return branch(root) / f"to-{to}"
+
+
 def outbox(root, to, folder=None):
-    """The *.md names directly in outbox/to-<to>/ (or its `folder`), sorted; [] when it is not there.
+    """The *.md names directly in this user's outbox/<login>/to-<to>/ (or its `folder`), sorted; [] when it is not there.
 
     @interacts  lists one folder.
-    @deps       pathlib.
+    @deps       queue.
     @complexity O(f) over f files there (a handful).
     @alloc      one list, returned.
     """
-    box = root.path / "outbox" / f"to-{to}"
+    box = queue(root, to)
     if folder is not None:
         box = box / folder
     return sorted(p.name for p in box.glob("*.md"))
@@ -170,15 +228,72 @@ def remote_command(root, n, sender, to, tc=DEFAULT_REMOTE_TC):
 
 
 def send_lock_path(root, target):
-    """This user's send lock for `target` under this root: outbox/.send-<uid>-<key>.lock.
+    """This user's send lock for `target` under this root: outbox/<login>/.send-<key>.lock (D33 part 2).
 
-    @interacts  reads this process's user id.
-    @deps       hashlib, os.
+    @interacts  reads the user database (branch).
+    @deps       branch; hashlib.
     @complexity O(t) over t characters of the target.
     @alloc      one path, returned.
     """
     key = hashlib.sha256(target.encode()).hexdigest()[:SEND_LOCK_KEY_CHARS]
-    return root.path / "outbox" / f".send-{os.geteuid()}-{key}.lock"
+    return branch(root) / f".send-{key}.lock"
+
+
+def seen_as(path, owners):
+    """The lstat result of `path`, with its owner replaced by owners[path] when `owners` names it: the member model's view of who owns what.
+
+    One Linux user cannot make a folder another user owns, so a folder
+    another member's first send would make is made here by hand and
+    counted as theirs.
+
+    @interacts  lstats `path`.
+    @deps       os, stat.
+    @complexity O(1).
+    @alloc      one stat result, returned.
+    """
+    st = os.lstat(path)
+    if path not in owners:
+        return st
+    fields = list(st[:stat.ST_CTIME + 1])
+    fields[stat.ST_UID] = owners[path]
+    return os.stat_result(fields)
+
+
+def may(st, uid, gids, bit):
+    """True when user `uid` in groups `gids` holds the permission `bit` (MAY_READ, MAY_WRITE or MAY_SEARCH) on the entry `st` describes: the owner's bits for its owner, else the group's for a member of its group, else the others' (POSIX's first match). Nobody here is root.
+
+    @interacts  none.
+    @deps       stat.
+    @complexity O(1).
+    @alloc      none.
+    """
+    mode = stat.S_IMODE(st.st_mode)
+    shift = 6 if st.st_uid == uid else 3 if st.st_gid in gids else 0
+    return bool((mode >> shift) & bit)
+
+
+def may_move_or_remove(entry, parent, uid, gids):
+    """True when user `uid` may rename or unlink the entry `entry` (a stat result) out of the folder `parent` (one): write and search on the folder and, when the folder is sticky, the entry or the folder its own (POSIX).
+
+    @interacts  none.
+    @deps       may; stat.
+    @complexity O(1).
+    @alloc      none.
+    """
+    if not (may(parent, uid, gids, MAY_WRITE) and may(parent, uid, gids, MAY_SEARCH)):
+        return False
+    return not parent.st_mode & stat.S_ISVTX or uid in (entry.st_uid, parent.st_uid)
+
+
+def may_make_in(folder, uid, gids):
+    """True when user `uid` may make an entry in the folder `folder` (a stat result): write and search on it (POSIX).
+
+    @interacts  none.
+    @deps       may.
+    @complexity O(1).
+    @alloc      none.
+    """
+    return may(folder, uid, gids, MAY_WRITE) and may(folder, uid, gids, MAY_SEARCH)
 
 
 def assert_called(test, folder, calls):
@@ -223,7 +338,7 @@ class SshRouteTest(unittest.TestCase):
             want = SSH_ARGV_HEAD + [TARGET, remote_command(root, 1, "a", "b")]
             token = token_of(root)
             sent, waiting = outbox(root, "b", "sent"), outbox(root, "b")
-            text = (root.path / "outbox" / "to-b" / "sent" / "000001-from-a.md").read_text()
+            text = (queue(root, "b") / "sent" / "000001-from-a.md").read_text()
         self.assertEqual((code, err), (0, ""), err)
         self.assertEqual(out, SENT_WORDS.format(target=TARGET) + "\n")
         self.assertEqual(len(seen), 1)
@@ -357,7 +472,7 @@ class SshRouteTest(unittest.TestCase):
                     root.tc("card", "b", "--ssh", TARGET)
                     code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi")
                     seen = assert_called(self, folder, calls)
-                    path = root.path / "outbox" / "to-b" / "000001-from-a.md"
+                    path = queue(root, "b") / "000001-from-a.md"
                     waiting = outbox(root, "b")
                     filed = outbox(root, "b", "sent") + outbox(root, "b", "refused")
                 self.assertEqual(code, EXIT_QUEUED, err)
@@ -383,10 +498,10 @@ class SshRouteTest(unittest.TestCase):
             code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi")
             seen = assert_called(self, folder, calls)
             refused = outbox(root, "b", "refused")
-            note = root.path / "outbox" / "to-b" / "refused" / "000001-from-a.md.stderr"
+            note = queue(root, "b") / "refused" / "000001-from-a.md.stderr"
             note_text = note.read_text() if note.exists() else None
             waiting = outbox(root, "b")
-            filed = root.path / "outbox" / "to-b" / "refused" / "000001-from-a.md"
+            filed = queue(root, "b") / "refused" / "000001-from-a.md"
         self.assertEqual(code, EXIT_GATE_REFUSED, err)
         self.assertEqual(len(seen), 1)
         self.assertEqual(err, f"{FAKE_REFUSED_STDERR.strip()}\nrefused by {TARGET} (exit {EXIT_GATE_REFUSED}); "
@@ -451,35 +566,34 @@ class SshRouteTest(unittest.TestCase):
         self.assertEqual(reachable, 1)
 
     def test_queue_order_counts_only_this_users_own_files(self):
-        """In process, D22: a waiting file another member owns (owned_by_me patched to say so) holds nothing back; the send goes, exit 0. Control: the same file as this user's queues the next send.
+        """D22, D32: a file waiting for u@h in another member's branch holds nothing back; the send goes, exit 0. Control: the same file moved into this user's branch queues the next send.
 
-        One Linux user cannot make a file another user owns, so the
-        owner check is patched for that file alone, by its inode.
+        SSH fix round 1 (Claude Opus 5.5, unreviewed): each member's queue
+        is a branch of their own, so the other member's file is moved by
+        hand into outbox/ben-member/to-b/, where that member's send would
+        have put it.
 
-        @interacts  one tc card, two sends as commands (one failing), one
-                    in process with PATH set to the fake's and owned_by_me
-                    patched, one more as a command; loads tc.
-        @deps       load_tc, assert_called, outbox; unittest.mock.
+        @interacts  one tc card, four sends (one failing), two renames
+                    by hand.
+        @deps       queue, assert_called, outbox; os.
         @complexity O(1).
-        @alloc      one TcRoot and one module.
+        @alloc      one TcRoot.
         """
         with _root.TcRoot() as root:
             folder, calls = root.fake_bin("ssh", [SSH_CONNECT_FAILED, 0, 0])
             root.tc("card", "b", "--ssh", TARGET)
             root.tc("send", "--from", "a", "--to", "b", "bob's, from before")
-            theirs = root.path / "outbox" / "to-b" / "000001-from-a.md"
-            inode = theirs.stat().st_ino
-            tc = load_tc(root)
-            mine = tc.owned_by_me
-            with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}), \
-                    mock.patch.object(tc, "owned_by_me", lambda st: st.st_ino != inode and mine(st)):
-                got = tc.route_and_deliver("a", "b", "alice's")
+            theirs = root.path / "outbox" / OTHER_MEMBER / "to-b" / "000001-from-a.md"
+            theirs.parent.mkdir(parents=True)
+            os.rename(queue(root, "b") / "000001-from-a.md", theirs)
+            got = root.tc("send", "--from", "a", "--to", "b", "alice's")
             sent = outbox(root, "b", "sent")
+            os.rename(theirs, queue(root, "b") / theirs.name)
             control = root.tc("send", "--from", "a", "--to", "b", "alice's next")
             seen = assert_called(self, folder, calls)
-        self.assertEqual(got.exit, 0, got)
+        self.assertEqual(got[0], 0, got)
         self.assertEqual(sent, ["000002-from-a.md"])
-        self.assertEqual(len(seen), 2, "the in-process send did not run ssh, or the control did")
+        self.assertEqual(len(seen), 2, "the second send did not run ssh, or the control did")
         self.assertEqual(control[0], EXIT_QUEUED, control)
         self.assertEqual(control[2], QUEUED_WORDS.format(target=TARGET, n=1))
 
@@ -497,7 +611,7 @@ class SshRouteTest(unittest.TestCase):
             folder, calls = root.fake_bin("ssh", 0)
             root.tc("card", "b", "--ssh", TARGET)
             lock = send_lock_path(root, TARGET)
-            lock.parent.mkdir()
+            lock.parent.mkdir(parents=True)
             with open(lock, "a") as held:
                 fcntl.flock(held, fcntl.LOCK_EX)
                 proc = root.start("send", "--from", "a", "--to", "b", "hi")
@@ -527,7 +641,7 @@ class SshRouteTest(unittest.TestCase):
             root.tc("card", "c", "--ssh", OTHER_TARGET)
             root.tc("card", "d", "--ssh", "u@h3")
             lock = send_lock_path(root, TARGET)
-            lock.parent.mkdir()
+            lock.parent.mkdir(parents=True)
             outside = root.base / "outside.txt"
             outside.write_text("untouched\n")
             send_lock_path(root, OTHER_TARGET).symlink_to(outside)
@@ -537,7 +651,7 @@ class SshRouteTest(unittest.TestCase):
             linked = root.tc("send", "--from", "a", "--to", "c", "hi")
             not_called = not (folder.parent / "calls.jsonl").exists()
             waiting = outbox(root, "b") + outbox(root, "c")
-            path = root.path / "outbox" / "to-b" / "000001-from-a.md"
+            path = queue(root, "b") / "000001-from-a.md"
             kept = outside.read_text()
             good = root.tc("send", "--from", "a", "--to", "d", "hi")
             seen = assert_called(self, folder, calls)
@@ -578,7 +692,7 @@ class SshRouteTest(unittest.TestCase):
                     mock.patch.object(tc, "SSH_SEND_SECONDS", SHORT_SEND_SECONDS):
                 got = tc.route_and_deliver("a", "b", "hi")
             seen = assert_called(self, folder, calls)
-            path = root.path / "outbox" / "to-b" / "000001-from-a.md"
+            path = queue(root, "b") / "000001-from-a.md"
             waiting = outbox(root, "b")
         self.assertEqual(got.exit, EXIT_QUEUED, got)
         self.assertEqual(got.words + "\n", KEPT_WORDS.format(target=TARGET, reason=f"no answer in {SHORT_SEND_SECONDS} s",
@@ -603,8 +717,8 @@ class SshRouteTest(unittest.TestCase):
             root.tc("card", "b", "--ssh", TARGET)
             root.tc("send", "--from", "a", "--to", "b", "the real one")
             assert_called(self, folder, calls)
-            path = root.path / "outbox" / "to-b" / "000001-from-a.md"
-            planted = root.path / "outbox" / "to-b" / "sent" / "000001-from-a.md"
+            path = queue(root, "b") / "000001-from-a.md"
+            planted = queue(root, "b") / "sent" / "000001-from-a.md"
             planted.parent.mkdir()
             planted.write_text("planted\n")
             tc = load_tc(root)
@@ -647,8 +761,93 @@ class SshRouteTest(unittest.TestCase):
         self.assertEqual(kwargs, {"deadline": 12345.0})
 
 
+class BranchTest(unittest.TestCase):
+    """SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and D33 part 1. This user's outbox branch, outbox/<login>/, is refused when it is not this user's own real folder, with words naming its owner and the one command that clears it, and tc health lists it.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, load_tc, owner_patched_lstat.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per test or case.
+    """
+
+    def test_a_branch_another_member_made_first_is_refused_with_words_and_health_lists_it(self):
+        """In process, outbox/<login>/ made first by another member (os.lstat patched to say so): a send exits 1 naming that member, the user who ran init and `mv -T <branch> <aside>`, writes nothing in it and runs no ssh; tc health's `squatted` lists it with the same command. A send as a command afterwards reaches the fake.
+
+        Must reject a send that takes a branch another member owns: that
+        member could then move or remove every message in it (HIGH-1).
+
+        @interacts  one tc card; makes the branch by hand; loads tc and
+                    calls route_and_deliver and health_snapshot with
+                    os.lstat patched for the branch; one send as a command.
+        @deps       load_tc, owner_patched_lstat, branch, assert_called;
+                    unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("ssh", 0)
+            root.tc("card", "b", "--ssh", TARGET)
+            mine = branch(root)
+            mine.mkdir(parents=True)
+            tc = load_tc(root)
+            other, me = tc.user_name(os.geteuid() + 1), tc.user_name(os.geteuid())
+            with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}), \
+                    mock.patch.object(os, "lstat", owner_patched_lstat(mine)):
+                got = tc.route_and_deliver("a", "b", "hi")
+                squatted = tc.health_snapshot(gpu=False)["squatted"]
+            written = sorted(mine.rglob("*"))
+            not_called = not (folder.parent / "calls.jsonl").exists()
+            good = root.tc("send", "--from", "a", "--to", "b", "hi")
+            reachable = len(assert_called(self, folder, calls))
+        fix = f"mv -T {mine} {mine.parent / ASIDE_NAME.format(name=login())}"
+        self.assertEqual(got.exit, EXIT_REFUSED, got)
+        self.assertIn(f"{mine} belongs to {other}, not to {me}", got.words)
+        self.assertIn(f"The user who ran init ({me}) clears it with one command: {fix}", got.words)
+        self.assertEqual(written, [], "a send wrote into a branch another member owns")
+        self.assertTrue(not_called, "ssh ran for a send whose branch is not its sender's")
+        self.assertEqual(squatted, [{"path": str(mine), "why": f"a folder {other} owns, not {login()}'s own branch",
+                                     "fix": f"{me}, who ran init, runs: {fix}"}])
+        self.assertEqual(good[0], 0, good)
+        self.assertEqual(reachable, 1)
+
+    def test_a_link_or_a_file_at_this_users_branch_name_is_refused_and_nothing_goes_through_it(self):
+        """A symlink to a folder outside the root, or a regular file, at outbox/<login>: a send exits 1 with the words, ssh never runs, the link's folder stays empty; once the plant is moved aside (the words' own mv), the send reaches the fake.
+
+        @interacts  per case: one tc card, a plant by hand, two sends,
+                    one rename by hand.
+        @deps       branch, assert_called; os.
+        @complexity O(1): two cases.
+        @alloc      one TcRoot per case.
+        """
+        for case in ("link", "file"):
+            with self.subTest(case=case), _root.TcRoot() as root:
+                folder, calls = root.fake_bin("ssh", 0)
+                root.tc("card", "b", "--ssh", TARGET)
+                mine = branch(root)
+                mine.parent.mkdir()
+                outside = root.base / "outside-folder"
+                outside.mkdir()
+                if case == "link":
+                    mine.symlink_to(outside, target_is_directory=True)
+                else:
+                    mine.write_text("planted\n")
+                code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi")
+                not_called = not (folder.parent / "calls.jsonl").exists()
+                leaked = sorted(outside.rglob("*"))
+                os.rename(mine, mine.parent / ASIDE_NAME.format(name=login()))
+                good = root.tc("send", "--from", "a", "--to", "b", "hi")
+                reachable = len(assert_called(self, folder, calls))
+            what = "is a symlink, which tc never follows" if case == "link" else "is not a folder"
+            self.assertEqual(code, EXIT_REFUSED, err)
+            self.assertIn(f"{mine} {what}", err)
+            self.assertTrue(not_called, "ssh ran for a send whose branch is a plant")
+            self.assertEqual(leaked, [], "a send wrote through a link at its branch's name")
+            self.assertEqual(good[0], 0, good)
+            self.assertEqual(reachable, 1)
+
+
 class SharedOutboxTest(UmaskTestCase):
-    """The outbox on a shared mailbox (C4, D22): sticky folders, files the sender's alone, and init finding all of it right.
+    """The outbox on a shared mailbox (C4, D22, D32, D33): one branch per member at 2750, files the sender's alone, the send lock its owner's alone, and init finding all of it right.
 
     @interacts  see the module block.
     @deps       UmaskTestCase, primary_group, _root.TcRoot.
@@ -656,15 +855,19 @@ class SharedOutboxTest(UmaskTestCase):
     @alloc      one TcRoot per test.
     """
 
-    def test_outbox_folders_are_sticky_and_its_files_0640_and_init_leaves_them(self):
-        """Shared with the user's primary group: outbox/to-b/, sent/ and refused/ are 3775 in the group; the messages, the note, the token and the send lock are 0640; init run again exits 0 and changes none of it.
+    def test_a_branch_and_its_folders_are_2750_its_files_0640_the_lock_0600_and_init_leaves_them(self):
+        """Shared with the user's primary group: outbox/ is 3775; outbox/<login>/, to-b/, sent/ and refused/ are 2750 in the group; the messages, the note and the token are 0640; the send lock, in the branch, is 0600, and no lock is left in outbox/ itself; init run again exits 0, skips nothing and changes none of it.
 
-        Must reject outbox/to-b/ at 2775, where any member could move
-        another member's queued file (D22).
+        SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 1 and 2.
+        Must reject a branch folder another member may write in (they
+        could plant a folder or file in it), and a send lock another
+        member may open (they could hold its flock through a read-only
+        open, the audit's LOW-3).
 
         @interacts  tc init twice, one tc card, two sends (one refused,
                     one sent); lstats the outbox.
-        @deps       primary_group, assert_called, send_lock_path; os, stat.
+        @deps       primary_group, assert_called, queue, branch,
+                    send_lock_path; os, stat.
         @complexity O(1).
         @alloc      one TcRoot.
         """
@@ -676,26 +879,84 @@ class SharedOutboxTest(UmaskTestCase):
             refused = root.tc("send", "--from", "a", "--to", "b", "one")
             sent = root.tc("send", "--from", "a", "--to", "b", "two")
             assert_called(self, folder, calls)
-            box = root.path / "outbox" / "to-b"
-            entries = {"to-b": box, "sent": box / "sent", "refused": box / "refused",
-                       "sent message": box / "sent" / "000002-from-a.md",
+            box = queue(root, "b")
+            entries = {"outbox": root.path / "outbox", "branch": branch(root), "to-b": box, "sent": box / "sent",
+                       "refused": box / "refused", "sent message": box / "sent" / "000002-from-a.md",
                        "refused message": box / "refused" / "000001-from-a.md",
                        "note": box / "refused" / "000001-from-a.md.stderr",
                        "token": root.path / "outbox" / ".origin-token",
                        "send lock": send_lock_path(root, TARGET)}
+            stray = sorted(p.name for p in (root.path / "outbox").glob(".send-*"))
+            missing = sorted(k for k, p in entries.items() if not os.path.lexists(p))
+            entries = {k: p for k, p in entries.items() if k not in missing}
             before = {k: (stat.S_IMODE(os.lstat(p).st_mode), os.lstat(p).st_gid) for k, p in entries.items()}
             again = root.tc("init", "--shared", "--group", group)
             after = {k: (stat.S_IMODE(os.lstat(p).st_mode), os.lstat(p).st_gid) for k, p in entries.items()}
         self.assertEqual(init[0], 0, init)
         self.assertEqual(refused[0], EXIT_GATE_REFUSED, refused)
         self.assertEqual(sent[0], 0, sent)
-        for name in ("to-b", "sent", "refused"):
-            self.assertEqual(before[name], (STICKY_FOLDER_MODE, gid), f"{name}: {oct(before[name][0])}")
-        for name in ("sent message", "refused message", "note", "token", "send lock"):
+        self.assertEqual(stray, [], "a send lock was left in outbox/ itself, where any member can reach it")
+        self.assertEqual(missing, [], "not there")
+        self.assertEqual(before["outbox"], (TOP_FOLDER_MODE, gid))
+        for name in ("branch", "to-b", "sent", "refused"):
+            self.assertEqual(before[name], (BRANCH_MODE, gid), f"{name}: {oct(before[name][0])}")
+        for name in ("sent message", "refused message", "note", "token"):
             self.assertEqual(before[name], (OWNED_FILE_MODE, gid), f"{name}: {oct(before[name][0])}")
+        self.assertEqual(before["send lock"], (SEND_LOCK_MODE, gid), oct(before["send lock"][0]))
         self.assertEqual(again[0], 0, again)
         self.assertNotIn("skipped", again[2])
         self.assertEqual(after, before)
+
+    def test_another_member_can_move_rename_or_remove_nothing_in_a_branch_whoever_sent_first(self):
+        """Shared: ben-member sent to far-b first (the folders that send makes, in the old shape and in D32's, made here by hand and counted as his); ann's send then queues. In the member model (POSIX's rules on the real modes, those folders his), he may rename or remove no entry of ann's queue or branch, nor the branch itself, may make no entry in any folder of it, and may neither open nor plant ann's send lock.
+
+        SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
+        proof (D32, D33 parts 1 and 2). One Linux user cannot be refused
+        by the kernel as another, so the test asks POSIX's rules of the
+        real modes, with the owners patched as the SHARED tests patch
+        them. Must reject ann's message in an outbox/to-far-b/ ben made:
+        sticky never stops a folder's owner.
+
+        @interacts  tc init, one tc card, one send (kept, ssh failing);
+                    makes ben-member's folders by hand; lstats every entry
+                    of ann's branch and the folders above her message.
+        @deps       primary_group, assert_called, branch, send_lock_path,
+                    seen_as, may, may_move_or_remove, may_make_in; os,
+                    stat.
+        @complexity O(e) over e entries of ann's branch (a handful).
+        @alloc      one TcRoot.
+        """
+        _, group, gid = primary_group()
+        ben, gids = os.geteuid() + 1, {gid}
+        with _root.TcRoot() as root:
+            init = root.tc("init", "--shared", "--group", group)
+            folder, calls = root.fake_bin("ssh", SSH_CONNECT_FAILED, stderr=FAKE_CONNECT_STDERR)
+            root.tc("card", "far-b", "--ssh", TARGET)
+            top = root.path / "outbox"
+            bens = [top / "to-far-b", top / OTHER_MEMBER, top / OTHER_MEMBER / "to-far-b"]
+            for path in bens:
+                path.mkdir()
+            owners = {path: ben for path in bens}
+            code, out, err = root.tc("send", "--from", "ann", "--to", "far-b", "from ann")
+            assert_called(self, folder, calls)
+            queued = [p for p in top.rglob("*-from-ann.md")]
+            above = [p for q in queued for p in [q, *q.parents] if top in p.parents]
+            mine = [branch(root), *branch(root).rglob("*")]
+            moves = sorted({str(p) for p in above + mine
+                            if may_move_or_remove(seen_as(p, owners), seen_as(p.parent, owners), ben, gids)})
+            plants = sorted(str(p) for p in {*mine, *[p.parent for p in above]}
+                            if os.path.isdir(p) and not os.path.islink(p)
+                            and p != top and may_make_in(seen_as(p, owners), ben, gids))
+            locks = sorted(top.rglob(".send-*"))
+            opens = [str(p) for p in locks for bit in (MAY_READ, MAY_WRITE) if may(seen_as(p, owners), ben, gids, bit)]
+        self.assertEqual(init[0], 0, init)
+        self.assertEqual(code, EXIT_QUEUED, err)
+        self.assertEqual(len(queued), 1, queued)
+        self.assertEqual(moves, [], "ben-member may rename or remove these")
+        self.assertEqual(plants, [], "ben-member may make an entry in these")
+        self.assertEqual(opens, [], "ben-member may open ann's send lock")
+        self.assertIn(branch(root), queued[0].parents, "ann's message is not in ann's branch")
+        self.assertEqual(locks, [send_lock_path(root, TARGET)], "ann's send lock is not in ann's branch")
 
 
 if __name__ == "__main__":

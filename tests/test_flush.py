@@ -23,15 +23,13 @@ it watched is reachable.
             call, start `tc flush` in the background, and run `tc send`
             while it sleeps; teardown kills the flush by its own pid if it
             still runs. One test holds this user's send lock itself. One
-            test loads tc as a module (TC_ROOT set to the harness root
-            first, put back after) and calls cmd_flush in process, with
-            PATH set to the fake's for that call and owned_by_me patched
-            so one file counts as another member's (D22).
-@deps       python3 stdlib (argparse, contextlib, fcntl, io, os, pathlib,
-            shlex, sys, time, unittest, unittest.mock); tests/_root.py;
-            load_tc and FINISH_CEILING_SECONDS from test_codex_route.py;
-            the card, outbox and lock helpers from test_ssh_route.py;
-            ../tc.
+            test moves a waiting file by hand into another member's
+            outbox branch (D22, D32; SSH fix round 1, Claude Opus 5.5,
+            unreviewed).
+@deps       python3 stdlib (fcntl, os, pathlib, shlex, sys, time,
+            unittest); tests/_root.py; LOCK_POLL_SECONDS and
+            FINISH_CEILING_SECONDS from test_codex_route.py; the card,
+            outbox and lock helpers from test_ssh_route.py; ../tc.
 @complexity O(1) per test: two to six tc runs and as many fake calls,
             each under a second. The two concurrency tests run about
             SHORT_SLEEP_SECONDS and LONG_SLEEP_SECONDS; the held-lock test
@@ -41,17 +39,13 @@ it watched is reachable.
             flush in two tests.
 """
 
-import argparse
-import contextlib
 import fcntl
-import io
 import os
 import pathlib
 import shlex
 import sys
 import time
 import unittest
-from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 # Run as `python3 -m unittest tests.test_flush` from the repo root, tests/
@@ -60,9 +54,9 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import _root  # noqa: E402  (needs the path line above)
-from test_codex_route import FINISH_CEILING_SECONDS, LOCK_POLL_SECONDS, load_tc  # noqa: E402
-from test_ssh_route import (EXIT_BUSY, EXIT_QUEUED, FAKE_CONNECT_STDERR, OTHER_TARGET,  # noqa: E402
-                            SSH_CONNECT_FAILED, TARGET, assert_called, outbox, send_lock_path)
+from test_codex_route import FINISH_CEILING_SECONDS, LOCK_POLL_SECONDS  # noqa: E402
+from test_ssh_route import (EXIT_BUSY, EXIT_QUEUED, FAKE_CONNECT_STDERR, OTHER_MEMBER, OTHER_TARGET,  # noqa: E402
+                            SSH_CONNECT_FAILED, TARGET, assert_called, login, outbox, queue, send_lock_path)
 
 # A far tc's refusal of a bad name (row 6), and what the fake says for it.
 # Made up for the test; not a real far tc's wording.
@@ -213,7 +207,7 @@ class FlushTest(unittest.TestCase):
             folder, calls = root.fake_bin("ssh", [0, EXIT_BAD_NAME, 0], stderr=FAKE_BAD_NAME_STDERR)
             code, out, err = root.tc("flush")
             sent = origins(assert_called(self, folder, calls))
-            note = root.path / "outbox" / "to-b" / "refused" / "000002-from-a.md.stderr"
+            note = queue(root, "b") / "refused" / "000002-from-a.md.stderr"
             note_text = note.read_text() if note.exists() else ""
             filed = (outbox(root, "b", "sent"), outbox(root, "b", "refused"), outbox(root, "b"))
         self.assertEqual(code, 0, err)
@@ -244,19 +238,20 @@ class FlushTest(unittest.TestCase):
         self.assertIn(f"the far tc was busy, exit {EXIT_BUSY}", err)
 
     def test_only_this_users_own_files_are_sent_and_the_others_are_counted(self):
-        """In process, D22: with #1 standing in for another member's file (owned_by_me patched), flush sends only #2 and says 1 waiting for u@h belongs to other members; #1 stays; exit 0.
+        """D22, D32: with #1 moved into another member's branch (outbox/ben-member/to-b/), flush sends only #2 and says 1 waiting for u@h belongs to other members, named by the file's owner; #1 stays; exit 0.
 
-        One Linux user cannot make a file another user owns, so the owner
-        check is patched for that file alone, by its inode. The two-user
-        walk is qa/human/route-shared.md's.
+        SSH fix round 1 (Claude Opus 5.5, unreviewed): each member's queue
+        is a branch of their own, so the other member's file is moved by
+        hand into the branch that member's send would have made. One
+        Linux user cannot make a file another user owns, so the owner
+        named is the running user. The two-user walk is
+        qa/human/route-shared.md's.
 
-        @interacts  one tc card, two sends as commands (kept, then
-                    queued); loads tc and calls cmd_flush once in process
-                    with PATH set to the fake's and owned_by_me patched.
-        @deps       load_tc, assert_called, origins, outbox;
-                    unittest.mock, contextlib, io, argparse.
+        @interacts  one tc card, two sends (kept, then queued), one rename
+                    by hand, one flush.
+        @deps       queue, assert_called, origins, outbox, login; os.
         @complexity O(1).
-        @alloc      one TcRoot and one module.
+        @alloc      one TcRoot.
         """
         with _root.TcRoot() as root:
             first, first_calls = root.fake_bin("ssh", SSH_CONNECT_FAILED, stderr=FAKE_CONNECT_STDERR)
@@ -264,27 +259,18 @@ class FlushTest(unittest.TestCase):
             root.tc("send", "--from", "a", "--to", "b", "bob's")
             root.tc("send", "--from", "a", "--to", "b", "alice's")
             assert_called(self, first, first_calls)
-            theirs = root.path / "outbox" / "to-b" / "000001-from-a.md"
-            inode = theirs.stat().st_ino
+            theirs = root.path / "outbox" / OTHER_MEMBER / "to-b" / "000001-from-a.md"
+            theirs.parent.mkdir(parents=True)
+            os.rename(queue(root, "b") / theirs.name, theirs)
             folder, calls = root.fake_bin("ssh", 0)
-            tc = load_tc(root)
-            mine = tc.owned_by_me
-            exited = None
-            with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}), \
-                    mock.patch.object(tc, "owned_by_me", lambda st: st.st_ino != inode and mine(st)), \
-                    contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
-                try:
-                    tc.cmd_flush(argparse.Namespace(to=None))
-                except SystemExit as stop:
-                    exited = stop.code
+            code, out, err = root.tc("flush")
             sent = origins(assert_called(self, folder, calls))
-            waiting = outbox(root, "b")
-            names = tc.user_name(os.geteuid())
-        self.assertIsNone(exited, f"flush exited {exited}: {err.getvalue()}")
+            waiting = sorted(p.name for p in theirs.parent.glob("*.md"))
+        self.assertEqual(code, 0, err)
         self.assertEqual(sent, [2])
         self.assertEqual(waiting, ["000001-from-a.md"])
-        self.assertIn(OTHERS_WORDS.format(k=1, target=TARGET, names=names), out.getvalue())
-        self.assertEqual(err.getvalue(), "")
+        self.assertIn(OTHERS_WORDS.format(k=1, target=TARGET, names=login()), out)
+        self.assertEqual(err, "")
 
     def test_a_file_whose_card_no_longer_says_ssh_stays_and_is_never_sent_another_way(self):
         """A message waits for b; b then joins here (route local). flush leaves it, names why and the fix, exit 4; nothing lands in mail/to-b; ssh never runs.
@@ -306,7 +292,7 @@ class FlushTest(unittest.TestCase):
             not_called = not (folder.parent / "calls.jsonl").exists()
             delivered = sorted((root.path / "mail" / "to-b").glob("*.md"))
             waiting = outbox(root, "b")
-            path = root.path / "outbox" / "to-b" / "000001-from-a.md"
+            path = queue(root, "b") / "000001-from-a.md"
             root.tc("card", "c", "--ssh", OTHER_TARGET)
             root.tc("send", "--from", "a", "--to", "c", "hi")
             reachable = len(assert_called(self, folder, calls))

@@ -17,19 +17,25 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   mail/.ring-pending-<name>                ring owed and why, or clear (D14, D16, D20)
   cards/<name>.json                        one address card per name (C1)
   .shared                                  the group a shared mailbox is shared with (C4), 0644 (D21)
-  outbox/to-<name>/NNNNNN-from-<sender>.md an ssh message waiting to go (C3, D25)
-  outbox/to-<name>/sent/, refused/         ssh messages the far tc took, or refused (+ .stderr note)
+  outbox/<user>/                           one Linux user's own branch of the outbox, 2750 when shared (D32, D33)
+  outbox/<user>/to-<name>/NNNNNN-from-<sender>.md  an ssh message waiting to go (C3, D25)
+  outbox/<user>/to-<name>/sent/, refused/  ssh messages the far tc took, or refused (+ .stderr note)
+  outbox/<user>/.send-<key>.lock           that user's send lock for one ssh target, 0600 (D33)
   outbox/.origin-token                     this mailbox's random origin token (D25)
-  outbox/.send-<uid>-<key>.lock            one user's send lock for one ssh target
   mail/.origins/<origin id>                an ssh message's origin id, filed once delivered (D25)
 
 @interacts  writes mail/, status/, cards/ and outbox/ under ROOT. Its one
             way off the machine is `ssh` (SSH S1, Claude Opus 5.5,
             unreviewed): a send to an ssh card runs the ssh client once
             (C3), as the user who ran tc, with that user's keys, and
-            files the message in outbox/ by the answer; `flush` sends
-            that user's waiting outbox mail the same way, one ssh run per
-            message (SSH S2). Inbound, `gate` is the forced command one
+            files the message in that user's own outbox branch,
+            outbox/<user>/, by the answer (D32; SSH fix round 1, Claude
+            Opus 5.5, unreviewed: a branch another member made, a link
+            or not a folder is refused, exit 1, with words naming its
+            owner and the one command that clears it, and `health`
+            lists it, D33); `flush` sends that user's waiting outbox
+            mail the same way, one ssh run per message (SSH S2).
+            Inbound, `gate` is the forced command one
             far key runs (SSH S3, C3): it reads SSH_ORIGINAL_COMMAND,
             delivers a send as from its --as name through the router
             (never to an ssh card, D18), answers `health --json` without
@@ -47,8 +53,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             it names and mode 2775 (make_folder, D16), or 3775 (sticky,
             D17) for mail/, status/, cards/ and outbox/ themselves, or
             3770 for an inbox and its read/, which only `join` makes, as
-            the recipient (D20). Messages, cards and status files are made
-            0640, never group-writable; mail/.seq, the locks and the ring
+            the recipient (D20), or 2750 for an outbox branch and every
+            folder in it (D33). Messages, cards and status files are made
+            0640, never group-writable, and the send lock 0600 (D33);
+            mail/.seq, the locks and the ring
             marker stay 0664 and are never removed (the marker is
             rewritten, D20). A send to a name with no card, whether or not
             an inbox is there (D21), or to an inbox its card's owner does
@@ -136,9 +144,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             publish try (one in an honest mailbox; at most
             PUBLISH_MAX_TRIES, reached by a set-back mail/.seq or by
             names planted ahead of it, .tmp names among them, round 7);
-            an ssh send adds a scan of the outbox, O(q + w log w) over q
-            outbox folders and w waiting files, and one ssh run of at
-            most SSH_SEND_SECONDS (SSH S1, Claude Opus 5.5, unreviewed);
+            an ssh send adds a scan of this user's outbox branch, O(q + w
+            log w) over q folders in it and w waiting files, and one ssh
+            run of at most SSH_SEND_SECONDS (SSH S1, Claude Opus 5.5,
+            unreviewed; the branch, SSH fix round 1, D32);
             flush O(w x (q + w log w)) over w waiting files of this user
             and q outbox folders, plus one ssh run per file (SSH S2);
             status O(1). A command's flocks on
@@ -176,11 +185,12 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             name (mail/.ring-pending-<name>), kept: rewritten, never
             removed (D20); ROOT/.shared, written by init and kept. SSH S1
             (Claude Opus 5.5, unreviewed): one outbox file per ssh
-            message, kept forever in outbox/to-<name>/, its sent/ or its
-            refused/ (with a .stderr note beside a refused one); one
-            origin token per mailbox and one send lock per user per ssh
-            target, made on first use and kept; one empty filing per
-            origin id delivered here, kept (SSH S3).
+            message, kept forever in outbox/<user>/to-<name>/, its sent/
+            or its refused/ (with a .stderr note beside a refused one;
+            the branch, SSH fix round 1, D32); one origin token per
+            mailbox and one send lock per user per ssh target, in that
+            user's branch, made on first use and kept; one empty filing
+            per origin id delivered here, kept (SSH S3).
             Nothing held in memory past one command. `wait` measured flat at
             13 MB RSS over 200k polls; it also hard-caps itself at
             WAIT_MEMORY_CAP_BYTES so a runaway dies alone. `wait` holds
@@ -373,12 +383,13 @@ NOT_ENTERED_WHY = ("a folder when tc first looked, but by the time tc came to en
 # SHARED fix round 8 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1
 # (audits/2026-10-15-0840-quick). How many folders deep the walk enters,
 # counting the top (mail/, status/, cards/ or outbox/) as one. A real
-# mailbox is three deep: mail/to-<x>/read, and the ssh route's
-# outbox/to-<x>/sent and refused/ (C3). Eight leaves room for folders
-# made by hand and bounds what one walk holds at once: one descriptor and
-# one list of names per level. Any member may make folders under the four
-# to any depth, so a folder past it is named and not entered, never a
-# traceback.
+# mailbox is at most four deep: the ssh route's outbox/<user>/to-<x>/sent
+# and refused/ (C3, D32; SSH fix round 1, Claude Opus 5.5, unreviewed),
+# where mail/to-<x>/read and mail/.origins/<user>/<key-name> are three.
+# Eight leaves room for folders made by hand and bounds what one walk
+# holds at once: one descriptor and one list of names per level. Any
+# member may make folders under the four to any depth, so a folder past
+# it is named and not entered, never a traceback.
 WALK_MAX_DEPTH = 8
 TOO_DEEP_WHY = (f"{WALK_MAX_DEPTH + 1} folders deep, counting its top as one, past the {WALK_MAX_DEPTH} the "
                 f"walk enters; tc looked at nothing under it")
@@ -551,12 +562,15 @@ SSH_SEND_SECONDS = 30
 # tc never answered, so the message waits for tc flush.
 SSH_CONNECT_FAILED = 255
 # Row 4 of the exit table: kept in the outbox. ssh could not reach the
-# target, the far tc was busy (its exit 10, D23), the target already has a
-# queue, or another tc is sending to it right now.
+# target (the far tc busy, its exit 10, counts the same, D23), the target
+# already has a queue, or another tc holds this member's send lock or it
+# would not open (D33 part 6; SSH fix round 1, Claude Opus 5.5,
+# unreviewed: the audit's LOW-2).
 EXIT_QUEUED = 4
 # The outbox's folder under ROOT (one of SHARED_FOLDER_NAMES, C4), and the
-# two folders under each outbox/to-<name>/ that a message is filed in once
-# the far side answered: sent/ on its exit 0, refused/ on a refusal (D25).
+# two folders under each outbox/<user>/to-<name>/ (D32) that a message is
+# filed in once the far side answered: sent/ on its exit 0, refused/ on a
+# refusal (D25).
 OUTBOX_NAME = "outbox"
 OUTBOX_SENT = "sent"
 OUTBOX_REFUSED = "refused"
@@ -588,16 +602,45 @@ ORIGIN_TOKEN_READ_MAX_BYTES = 4096
 ORIGIN_SEQ_MAX_DIGITS = 18
 ORIGIN_PATTERN = re.compile(rf"([0-9a-f]{{{2 * ORIGIN_TOKEN_BYTES}}})-([0-9]{{1,{ORIGIN_SEQ_MAX_DIGITS}}})-"
                             rf"({NAME_PATTERN.pattern})")
-# The send lock: one per Linux user per ssh target, in outbox/, held by the
-# one tc that sends that user's queue for that target (a send, or tc
-# flush), so a newer message never goes ahead of an older one and no two
-# sends of one file run at once. Per user, so one member's flush never
-# holds up another's mail (D22); per target, so a dead target never holds
-# up a live one. {key} is the start of the target's sha256 in hex: a
-# target may be longer than a file name allows, and two targets that
-# shared a key would only share a lock.
-SEND_LOCK_NAME = ".send-{uid}-{key}.lock"
+# The send lock: one per Linux user per ssh target, held by the one tc
+# that sends that user's queue for that target (a send, or tc flush), so a
+# newer message never goes ahead of an older one and no two sends of one
+# file run at once. Per user, so one member's flush never holds up
+# another's mail (D22); per target, so a dead target never holds up a live
+# one. {key} is the start of the target's sha256 in hex: a target may be
+# longer than a file name allows, and two targets that shared a key would
+# only share a lock. SSH fix round 1 (Claude Opus 5.5, unreviewed): D33
+# part 2, the audit's LOW-3. It lives in the user's own outbox branch, at
+# SEND_LOCK_MODE, so no other member can plant a link or a FIFO at its
+# name, or open it and hold its flock.
+SEND_LOCK_NAME = ".send-{key}.lock"
 SEND_LOCK_KEY_CHARS = 16
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and D33 part 1, each
+# member's outbox is a branch only that member owns (the audit's HIGH-1).
+# An outbox branch, outbox/<user>/, and every folder in it (to-<name>/,
+# sent/, refused/), on a shared mailbox: setgid, the owner reads, writes
+# and enters it, the group reads and enters it, nobody else has access.
+# No group write, so no member can plant a folder or a file inside
+# another member's branch, and the owner of every folder a queued file
+# sits in is its sender: sticky's one gap, a folder's owner, is then the
+# sender. Group read keeps flush's count of other members' files. The far
+# side's mail/.origins/<user>/ and every folder in it take the same mode
+# (D33 part 5).
+SHARED_BRANCH_MODE = 0o2750
+# The mode tc makes a branch folder at, before it sets SHARED_BRANCH_MODE
+# through a descriptor: the owner's alone, so no member can write in it
+# for the moment between the mkdir and the fchmod.
+NEW_BRANCH_FOLDER_MODE = 0o700
+# The send lock's mode: its owner reads and writes it, nobody else can
+# open it. flock needs no write access, so a lock the group could read
+# could be held by any member through a read-only open (D33 part 2).
+SEND_LOCK_MODE = 0o600
+# Where the user who ran init moves aside a folder that sits at a
+# member's branch name but is not that member's own (a member made it
+# first, or it is a link or not a folder): {name} is the name it had,
+# {k} the first count from 1 that nothing holds. It starts with a dot, so
+# no member's branch ever has its name, and nothing tc lists reads it.
+SQUATTED_NAME = ".squatted-{name}-{k}"
 # SSH S3 (Claude Opus 5.5, unreviewed): tc gate, the forced command for
 # inbound ssh (C3, D16, D18, D25).
 # Row 7 of the exit table: refused by the gate.
@@ -804,6 +847,35 @@ def mailbox_share():
                f"machine does not have; nothing written", EXIT_REFUSED)
 
 
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-2, a
+# failure a caller turns into words or a warning, never an exit.
+def share_or_raise():
+    """mailbox_share, raising OSError with the words in its strerror where mailbox_share would refuse.
+
+    For a caller that must never exit midway (the far gate filing an
+    origin id after the message landed, the outbox after ssh answered):
+    it catches OSError and says why.
+
+    @interacts  reads ROOT/.shared (shared_group) and, when it names a
+                group, the group database. Writes nothing.
+    @deps       shared_group, shared_problem_words, printable; grp, errno;
+                ROOT, SHARED_MARKER_NAME.
+    @complexity O(1): one small file and one group lookup.
+    @alloc      one Share, returned, or the words, raised.
+    """
+    try:
+        group = shared_group()
+    except ValueError as problem:
+        raise OSError(errno.EINVAL, shared_problem_words(problem)) from problem
+    if group is None:
+        return None
+    try:
+        return Share(group, grp.getgrnam(group).gr_gid)
+    except KeyError:
+        raise OSError(errno.EINVAL, f"{ROOT / SHARED_MARKER_NAME} names group {printable(group)}, which this "
+                                    f"machine does not have") from None
+
+
 def user_name(uid):
     """The login name of user number `uid`, or the number as text when the machine has no such user.
 
@@ -895,16 +967,31 @@ def make_folder(path):
     return share
 
 
-def make_folder_with(path, share):
+def make_folder_with(path, share, raising=False):
     """make_folder's work, with the mailbox's Share (or None) resolved once by the caller and passed down each level.
 
-    @interacts  see make_folder.
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-2.
+    `raising` True is the variant for a caller that must never exit
+    midway: each refusal is raised as OSError, its words in strerror,
+    for the caller's own try to turn into words or a warning. A folder
+    whose mode is SHARED_BRANCH_MODE (an outbox branch and the folders in
+    it, D33) is made at NEW_BRANCH_FOLDER_MODE, so no member can write in
+    it before its mode is set.
+
+    @interacts  see make_folder; with `raising`, raises OSError where it
+                would refuse.
     @deps       in_shared_folders, shared_folder_mode, refuse, printable,
-                user_name, group_name; os, stat, errno; OWN_FIX_WORDS.
+                user_name, group_name; os, stat, errno; OWN_FIX_WORDS,
+                SHARED_BRANCH_MODE, NEW_BRANCH_FOLDER_MODE.
     @complexity O(d) over d missing folders, as make_folder.
     @alloc      one descriptor per new folder under a shared mailbox,
                 closed before return.
     """
+    def fail(words):
+        if raising:
+            raise OSError(errno.EPERM, words)
+        refuse(f"tc: {words}", EXIT_REFUSED)
+
     if share is not None and in_shared_folders(path):
         try:
             st = os.lstat(path)
@@ -912,23 +999,26 @@ def make_folder_with(path, share):
             st = None
         if st is not None:
             if stat.S_ISLNK(st.st_mode):
-                refuse(f"tc: {path} is a symlink, not a real folder; tc never follows it, so nothing "
-                       f"was written there", EXIT_REFUSED)
+                fail(f"{path} is a symlink, not a real folder; tc never follows it, so nothing was written there")
             if not stat.S_ISDIR(st.st_mode):
                 raise FileExistsError(errno.EEXIST, "not a folder", str(path))
             if st.st_gid != share.gid:  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, its owner's init, no line to paste
-                refuse(f"tc: {path} is in group {printable(group_name(st.st_gid))}, not "
-                       f"{printable(share.group)}; under a shared mailbox every folder under mail/, "
-                       f"status/, cards/ and outbox/ is in that group, or other members cannot use it. "
-                       f"Nothing written. Its owner, {user_name(st.st_uid)}, "
-                       f"{OWN_FIX_WORDS.format(group=printable(share.group))}.", EXIT_REFUSED)
+                fail(f"{path} is in group {printable(group_name(st.st_gid))}, not "
+                     f"{printable(share.group)}; under a shared mailbox every folder under mail/, "
+                     f"status/, cards/ and outbox/ is in that group, or other members cannot use it. "
+                     f"Nothing written. Its owner, {user_name(st.st_uid)}, "
+                     f"{OWN_FIX_WORDS.format(group=printable(share.group))}.")
             return
     elif path.is_dir():
         return
     if not path.parent.is_dir():
-        make_folder_with(path.parent, share)
+        make_folder_with(path.parent, share, raising)
+    branch = share is not None and shared_folder_mode(path) == SHARED_BRANCH_MODE  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33
     try:
-        os.mkdir(path)
+        if branch:
+            os.mkdir(path, NEW_BRANCH_FOLDER_MODE)
+        else:
+            os.mkdir(path)
     except FileExistsError:
         if not path.is_dir():
             raise
@@ -948,9 +1038,9 @@ def make_folder_with(path, share):
             undone = "removed it again"
         except OSError as stuck:
             undone = f"could not remove it ({stuck.strerror})"
-        refuse(f"tc: could not give the new folder {path} group {printable(share.group)} "
-               f"({err.strerror}); {undone}; nothing written. Check that this login is in "
-               f"group {printable(share.group)} (id -nG).", EXIT_REFUSED)
+        fail(f"could not give the new folder {path} group {printable(share.group)} "
+             f"({err.strerror}); {undone}; nothing written. Check that this login is in "
+             f"group {printable(share.group)} (id -nG).")
 
 
 def share_entry(entry, where, gid, owner=None):
@@ -1008,12 +1098,23 @@ def share_entry(entry, where, gid, owner=None):
     and a change would show at its other name, outside the mailbox too.
     One already right is left alone, as before.
 
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33. A folder's or
+    file's mode is the one for its place and its owner (shared_folder_mode
+    and shared_file_mode with the owner's id), so an outbox branch is
+    SHARED_BRANCH_MODE and a send lock SEND_LOCK_MODE only where the
+    member the branch is named for owns them. An entry the walk's lstat
+    already finds right (a real folder or regular file, in group `gid`, at
+    its mode, and, given `owner`, that user's) is left alone without an
+    open: another member's send lock (SEND_LOCK_MODE) is one this user may
+    not open, and nothing needs changing in it.
+
     @interacts  opens the entry by its name in dir_fd (or takes the
-                caller's descriptor) and fstats it; sets its group and
-                mode on the descriptor unless they are right (or it is
-                not the entry the walk found, or, given `owner`, not that
-                user's, or a file with another name); reads the user
-                database for a skip's words.
+                caller's descriptor) and fstats it, unless the walk's lstat
+                found it right; sets its group and mode on the descriptor
+                unless they are right (or it is not the entry the walk
+                found, or, given `owner`, not that user's, or a file with
+                another name); reads the user database for a skip's words
+                and for the mode a branch entry gets.
     @deps       shared_folder_mode, shared_file_mode, user_name; os, stat,
                 errno; ENTRY_FLAGS, LINK_WHY, CHANGED_WHY, HARD_LINK_WHY.
     @complexity O(1).
@@ -1024,6 +1125,15 @@ def share_entry(entry, where, gid, owner=None):
         fd, opened, looked = entry, False, None
     else:
         dir_fd, name, looked = entry  # SHARED fix round 8 (Claude Opus 5.5, unreviewed): HIGH-1, with the walk's lstat
+        if looked is not None and (owner is None or looked.st_uid == owner):  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33, right already
+            if stat.S_ISDIR(looked.st_mode):
+                kind, want = "folder", shared_folder_mode(where, looked.st_uid)
+            elif stat.S_ISREG(looked.st_mode):
+                kind, want = "file", shared_file_mode(where, looked.st_uid)
+            else:
+                kind = None
+            if kind is not None and looked.st_gid == gid and stat.S_IMODE(looked.st_mode) == want:
+                return kind, None, False
         try:
             fd = os.open(name, ENTRY_FLAGS, dir_fd=dir_fd)
         except FileNotFoundError:
@@ -1036,9 +1146,9 @@ def share_entry(entry, where, gid, owner=None):
         if looked is not None and not os.path.samestat(looked, st):  # SHARED fix round 8 (Claude Opus 5.5, unreviewed): HIGH-1
             return None, CHANGED_WHY, False
         if stat.S_ISDIR(st.st_mode):
-            kind, want = "folder", shared_folder_mode(where)
+            kind, want = "folder", shared_folder_mode(where, st.st_uid)  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33
         elif stat.S_ISREG(st.st_mode):
-            kind, want = "file", shared_file_mode(where)
+            kind, want = "file", shared_file_mode(where, st.st_uid)
         else:
             return None, "not a regular file or a folder", False
         if owner is not None and st.st_uid != owner:  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, this user's own only
@@ -1294,8 +1404,8 @@ def shared_entries(root_fd, gid):
 
 # SHARED D17 (Claude Opus 5.5, unreviewed): the sticky folders, opens that never
 # follow a link, and the inbox folder checked before use.
-def shared_folder_mode(path):
-    """The mode a shared folder gets: SHARED_TOP_FOLDER_MODE for the four, SHARED_INBOX_MODE for an inbox and its read/, else SHARED_FOLDER_MODE.
+def shared_folder_mode(path, uid=None):
+    """The mode a shared folder gets: SHARED_TOP_FOLDER_MODE for the four, SHARED_INBOX_MODE for an inbox and its read/, SHARED_BRANCH_MODE for a branch and every folder in it, else SHARED_FOLDER_MODE.
 
     The sticky bit goes on mail/, status/, cards/ and outbox/ themselves
     (D17). SHARED fix round 1 (Claude Opus 5.5, unreviewed): an inbox
@@ -1304,20 +1414,27 @@ def shared_folder_mode(path):
     owns the inbox, still moves every message into read/, and no sender
     can touch another's.
 
-    SSH S1 (Claude Opus 5.5, unreviewed): D22 and D25. Each
-    outbox/to-<name>/ and its sent/ and refused/ take
-    SHARED_TOP_FOLDER_MODE too, sticky, so a member cannot move or delete
-    another member's queued, sent or refused mail. The user who made such
-    a folder owns it, and sticky still lets a folder's owner do that.
     SSH S3 (Claude Opus 5.5, unreviewed): mail/.origins/ (D25's filed
-    origin ids) is sticky too, so no member removes another's filing.
+    origin ids) is sticky, so each member makes a folder of their own in
+    it and no member removes or renames another's.
 
-    @interacts  none; path work only.
-    @deps       pathlib; ROOT, MAIL, SHARED_FOLDER_NAMES, OUTBOX_NAME,
-                OUTBOX_SENT, OUTBOX_REFUSED, ORIGINS_NAME,
-                SHARED_TOP_FOLDER_MODE, SHARED_INBOX_MODE,
-                SHARED_FOLDER_MODE.
-    @complexity O(1): a few name comparisons.
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and D33 parts 1
+    and 5, replacing S1's sticky outbox/to-<name>/ (whose maker could
+    still move every other member's mail in it). A branch is
+    outbox/<user>/ or mail/.origins/<user>/, named for the login of the
+    user who owns the folder (`uid`, None for this process's user, which
+    is who owns a folder tc makes). It and every folder in it take
+    SHARED_BRANCH_MODE: no group write, so only its member makes, moves
+    or removes anything in it. A folder at another user's branch name
+    (one a member made first) is not a branch here and gets
+    SHARED_FOLDER_MODE; tc refuses it (claim_branch, open_branch).
+
+    @interacts  reads the user database (branch_user) for a folder under
+                outbox/ or mail/.origins/. Writes nothing.
+    @deps       branch_user; pathlib; ROOT, MAIL, SHARED_FOLDER_NAMES,
+                OUTBOX_NAME, ORIGINS_NAME, SHARED_TOP_FOLDER_MODE,
+                SHARED_INBOX_MODE, SHARED_BRANCH_MODE, SHARED_FOLDER_MODE.
+    @complexity O(1): a few name comparisons and at most one user lookup.
     @alloc      the parent paths it compares, freed on return.
     """
     if path.parent == ROOT and path.name in SHARED_FOLDER_NAMES:
@@ -1325,16 +1442,16 @@ def shared_folder_mode(path):
     box = path.parent if path.name == "read" else path
     if box.parent == MAIL and box.name.startswith("to-"):
         return SHARED_INBOX_MODE
-    queue = path.parent if path.name in (OUTBOX_SENT, OUTBOX_REFUSED) else path  # SSH S1 (Claude Opus 5.5, unreviewed): D22
-    if queue.parent == ROOT / OUTBOX_NAME and queue.name.startswith("to-"):
+    if path == MAIL / ORIGINS_NAME:  # SSH S3 (Claude Opus 5.5, unreviewed): D25, each member's folder their own
         return SHARED_TOP_FOLDER_MODE
-    if path == MAIL / ORIGINS_NAME:  # SSH S3 (Claude Opus 5.5, unreviewed): D25, each filed id its filer's
-        return SHARED_TOP_FOLDER_MODE
+    for top in (ROOT / OUTBOX_NAME, MAIL / ORIGINS_NAME):  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D32, D33
+        if path != top and path.is_relative_to(top) and path.relative_to(top).parts[0] == branch_user(uid):
+            return SHARED_BRANCH_MODE
     return SHARED_FOLDER_MODE
 
 
-def shared_file_mode(path):
-    """The mode init gives a file under the shared folders: SHARED_WRITABLE_FILE_MODE directly in mail/, else SHARED_OWNED_FILE_MODE.
+def shared_file_mode(path, uid=None):
+    """The mode init gives a file under the shared folders: SHARED_WRITABLE_FILE_MODE directly in mail/, SEND_LOCK_MODE for a send lock in its owner's outbox branch, else SHARED_OWNED_FILE_MODE.
 
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 items 2 and 5.
     The files directly in mail/ are the ones every member must write
@@ -1342,13 +1459,26 @@ def shared_file_mode(path):
     down, in an inbox or its read/. Cards, status files and messages are
     never group-writable.
 
-    @interacts  none; path work only.
-    @deps       pathlib; MAIL, SHARED_WRITABLE_FILE_MODE,
-                SHARED_OWNED_FILE_MODE.
-    @complexity O(1).
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 2. A send lock
+    (a name SEND_LOCK_NAME gives, directly in the outbox branch of `uid`,
+    None for this process's user) is its owner's alone, so no member can
+    open it and hold its flock.
+
+    @interacts  reads the user database (branch_user) for a file directly
+                in an outbox branch. Writes nothing.
+    @deps       branch_user; pathlib; ROOT, MAIL, OUTBOX_NAME,
+                SEND_LOCK_NAME, SHARED_WRITABLE_FILE_MODE,
+                SHARED_OWNED_FILE_MODE, SEND_LOCK_MODE.
+    @complexity O(1), and at most one user lookup.
     @alloc      none.
     """
-    return SHARED_WRITABLE_FILE_MODE if path.parent == MAIL else SHARED_OWNED_FILE_MODE
+    if path.parent == MAIL:
+        return SHARED_WRITABLE_FILE_MODE
+    lead, _, tail = SEND_LOCK_NAME.partition("{key}")
+    if (path.parent.parent == ROOT / OUTBOX_NAME and path.name.startswith(lead) and path.name.endswith(tail)
+            and path.parent.name == branch_user(uid)):  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 2
+        return SEND_LOCK_MODE
+    return SHARED_OWNED_FILE_MODE
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, a FIFO at a lock's
@@ -4379,8 +4509,9 @@ def ring_codex(card, sender, to, count):
 
 # ---------- ssh route: deliver_ssh and the outbox (C3, D22, D23, D25) ----------
 # SSH S1 (Claude Opus 5.5, unreviewed). Every ssh send leaves a record: it
-# is published into outbox/to-<to>/ first, then sent, then filed in sent/
-# or refused/ by the far tc's answer.
+# is published into outbox/<user>/to-<to>/ first (the sender's own branch,
+# D32; SSH fix round 1, Claude Opus 5.5, unreviewed), then sent, then
+# filed in sent/ or refused/ by the far tc's answer.
 
 # Where an ssh card sends: its target (user@host or host), the far tc's
 # path as the first word of the remote command (C3's quoting), and why the
@@ -4391,10 +4522,220 @@ SshWhere = collections.namedtuple("SshWhere", "target remote why")
 # err the far side's stdout and stderr; reason, for a kept message, why in
 # words.
 SshOutcome = collections.namedtuple("SshOutcome", "kind code out err reason")
-# One message waiting directly in an outbox/to-<to>/: its number and
+# One message waiting directly in an outbox/<user>/to-<to>/: its number and
 # sender (from its name), the name it is for, its path and its lstat
 # result.
 OutboxFile = collections.namedtuple("OutboxFile", "n sender to path st")
+
+
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and D33 part 1, the
+# audit's HIGH-1 and DEBT-1. One helper names a branch and one a queue, so
+# the layout is spelled in one place.
+def branch_user(uid=None):
+    """The name of user `uid`'s branch (None: this process's effective user): that user's login, or the number as text when the machine has no such user.
+
+    @interacts  reads this process's user id and the user database.
+    @deps       user_name; os.
+    @complexity O(1): one lookup.
+    @alloc      one short string, returned.
+    """
+    return user_name(os.geteuid() if uid is None else uid)
+
+
+def outbox_branch(uid=None):
+    """outbox/<user>/ for user `uid` (None: this process's user): the one folder that user's ssh mail waits and is filed under (C3, D32).
+
+    @interacts  reads the user database (branch_user).
+    @deps       branch_user; ROOT, OUTBOX_NAME.
+    @complexity O(1).
+    @alloc      one path, returned.
+    """
+    return ROOT / OUTBOX_NAME / branch_user(uid)
+
+
+def outbox_queue(to, uid=None):
+    """outbox/<user>/to-<to>/: where user `uid`'s (None: this process's user's) ssh mail to `to` waits, with its sent/ and refused/ below (C3, D25, D32).
+
+    @interacts  reads the user database (branch_user).
+    @deps       outbox_branch.
+    @complexity O(1).
+    @alloc      one path, returned.
+    """
+    return outbox_branch(uid) / f"to-{to}"
+
+
+def init_user_name():
+    """The login of the user who ran init: the owner of ROOT/.shared, or of outbox/ when there is no .shared to look at (a private mailbox).
+
+    @interacts  lstats ROOT/.shared, or outbox/; reads the user database.
+    @deps       user_name; os; ROOT, SHARED_MARKER_NAME, OUTBOX_NAME.
+    @complexity O(1): at most two lstats.
+    @alloc      one short string, returned.
+    """
+    for path in (ROOT / SHARED_MARKER_NAME, ROOT / OUTBOX_NAME):
+        try:
+            return user_name(os.lstat(path).st_uid)
+        except OSError:
+            continue
+    return "the owner of the mailbox"
+
+
+def aside_path(path):
+    """Where `path` goes when it is moved aside: SQUATTED_NAME in its own folder, k the first count from 1 that nothing holds there.
+
+    @interacts  lstats each name tried (os.path.lexists). Writes nothing.
+    @deps       os; SQUATTED_NAME.
+    @complexity O(k) over k names already taken (none, in practice).
+    @alloc      one path per name tried; the free one, returned.
+    """
+    k = 1
+    while os.path.lexists(path.parent / SQUATTED_NAME.format(name=path.name, k=k)):
+        k += 1
+    return path.parent / SQUATTED_NAME.format(name=path.name, k=k)
+
+
+def branch_problem(path, st, share, top_level):
+    """Why the folder at `path` (its lstat result `st`) cannot hold this user's mail, in words, or None when it is this user's own real folder (D32, D33).
+
+    Refused: a link, anything but a folder, a folder another user owns,
+    and, under a shared mailbox (`share`), a folder in another group or
+    one its group or anyone else may write. The words name the owner and
+    the one command that clears it: a `mv -T` aside (aside_path), run by
+    the user who ran init when `top_level` (the branch itself, which sits
+    in outbox/ or mail/.origins/, sticky folders only their owner and
+    the entry's may rename in), else by this user, in whose own branch it
+    sits. A folder of this user's own in the wrong group or mode is fixed
+    by this user's own tc init (OWN_FIX_WORDS). tc prints a `mv -T` line
+    and no other: rename(2) moves the name itself, never what a link at it
+    leads to, and -T never moves it into a folder that already has the
+    new name.
+
+    @interacts  reads this process's user id and the user database;
+                lstats names beside `path` (aside_path, init_user_name).
+                Writes nothing.
+    @deps       aside_path, init_user_name, user_name, group_name,
+                printable; os, stat; OWN_FIX_WORDS.
+    @complexity O(1), plus aside_path's.
+    @alloc      the words, returned.
+    """
+    me = os.geteuid()
+    if stat.S_ISLNK(st.st_mode):
+        what = "is a symlink, which tc never follows"
+    elif not stat.S_ISDIR(st.st_mode):
+        what = "is not a folder"
+    elif st.st_uid != me:
+        what = f"belongs to {user_name(st.st_uid)}, not to {user_name(me)}"
+    else:
+        what = None
+    if what is not None:
+        if top_level:
+            who = f"The user who ran init ({init_user_name()}) clears it with one command"
+        else:
+            who = "It sits in your own branch, so you clear it with one command"
+        return (f"{path} {what}: a branch and every folder in it are their member's alone (D32, D33), so tc "
+                f"wrote nothing there. {who}: mv -T {path} {aside_path(path)}")
+    mode = stat.S_IMODE(st.st_mode)
+    if share is not None and st.st_gid != share.gid:
+        what = f"is in group {printable(group_name(st.st_gid))}, not {printable(share.group)}"
+    elif share is not None and mode & (stat.S_IWGRP | stat.S_IWOTH):
+        what = f"is {mode:04o}: others may write in it, so it is no branch of yours (D33)"
+    else:
+        return None
+    return (f"{path} {what}; tc wrote nothing there. Its owner, you, "
+            f"{OWN_FIX_WORDS.format(group=printable(share.group))}.")
+
+
+def claim_branch(path):
+    """Make, or find, each folder from this user's outbox branch down to `path` (the branch or a folder in it), checking each before anything is made in it: the mailbox's Share, or None when private. Raises OSError, its words in strerror.
+
+    The audit's HIGH-1, conditions (a) and (b). outbox/ is made when
+    missing (it is the init user's, C4; its owner is not checked). Then,
+    top down, each level below it: a missing one is made as this user
+    (make_folder_with, raising: SHARED_BRANCH_MODE under a shared
+    mailbox), and each, made or found, is lstat()ed and must be this
+    user's own real folder (branch_problem) before the next is made in
+    it. So nothing is ever made in a folder another member owns, and a
+    member who made outbox/<user>/ first, or planted a link there, gets
+    words naming them and the one command that clears it, never this
+    user's mail.
+
+    @interacts  reads ROOT/.shared and the group database
+                (share_or_raise); lstats outbox/ and each level below it,
+                making those missing (make_folder_with); reads the user
+                database for the words. Raises OSError.
+    @deps       share_or_raise, make_folder_with, branch_problem; os,
+                errno; ROOT, OUTBOX_NAME.
+    @complexity O(d) over d levels from the branch down to `path` (at most
+                three: the branch, to-<name>/, sent/ or refused/).
+    @alloc      the folders it makes, kept; one stat result per level.
+    """
+    share = share_or_raise()
+    top = ROOT / OUTBOX_NAME
+
+    def make(folder):
+        try:
+            make_folder_with(folder, share, raising=True)
+        except FileExistsError:
+            raise OSError(errno.ENOTDIR, f"{folder} is not a folder, so tc wrote nothing there") from None
+    make(top)
+    parts = path.relative_to(top).parts
+    for depth in range(1, len(parts) + 1):
+        level = top.joinpath(*parts[:depth])
+        try:
+            st = os.lstat(level)
+        except FileNotFoundError:
+            make(level)
+            st = os.lstat(level)
+        problem = branch_problem(level, st, share, depth == 1)
+        if problem is not None:
+            raise OSError(errno.EPERM, problem)
+    return share
+
+
+def squatted_branches():
+    """Each branch named for a user of this machine that is not that user's own real folder, in outbox/ and mail/.origins/: a list of {"path", "why", "fix"}, for tc health (D33).
+
+    A name counts as a branch when the user database has a login of that
+    name; names starting with a dot (the origin token, a folder moved
+    aside) never do. `why` says what is there instead (a link, not a
+    folder, another user's folder); `fix` is the one command the user who
+    ran init runs, a `mv -T` aside.
+
+    @interacts  lists outbox/ and mail/.origins/, and lstats each entry
+                named for a login; reads the user database. Writes
+                nothing.
+    @deps       aside_path, init_user_name, user_name; os, pwd, stat;
+                ROOT, MAIL, OUTBOX_NAME, ORIGINS_NAME.
+    @complexity O(e) over e entries in the two folders: one per member,
+                plus the token and anything moved aside.
+    @alloc      one dict per squatted branch, returned.
+    """
+    found = []
+    for top in (ROOT / OUTBOX_NAME, MAIL / ORIGINS_NAME):
+        try:
+            names = sorted(os.listdir(top))
+        except OSError:
+            continue
+        for name in names:
+            if name.startswith("."):
+                continue
+            try:
+                uid = pwd.getpwnam(name).pw_uid
+                st = os.lstat(top / name)
+            except (KeyError, OSError):
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                why = "a symlink"
+            elif not stat.S_ISDIR(st.st_mode):
+                why = "not a folder"
+            elif st.st_uid != uid:
+                why = f"a folder {user_name(st.st_uid)} owns"
+            else:
+                continue
+            path = top / name
+            found.append({"path": str(path), "why": f"{why}, not {name}'s own branch",
+                          "fix": f"{init_user_name()}, who ran init, runs: mv -T {path} {aside_path(path)}"})
+    return found
 
 
 def ssh_where(card):
@@ -4468,8 +4809,8 @@ def owned_by_me(st):
     return st.st_uid == os.geteuid()
 
 
-def outbox_files():
-    """Every message waiting directly in an outbox/to-<name>/, sorted by number, as OutboxFiles; and (path, why) for each entry left out.
+def outbox_files(branch):
+    """Every message waiting directly in a to-<name>/ of the outbox branch `branch`, in queue order, as OutboxFiles; and (path, why) for each entry left out.
 
     Only real folders named to-<name> with a C0 name are entered (lstat,
     never a link), and only regular files named NNNNNN-from-<sender>.md
@@ -4477,16 +4818,22 @@ def outbox_files():
     left out with words). sent/ and refused/ are below, never listed
     here. Whoever owns a file, it is listed: the caller asks owned_by_me.
 
-    @interacts  lists outbox/ and each outbox/to-<name>/, lstats each
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and the audit's
+    REC-12. One branch, outbox/<user>/, is listed (this user's, for a
+    send or a flush; another member's, for flush's count of theirs),
+    never the whole outbox, so a scan costs this user's own files.
+
+    @interacts  lists `branch` and each to-<name>/ in it, lstats each
                 entry (real_folder, message_files). Writes nothing.
-    @deps       real_folder, message_files, valid_name; os; ROOT,
-                OUTBOX_NAME, MESSAGE_NAME_PATTERN, OutboxFile.
-    @complexity O(q + w log w) over q entries in outbox/ (one per name
-                ever sent to over ssh, a few dozen) and w files waiting
-                (single digits, unless a target has been down a while).
+    @deps       real_folder, message_files, valid_name; os;
+                MESSAGE_NAME_PATTERN, OutboxFile.
+    @complexity O(q + w log w) over q entries in the branch (one per name
+                this user ever sent to over ssh, a few dozen) and w files
+                waiting in it (single digits, unless a target has been
+                down a while).
     @alloc      two lists, returned.
     """
-    top = ROOT / OUTBOX_NAME
+    top = branch
     found, left_out = [], []
     try:
         names = os.listdir(top)
@@ -4515,22 +4862,46 @@ def outbox_files():
     return found, left_out
 
 
+def other_branches():
+    """The outbox branches of every other member: each real folder directly in outbox/ but this user's own, whose name starts with no dot (D32). A list of paths.
+
+    For tc flush's count of other members' waiting files (D22). Names
+    starting with a dot (the origin token, a folder moved aside) are not
+    branches.
+
+    @interacts  lists outbox/ and lstats each entry (real_folder); reads
+                the user database (outbox_branch). Writes nothing.
+    @deps       outbox_branch, real_folder; os; ROOT, OUTBOX_NAME.
+    @complexity O(m) over m entries in outbox/ (one per member).
+    @alloc      one list of paths, returned.
+    """
+    top, mine = ROOT / OUTBOX_NAME, outbox_branch()
+    try:
+        names = sorted(os.listdir(top))
+    except OSError:
+        return []
+    return [top / name for name in names
+            if not name.startswith(".") and top / name != mine and real_folder(top / name)]
+
+
 def queue_ahead(target, n):
     """How many of this user's own outbox messages for `target` wait ahead of number `n` ("queue order first", C3, D22).
 
     A file counts when this user owns it (owned_by_me), its number is
     below `n`, and its `to`'s card points at `target` now (queue_route).
-    Other members' files never count: each member's queue is their own.
+    Other members' files never count: each member's queue is their own,
+    in their own branch (D32), and only this user's branch is listed.
 
-    @interacts  lists the outbox (outbox_files) and reads the card of each
-                name with a file that could count. Writes nothing.
-    @deps       outbox_files, owned_by_me, queue_route.
+    @interacts  lists this user's outbox branch (outbox_files) and reads
+                the card of each name with a file that could count.
+                Writes nothing.
+    @deps       outbox_files, outbox_branch, owned_by_me, queue_route.
     @complexity O(q + w log w) as outbox_files, plus one card read per
                 name among the files counted.
     @alloc      the outbox lists and one dict of routes, freed on return.
     """
     routes, ahead = {}, 0
-    for f in outbox_files()[0]:
+    for f in outbox_files(outbox_branch())[0]:
         if f.n >= n or not owned_by_me(f.st):
             continue
         if f.to not in routes:
@@ -4543,17 +4914,22 @@ def queue_ahead(target, n):
 def send_lock(target, deadline=None):
     """Hold this user's send lock for `target` for the `with` block: yields (held, why).
 
-    outbox/SEND_LOCK_NAME, one per Linux user per target, so one tc at a
-    time sends a user's queue for a target, in order, and never sends one
-    file twice at once. held is True once the flock is held; False when it
-    was not taken by `deadline` (flock_within: another send or a flush is
-    sending to that target), with why None; or False with words when the
-    lock file would not open (a link or a FIFO at its name, D17, D19:
-    open_regular refuses both). It never exits here: a caller that cannot
-    hold it still publishes its message and keeps it in the outbox
-    (deliver_ssh, exit 4), or leaves the target for the next flush
-    (cmd_flush). Made SHARED_OWNED_FILE_MODE under a shared mailbox, so
-    init finds it already right.
+    outbox/<user>/SEND_LOCK_NAME, one per Linux user per target, so one tc
+    at a time sends a user's queue for a target, in order, and never sends
+    one file twice at once. held is True once the flock is held; False
+    when it was not taken by `deadline` (flock_within: another send or a
+    flush is sending to that target), with why None; or False with words
+    when the branch is not this user's own (claim_branch) or the lock file
+    would not open (a link or a FIFO at its name, D17, D19: open_regular
+    refuses both). It never exits here: a caller that cannot hold it
+    still publishes its message and keeps it in the outbox (deliver_ssh,
+    exit 4), or leaves the target for the next flush (cmd_flush).
+
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 2, the audit's
+    LOW-3. The lock lives in this user's own branch, which no other member
+    can write in, so nobody can plant a link or a FIFO at its name; it is
+    made SEND_LOCK_MODE, its owner's alone, so nobody else can open it and
+    hold its flock. Init finds it already right (shared_file_mode).
 
     The lock is held through the ssh run, which may take
     SSH_SEND_SECONDS. Nobody waits on it past `deadline`: a send that
@@ -4561,27 +4937,29 @@ def send_lock(target, deadline=None):
     for the next flush. Neither the inbox locks nor mail/.seq is ever held
     while ssh runs.
 
-    @interacts  reads ROOT/.shared and makes outbox/ (make_folder); opens
-                or makes outbox/.send-<uid>-<key>.lock (open_regular) and
-                waits for its flock no later than `deadline`
-                (flock_within); the kernel drops it when the block ends
-                or the process dies.
-    @deps       make_folder, open_regular, flock_within; contextlib,
-                fcntl, hashlib, os; ROOT, OUTBOX_NAME, SEND_LOCK_NAME,
-                SEND_LOCK_KEY_CHARS, SHARED_OWNED_FILE_MODE,
-                NEW_FILE_MODE.
+    @interacts  reads ROOT/.shared, makes or finds this user's outbox
+                branch and checks it (claim_branch); opens or makes
+                outbox/<user>/.send-<key>.lock (open_regular) and waits
+                for its flock no later than `deadline` (flock_within); the
+                kernel drops it when the block ends or the process dies.
+    @deps       claim_branch, outbox_branch, open_regular, flock_within;
+                contextlib, fcntl, hashlib, os; SEND_LOCK_NAME,
+                SEND_LOCK_KEY_CHARS, SEND_LOCK_MODE.
     @complexity O(t) over t characters of the target, plus waiting until
                 `deadline` at most.
     @alloc      one open lock file for the block; the lock file, made on
                 first use and kept.
     """
-    top = ROOT / OUTBOX_NAME
-    share = make_folder(top)
-    key = hashlib.sha256(target.encode()).hexdigest()[:SEND_LOCK_KEY_CHARS]
-    path = top / SEND_LOCK_NAME.format(uid=os.geteuid(), key=key)
-    mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
+    branch = outbox_branch()
     try:
-        fd = open_regular(path, os.O_WRONLY | os.O_APPEND, mode)
+        claim_branch(branch)
+    except OSError as err:
+        yield False, err.strerror
+        return
+    key = hashlib.sha256(target.encode()).hexdigest()[:SEND_LOCK_KEY_CHARS]
+    path = branch / SEND_LOCK_NAME.format(key=key)
+    try:
+        fd = open_regular(path, os.O_WRONLY | os.O_APPEND, SEND_LOCK_MODE)
     except (OSError, ValueError) as err:
         why = "it is a symlink" if isinstance(err, OSError) and err.errno == errno.ELOOP else (
             err.strerror if isinstance(err, OSError) and err.strerror else str(err))
@@ -4705,30 +5083,31 @@ def ssh_run(where, sender, to, origin, text):
 def file_away(path, folder):
     """Move the outbox message at `path` into `folder` beside it (sent/ or refused/) without replacing anything: its new path. Raises OSError.
 
-    The folder is made through make_folder (sticky under a shared
-    mailbox) and lstat()ed: a link or anything but a folder there is
-    refused. The file is hard-linked into it, never renamed, since a
-    rename replaces what holds its target (D25: a move into sent/ or
-    refused/ never replaces a file already there); then its outbox name
-    is removed. A name the folder already holds takes BY_HAND_NAME with
-    the first free k (by_hand_name, cut to the folder's name limit), up
-    to PUBLISH_MAX_TRIES names, then FileExistsError. The link never
-    follows a link at `path`.
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D32, D33 and the
+    audit's MEDIUM-2. The folder is made or found through claim_branch,
+    which raises OSError with words, never exits: every level from this
+    user's branch down to it must be this user's own real folder
+    (SHARED_BRANCH_MODE under a shared mailbox), so a link, anything but
+    a folder, or a folder another user made there is a warning for the
+    caller, after the far side answered. The file is hard-linked into it,
+    never renamed, since a rename replaces what holds its target (D25: a
+    move into sent/ or refused/ never replaces a file already there);
+    then its outbox name is removed. A name the folder already holds
+    takes BY_HAND_NAME with the first free k (by_hand_name, cut to the
+    folder's name limit), up to PUBLISH_MAX_TRIES names, then
+    FileExistsError. The link never follows a link at `path`.
 
-    @interacts  reads ROOT/.shared and makes the folder (make_folder,
-                which refuses, exit 1, a shared folder in the wrong
-                group); lstats it; reads its name limit; links the file
-                in and unlinks its outbox name.
-    @deps       make_folder, by_hand_name; os, stat, errno;
-                PUBLISH_MAX_TRIES.
+    @interacts  reads ROOT/.shared, makes or finds the folder and checks
+                each level of the branch above it (claim_branch); reads
+                its name limit; links the file in and unlinks its outbox
+                name.
+    @deps       claim_branch, by_hand_name; os, errno; PUBLISH_MAX_TRIES.
     @complexity O(k) over k names already taken (none in an honest
-                outbox).
+                outbox), plus claim_branch's three levels.
     @alloc      one path per name tried; the new one, returned.
     """
     dest = path.parent / folder
-    make_folder(dest)
-    if not stat.S_ISDIR(os.lstat(dest).st_mode):
-        raise OSError(errno.ENOTDIR, "a link or not a folder, which tc never follows", str(dest))
+    claim_branch(dest)
     limit = os.pathconf(dest, "PC_NAME_MAX")
     for k in range(PUBLISH_MAX_TRIES):
         filed = dest / (path.name if k == 0 else by_hand_name(k, path.name, limit))
@@ -4817,25 +5196,31 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
 
     1. The card is checked (ssh_where): a bad target or remote path is
        Delivery exit 6, words, nothing written and ssh never run (D13).
-    2. The mailbox's origin token is read, or made (origin_token); one
+    2. SSH fix round 1 (Claude Opus 5.5, unreviewed): D32, D33 part 1.
+       This user's queue, outbox/<user>/to-<to>/ (outbox_queue), is made
+       or found and every level of it checked (claim_branch): a branch
+       or folder another member owns, a link or not a folder is Delivery
+       exit 1, words naming the owner and the one command that clears
+       it, nothing written.
+    3. The mailbox's origin token is read, or made (origin_token); one
        that cannot be is Delivery exit 1, nothing written.
-    3. This user's send lock for the target is taken (send_lock), no
-       later than `deadline`.
-    4. The message is published in outbox/to-<to>/ (D25) exactly as local
-       mail is (publish_message: same mail/.seq, same header, never a
-       replace, sent/ and refused/ as its history), as this user, at
-       SHARED_OWNED_FILE_MODE under a shared mailbox. From here every
-       send leaves a record. It is published whether or not the lock
-       was taken, but after the wait for it: with the lock held, no
-       flush can send this file before this send does, and a flush that
-       held the lock meanwhile may find and send it (C3, lane note 5).
-       Lock not taken: Delivery exit 4, kept, words saying another tc is
-       sending to the target.
-    5. Queue order first (C3, D22): when this user's own outbox already
+    4. This user's send lock for the target is taken (send_lock, in this
+       user's branch), no later than `deadline`.
+    5. The message is published in outbox/<user>/to-<to>/ (D25, D32)
+       exactly as local mail is (publish_message: same mail/.seq, same
+       header, never a replace, sent/ and refused/ as its history), as
+       this user, at SHARED_OWNED_FILE_MODE under a shared mailbox. From
+       here every send leaves a record. It is published whether or not
+       the lock was taken, but after the wait for it: with the lock held,
+       no flush can send this file before this send does, and a flush
+       that held the lock meanwhile may find and send it (C3, lane note
+       5). Lock not taken: Delivery exit 4, kept, words saying another tc
+       is sending to the target.
+    6. Queue order first (C3, D22): when this user's own outbox already
        holds older mail for the same target (queue_ahead), the message
        stays queued behind it without trying, exit 4, `<target> has <n>
        waiting in the outbox; queued behind them. Run: tc flush`.
-    6. Else one ssh run (ssh_run) with --origin <token>-<number>-<sender>
+    7. Else one ssh run (ssh_run) with --origin <token>-<number>-<sender>
        (D25), and the message is filed by the answer (file_outcome), all
        under the send lock: sent/ and exit 0; kept, exit 4 (255, a
        timeout, a far 10 busy, D23); refused/ with the far stderr beside
@@ -4849,29 +5234,31 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
     the move leaves the message waiting: tc flush sends it again, a
     duplicate the origin id turns into `already delivered`, never a loss.
 
-    @interacts  reads ROOT/.shared and makes outbox/, outbox/to-<to>/ and,
-                when it files one, sent/ or refused/ (make_folder);
-                lstats outbox/to-<to>/ (real_folder); reads or makes the
-                origin token; takes the send lock; takes numbers from
-                mail/.seq (next_seq, publish_message) and publishes one
-                file in outbox/to-<to>/; lists the outbox and
-                reads the card of each name waiting (queue_ahead); runs
-                ssh once (ssh_run); links the file into sent/ or refused/
-                and removes its outbox name, writing the far stderr beside
-                a refused one (file_outcome).
-    @deps       ssh_where, origin_token, lock_deadline, make_folder,
-                real_folder, next_seq, publish_message, send_lock,
+    @interacts  reads ROOT/.shared; makes or finds outbox/, this user's
+                branch outbox/<user>/, outbox/<user>/to-<to>/ and, when it
+                files one, sent/ or refused/, lstat()ing each level
+                (claim_branch); reads or makes the origin token; takes the
+                send lock; takes numbers from mail/.seq (next_seq,
+                publish_message) and publishes one file in
+                outbox/<user>/to-<to>/; lists this user's branch and reads
+                the card of each name waiting (queue_ahead); runs ssh once
+                (ssh_run); links the file into sent/ or refused/ and
+                removes its outbox name, writing the far stderr beside a
+                refused one (file_outcome).
+    @deps       ssh_where, outbox_queue, claim_branch, origin_token,
+                lock_deadline, next_seq, publish_message, send_lock,
                 queue_ahead, ssh_run, file_outcome, outbox_text, Delivery;
-                ROOT, CARDS, OUTBOX_NAME, OUTBOX_SENT, OUTBOX_REFUSED,
-                SHARED_OWNED_FILE_MODE, NEW_FILE_MODE, EXIT_BAD_NAME,
-                EXIT_REFUSED, EXIT_QUEUED.
+                CARDS, OUTBOX_SENT, OUTBOX_REFUSED, SHARED_OWNED_FILE_MODE,
+                NEW_FILE_MODE, EXIT_BAD_NAME, EXIT_REFUSED, EXIT_QUEUED.
     @complexity O(b) over b bytes of body per publish try (one in an
-                honest mailbox), plus queue_ahead's O(q + w log w), plus
-                one ssh run of at most SSH_SEND_SECONDS; mail/.seq and the
-                send lock wait at most LOCK_WAIT_SECONDS in all.
+                honest mailbox), plus queue_ahead's O(q + w log w) over
+                this user's branch, plus one ssh run of at most
+                SSH_SEND_SECONDS; mail/.seq and the send lock wait at most
+                LOCK_WAIT_SECONDS in all.
     @alloc      the message text while written; one outbox file, kept in
-                outbox/to-<to>/, sent/ or refused/ (D25); a refusal's
-                note, kept; one open lock file while the lock is held.
+                outbox/<user>/to-<to>/, sent/ or refused/ (D25, D32); a
+                refusal's note, kept; one open lock file while the lock
+                is held.
     """
     where = ssh_where(card)
     if where.why is not None:
@@ -4879,17 +5266,17 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
                                        f"Write it again with tc card {to} --ssh <target>.", [])
     if deadline is None:
         deadline = lock_deadline()
+    box = outbox_queue(to)  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D32, this user's own branch
+    try:
+        share = claim_branch(box)
+    except OSError as err:
+        return Delivery(EXIT_REFUSED, f"tc send: {err.strerror}", [])
     try:
         token = origin_token()
     except (OSError, ValueError) as err:
         why = (f"{err.strerror}" + (f" at {err.filename}" if err.filename else "")
                if isinstance(err, OSError) else str(err))
         return Delivery(EXIT_REFUSED, f"tc send: could not read or make the origin token ({why}); nothing sent", [])
-    box = ROOT / OUTBOX_NAME / f"to-{to}"
-    share = make_folder(box)
-    if not real_folder(box):
-        return Delivery(EXIT_REFUSED, f"tc send: {box} is a symlink or not a folder; tc never follows it, so "
-                                      f"nothing was written there", [])
     mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
     with send_lock(where.target, deadline) as (held, why):
         n = next_seq(deadline)  # under the lock when held, so no flush takes this file before this send does
@@ -4957,37 +5344,50 @@ def cmd_flush(args):
     (exit 4). A file that cannot be read stops its target too, with words.
 
     D22: only files this user owns are sent (owned_by_me); for each
-    target, a line counts the files other members own and says each
-    member sends their own. A file whose card no longer says ssh (or is
-    missing or unreadable) stays where it is, with words saying why and
-    what fixes it; it is never sent another way. `--to <name>` sends the
-    queue of the target <name>'s card points at, so every name whose
-    card points there goes, in order; with no ssh card for <name>, only
-    outbox/to-<name>/ is looked at, and its files are left.
+    target, a line counts the files waiting in other members' branches
+    and says each member sends their own. A file whose card no longer
+    says ssh (or is missing or unreadable) stays where it is, with words
+    saying why and what fixes it; it is never sent another way. `--to
+    <name>` sends the queue of the target <name>'s card points at, so
+    every name whose card points there goes, in order; with no ssh card
+    for <name>, only outbox/<user>/to-<name>/ is looked at, and its
+    files are left.
+
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and D33 part 1.
+    This user's mail waits in this user's own branch, outbox/<user>/,
+    and only that branch is listed in the loop. A branch that is not
+    this user's own real folder (another member made it first, a link,
+    not a folder) is refused, exit 1, with words naming its owner and the
+    one command that clears it (claim_branch), and nothing is sent.
 
     One line per file: sent ones on stdout, the rest on stderr, then a
     line per file still waiting that was not tried. Exit 0 when none of
     this user's files in the selection is left waiting, 4 when any is
     (EXIT_QUEUED). Refused files are filed, not left.
 
-    @interacts  checks --to (C0, exit 6); lists the outbox
-                (outbox_files) and reads each waiting name's card
-                (queue_route), again before each file; reads or makes the
-                origin token (refused, exit 1, nothing sent, when it
-                cannot); per target takes the send lock (send_lock); per
-                file reads it (outbox_body), runs ssh once (ssh_run) and
-                files it in sent/ or refused/ (file_outcome); reads the
-                user database for other members' names; prints.
-    @deps       require_names, outbox_files, queue_route, owned_by_me,
+    @interacts  checks --to (C0, exit 6); lstats this user's branch and
+                each level of it (claim_branch, exit 1 on a refusal);
+                lists it (outbox_files) and reads each waiting name's card
+                (queue_route), again before each file; lists the other
+                members' branches once (other_branches, outbox_files);
+                reads or makes the origin token (refused, exit 1, nothing
+                sent, when it cannot); per target takes the send lock
+                (send_lock); per file reads it (outbox_body), runs ssh
+                once (ssh_run) and files it in sent/ or refused/
+                (file_outcome); reads the user database for other
+                members' names; prints.
+    @deps       require_names, outbox_branch, outbox_queue, claim_branch,
+                outbox_files, other_branches, queue_route, owned_by_me,
                 origin_token, send_lock, outbox_body, ssh_run,
-                file_outcome, printable, user_name, refuse; sys; ROOT,
-                OUTBOX_NAME, SSH_SENT, SSH_KEPT, EXIT_QUEUED,
-                EXIT_REFUSED.
+                file_outcome, printable, user_name, refuse; os, sys;
+                SSH_SENT, SSH_KEPT, EXIT_QUEUED, EXIT_REFUSED.
     @complexity O(w x (q + w log w)) over w of this user's files waiting
-                for the targets flushed and q outbox folders, since the
-                outbox is listed again before each file, plus one ssh run
-                of at most SSH_SEND_SECONDS per file. w is single digits
-                unless a target has been down for a long time.
+                for the targets flushed and q to-<name>/ folders in this
+                user's branch, since the branch is listed again before
+                each file, plus one ssh run of at most SSH_SEND_SECONDS
+                per file, plus one listing of every other member's branch
+                (O(W log W) over W files waiting there). w is single
+                digits unless a target has been down for a long time.
     @alloc      the outbox lists, one dict of routes and the sets of
                 paths tried and said, freed on exit; one open lock file
                 per target while it is flushed.
@@ -5005,13 +5405,19 @@ def cmd_flush(args):
     def chosen(f):
         return args.to is None or f.to == args.to or (pick.target is not None and route(f.to).target == pick.target)
 
-    files, left_out = outbox_files()
-    box = ROOT / OUTBOX_NAME / f"to-{args.to}" if args.to is not None else None
+    branch = outbox_branch()  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D32, this user's branch only
+    if os.path.lexists(branch):
+        try:
+            claim_branch(branch)
+        except OSError as err:
+            refuse(f"tc flush: {err.strerror}", EXIT_REFUSED)
+    files, left_out = outbox_files(branch)
+    box = outbox_queue(args.to) if args.to is not None else None
     for path, why in left_out:
         if box is None or path == box or box in path.parents:
             print(f"tc flush: skipped {printable(path)}: {why}", file=sys.stderr)
     mine = [f for f in files if chosen(f) and owned_by_me(f.st)]
-    theirs = [f for f in files if chosen(f) and not owned_by_me(f.st)]
+    theirs = [f for other in other_branches() for f in outbox_files(other)[0] if chosen(f)]
     stopped, said, targets = {}, set(), []
     if mine:
         try:
@@ -5033,7 +5439,7 @@ def cmd_flush(args):
             tried = set()
             while True:
                 routes.clear()  # cards are read again before each file
-                queue = [f for f in outbox_files()[0]
+                queue = [f for f in outbox_files(branch)[0]
                          if owned_by_me(f.st) and f.path not in tried and route(f.to).target == target]
                 if not queue:
                     break
@@ -5061,7 +5467,7 @@ def cmd_flush(args):
                     stopped[target] = f"{target} could not be reached ({outcome.reason}); it waits behind {lead}"
                     break
     routes.clear()
-    left = [f for f in outbox_files()[0] if chosen(f) and owned_by_me(f.st)]
+    left = [f for f in outbox_files(branch)[0] if chosen(f) and owned_by_me(f.st)]
     for f in left:
         if f.path in said:
             continue
@@ -5150,8 +5556,10 @@ def cmd_gate(args):
     is `already delivered`, exit 0, and the id is filed once its message
     is delivered (D25). The size limit holds (exit 8, C0), and an empty
     body is refused, exit 1. A health shape prints `tc health --json`'s
-    snapshot without its `cards` key and without a GPU query (D16, D18).
-    Anything else: `tc gate: refused`, exit 7, nothing written.
+    snapshot without its `cards` key and without a GPU query (D16, D18),
+    and without its `squatted` key (SSH fix round 1, Claude Opus 5.5,
+    unreviewed: paths that name this machine's users). Anything else:
+    `tc gate: refused`, exit 7, nothing written.
 
     It starts no shell and no program but the codex ring, reached through
     the router for a card that says codex (D18): an argv list, a checked
@@ -5178,7 +5586,7 @@ def cmd_gate(args):
     if command is None:
         refuse(GATE_REFUSED_WORDS, EXIT_GATE_REFUSED)
     if command.shape == "health":
-        print(json.dumps(health_snapshot(cards=False, gpu=False), indent=2))
+        print(json.dumps(health_snapshot(cards=False, gpu=False, branches=False), indent=2))
         return
     body = read_body(None)
     if not body.strip():
@@ -5453,7 +5861,7 @@ def cards_summary():
     return out
 
 
-def health_snapshot(cards=True, gpu=True):
+def health_snapshot(cards=True, gpu=True, branches=True):
     """One snapshot of the machine, sessions, listeners, watchers, mail and cards.
 
     SSH S3 (Claude Opus 5.5, unreviewed): the gate's `health --json`
@@ -5461,6 +5869,13 @@ def health_snapshot(cards=True, gpu=True):
     key never reads account labels or ssh targets (D16); `gpu` False
     never runs nvidia-smi (machine_stats), so the gate runs no program
     but the codex ring (D18), and `gpus` is null.
+
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 1. `squatted`
+    lists each branch, in outbox/ or mail/.origins/, named for a user of
+    this machine that is not that user's own real folder
+    (squatted_branches), with the one command that clears it, so nobody
+    learns of it from a failed send. The gate passes `branches` False:
+    the paths name this machine's users, which a far key has no need of.
 
     `shared_group` (SHARED H1, Claude Opus 5.5, unreviewed) is the group
     the mailbox is shared with, or null when it is private (C4).
@@ -5479,14 +5894,17 @@ def health_snapshot(cards=True, gpu=True):
     that inbox or its read/ (mailbox_summary, the audit's LOW-2).
 
     @interacts  reads /proc, mail/, status/, cards/ (only when `cards`)
-                and ROOT/.shared; may run nvidia-smi (machine_stats, only
+                and ROOT/.shared; lists outbox/ and mail/.origins/ (only
+                when `branches`); may run nvidia-smi (machine_stats, only
                 when `gpu`). Writes nothing.
     @deps       now_iso, machine_stats, session_counts, listeners,
-                mailbox_summary, cards_summary, shared_group.
-    @complexity O(p + k + n + m + c): p processes, k lines in /proc/locks,
-                n mailbox names, m message files in every inbox and read/
-                (mailbox_summary stats each one: hundreds to thousands), c
-                cards.
+                mailbox_summary, cards_summary, squatted_branches,
+                shared_group.
+    @complexity O(p + k + n + m + c + e): p processes, k lines in
+                /proc/locks, n mailbox names, m message files in every
+                inbox and read/ (mailbox_summary stats each one: hundreds
+                to thousands), c cards, e entries in outbox/ and
+                mail/.origins/ (one per member each).
     @alloc      one dict, returned.
     """
     try:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): LOW-8, a field, never a raise
@@ -5498,6 +5916,8 @@ def health_snapshot(cards=True, gpu=True):
             "mail": mailbox_summary()}
     if cards:  # SSH S3 (Claude Opus 5.5, unreviewed): D16, never for the gate
         snap["cards"] = cards_summary()
+    if branches:  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 1, never for the gate
+        snap["squatted"] = squatted_branches()
     snap["shared_group"], snap["shared_problem"] = group, problem  # SHARED H1 (Claude Opus 5.5, unreviewed): C4
     return snap
 
@@ -5540,6 +5960,10 @@ def cmd_health(args):
     count mailbox_summary could not know reads `unread unknown`, then the
     reason, never `0 unread`.
 
+    SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 1. One
+    `squatted` line per branch that is not its member's own, naming what
+    is there and the one command the user who ran init runs.
+
     @interacts  see health_snapshot; prints to stdout.
     @deps       health_snapshot, describe_card, printable, _who, _age,
                 _gpu_text; json.
@@ -5574,6 +5998,8 @@ def cmd_health(args):
             bits.append(printable(b["mail_problem"]))
         rows.append(f"{printable(name)}: " + ", ".join(bits))  # Phase fix round 1 (Claude Opus 5.5, unreviewed)
     print("mail       " + ("\n           ".join(rows) if rows else "empty"))
+    for squat in snap["squatted"]:  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 1
+        print(f"squatted   {printable(squat['path'])}: {printable(squat['why'])}; {printable(squat['fix'])}")
     group, problem = snap["shared_group"], snap["shared_problem"]  # SHARED H1 (Claude Opus 5.5, unreviewed): C4
     if group is not None:
         print(f"mailbox shared with group {printable(group)}")
