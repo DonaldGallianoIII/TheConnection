@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D20) the same day.
+        wave 2 rulings (D17 to D21) the same day.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
 Date:   2026-10-14
@@ -353,10 +353,11 @@ For a separate Linux user per account on one machine.
      each other's files.
   2. Message, card and status files are created `0640`, never
      group-writable, so nobody rewrites one in place.
-  3. A send to a name with no card and no inbox is refused, exit 1,
-     `tc send: nobody has joined as <name> on this shared mailbox`, so a
-     sender never ends up owning someone else's inbox. O1's deliver plus
-     warning stays for a private mailbox.
+  3. A local send to a name with no card is refused, exit 1, `tc send:
+     nobody has joined as <name> on this shared mailbox`, whether or not
+     an inbox exists (D21), so a sender never ends up owning someone
+     else's inbox and a card-less inbox never takes mail. O1's deliver
+     plus warning stays for a private mailbox.
   4. An inbox not owned by the owner of its recipient's card (an old
      one, or one made before this rule) is refused with words; tc never
      guesses.
@@ -366,7 +367,11 @@ For a separate Linux user per account on one machine.
      clear, instead of being removed). The worst a member can do through
      them is make a send fail or ring once more; never read, lose or
      alter mail.
-  The two-user cases are Donald's human QA (`qa/human/route-shared.md`).
+  6. `.shared` is `0644`, owned by whoever ran init and writable by that
+     user only (D21), so no other member can change which group
+     everyone's tc uses.
+  The two-user cases are Donald's human QA (`qa/human/route-shared.md`),
+  including a member trying to rewrite `.shared` and being refused.
 - `tc health` says `mailbox shared with group <g>` or `mailbox private`.
 
 ## C5. The board feed

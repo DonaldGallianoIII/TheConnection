@@ -314,6 +314,8 @@ mailbox (human QA, D4); modes are right by test.
   (made by hand with `os.chown` when the test runs as root, else by a
   card file whose recorded owner is patched) is refused; the ring marker
   is cleared by rewriting its contents, never by unlinking it.
+  D21: `.shared` is `0644`; in shared mode a send to a name with an
+  inbox but no card is refused with the D20 words.
 - **Verify:** `python3 -m unittest tests.test_shared -v`.
 
 ---
