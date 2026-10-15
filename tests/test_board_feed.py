@@ -20,20 +20,24 @@ renamed, mail/.seq raised), and the feed reads only their names.
             to kill them by their own pids. Loads board/serve.py as a
             module; each Board loads tc with TC_ROOT set to the test's root.
             Writes cards, status lines and message files in that root only.
-@deps       python3 stdlib (fcntl, importlib, json, os, pathlib, sys,
-            threading, time, unittest, unittest.mock); tests/_root.py;
-            board/serve.py; ../tc.
+@deps       python3 stdlib (contextlib, fcntl, importlib, io, json, os,
+            pathlib, sys, threading, time, unittest, unittest.mock);
+            tests/_root.py; board/serve.py; ../tc.
 @complexity O(1) per test: at most 52 message files, 9 names, two
             listeners, and a few feed() calls, each O(n + m + e) in serve.py
             plus tc's health snapshot (tens of ms, most of it nvidia-smi
             when present). The D15 state test swaps the snapshot for a
-            stand-in, so it starts no listener and no child.
+            stand-in, so it starts no listener and no child. The hostile
+            mailbox tests make a FIFO, a looping link and a symlink in
+            their own root only.
 @alloc      one TcRoot per test, removed when its context exits; the feeds
             are plain dicts dropped at the end of each test.
 """
 
+import contextlib
 import fcntl
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -82,6 +86,11 @@ FUTURE_S = 3600
 STAND_IN_PID = 4242
 # C1's word for an account nobody named, written here, not read from serve.py.
 ACCOUNT_UNKNOWN = "unknown"
+# A card this many "[" deep is past Python's recursion limit for json, yet
+# under serve.py's 65,536-byte card cap, so the read reaches json.loads.
+NESTED_DEPTH = 60000
+# A feed that meets a FIFO must still return within this long.
+FEED_CEILING_S = 2
 
 
 def load_serve():
@@ -221,6 +230,25 @@ def check_parents_match_walk(test, feed):
             test.assertIn(parent, nodes, f"{name} at level {node['level']} has no parent node")
             test.assertEqual(node["level"], nodes[parent]["level"] + 1,
                              f"{name} is not one level under its parent {parent}")
+
+
+def release_fifo(path):
+    """Open the FIFO at `path` for writing without blocking, then close it.
+
+    A reader stuck opening the FIFO goes on and reads end of file, so no
+    thread is left hanging. With no reader waiting the open fails (ENXIO),
+    which is fine: nothing is stuck.
+
+    @interacts  opens and closes one FIFO.
+    @deps       os.
+    @complexity O(1).
+    @alloc      none.
+    """
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return
+    os.close(fd)
 
 
 def every_path(root):
@@ -768,6 +796,126 @@ class ShapesTest(unittest.TestCase):
             links = serve.Board(root=root.path).feed()["links"]
         self.assertEqual([link for link in links if link["kind"] == "native"],
                          [{"from": "m", "to": "n", "kind": "native"}])
+
+
+
+# Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+class HostileMailboxTest(unittest.TestCase):
+    """Files in the mailbox that are not what the feed expects cost one poll nothing.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, serve.Board, write_card, put_message.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per test.
+    """
+
+    def test_a_card_nested_past_the_recursion_limit_is_skipped(self):
+        """cards/deep.json nests too deep for json: feed() skips it and names it once on stderr.
+
+        Must reject a read that misses RecursionError: every feed would
+        fail, and the server would answer 500 until the file went.
+
+        @interacts  two cards in a fresh TcRoot; two feed() calls with
+                    stderr captured.
+        @deps       _root.TcRoot, write_card, serve.Board, contextlib.
+        @complexity O(NESTED_DEPTH) for the one json.loads per feed.
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            write_card(root.path, "a")
+            (root.path / "cards" / "deep.json").write_text("[" * NESTED_DEPTH)
+            board = serve.Board(root=root.path)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                first = board.feed()
+                board.feed()
+        self.assertEqual([node["id"] for node in first["nodes"]], ["a"])
+        lines = err.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, f"stderr lines: {lines}")
+        self.assertIn("cards/deep.json", lines[0])
+
+    def test_one_bad_inbox_entry_skips_only_itself(self):
+        """mail/to-loop is a link to itself; the messages between a and b still make wires and a link.
+
+        Must reject a scan that drops every message when one to-* entry's
+        stat fails.
+
+        @interacts  two message files and one looping link in a fresh
+                    TcRoot; one feed().
+        @deps       _root.TcRoot, put_message, serve.Board.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            put_message(root.path, 1, "a", "b")
+            put_message(root.path, 2, "b", "a")
+            (root.path / "mail" / "to-loop").symlink_to("to-loop")
+            feed = serve.Board(root=root.path).feed()
+        self.assertEqual([(w["from"], w["to"]) for w in feed["wires"]], [("a", "b"), ("b", "a")])
+        self.assertIn(("a", "b"), [(link["from"], link["to"]) for link in feed["links"]
+                                   if link["kind"] == "mailbox"])
+
+    def test_a_fifo_card_or_status_does_not_block_the_feed(self):
+        """A FIFO at cards/pipe.json, then at status/a.md: feed() returns within 2 s each time.
+
+        feed() runs in a daemon thread. If it blocks, the FIFO is opened for
+        writing and closed, so the reader goes on and no thread is left.
+        Must reject a plain open(), which waits for a writer while the
+        server holds feed_lock.
+
+        @interacts  one card and one FIFO in each of two fresh TcRoots; one
+                    feed() in a daemon thread each.
+        @deps       _root.TcRoot, write_card, serve.Board, release_fifo,
+                    threading.
+        @complexity O(1).
+        @alloc      one TcRoot and one thread per case, both gone at its end.
+        """
+        for where in ("cards/pipe.json", "status/a.md"):
+            with self.subTest(where=where), _root.TcRoot() as root:
+                write_card(root.path, "a")
+                fifo = root.path / where
+                fifo.parent.mkdir(exist_ok=True)
+                os.mkfifo(fifo)
+                result = {}
+                board = serve.Board(root=root.path)
+                worker = threading.Thread(target=lambda: result.update(feed=board.feed()), daemon=True)
+                worker.start()
+                worker.join(FEED_CEILING_S)
+                blocked = worker.is_alive()
+                if blocked:
+                    release_fifo(fifo)
+                    worker.join(FEED_CEILING_S)
+                self.assertFalse(blocked, f"feed() blocked on the FIFO at {where}")
+                nodes = by_id(result["feed"])
+                self.assertEqual(sorted(nodes), ["a"])
+                self.assertIsNone(nodes["a"]["status"])
+
+    def test_a_symlinked_status_or_card_is_not_followed(self):
+        """status/a.md and cards/b.json are symlinks to files outside the mailbox: neither is read.
+
+        Must reject a read that follows the link: a's status would show the
+        outside file's line, and b would be a node.
+
+        @interacts  one card, two outside files and two symlinks in a fresh
+                    TcRoot; one feed().
+        @deps       _root.TcRoot, write_card, serve.Board.
+        @complexity O(1).
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            write_card(root.path, "a")
+            outside = root.base / "outside.md"
+            outside.write_text("## a status, 2026-10-14T12:00:00-05:00\na line from outside the mailbox\n")
+            outside_card = root.base / "outside.json"
+            outside_card.write_text(json.dumps({"version": 1, "name": "b", "kind": "claude",
+                                                "account": "work", "route": "local"}))
+            (root.path / "status").mkdir(exist_ok=True)
+            (root.path / "status" / "a.md").symlink_to(outside)
+            (root.path / "cards" / "b.json").symlink_to(outside_card)
+            feed = serve.Board(root=root.path).feed()
+        nodes = by_id(feed)
+        self.assertEqual(sorted(nodes), ["a"], "a symlinked card was read")
+        self.assertIsNone(nodes["a"]["status"], "a symlinked status was read")
 
 
 if __name__ == "__main__":

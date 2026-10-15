@@ -84,10 +84,14 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             Opens no message body. Writes nothing to disk. main() binds one
             TCP socket on 127.0.0.1, prints the URL with the token once to
             stdout, reads the allow-listed files in board/ per request, and
-            writes no request log. A failed feed writes one line to stderr.
+            writes no request log. A failed feed writes one line to stderr,
+            and so does the first poll that meets a card nested past
+            Python's recursion limit. Card and status files are opened with
+            O_NONBLOCK and O_NOFOLLOW and read only when fstat says regular,
+            so a FIFO never blocks a poll and a symlink never redirects one.
 @deps       python3 stdlib (argparse, collections, heapq, hmac, http.server,
-            importlib, json, os, pathlib, re, secrets, signal, sys,
-            threading, time, urllib.parse); ../tc; Linux (/proc via tc).
+            importlib, io, json, os, pathlib, re, secrets, signal, stat,
+            sys, threading, time, urllib.parse); ../tc; Linux (/proc via tc).
 @complexity feed(): O(n + m + e) plus tc's own health_snapshot (O(p + k + n),
             see tc's header): n names (single digits to tens), m message
             file names (about 800 after two weeks of heavy use; each is
@@ -99,9 +103,11 @@ partner is a lower relay is drawn as that relay's `worker`, marked
 @alloc      per feed(): one list of m small tuples and the returned dict,
             freed when the caller drops them. Held across calls: the
             loaded tc module and last_listening_at, one float per name
-            seen listening, pruned past DOWN_WINDOW_S on every feed(). The
-            server holds one Board, the token and a lock; one short-lived
-            thread per request.
+            seen listening, pruned past DOWN_WINDOW_S on every feed(), and
+            the names of cards found nested too deep, one each. The server
+            holds one Board, the token, a lock and MAX_CONNECTIONS slots;
+            one short-lived thread per request, at most MAX_CONNECTIONS at
+            once, each ended by REQUEST_DEADLINE_S.
 """
 
 import argparse
@@ -111,12 +117,14 @@ import hmac
 import http.server
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import pathlib
 import re
 import secrets
 import signal
+import stat
 import sys
 import threading
 import time
@@ -175,9 +183,16 @@ STATIC_FILES = {
     "compare.html": "text/html; charset=utf-8",
 }
 FEED_TYPE = "application/json; charset=utf-8"
-# A connection that sends nothing for this long is dropped, so a stalled
-# client cannot hold a request thread forever. The page asks every 3 s.
-REQUEST_TIMEOUT_S = 10
+# Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+# The longest one request may take, start to end: reading its request line
+# and headers and writing the answer. The page's requests take milliseconds.
+# A socket timeout alone restarts on every byte, so a client that trickles
+# one byte at a time would hold its thread for good; this deadline ends it.
+REQUEST_DEADLINE_S = 10
+# Connections served at once. The page keeps one request out at a time
+# (look.js createPoller) and a browser opens at most six to one host. One
+# past this is closed at once, so a local process cannot pile up threads.
+MAX_CONNECTIONS = 16
 
 # tc's message file name: NNNNNN-from-<sender>.md, tc's SEQ_WIDTH digits
 # (more past 999999). The .tmp sibling a send writes first never matches.
@@ -241,18 +256,54 @@ def load_tc(root=None):
     return tc
 
 
-def read_cards(folder):
+def read_regular(path, limit):
+    """Up to `limit` bytes of `path` when it is a regular file, else None.
+
+    Opened with O_NONBLOCK and O_NOFOLLOW, and checked with fstat before
+    any read: a FIFO never blocks the feed (which holds feed_lock), and a
+    symlink never points the board at a file outside the mailbox. Anything
+    that is not a regular file, or cannot be opened or read, is None.
+
+    @interacts  opens, fstats and reads one file, and closes it.
+    @deps       os, stat.
+    @complexity O(limit).
+    @alloc      the bytes read, returned.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks, left = [], limit
+        while left > 0:
+            chunk = os.read(fd, left)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def read_cards(folder, on_nested=None):
     """Every card in `folder` (cards/ under ROOT), as {name: fields}.
 
     The name is the file's stem (C1: cards/<name>.json). A file that is not
-    a JSON object, is unreadable, or is over CARD_READ_MAX_BYTES is skipped:
-    the board draws what it can. Only the fields the feed uses are kept,
-    each checked for type: kind, account, route (default "local"),
-    reports_to (a non-empty string, else None).
+    a regular file (read_regular), is not a JSON object, is unreadable, or
+    is over CARD_READ_MAX_BYTES is skipped: the board draws what it can. A
+    file nested past Python's recursion limit is skipped too, and its file
+    name goes to on_nested(name) when given. Only the fields the feed uses
+    are kept, each checked for type: kind, account, route (default
+    "local"), reports_to (a non-empty string, else None).
 
     @interacts  lists `folder`; reads each *.json in it, at most
-                CARD_READ_MAX_BYTES + 1 bytes each.
-    @deps       json, pathlib; card_text.
+                CARD_READ_MAX_BYTES + 1 bytes each; calls on_nested.
+    @deps       json, pathlib; read_regular, card_text.
     @complexity O(c) over c card files (one per name, tens at most).
     @alloc      one small dict per card, returned.
     """
@@ -262,13 +313,16 @@ def read_cards(folder):
     except OSError:
         return cards
     for path in paths:
+        raw = read_regular(path, CARD_READ_MAX_BYTES + 1)
+        if raw is None or len(raw) > CARD_READ_MAX_BYTES:
+            continue
         try:
-            with open(path, "rb") as f:
-                raw = f.read(CARD_READ_MAX_BYTES + 1)
-            if len(raw) > CARD_READ_MAX_BYTES:
-                continue
             card = json.loads(raw)
-        except (OSError, ValueError):
+        except ValueError:
+            continue
+        except RecursionError:
+            if on_nested is not None:
+                on_nested(path.name)
             continue
         if not isinstance(card, dict):
             continue
@@ -295,7 +349,9 @@ def scan_messages(mail):
 
     Looks in each mail/to-<name>/ and its read/. A name that does not match
     MESSAGE_NAME (a .tmp being written, a lock, anything else) is skipped.
-    Opens no file.
+    A to-* entry whose stat fails (a link that loops, a folder the user
+    cannot search, a dead mount) is skipped on its own; the rest of the
+    scan stands. Opens no file.
 
     @interacts  lists `mail`, each to-*/ folder and each to-*/read/.
     @deps       os, re.
@@ -304,10 +360,19 @@ def scan_messages(mail):
     """
     found = []
     try:
-        boxes = [entry for entry in os.scandir(mail)
-                 if entry.name.startswith(INBOX_PREFIX) and entry.is_dir()]
+        with os.scandir(mail) as listing:
+            entries = list(listing)
     except OSError:
         return found
+    boxes = []
+    for entry in entries:
+        if not entry.name.startswith(INBOX_PREFIX):
+            continue
+        try:
+            if entry.is_dir():
+                boxes.append(entry)
+        except OSError:
+            continue
     for box in boxes:
         to = box.name[len(INBOX_PREFIX):]
         if not to:
@@ -329,19 +394,18 @@ def status_preview(folder, name):
     """The status line C5 shows for `name`, or None when there is none.
 
     The first non-empty line of status/<name>.md that is not tc's header
-    line, cut at STATUS_PREVIEW_CHARS.
+    line, cut at STATUS_PREVIEW_CHARS. A status path that is not a regular
+    file (a FIFO, a symlink, a folder) shows no status (read_regular).
 
     @interacts  reads at most STATUS_READ_MAX_BYTES of status/<name>.md.
-    @deps       re.
+    @deps       re; read_regular.
     @complexity O(s) over s <= STATUS_READ_MAX_BYTES bytes read.
     @alloc      the bytes read and one short string, returned.
     """
-    try:
-        with open(folder / f"{name}{STATUS_SUFFIX}", "rb") as f:
-            head = f.read(STATUS_READ_MAX_BYTES).decode("utf-8", "replace")
-    except OSError:
+    raw = read_regular(folder / f"{name}{STATUS_SUFFIX}", STATUS_READ_MAX_BYTES)
+    if raw is None:
         return None
-    lines = head.splitlines()
+    lines = raw.decode("utf-8", "replace").splitlines()
     if lines and STATUS_HEADER.match(lines[0]):
         lines = lines[1:]
     for line in lines:
@@ -501,7 +565,8 @@ class Board:
     @interacts  see the module block.
     @deps       load_tc and the module's helpers.
     @complexity O(1) to build, plus one load of tc.
-    @alloc      the tc module and last_listening_at, held for the object's life.
+    @alloc      the tc module, last_listening_at and nested_cards, held for
+                the object's life.
     """
 
     def __init__(self, root=None, clock=time.time):
@@ -510,19 +575,41 @@ class Board:
         @interacts  load_tc(root).
         @deps       load_tc.
         @complexity O(1).
-        @alloc      the tc module and one empty dict.
+        @alloc      the tc module, one empty dict and one empty set.
         """
         self.tc = load_tc(root)
         self.clock = clock
         self.last_listening_at = {}
+        self.nested_cards = set()
+
+    # Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+    def note_nested(self, file_name):
+        """Write one stderr line the first time a card file nests past the recursion limit.
+
+        feed() skips such a card on every poll, never answering 500 for it;
+        the line names the file once per Board, so a poll every 3 s does
+        not repeat it.
+
+        @interacts  writes one line to stderr, the first time per file name.
+        @deps       sys.
+        @complexity O(1).
+        @alloc      one string per distinct file name, held for the Board's
+                    life (bounded by the files ever put in cards/).
+        """
+        if file_name in self.nested_cards:
+            return
+        self.nested_cards.add(file_name)
+        print(f"serve.py: skipped cards/{file_name}: nested past Python's recursion limit",
+              file=sys.stderr, flush=True)
 
     def feed(self):
         """One C5 feed object for the mailbox as it is now.
 
-        @interacts  see the module block; updates last_listening_at.
+        @interacts  see the module block; updates last_listening_at and,
+                    through note_nested, nested_cards.
         @deps       tc.health_snapshot, read_cards, scan_messages,
                     status_preview, file_age, parents_of, roles_of,
-                    levels_of.
+                    levels_of, note_nested.
         @complexity O(n + m + e), see the module block.
         @alloc      the returned dict; last_listening_at gains one float per
                     name listening now and drops each past DOWN_WINDOW_S.
@@ -537,7 +624,7 @@ class Board:
             if now - seen > DOWN_WINDOW_S:
                 del self.last_listening_at[name]
 
-        cards = read_cards(self.tc.ROOT / CARDS_FOLDER)
+        cards = read_cards(self.tc.ROOT / CARDS_FOLDER, self.note_nested)
         mail = snap["mail"]
         names = set(mail) | set(cards)
         messages = scan_messages(self.tc.MAIL)
@@ -624,24 +711,132 @@ class Board:
         }
 
 
+# Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+class DeadlineSocket(io.RawIOBase):
+    """A request's socket, read and written against one deadline for the whole request.
+
+    http.server reads the request line and headers through rfile and writes
+    the answer through wfile. Each read and write here first sets the
+    socket's timeout to the time left, so a client that trickles one byte
+    at a time still runs out at the deadline. Past it, TimeoutError, which
+    http.server answers by closing the connection. The deadline is on the
+    monotonic clock: it times I/O, it decides nothing in the feed.
+
+    @interacts  reads from and writes to one connected socket; sets its
+                timeout before each call. Closing it leaves the socket to
+                the server.
+    @deps       io, time.
+    @complexity O(b) per call over b bytes.
+    @alloc      none retained.
+    """
+
+    def __init__(self, sock, deadline):
+        """Wrap `sock` until `deadline`, a time.monotonic() value.
+
+        @interacts  none.
+        @deps       io.
+        @complexity O(1).
+        @alloc      none.
+        """
+        super().__init__()
+        self.sock = sock
+        self.deadline = deadline
+
+    def readable(self):
+        """True: http.server reads the request through this.
+
+        @interacts  none.
+        @deps       none.
+        @complexity O(1).
+        @alloc      none.
+        """
+        return True
+
+    def writable(self):
+        """True: http.server writes the answer through this.
+
+        @interacts  none.
+        @deps       none.
+        @complexity O(1).
+        @alloc      none.
+        """
+        return True
+
+    def arm(self):
+        """Set the socket's timeout to the time left; TimeoutError when none is left.
+
+        @interacts  sets the socket's timeout.
+        @deps       time.
+        @complexity O(1).
+        @alloc      none.
+        """
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("request deadline passed")
+        self.sock.settimeout(left)
+
+    def readinto(self, buffer):
+        """Read what the socket has into `buffer`, within the deadline.
+
+        @interacts  one recv on the socket.
+        @deps       arm.
+        @complexity O(b) over b bytes read.
+        @alloc      none.
+        """
+        self.arm()
+        return self.sock.recv_into(buffer)
+
+    def write(self, data):
+        """Send all of `data` within the deadline (sendall's timeout covers the whole send).
+
+        @interacts  one sendall on the socket.
+        @deps       arm.
+        @complexity O(b) over b bytes.
+        @alloc      none.
+        """
+        self.arm()
+        self.sock.sendall(data)
+        return len(data)
+
+
 class FeedHandler(http.server.BaseHTTPRequestHandler):
     """One request to the board: the Host check, then the feed or a board file.
 
     Every request is checked in this order. A Host that is not
     127.0.0.1:<port> or localhost:<port>: 421. A method other than GET or
     HEAD: 405. /feed without the right X-TC-Token header: 401. A path not
-    on STATIC_FILES (or not on disk): 404. Every refusal has no body.
+    on STATIC_FILES (or not on disk): 404. Every refusal has no body. The
+    whole request, read and answer, has REQUEST_DEADLINE_S (setup()).
 
     @interacts  reads the request; writes one response; calls the server's
                 Board.feed() under its lock; reads one file in board/.
-    @deps       hmac, http.server, json, urllib.parse.
+    @deps       hmac, http.server, io, json, time, urllib.parse;
+                DeadlineSocket.
     @complexity O(1) to route, plus the feed or the file.
     @alloc      the response bytes, freed after the write.
     """
 
     server_version = "tc-board"
     sys_version = ""
-    timeout = REQUEST_TIMEOUT_S
+    timeout = REQUEST_DEADLINE_S
+
+    # Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+    def setup(self):
+        """Read and write this request through one DeadlineSocket: REQUEST_DEADLINE_S in all.
+
+        The streams http.server's setup made are closed and replaced.
+
+        @interacts  sets the socket's timeout before each read and write.
+        @deps       http.server, io, time; DeadlineSocket.
+        @complexity O(1).
+        @alloc      one DeadlineSocket and one read buffer, closed by finish().
+        """
+        super().setup()
+        self.rfile.close()
+        self.wfile.close()
+        raw = DeadlineSocket(self.connection, time.monotonic() + REQUEST_DEADLINE_S)
+        self.rfile = io.BufferedReader(raw)
+        self.wfile = raw
 
     def __getattr__(self, name):
         """Any do_<METHOD> not defined below answers 405, so no method reaches 501.
@@ -786,29 +981,63 @@ class BoardServer(http.server.ThreadingHTTPServer):
 
     Board.feed() keeps state across calls (last_listening_at), so requests
     take `feed_lock` around it. Request threads are daemon threads, so a
-    stalled one never keeps the process alive.
+    stalled one never keeps the process alive. At most `max_connections`
+    (MAX_CONNECTIONS) are served at once, each holding one of `slots`; one
+    past that is closed at once, and each ends by REQUEST_DEADLINE_S.
 
     @interacts  binds one TCP socket on BIND_HOST:`port` (0: the OS picks).
     @deps       http.server, threading; FeedHandler.
     @complexity O(1) to build.
     @alloc      the socket, released by server_close(); the Board, the
-                token and one lock, held for the server's life.
+                token, one lock and the slots, held for the server's life.
     """
 
     daemon_threads = True
 
-    def __init__(self, board, port, token):
+    def __init__(self, board, port, token, max_connections=MAX_CONNECTIONS):
         """Bind BIND_HOST:`port` and keep `board` and `token` for the handler.
 
         @interacts  binds and listens on one socket.
         @deps       http.server, threading.
         @complexity O(1).
-        @alloc      the socket and one lock.
+        @alloc      the socket, one lock and one semaphore.
         """
         super().__init__((BIND_HOST, port), FeedHandler)
         self.board = board
         self.token = token
         self.feed_lock = threading.Lock()
+        self.slots = threading.BoundedSemaphore(max_connections)
+
+    # Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+    def process_request(self, request, client_address):
+        """Start the request's thread when a slot is free; with none free, close it at once.
+
+        @interacts  takes one slot, or shuts the connection down.
+        @deps       socketserver (through http.server), threading.
+        @complexity O(1).
+        @alloc      one thread while the request runs.
+        """
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        """Handle one request on its own thread, then give its slot back.
+
+        @interacts  see FeedHandler; releases one slot.
+        @deps       socketserver (through http.server).
+        @complexity the request's.
+        @alloc      none retained.
+        """
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
 
 
 def stop_on_term(signum, frame):

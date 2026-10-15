@@ -1,6 +1,8 @@
 """
 Tests for board/serve.py's server (C6): the token on /feed, the Host check,
 GET and HEAD only, the static allow list, and a socket bound to 127.0.0.1.
+Round 1 adds the whole-request deadline (a client that trickles one byte at
+a time is dropped) and the cap on connections served at once.
 
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
@@ -12,11 +14,16 @@ other than tc as a child; a P0 fix adds one on its own branch.
 @interacts  starts one BoardServer per test on 127.0.0.1 and a free port,
             in a daemon thread, and shuts it down and closes its socket in
             cleanup. Its Board reads a throwaway TC_ROOT from
-            tests/_root.py. Talks to it with http.client over loopback.
-@deps       python3 stdlib (http.client, importlib, json, pathlib, sys,
-            threading, unittest); tests/_root.py; board/serve.py; ../tc.
+            tests/_root.py. Talks to it with http.client over loopback, and
+            with raw sockets for the deadline and the cap. The deadline
+            tests set serve.REQUEST_DEADLINE_S to SHORT_DEADLINE_S while
+            they run; the cap test starts a second server of its own.
+@deps       python3 stdlib (http.client, importlib, json, pathlib, socket,
+            sys, threading, time, unittest, unittest.mock); tests/_root.py;
+            board/serve.py; ../tc.
 @complexity O(1) per test: a handful of requests, one or two of them a
-            feed() of an empty mailbox (tens of ms each).
+            feed() of an empty mailbox (tens of ms each). The two deadline
+            tests each wait out SHORT_DEADLINE_S once.
 @alloc      one TcRoot, one server socket and one thread per test, all
             released in cleanup.
 """
@@ -25,9 +32,12 @@ import http.client
 import importlib.util
 import json
 import pathlib
+import socket
 import sys
 import threading
+import time
 import unittest
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 # Run as `python3 -m unittest tests.test_board_server` from the repo root,
@@ -46,6 +56,26 @@ REQUEST_TIMEOUT_SECONDS = 10
 STOP_TIMEOUT_SECONDS = 5
 # The loopback address C6 requires, written here, not read from serve.py.
 LOOPBACK = "127.0.0.1"
+# Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+# A whole-request deadline short enough to wait out, set in place of
+# serve.REQUEST_DEADLINE_S while a deadline test runs.
+SHORT_DEADLINE_S = 1
+# The trickling client sends one byte this often: far inside any per-read
+# timeout, so only a deadline on the whole request can stop it.
+TRICKLE_STEP_S = 0.2
+# A request line that never ends: no newline, so the server cannot answer
+# it and close for that reason instead of the deadline.
+TRICKLE_BYTES = b"GET /" + b"x" * 64
+# The server must close a stalled connection within the deadline plus this.
+CLOSE_SLACK_S = 1
+# How long the trickling client keeps at it before the test calls it a hang.
+TRICKLE_CEILING_S = SHORT_DEADLINE_S + CLOSE_SLACK_S + 1
+# The cap test's own server serves this many connections at once.
+TEST_CAP = 2
+# A connection past the cap is closed this fast, well under the deadline.
+AT_ONCE_S = 0.5
+# How often the test looks for a freed slot while it waits.
+LOOK_STEP_S = 0.05
 
 
 def load_serve():
@@ -197,6 +227,108 @@ class ServerTest(unittest.TestCase):
         @alloc      none.
         """
         self.assertEqual(self.server.socket.getsockname()[0], LOOPBACK)
+
+
+    # Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+    def all_slots_free(self, server, cap, within):
+        """True once none of `server`'s `cap` slots is held, looking for at most `within` s.
+
+        A slot is held while a request thread runs, so all free means every
+        request thread has ended.
+
+        @interacts  takes and gives back the server's slots.
+        @deps       time.
+        @complexity O(cap) per look.
+        @alloc      none.
+        """
+        end = time.monotonic() + within
+        while True:
+            taken = 0
+            while taken < cap and server.slots.acquire(blocking=False):
+                taken += 1
+            for _ in range(taken):
+                server.slots.release()
+            if taken == cap:
+                return True
+            if time.monotonic() > end:
+                return False
+            time.sleep(LOOK_STEP_S)
+
+    def test_a_trickling_client_is_dropped_at_the_deadline(self):
+        """One byte every 0.2 s, never a full request line: the server closes it by the deadline.
+
+        Its thread ends too: every slot is free again. Must reject a
+        timeout per read, which restarts on every byte and holds the
+        thread for as long as the client keeps trickling.
+
+        @interacts  one raw loopback connection; serve.REQUEST_DEADLINE_S
+                    patched for the test.
+        @deps       socket, time, unittest.mock; all_slots_free.
+        @complexity O(1): about SHORT_DEADLINE_S of trickling.
+        @alloc      one socket, closed before return.
+        """
+        closed_after = None
+        with mock.patch.object(serve, "REQUEST_DEADLINE_S", SHORT_DEADLINE_S):
+            sock = socket.create_connection((LOOPBACK, self.port), timeout=TRICKLE_STEP_S)
+            start = time.monotonic()
+            try:
+                for byte in TRICKLE_BYTES:
+                    if time.monotonic() - start > TRICKLE_CEILING_S:
+                        break
+                    try:
+                        sock.send(bytes([byte]))
+                        if sock.recv(1) == b"":
+                            closed_after = time.monotonic() - start
+                            break
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        closed_after = time.monotonic() - start
+                        break
+            finally:
+                sock.close()
+        self.assertIsNotNone(closed_after, f"a trickling client held its connection past {TRICKLE_CEILING_S} s")
+        self.assertLessEqual(closed_after, SHORT_DEADLINE_S + CLOSE_SLACK_S)
+        self.assertTrue(self.all_slots_free(self.server, serve.MAX_CONNECTIONS, CLOSE_SLACK_S),
+                        "the trickling client's thread outlived the deadline")
+
+    def test_a_connection_past_the_cap_is_closed_at_once(self):
+        """A server capped at 2: two idle connections hold it, and a third is closed at once.
+
+        The two idle ones end by the deadline, and their slots come back.
+        Must reject a server with no cap, which leaves the third open.
+
+        @interacts  starts a second BoardServer on a free port in a daemon
+                    thread, stopped and closed in cleanup; three raw
+                    loopback connections; serve.REQUEST_DEADLINE_S patched.
+        @deps       socket, threading, time, unittest.mock; all_slots_free.
+        @complexity O(1): about SHORT_DEADLINE_S of waiting.
+        @alloc      one server, one thread and three sockets, all released.
+        """
+        with mock.patch.object(serve, "REQUEST_DEADLINE_S", SHORT_DEADLINE_S):
+            server = serve.BoardServer(self.server.board, 0, TOKEN, max_connections=TEST_CAP)
+            self.addCleanup(server.server_close)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(thread.join, STOP_TIMEOUT_SECONDS)
+            self.addCleanup(server.shutdown)
+            port = server.server_address[1]
+            held = [socket.create_connection((LOOPBACK, port), timeout=REQUEST_TIMEOUT_SECONDS)
+                    for _ in range(TEST_CAP)]
+            extra = socket.create_connection((LOOPBACK, port), timeout=AT_ONCE_S)
+            try:
+                try:
+                    answer = extra.recv(1)
+                except socket.timeout:
+                    answer = None
+                except OSError:
+                    answer = b""
+                self.assertEqual(answer, b"", f"a connection past the cap of {TEST_CAP} was held open")
+                self.assertTrue(self.all_slots_free(server, TEST_CAP, SHORT_DEADLINE_S + CLOSE_SLACK_S),
+                                "the idle connections held their slots past the deadline")
+            finally:
+                for sock in held + [extra]:
+                    sock.close()
 
 
 if __name__ == "__main__":
