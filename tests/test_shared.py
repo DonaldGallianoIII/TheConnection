@@ -149,6 +149,26 @@ CODEX_FAILS, CODEX_QUEUED = 1, 0
 # The ring marker's first line after a failed ring, and once nothing is owed.
 FAILED_STATE = "failed"
 CLEAR_STATE = "clear"
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): init, make_folder and
+# the refusals' words (the audit's MEDIUM-4, LOW-2 to LOW-8).
+# What init says when .shared cannot be written, by the mailbox's state.
+STAYS_PRIVATE_WORDS = "the mailbox stays private"
+STAYS_SHARED_WORDS = "the mailbox stays shared with group {group}"
+# A group name .shared may hold for the words; no machine needs to have it.
+OTHER_GROUP = "tc-test-other-group"
+# What tc says when it cannot reach .shared, or ROOT, for want of access.
+SEARCH_WORDS = "needs search (x) access on every folder from / down to"
+# What tc says for a .shared it can read that names no group.
+REWRITE_WORDS = "Run tc init --shared --group <g> to rewrite it"
+# What make_folder says for a folder in the wrong group, and after it
+# removed the folder it could not share.
+WRONG_GROUP_WORDS = "is in group {have}, not {want}"
+REMOVED_WORDS = "removed it again"
+# Folder modes a test sets by hand: read and enter only (no new entries),
+# nothing at all (no search), and the owner's full access to put back.
+READ_ONLY_FOLDER_MODE = 0o555
+NO_ACCESS_MODE = 0o000
+OWNER_FOLDER_MODE = 0o700
 
 
 def groups_to_test():
@@ -288,7 +308,7 @@ class SharedTest(unittest.TestCase):
                 later = tree(root.path)
                 self.assertEqual(sorted(after), ["cards", "cards/b.json", "mail", "mail/.box-b.lock",
                                                  "mail/.seq", "mail/to-b", "mail/to-b/000001-from-a.md",
-                                                 "mail/to-b/read", "status", "status/b.md"])
+                                                 "mail/to-b/read", "outbox", "status", "status/b.md"])
                 self.assertEqual({p: m for p, (k, m, g) in before.items() if k == "file"},
                                  {p: PRIVATE_FILE_MODE for p, (k, m, g) in before.items() if k == "file"},
                                  "files before init are not 0644: the umask never reached the child")
@@ -354,11 +374,16 @@ class SharedTest(unittest.TestCase):
     def test_folders_made_after_init_get_the_group_and_setgid(self):
         """Init on an empty root, then a join, a send, a status and a wait: each new folder and file in g at its mode (shared_as) (D16, D20).
 
-        cards/ comes from the first join, mail/, the inbox and its read/
-        from the first send, status/ from the first status, and the wait
-        lock from a wait that times out at once. Must reject a later
-        folder without setgid (0775), or a top folder left in the
-        primary group (the supplementary run), and any file at 0644.
+        SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19. Init makes
+        mail/, status/, cards/ and outbox/ itself, each 3775 in g, so no
+        other user has to make one in a ROOT the first user owns. The
+        inbox and its read/ then come from the first join (D20), the
+        message from the first send, the status file from the first
+        status, and the wait lock from a wait that times out at once.
+        Must reject an init that makes no top folder (the second user's
+        first command would need write access to ROOT), a later folder
+        without setgid (0775), or a top folder left in the primary group
+        (the supplementary run), and any file at 0644.
 
         @interacts  per group: init, a join, a send, a status, a wait.
         @deps       _root.TcRoot.tc, groups_to_test, tree, shared_as.
@@ -369,7 +394,8 @@ class SharedTest(unittest.TestCase):
             with self.subTest(group=label), _root.TcRoot() as root:
                 code, out, err = root.tc("init", "--shared", "--group", name)
                 self.assertEqual(code, 0, f"tc init exited {code}: {err}")
-                self.assertEqual(tree(root.path), {}, "init made a folder: C4 reaches only what is there")
+                self.assertEqual(tree(root.path), {top: ("folder", TOP_FOLDER_MODE, gid) for top in SHARED_FOLDERS},
+                                 "init did not make the four top folders (D19)")
                 runs = [root.tc("join", "b", env={"CLAUDECODE": "1"}),
                         root.tc("send", "--from", "a", "--to", "b", "hi"),
                         root.tc("status", "b", "busy")]
@@ -380,8 +406,8 @@ class SharedTest(unittest.TestCase):
                 self.assertEqual(waited[0], EXIT_TIMEOUT, waited[2])
                 self.assertEqual(sorted(made), ["cards", "cards/b.json", "mail", "mail/.box-b.lock",
                                                 "mail/.seq", "mail/.wait-c.lock", "mail/to-b",
-                                                "mail/to-b/000001-from-a.md", "mail/to-b/read", "status",
-                                                "status/b.md"])
+                                                "mail/to-b/000001-from-a.md", "mail/to-b/read", "outbox",
+                                                "status", "status/b.md"])
                 self.assertEqual(made, {p: shared_as(p, k, gid) for p, (k, m, g) in made.items()})
 
 
@@ -1144,6 +1170,299 @@ class NobodyTouchesAnotherMembersMailTest(unittest.TestCase):
         self.assertEqual(unread, ["000002-from-c.md"])
         self.assertEqual(moved, ["000001-from-a.md", "000003-from-d.md"])
         self.assertIn("from a", out.getvalue())
+
+
+
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19 (init makes the
+# four), the audit's MEDIUM-4 and LOW-2 to LOW-8.
+def run_init(tc, group):
+    """Run tc.cmd_init in process for `group`: (exit code, stdout, stderr).
+
+    @interacts  runs cmd_init, which sets this process's umask (the
+                caller's setUp puts it back) and changes the root's entries;
+                captures stdout and stderr.
+    @deps       argparse, contextlib, io; tc.cmd_init.
+    @complexity as cmd_init.
+    @alloc      the captured text, returned.
+    """
+    out, err = io.StringIO(), io.StringIO()
+    code = 0
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            tc.cmd_init(argparse.Namespace(shared=True, group=group))
+        except SystemExit as stop:
+            code = stop.code
+    return code, out.getvalue(), err.getvalue()
+
+
+class InitAndRefusalsTest(unittest.TestCase):
+    """make_folder never leaves a folder in the wrong group; init reruns cleanly, walks what it cannot change and says the real state; the refusals' words; health never raises.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, groups_to_test, tree, load_tc, run_init.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per test.
+    """
+
+    def setUp(self):
+        """Set this process's umask to CHILD_UMASK; the cleanup puts the old one back (in-process init sets its own).
+
+        @interacts  sets the umask of this process (and so of every child).
+        @deps       os.
+        @complexity O(1).
+        @alloc      none.
+        """
+        self.addCleanup(os.umask, os.umask(CHILD_UMASK))
+
+    def test_make_folder_removes_a_folder_it_cannot_share_and_refuses(self):
+        """In process, with fchown refused: make_folder(outbox/sent) exits 1 with words and leaves no outbox/sent.
+
+        Must reject a make_folder that leaves the folder (the next run
+        would accept it in the maker's group, MEDIUM-4).
+
+        @interacts  init; loads tc in process and runs make_folder with
+                    os.fchown replaced and stderr captured.
+        @deps       _root.TcRoot.tc, groups_to_test, load_tc; contextlib,
+                    errno, io, unittest.mock; tc.make_folder.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        label, name, gid = groups_to_test()[0]
+
+        def refused(fd, uid, gid):
+            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+        with _root.TcRoot() as root:
+            root.tc("init", "--shared", "--group", name)
+            tc = load_tc(root)
+            said = io.StringIO()
+            with mock.patch.object(os, "fchown", refused), contextlib.redirect_stderr(said):
+                with self.assertRaises(SystemExit) as stop:
+                    tc.make_folder(root.path / "outbox" / "sent")
+            left = os.path.lexists(root.path / "outbox" / "sent")
+        self.assertEqual(stop.exception.code, EXIT_REFUSED)
+        self.assertIn(REMOVED_WORDS, said.getvalue())
+        self.assertFalse(left, "make_folder left a folder it could not give the group")
+
+    def test_a_shared_folder_in_the_wrong_group_is_refused_never_accepted(self):
+        """Shared with a supplementary group, status/ moved by hand to the primary group: tc status x busy exits 1 with words and writes nothing.
+
+        Must reject a make_folder that accepts any folder that is there
+        (other members could not write in it). Needs a supplementary
+        group; skipped with a reason without one.
+
+        @interacts  init; one chown by hand; one status post.
+        @deps       _root.TcRoot.tc, groups_to_test.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        found = groups_to_test()
+        if len(found) < 2:
+            self.skipTest("the running user has no named supplementary group, so no folder can be "
+                          "put in a group other than the one shared")
+        (_, primary, primary_gid), (_, name, gid) = found[0], found[1]
+        with _root.TcRoot() as root:
+            root.tc("init", "--shared", "--group", name)
+            os.chown(root.path / "status", -1, primary_gid)
+            code, out, err = root.tc("status", "x", "busy")
+            wrote = os.path.lexists(root.path / "status" / "x.md")
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertIn(WRONG_GROUP_WORDS.format(have=primary, want=name), err)
+        self.assertFalse(wrote, "a status landed in a folder in the wrong group")
+
+    def test_a_rerun_of_init_changes_nothing_already_right(self):
+        """In process: init, then init again over the same root: the second run calls fchown and fchmod on nothing and exits 0.
+
+        Linux lets only an entry's owner change its group, so on a live
+        shared mailbox every entry another member owns would be an EPERM
+        skip. Must reject a share_entry that changes entries already in g
+        at their mode (LOW-2).
+
+        @interacts  a join, a send, a status; loads tc in process and runs
+                    cmd_init twice, the second time with os.fchown and
+                    os.fchmod wrapped to count calls.
+        @deps       _root.TcRoot.tc, groups_to_test, load_tc, run_init;
+                    unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        label, name, gid = groups_to_test()[0]
+        with _root.TcRoot() as root:
+            root.tc("join", "b", env={"CLAUDECODE": "1"})
+            root.tc("send", "--from", "a", "--to", "b", "hi")
+            root.tc("status", "b", "busy")
+            tc = load_tc(root)
+            first = run_init(tc, name)
+            with mock.patch.object(os, "fchown", wraps=os.fchown) as chowned, \
+                    mock.patch.object(os, "fchmod", wraps=os.fchmod) as chmodded:
+                second = run_init(tc, name)
+        self.assertEqual(first[0], 0, first[2])
+        self.assertEqual(second[0], 0, second[2])
+        self.assertEqual((chowned.call_count, chmodded.call_count), (0, 0),
+                         "a rerun changed entries already in the group at their mode")
+
+    def test_init_walks_a_top_folder_whose_own_change_failed(self):
+        """In process, with share_entry refusing mail/ itself: init still gives the message under it 0640, names mail/, exits 1.
+
+        Must reject a walk that skips everything under a top folder it
+        could not change, uncounted and unnamed (LOW-3).
+
+        @interacts  a send; loads tc in process and runs cmd_init with
+                    share_entry wrapped to refuse mail/.
+        @deps       _root.TcRoot.tc, groups_to_test, load_tc, run_init;
+                    unittest.mock; tc.share_entry.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        label, name, gid = groups_to_test()[0]
+        with _root.TcRoot() as root:
+            root.tc("send", "--from", "a", "--to", "b", "hi")
+            tc = load_tc(root)
+            real = tc.share_entry
+
+            def share_entry(path, gid):
+                if path == root.path / "mail":
+                    return "folder", "Operation not permitted"
+                return real(path, gid)
+            with mock.patch.object(tc, "share_entry", share_entry):
+                code, out, err = run_init(tc, name)
+            message = os.lstat(root.path / "mail" / "to-b" / "000001-from-a.md")
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertIn(f"skipped {root.path / 'mail'}: Operation not permitted", err)
+        self.assertEqual((stat.S_IMODE(message.st_mode), message.st_gid), (SHARED_OWNED_FILE_MODE, gid),
+                         "init did not reach a message under the top folder it could not change")
+
+    def test_when_init_cannot_write_shared_its_words_match_the_state_and_come_after_the_skips(self):
+        """ROOT made read-only: init over a shared root exits 0 (.shared already right); over a private one it says `stays private`, after the skip line; over one shared with another group it says so.
+
+        Must reject a rewrite of a .shared that already names the group,
+        words that call a shared mailbox private, and a refusal that
+        drops the skip lines (LOW-4). Skipped as root, who may write a
+        read-only folder.
+
+        @interacts  three roots: sends and statuses, init, a FIFO made by
+                    hand, a hand-written .shared; ROOT chmodded read-only
+                    and back.
+        @deps       _root.TcRoot.tc, groups_to_test.
+        @complexity O(1).
+        @alloc      three TcRoots.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root may write a read-only folder")
+        label, name, gid = groups_to_test()[0]
+        runs = {}
+        for case in ("shared", "private", "other"):
+            with _root.TcRoot() as root:
+                root.tc("send", "--from", "a", "--to", "b", "hi")
+                root.tc("status", "b", "busy")
+                if case == "shared":
+                    root.tc("init", "--shared", "--group", name)
+                if case == "private":
+                    os.mkfifo(root.path / "mail" / "planted-fifo")
+                if case == "other":
+                    (root.path / ".shared").write_text(f"{OTHER_GROUP}\n")
+                mode = stat.S_IMODE(os.lstat(root.path).st_mode)
+                root.path.chmod(READ_ONLY_FOLDER_MODE)
+                try:
+                    runs[case] = root.tc("init", "--shared", "--group", name)
+                finally:
+                    root.path.chmod(mode)
+        self.assertEqual(runs["shared"][0], 0, runs["shared"][2])
+        code, out, err = runs["private"]
+        self.assertEqual(code, EXIT_REFUSED, err)
+        self.assertIn(STAYS_PRIVATE_WORDS, err)
+        self.assertIn("planted-fifo", err)
+        self.assertLess(err.index("planted-fifo"), err.index(STAYS_PRIVATE_WORDS),
+                        "the skip line came after the refusal")
+        self.assertEqual(runs["other"][0], EXIT_REFUSED, runs["other"][2])
+        self.assertIn(STAYS_SHARED_WORDS.format(group=OTHER_GROUP), runs["other"][2])
+
+    def test_a_card_rename_tc_may_not_make_is_refused_with_words_and_no_tmp(self):
+        """In process, with the card's rename refused (EPERM, as the sticky cards/ refuses another user's card): write_card exits 1 with words and leaves no .tmp.
+
+        Must reject a traceback and a .tmp left in cards/ (LOW-5).
+
+        @interacts  loads tc in process and runs write_card with os.rename
+                    wrapped to refuse cards/b.json and stderr captured.
+        @deps       _root.TcRoot, load_tc; contextlib, errno, io,
+                    unittest.mock; tc.write_card.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        card = {"name": "b", "kind": "other", "route": "local"}
+        with _root.TcRoot() as root:
+            tc = load_tc(root)
+            real = os.rename
+            target = root.path / "cards" / "b.json"
+
+            def rename(src, dst, *args, **kwargs):
+                if pathlib.Path(dst) == target:
+                    raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), str(src))
+                return real(src, dst, *args, **kwargs)
+            said = io.StringIO()
+            with mock.patch.object(os, "rename", rename), contextlib.redirect_stderr(said):
+                with self.assertRaises(SystemExit) as stop:
+                    tc.write_card(card)
+            left = sorted(p.name for p in (root.path / "cards").iterdir())
+        self.assertEqual(stop.exception.code, EXIT_REFUSED)
+        self.assertIn(TAKEN_CARD_WORDS, said.getvalue())
+        self.assertEqual(left, [], "a refused card left its .tmp behind")
+
+    def test_the_unreadable_shared_refusal_says_what_to_check(self):
+        """.shared at no access: a send says this user needs search access, not run init; a .shared of two lines says rewrite it; init on an unreachable ROOT says the same, never a traceback.
+
+        Must reject one sentence for every cause (LOW-7). The access cases
+        are skipped as root, who reads anything.
+
+        @interacts  three roots: one .shared chmodded to no access and
+                    back, one hand-written .shared, one temp folder made
+                    unsearchable and back; a send or an init in each.
+        @deps       _root.TcRoot.tc.
+        @complexity O(1).
+        @alloc      three TcRoots.
+        """
+        with _root.TcRoot() as root:
+            (root.path / ".shared").write_text("one\ntwo\n")
+            malformed = root.tc("send", "--from", "a", "--to", "b", "hi")
+        self.assertEqual(malformed[0], EXIT_REFUSED, malformed[2])
+        self.assertIn(REWRITE_WORDS, malformed[2])
+        if os.geteuid() == 0:
+            self.skipTest("root reads any file, so .shared cannot be made unreadable")
+        with _root.TcRoot() as root:
+            marker = root.path / ".shared"
+            marker.write_text("anygroup\n")
+            marker.chmod(NO_ACCESS_MODE)
+            locked = root.tc("send", "--from", "a", "--to", "b", "hi")
+        with _root.TcRoot() as root:
+            root.base.chmod(NO_ACCESS_MODE)
+            try:
+                unreachable = root.tc("init", "--shared", "--group", groups_to_test()[0][1])
+            finally:
+                root.base.chmod(OWNER_FOLDER_MODE)
+        self.assertEqual(locked[0], EXIT_REFUSED, locked[2])
+        self.assertIn(SEARCH_WORDS, locked[2])
+        self.assertNotIn(REWRITE_WORDS, locked[2])
+        self.assertEqual(unreachable[0], EXIT_REFUSED, unreachable[2])
+        self.assertIn(SEARCH_WORDS, unreachable[2])
+        self.assertNotIn("Traceback", unreachable[2])
+
+    def test_health_snapshot_reports_an_unreadable_shared_as_a_field(self):
+        """In process, .shared of two lines: health_snapshot() returns, shared_group null and shared_problem saying why.
+
+        Must reject a snapshot that raises (BOARD's feed would answer 500
+        on every poll, LOW-8).
+
+        @interacts  writes .shared by hand; loads tc in process and calls
+                    health_snapshot (reads /proc).
+        @deps       _root.TcRoot, load_tc; tc.health_snapshot.
+        @complexity O(p) over p processes on the machine (hundreds).
+        @alloc      one TcRoot, one module and one snapshot.
+        """
+        with _root.TcRoot() as root:
+            (root.path / ".shared").write_text("one\ntwo\n")
+            tc = load_tc(root)
+            snap = tc.health_snapshot()
+        self.assertIsNone(snap["shared_group"])
+        self.assertIn("names no group", snap["shared_problem"])
 
 
 if __name__ == "__main__":

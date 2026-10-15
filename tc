@@ -65,11 +65,14 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             card O(u) for its unread count; cards O(c). init O(f) over f
             folders and files under the shared folders (hundreds to
             thousands; read/ is the history). .shared is read once in main
-            (set_shared_umask) and once more by each step that depends on
-            it: read, peek, wait (once, not per poll), a status post, card,
-            send and health read it twice in all, join three times, and
-            make_folder once more per folder it makes. Each read is one
-            small file, O(1).
+            (set_shared_umask), then once per step that depends on it
+            (mailbox_share, and each make_folder call, once per call):
+            log and cards 1 in all; peek, wait (never per poll), status,
+            watch, health and init 2; read and card 3; send 4; join up to
+            5 (a codex join that makes the inbox). A private send, read,
+            peek or wait that makes an inbox's read/ adds 1. Each read is
+            one small file, O(1), and each make_folder call one group
+            lookup when shared.
 @alloc      one file per message, kept forever (read/ is the history); one
             card per name, replaced on a rejoin; one inbox lock file per
             name (mail/.box-<name>.lock), kept; one ring marker per codex
@@ -369,16 +372,40 @@ def shared_group():
     return group
 
 
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-7.
+def shared_problem_words(problem):
+    """The refusal for a .shared that shared_group would not read (`problem`, its ValueError): what to check, by cause.
+
+    A permission error is not the file's fault: this user cannot search a
+    folder above ROOT (a home folder at 0750) or read .shared, and init
+    cannot fix that, so the words say what access is needed. Anything else
+    (a link, a FIFO, too big, not UTF-8, no group on one line) is the
+    file's, and init rewrites it.
+
+    @interacts  none; string work only.
+    @deps       ROOT, SHARED_MARKER_NAME.
+    @complexity O(1).
+    @alloc      one string, returned.
+    """
+    if isinstance(problem.__cause__, PermissionError):
+        return (f"tc: cannot read {ROOT / SHARED_MARKER_NAME} ({problem.__cause__.strerror}); this user "
+                f"needs search (x) access on every folder from / down to {ROOT}, and read access to "
+                f".shared. Nothing done.")
+    return f"tc: {problem}; nothing done. Run tc init --shared --group <g> to rewrite it."
+
+
 def set_shared_umask(fn):
     """Set SHARED_UMASK when ROOT/.shared names a group, before the command `fn` writes anything (C4).
 
-    main() calls it ahead of the command, so every file and lock the
-    command makes is group-writable. An unreadable .shared refuses every
-    command (exit 1, nothing written) except init, which rewrites it.
+    main() calls it ahead of the command, so every lock it makes is
+    group-writable. An unreadable .shared refuses every command (exit 1,
+    nothing written, shared_problem_words) except init, which rewrites
+    it.
 
     @interacts  reads ROOT/.shared (shared_group); sets this process's
                 umask, or writes one line to stderr and exits.
-    @deps       shared_group, refuse, cmd_init; os; SHARED_UMASK.
+    @deps       shared_group, shared_problem_words, refuse, cmd_init; os;
+                SHARED_UMASK.
     @complexity O(1): one small file.
     @alloc      none past the read.
     """
@@ -387,8 +414,7 @@ def set_shared_umask(fn):
     except ValueError as problem:
         if fn is cmd_init:
             return
-        refuse(f"tc: {problem}; nothing done. Run tc init --shared --group <g> to rewrite it.",
-               EXIT_REFUSED)
+        refuse(shared_problem_words(problem), EXIT_REFUSED)
     if group is not None:
         os.umask(SHARED_UMASK)
 
@@ -409,16 +435,15 @@ def mailbox_share():
     @interacts  reads ROOT/.shared (shared_group) and, when it names a
                 group, the group database; on a refusal one line to stderr
                 and exit 1.
-    @deps       shared_group, refuse, printable; grp; SHARED_MARKER_NAME,
-                EXIT_REFUSED.
+    @deps       shared_group, shared_problem_words, refuse, printable; grp;
+                SHARED_MARKER_NAME, EXIT_REFUSED.
     @complexity O(1): one small file and one group lookup.
     @alloc      one Share, returned.
     """
     try:
         group = shared_group()
     except ValueError as problem:
-        refuse(f"tc: {problem}; nothing done. Run tc init --shared --group <g> to rewrite it.",
-               EXIT_REFUSED)
+        refuse(shared_problem_words(problem), EXIT_REFUSED)
     if group is None:
         return None
     try:
@@ -442,61 +467,132 @@ def user_name(uid):
         return str(uid)
 
 
+def group_name(gid):
+    """The name of group number `gid`, or the number as text when the machine has no such group.
+
+    @interacts  reads the group database.
+    @deps       grp.
+    @complexity O(1): one lookup.
+    @alloc      one short string, returned.
+    """
+    try:
+        return grp.getgrgid(gid).gr_name
+    except KeyError:
+        return str(gid)
+
+
+def in_shared_folders(path):
+    """True when `path` is mail/, status/, cards/ or outbox/ under ROOT, or anything inside one of them.
+
+    @interacts  none; path work only.
+    @deps       pathlib; ROOT, SHARED_FOLDER_NAMES.
+    @complexity O(1): four comparisons.
+    @alloc      the four paths compared, freed on return.
+    """
+    return any(path.is_relative_to(ROOT / name) for name in SHARED_FOLDER_NAMES)
+
+
 def make_folder(path):
-    """Make the folder `path`, and any missing folder above it. Every folder tc makes is made here.
+    """Make the folder `path`, and any missing folder above it. Every folder tc makes is made here. The mailbox's Share, or None when private.
 
     A folder already there is left as it is. Under a shared mailbox (D16),
     each folder this call makes gets the group named in .shared and its
     mode from shared_folder_mode (the sticky SHARED_TOP_FOLDER_MODE for
-    mail/, status/, cards/ and outbox/, D17) as it is made, since init
-    reached only the folders there at the time. Group and mode go through
-    a descriptor opened with O_NOFOLLOW, so a link swapped in at the new
-    name is refused, never changed. Raises FileExistsError when something that is not a folder
-    holds the name, as Path.mkdir(exist_ok=True) does. Refuses (exit 1)
-    when .shared names a group this machine lacks (checked before anything
-    is made) or the new folder cannot be given the group and mode.
+    mail/, status/, cards/ and outbox/, D17; SHARED_INBOX_MODE for an
+    inbox and its read/, D20) as it is made. Group and mode go through a
+    descriptor opened with O_NOFOLLOW, so a link swapped in at the new
+    name is refused, never changed. Raises FileExistsError when something
+    that is not a folder holds the name, as Path.mkdir(exist_ok=True)
+    does. Refuses (exit 1) when .shared is unreadable or names a group
+    this machine lacks (mailbox_share, before anything is made).
 
-    @interacts  stats `path` and its missing parents; makes each missing
-                folder; under a shared mailbox reads ROOT/.shared and the
-                group database, then opens each new folder and sets its
-                group and mode.
-    @deps       shared_group, shared_folder_mode, refuse, printable; os,
-                grp.
-    @complexity O(d) over d missing folders above `path` (at most three:
-                mail/, an inbox, its read/); O(1) when `path` is there.
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-4
+    and LOW-13. A shared mailbox never ends up with a folder in the wrong
+    group. When the new folder cannot be given the group and mode (a
+    process outside the group, say), tc removes the empty folder it just
+    made, its own runtime cleanup, and refuses with words. Under the four
+    shared folders, a folder already there (`path` itself) that is not in
+    the group, or is a symlink, is refused with words, never accepted.
+    .shared and the group are resolved once per call, not once per level.
+    The Share is returned, so a caller that makes its folder first knows
+    the mailbox's mode without reading .shared again.
+
+    @interacts  reads ROOT/.shared and the group database (mailbox_share);
+                lstats `path` (under the shared folders, shared) or stats
+                it, and its missing parents; makes each missing folder;
+                under a shared mailbox opens each new folder and sets its
+                group and mode, or removes it again; on a refusal one line
+                to stderr and exit 1.
+    @deps       mailbox_share, make_folder_with, refuse.
+    @complexity O(d) over d missing folders: at most three below ROOT
+                (mail/, an inbox, its read/), plus ROOT and its missing
+                parents on a first run against a new TC_ROOT (private
+                only: a shared ROOT holds .shared). O(1) when `path` is
+                there. One .shared read and one group lookup either way.
+    @alloc      one descriptor per new folder under a shared mailbox,
+                closed before return; the Share, returned.
+    """
+    share = mailbox_share()
+    make_folder_with(path, share)
+    return share
+
+
+def make_folder_with(path, share):
+    """make_folder's work, with the mailbox's Share (or None) resolved once by the caller and passed down each level.
+
+    @interacts  see make_folder.
+    @deps       in_shared_folders, shared_folder_mode, refuse, printable,
+                user_name, group_name; os, stat, errno.
+    @complexity O(d) over d missing folders, as make_folder.
     @alloc      one descriptor per new folder under a shared mailbox,
                 closed before return.
     """
-    if path.is_dir():
-        return
-    group = shared_group()
-    gid = None
-    if group is not None:
+    if share is not None and in_shared_folders(path):
         try:
-            gid = grp.getgrnam(group).gr_gid
-        except KeyError:
-            refuse(f"tc: {ROOT / SHARED_MARKER_NAME} names group {printable(group)}, which this "
-                   f"machine does not have; nothing written", EXIT_REFUSED)
+            st = os.lstat(path)
+        except FileNotFoundError:
+            st = None
+        if st is not None:
+            if stat.S_ISLNK(st.st_mode):
+                refuse(f"tc: {path} is a symlink, not a real folder; tc never follows it, so nothing "
+                       f"was written there", EXIT_REFUSED)
+            if not stat.S_ISDIR(st.st_mode):
+                raise FileExistsError(errno.EEXIST, "not a folder", str(path))
+            if st.st_gid != share.gid:
+                refuse(f"tc: {path} is in group {printable(group_name(st.st_gid))}, not "
+                       f"{printable(share.group)}; under a shared mailbox every folder under mail/, "
+                       f"status/, cards/ and outbox/ is in that group, or other members cannot use it. "
+                       f"Nothing written. Its owner, {user_name(st.st_uid)}, can fix it with "
+                       f"tc init --shared --group {printable(share.group)}.", EXIT_REFUSED)
+            return
+    elif path.is_dir():
+        return
     if not path.parent.is_dir():
-        make_folder(path.parent)
+        make_folder_with(path.parent, share)
     try:
         os.mkdir(path)
     except FileExistsError:
         if not path.is_dir():
             raise
         return
-    if gid is None:
+    if share is None:
         return
     try:
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            os.fchown(fd, -1, gid)
+            os.fchown(fd, -1, share.gid)
             os.fchmod(fd, shared_folder_mode(path))  # after fchown, which may clear setgid
         finally:
             os.close(fd)
     except OSError as err:
-        refuse(f"tc: could not give the new folder {path} group {printable(group)} ({err.strerror})",
-               EXIT_REFUSED)
+        try:
+            os.rmdir(path)  # tc's own folder, made empty just above: none is left in the wrong group
+            undone = "removed it again"
+        except OSError as stuck:
+            undone = f"could not remove it ({stuck.strerror})"
+        refuse(f"tc: could not give the new folder {path} group {printable(share.group)} "
+               f"({err.strerror}); {undone}; nothing written. Check that this login is in "
+               f"group {printable(share.group)} (id -nG).", EXIT_REFUSED)
 
 
 def share_entry(path, gid):
@@ -507,16 +603,26 @@ def share_entry(path, gid):
     read/, D20); a file's from shared_file_mode (SHARED_WRITABLE_FILE_MODE
     directly in mail/, else SHARED_OWNED_FILE_MODE, D20).
 
-    kind is "folder" or "file" when set, else None; why is None, or the
-    words for a skip. Nothing at the name is (None, None). The entry is
-    opened with O_NOFOLLOW and O_NONBLOCK and changed through that
-    descriptor, so a link is skipped, never followed (D17's rule, in
-    init), and a FIFO never blocks. Anything but a folder or a regular
-    file is skipped, and so is an entry tc may not change (one another
-    user owns).
+    kind is "folder" or "file" whenever fstat found one, else None; why
+    is None when the entry now has group `gid` and its mode, or the words
+    for a skip. Nothing at the name is (None, None). The entry is opened
+    with O_NOFOLLOW and O_NONBLOCK and changed through that descriptor, so
+    a link is skipped, never followed (D17's rule, in init), and a FIFO
+    never blocks. Anything but a folder or a regular file is skipped, and
+    so is an entry tc may not change (one another user owns: its owner is
+    named).
 
-    @interacts  opens and fstats `path`; sets its group and mode.
-    @deps       shared_folder_mode, shared_file_mode; os, stat, errno.
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-2
+    and LOW-3. An entry already in group `gid` at its mode is left alone:
+    Linux lets only an entry's owner change its group, even to the one it
+    has, so a rerun of init on a live mailbox never trips over entries
+    other members own. A folder keeps its kind even when it could not be
+    changed, so init still walks it.
+
+    @interacts  opens and fstats `path`; sets its group and mode unless
+                they are right; reads the user database for a skip's words.
+    @deps       shared_folder_mode, shared_file_mode, user_name; os, stat,
+                errno.
     @complexity O(1).
     @alloc      one descriptor, closed before return.
     """
@@ -527,20 +633,51 @@ def share_entry(path, gid):
     except OSError as err:
         return None, ("a symlink, which tc never follows" if err.errno == errno.ELOOP else err.strerror)
     try:
-        mode = os.fstat(fd).st_mode
-        if stat.S_ISDIR(mode):
+        st = os.fstat(fd)
+        if stat.S_ISDIR(st.st_mode):
             kind, want = "folder", shared_folder_mode(path)
-        elif stat.S_ISREG(mode):
+        elif stat.S_ISREG(st.st_mode):
             kind, want = "file", shared_file_mode(path)
         else:
             return None, "not a regular file or a folder"
-        os.fchown(fd, -1, gid)
-        os.fchmod(fd, want)  # after fchown, which may clear setgid
-    except OSError as err:
-        return None, err.strerror
+        if st.st_gid == gid and stat.S_IMODE(st.st_mode) == want:
+            return kind, None  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): already right
+        try:
+            os.fchown(fd, -1, gid)
+            os.fchmod(fd, want)  # after fchown, which may clear setgid
+        except OSError as err:
+            owner = f" (owned by {user_name(st.st_uid)})" if err.errno == errno.EPERM else ""
+            return kind, f"{err.strerror}{owner}"
     finally:
         os.close(fd)
     return kind, None
+
+
+# SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-3 and
+# LOW-15, init's walk one entry at a time.
+def shared_entries(top, gid):
+    """Share `top` and, when it is a folder, every entry under it (share_entry); yield (path, kind, why) for each, one at a time.
+
+    A top folder that could not be changed is still walked, so what
+    under it can be changed is, and the rest is counted and named. A
+    linked folder is listed, never entered (os.walk's default); a top
+    that is a link is not walked at all.
+
+    @interacts  opens, fstats and changes each entry (share_entry); lists
+                each folder under `top`.
+    @deps       share_entry; os, pathlib.
+    @complexity O(f) over f entries under `top` (hundreds to thousands
+                under mail/: read/ is the history).
+    @alloc      one folder's listing at a time (os.walk); nothing kept.
+    """
+    kind, why = share_entry(top, gid)
+    yield top, kind, why
+    if kind != "folder":
+        return
+    for here, folders, files in os.walk(top):
+        for entry in folders + files:
+            path = pathlib.Path(here) / entry
+            yield (path, *share_entry(path, gid))
 
 
 # SHARED D17 (Claude Opus 5.5, unreviewed): the sticky folders, opens that never
@@ -781,20 +918,37 @@ def cmd_init(args):
     An entry it cannot change (a link, a FIFO, one another user owns) is
     named on stderr, and init exits 1 once the rest is done.
 
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19 and the audit's
+    LOW-2 to LOW-4 and LOW-7. Init first makes ROOT (it is not shared:
+    no group, no mode) and then mail/, status/, cards/ and outbox/ when
+    they are missing, so no other user ever has to make a top folder in a
+    ROOT the first user owns. ROOT it cannot reach is refused with words
+    on search access, nothing changed. Entries already right are left
+    alone (share_entry), so a rerun on a live mailbox is clean, and a top
+    folder whose own change failed is still walked (shared_entries). The
+    skipped lines print before anything else is said. When .shared
+    already names g it is not rewritten; when it cannot be written, the
+    words say the mailbox's real state: still private, still shared with
+    the group .shared names, or .shared still unreadable.
+
     @interacts  reads the group database and this process's groups; sets
-                its umask (SHARED_UMASK); walks the four folders and opens,
-                fstats and changes each entry (share_entry); makes ROOT if
-                missing; creates ROOT/.shared.<pid>.tmp and renames it to
-                ROOT/.shared. Prints one line, plus one stderr line per
-                skipped entry.
-    @deps       share_entry, make_folder, write_new_file, refuse, printable;
-                grp, os, pathlib, sys; SHARED_FOLDER_NAMES,
+                its umask (SHARED_UMASK); makes ROOT and its missing
+                parents, and each missing top folder; walks the four
+                folders and opens, fstats and changes each entry
+                (shared_entries); reads ROOT/.shared (shared_group); unless
+                it already names g, creates ROOT/.shared.<pid>.tmp and
+                renames it to ROOT/.shared, removing its own .tmp if the
+                rename fails. Prints one line, plus one stderr line per
+                skipped entry, first.
+    @deps       shared_entries, shared_group, write_new_file, refuse,
+                printable; grp, os, sys; SHARED_FOLDER_NAMES,
                 SHARED_MARKER_NAME, SHARED_UMASK.
     @complexity O(f) over f folders and files under the four folders: the
                 inboxes and every read/ (hundreds to thousands, growing
                 with the history).
-    @alloc      one walk's lists per folder and the skipped lines, freed on
-                exit; the .shared file, kept.
+    @alloc      one folder's listing at a time (os.walk) and one skipped
+                line per entry it could not change, freed on exit; the
+                four top folders when missing and the .shared file, kept.
     """
     group = args.group
     try:
@@ -804,31 +958,48 @@ def cmd_init(args):
     if gid not in os.getgroups() and gid != os.getegid():
         refuse(f"tc init: you are not in group {printable(group)}; nothing changed", EXIT_REFUSED)
     os.umask(SHARED_UMASK)
+    try:
+        os.makedirs(ROOT, exist_ok=True)  # ROOT itself is not shared: no group, no mode
+    except OSError as err:
+        refuse(f"tc init: cannot reach {ROOT} ({err.strerror}); this user needs search (x) access on "
+               f"every folder from / down to it. Nothing changed.", EXIT_REFUSED)
     done, skipped = {"folder": 0, "file": 0}, []
     for top in (ROOT / name for name in SHARED_FOLDER_NAMES):
-        kind, why = share_entry(top, gid)
-        found = [(top, kind, why)]
-        if kind == "folder":
-            for here, folders, files in os.walk(top):  # a linked folder is listed, never entered
-                found += [(path, *share_entry(path, gid))
-                          for path in (pathlib.Path(here) / entry for entry in folders + files)]
-        for path, kind, why in found:
-            if kind is not None:
-                done[kind] += 1
-            elif why is not None:
+        try:
+            os.mkdir(top)  # D19: no other user has to make a top folder in a ROOT this user owns
+        except FileExistsError:
+            pass
+        except OSError as err:
+            skipped.append(f"tc init: could not make {printable(top)}: {err.strerror}")
+            continue
+        for path, kind, why in shared_entries(top, gid):
+            if why is not None:
                 skipped.append(f"tc init: skipped {printable(path)}: {why}")
-    make_folder(ROOT)
-    tmp = ROOT / f"{SHARED_MARKER_NAME}.{os.getpid()}.tmp"
-    try:
-        write_new_file(tmp, f"{group}\n")
-        tmp.rename(ROOT / SHARED_MARKER_NAME)  # atomic, so a reader never sees half of it
-    except OSError as err:
-        refuse(f"tc init: could not write {ROOT / SHARED_MARKER_NAME} ({err.strerror}); "
-               f"the mailbox stays private", EXIT_REFUSED)
-    print(f"mailbox shared with group {printable(group)}: {done['folder']} folders and "
-          f"{done['file']} files set to group {printable(group)}")
-    for line in skipped:
+            elif kind is not None:
+                done[kind] += 1
+    for line in skipped:  # reported first, whatever happens to .shared
         print(line, file=sys.stderr)
+    marker = ROOT / SHARED_MARKER_NAME
+    try:
+        current = shared_group()
+    except ValueError:
+        current = ValueError  # unreadable: init is the one command that runs past it
+    if current != group:
+        tmp, made = ROOT / f"{SHARED_MARKER_NAME}.{os.getpid()}.tmp", False
+        try:
+            write_new_file(tmp, f"{group}\n")
+            made = True
+            tmp.rename(marker)  # atomic, so a reader never sees half of it
+        except OSError as err:
+            if made:
+                tmp.unlink(missing_ok=True)  # init's own .tmp, made just above
+            state = ("the mailbox stays private" if current is None
+                     else f"{marker} stays unreadable, so tc refuses every command but init"
+                     if current is ValueError else f"the mailbox stays shared with group {printable(current)}")
+            refuse(f"tc init: could not write {marker} ({err.strerror}); {state}. {done['folder']} "
+                   f"folders and {done['file']} files are in group {printable(group)}.", EXIT_REFUSED)
+    print(f"mailbox shared with group {printable(group)}: {done['folder']} folders and "
+          f"{done['file']} files in group {printable(group)}")
     if skipped:
         refuse(f"tc init: {len(skipped)} skipped; run tc init again as their owner, or fix them by hand",
                EXIT_REFUSED)
@@ -1208,14 +1379,14 @@ def cmd_wait(args):
                 mail/.wait-<name>.lock (flock) until it exits, opened
                 through open_by_name, which refuses a symlink or a FIFO
                 there (exit 1, D17, D19); reads ROOT/.shared once
-                (mailbox_share); in a private mailbox makes
+                (make_folder's mailbox_share); in a private mailbox makes
                 mail/to-<name>/read/ on the first poll; a linked inbox, or
                 under a shared mailbox one not its card owner's, refuses
                 there (exit 1, check_inbox); prints one line. Under a shared
                 mailbox it makes no inbox: a name nobody joined polls as no
                 mail (D20).
-    @deps       require_names, make_folder, open_by_name, mailbox_share,
-                unread, keepalive_seconds; fcntl, os, resource.
+    @deps       require_names, make_folder, open_by_name, unread,
+                keepalive_seconds; fcntl, os, resource.
     @complexity O(u) per poll over u *.md entries in the inbox (single
                 digits): two lstat calls for the inbox and read/, one for
                 the card when shared, one per entry; no .shared read per
@@ -1224,7 +1395,7 @@ def cmd_wait(args):
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     resource.setrlimit(resource.RLIMIT_AS, (WAIT_MEMORY_CAP_BYTES, WAIT_MEMORY_CAP_BYTES))
-    make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
+    share = make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
     lock = open(open_by_name(MAIL / f".wait-{args.name}.lock", os.O_WRONLY | os.O_TRUNC), "w")  # SHARED D17 (Claude Opus 5.5, unreviewed)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1233,7 +1404,7 @@ def cmd_wait(args):
         sys.exit(EXIT_ALREADY_LISTENING)
     timeout = args.timeout if args.timeout is not None else (
         keepalive_seconds() if args.keepalive else DEFAULT_WAIT_SECONDS)
-    shared = mailbox_share() is not None  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): read once, not per poll
+    shared = share is not None  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): read once, not per poll
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         msgs = unread(args.name, shared)
@@ -1264,12 +1435,12 @@ def cmd_status(args):
     words (open_by_name).
 
     @interacts  checks the name first when one is given (C0, exit 6,
-                nothing written); makes status/ (make_folder); when posting
-                reads ROOT/.shared (mailbox_share) and writes
-                status/<name>.md whole (open_by_name), or reads every status
-                file (read_regular_file); prints to stdout, and to stderr
-                for a file it will not show.
-    @deps       require_names, make_folder, mailbox_share, open_by_name,
+                nothing written); reads ROOT/.shared and makes status/
+                (make_folder); writes status/<name>.md whole
+                (open_by_name), or reads every status file
+                (read_regular_file); prints to stdout, and to stderr for a
+                file it will not show.
+    @deps       require_names, make_folder, open_by_name,
                 read_regular_file, refuse, now_iso; os;
                 STATUS_READ_MAX_BYTES, SHARED_OWNED_FILE_MODE,
                 NEW_FILE_MODE.
@@ -1279,7 +1450,7 @@ def cmd_status(args):
                 posting.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
-    make_folder(STATUS)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
+    share = make_folder(STATUS)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
     if args.text is None:
         files = sorted(STATUS.glob("*.md"))
         if not files:
@@ -1295,7 +1466,7 @@ def cmd_status(args):
         return
     # SHARED D17 (Claude Opus 5.5, unreviewed): a link at status/<name>.md is refused.
     # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 2, made 0640 when shared.
-    mode = SHARED_OWNED_FILE_MODE if mailbox_share() is not None else NEW_FILE_MODE
+    mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
     with open(open_by_name(STATUS / f"{args.name}.md", os.O_WRONLY | os.O_TRUNC, mode), "w") as f:
         f.write(f"## {args.name} status, {now_iso()}\n\n{args.text}\n")
     print(f"status posted for {args.name}")
@@ -1432,24 +1603,43 @@ def write_card(card):
     unreviewed): under a shared mailbox it is made SHARED_OWNED_FILE_MODE
     (0640, D20 item 2), so no member rewrites another's card in place.
 
-    @interacts  makes cards/ (make_folder); reads ROOT/.shared
-                (mailbox_share); creates cards/<name>.json.<pid>.tmp and
-                renames it to cards/<name>.json, replacing any card there;
-                on a .tmp it cannot make, one line to stderr and exit 1.
-    @deps       make_folder, mailbox_share, write_new_file, refuse; json,
-                os, pathlib; SHARED_OWNED_FILE_MODE, NEW_FILE_MODE.
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-5.
+    A rename tc may not make (under the sticky cards/, a card another user
+    owns) is refused with words naming the owner, never a traceback, and
+    the .tmp this call made is removed first, tc's own runtime cleanup,
+    so none is left behind.
+
+    @interacts  reads ROOT/.shared and makes cards/ (make_folder); creates
+                cards/<name>.json.<pid>.tmp and renames it to
+                cards/<name>.json, replacing any card there; on a .tmp it
+                cannot make, or a rename it may not make (then removing
+                its .tmp and lstatting the card for its owner), one line to
+                stderr and exit 1.
+    @deps       make_folder, write_new_file, refuse, user_name; json, os,
+                errno, pathlib; SHARED_OWNED_FILE_MODE, NEW_FILE_MODE.
     @complexity O(1): eleven fields.
     @alloc      one JSON string, freed on return; one card file, kept.
     """
-    make_folder(CARDS)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
+    share = make_folder(CARDS)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
     path = CARDS / f"{card['name']}.json"
     tmp = CARDS / f"{card['name']}.json.{os.getpid()}.tmp"
-    mode = SHARED_OWNED_FILE_MODE if mailbox_share() is not None else NEW_FILE_MODE  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20
+    mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20
     try:
         write_new_file(tmp, json.dumps(card, indent=2) + "\n", mode)
     except OSError as err:
         refuse(f"tc: could not create {tmp} ({err.strerror}); no card written", EXIT_REFUSED)
-    tmp.rename(path)  # atomic, so a reader never sees half a card
+    try:
+        tmp.rename(path)  # atomic, so a reader never sees half a card
+    except OSError as err:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): LOW-5
+        tmp.unlink(missing_ok=True)  # this call's own .tmp, made just above
+        if err.errno not in (errno.EPERM, errno.EACCES):
+            refuse(f"tc: could not replace {path} ({err.strerror}); no card written", EXIT_REFUSED)
+        try:
+            owner = user_name(os.lstat(path).st_uid)
+        except OSError:
+            owner = "another user"
+        refuse(f"tc: could not replace {path} ({err.strerror}): it belongs to {owner}, and under a "
+               f"shared mailbox only its owner can replace it. No card written.", EXIT_REFUSED)
     return path
 
 
@@ -2478,9 +2668,12 @@ def health_snapshot():
     """One snapshot of the machine, sessions, listeners, watchers, mail and cards.
 
     `shared_group` (SHARED H1, Claude Opus 5.5, unreviewed) is the group
-    the mailbox is shared with, or null when it is private (C4). An
-    unreadable .shared raises ValueError (shared_group); tc health never
-    gets here then, since main() refuses first.
+    the mailbox is shared with, or null when it is private (C4).
+    SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-8.
+    An unreadable .shared never raises here: `shared_group` is null and
+    `shared_problem` says why, so BOARD's in-process feed keeps answering.
+    `shared_problem` is null otherwise. tc health itself never sees it,
+    since main() refuses first.
 
     @interacts  reads /proc, mail/, status/, cards/ and ROOT/.shared; may
                 run nvidia-smi (machine_stats). Writes nothing.
@@ -2492,10 +2685,14 @@ def health_snapshot():
                 cards.
     @alloc      one dict, returned.
     """
+    try:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): LOW-8, a field, never a raise
+        group, problem = shared_group(), None
+    except ValueError as err:
+        group, problem = None, str(err)
     return {"time": now_iso(), "machine": machine_stats(), "sessions": session_counts(),
             "listeners": listeners("wait"), "watchers": listeners("watch"),
             "mail": mailbox_summary(), "cards": cards_summary(),
-            "shared_group": shared_group()}  # SHARED H1 (Claude Opus 5.5, unreviewed): C4
+            "shared_group": group, "shared_problem": problem}  # SHARED H1 (Claude Opus 5.5, unreviewed): C4
 
 
 def _gpu_text(gpus):
