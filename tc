@@ -17,8 +17,16 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   mail/.ring-pending-<name>                ring owed and why, or clear (D14, D16, D20)
   cards/<name>.json                        one address card per name (C1)
   .shared                                  the group a shared mailbox is shared with (C4), 0644 (D21)
+  outbox/to-<name>/NNNNNN-from-<sender>.md an ssh message waiting to go (C3, D25)
+  outbox/to-<name>/sent/, refused/         ssh messages the far tc took, or refused (+ .stderr note)
+  outbox/.origin-token                     this mailbox's random origin token (D25)
+  outbox/.send-<uid>-<key>.lock            one user's send lock for one ssh target
 
-@interacts  writes mail/, status/ and cards/ under ROOT; no network. The waking side is
+@interacts  writes mail/, status/, cards/ and outbox/ under ROOT. Its one
+            way off the machine is `ssh` (SSH S1, Claude Opus 5.5,
+            unreviewed): a send to an ssh card runs the ssh client once
+            (C3), as the user who ran tc, with that user's keys, and
+            files the message in outbox/ by the answer. The waking side is
             Claude Code's background Bash: `tc wait` or `tc watch` exiting is
             what re-invokes the session that started it. `health` and `watch`
             also read /proc (meminfo, locks, each process's comm and cmdline)
@@ -109,13 +117,19 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             D23); each ring marker write waits as long for the marker's
             flock, and then says so.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
-            grp, json, pathlib, pwd, re, resource, shlex, shutil, signal,
-            stat, subprocess, time, datetime, os, sys); Linux only (flock,
-            RLIMIT_AS, O_NOFOLLOW, O_NONBLOCK, /proc). nvidia-smi optional; the codex CLI for the codex route.
+            grp, hashlib, json, pathlib, pwd, re, resource, shlex, shutil,
+            signal, stat, subprocess, time, datetime, os, sys); Linux only
+            (flock, RLIMIT_AS, O_NOFOLLOW, O_NONBLOCK, /proc). nvidia-smi
+            optional; the codex CLI for the codex route; the ssh client
+            for the ssh route, with a POSIX login shell on the far side
+            (C3).
 @complexity send O(b), b body bytes up to SEND_BODY_MAX_BYTES, once per
             publish try (one in an honest mailbox; at most
             PUBLISH_MAX_TRIES, reached by a set-back mail/.seq or by
             names planted ahead of it, .tmp names among them, round 7);
+            an ssh send adds a scan of the outbox, O(q + w log w) over q
+            outbox folders and w waiting files, and one ssh run of at
+            most SSH_SEND_SECONDS (SSH S1, Claude Opus 5.5, unreviewed);
             status O(1). A command's flocks on
             mail/.seq and its inbox lock wait at most LOCK_WAIT_SECONDS in
             all; each ring marker write at most LOCK_WAIT_SECONDS (a codex
@@ -149,7 +163,12 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             card per name, replaced on a rejoin; one inbox lock file per
             name (mail/.box-<name>.lock), kept; one ring marker per codex
             name (mail/.ring-pending-<name>), kept: rewritten, never
-            removed (D20); ROOT/.shared, written by init and kept.
+            removed (D20); ROOT/.shared, written by init and kept. SSH S1
+            (Claude Opus 5.5, unreviewed): one outbox file per ssh
+            message, kept forever in outbox/to-<name>/, its sent/ or its
+            refused/ (with a .stderr note beside a refused one); one
+            origin token per mailbox and one send lock per user per ssh
+            target, made on first use and kept.
             Nothing held in memory past one command. `wait` measured flat at
             13 MB RSS over 200k polls; it also hard-caps itself at
             WAIT_MEMORY_CAP_BYTES so a runaway dies alone. `wait` holds
@@ -164,6 +183,7 @@ import datetime
 import errno
 import fcntl
 import grp
+import hashlib
 import json
 import os
 import pathlib
@@ -504,6 +524,68 @@ TMP_TAKEN_WHY = "each by a .tmp name already there, so no try got as far as the 
 # other cause (another user's file under fs.protected_hardlinks) does not
 # apply here.
 NO_HARD_LINK_ERRNOS = (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP)
+# SSH S1 (Claude Opus 5.5, unreviewed): the ssh route and its outbox (C3,
+# D22, D23, D25).
+# ssh's ConnectTimeout. Past it a far machine that does not answer counts
+# as unreachable and the message waits in the outbox. Ten seconds rides out
+# a slow network and keeps a dead one from holding a sender for long.
+SSH_CONNECT_SECONDS = 10
+# The whole ssh run: connect, the far tc's lock waits (its own
+# LOCK_WAIT_SECONDS) and its write. Past it ssh is killed and the message
+# waits in the outbox. The far side may have delivered it all the same,
+# which the origin id makes harmless (D25).
+SSH_SEND_SECONDS = 30
+# ssh's own exit code when the connection, or ssh itself, failed: the far
+# tc never answered, so the message waits for tc flush.
+SSH_CONNECT_FAILED = 255
+# Row 4 of the exit table: kept in the outbox. ssh could not reach the
+# target, the far tc was busy (its exit 10, D23), the target already has a
+# queue, or another tc is sending to it right now.
+EXIT_QUEUED = 4
+# The outbox's folder under ROOT (one of SHARED_FOLDER_NAMES, C4), and the
+# two folders under each outbox/to-<name>/ that a message is filed in once
+# the far side answered: sent/ on its exit 0, refused/ on a refusal (D25).
+OUTBOX_NAME = "outbox"
+OUTBOX_SENT = "sent"
+OUTBOX_REFUSED = "refused"
+# Beside a message in refused/: the far tc's exit code and stderr, in a
+# file named after the message plus this ending, which no scan of message
+# names (*.md) reads.
+REFUSAL_NOTE_SUFFIX = ".stderr"
+# An outbox message's file name: its number, then its sender (a C0 name),
+# as mail/ names them, so the outbox parses exactly like an inbox (D25).
+MESSAGE_NAME_PATTERN = re.compile(rf"([0-9]+)-from-({NAME_PATTERN.pattern})\.md")
+# How the outcome of one ssh run is sorted (ssh_run): the far tc took it,
+# it never got there or the far tc was busy (kept for tc flush), or the
+# far tc said no (filed in refused/, never retried).
+SSH_SENT, SSH_KEPT, SSH_REFUSED = "sent", "kept", "refused"
+# D25's origin token: random bytes made once per mailbox, written as hex in
+# outbox/ORIGIN_TOKEN_NAME, never the hostname. 16 bytes (32 hex digits)
+# make two mailboxes' tokens differ in practice. A token is not a secret:
+# it only tells one mailbox's message numbers from another's.
+ORIGIN_TOKEN_NAME = ".origin-token"
+ORIGIN_TOKEN_BYTES = 16
+ORIGIN_TOKEN_PATTERN = re.compile(rf"[0-9a-f]{{{2 * ORIGIN_TOKEN_BYTES}}}")
+# The most of the token file tc reads: one line of hex; 4 KiB bounds a
+# hand-made one.
+ORIGIN_TOKEN_READ_MAX_BYTES = 4096
+# An origin id: <token>-<outbox number>-<sender>, checked against this
+# fixed pattern on the far side (C3). The token is hex and the number
+# digits, so the first two dashes split it, and the sender (C0) comes
+# last. 18 digits hold any number mail/.seq reaches in practice.
+ORIGIN_SEQ_MAX_DIGITS = 18
+ORIGIN_PATTERN = re.compile(rf"([0-9a-f]{{{2 * ORIGIN_TOKEN_BYTES}}})-([0-9]{{1,{ORIGIN_SEQ_MAX_DIGITS}}})-"
+                            rf"({NAME_PATTERN.pattern})")
+# The send lock: one per Linux user per ssh target, in outbox/, held by the
+# one tc that sends that user's queue for that target (a send, or tc
+# flush), so a newer message never goes ahead of an older one and no two
+# sends of one file run at once. Per user, so one member's flush never
+# holds up another's mail (D22); per target, so a dead target never holds
+# up a live one. {key} is the start of the target's sha256 in hex: a
+# target may be longer than a file name allows, and two targets that
+# shared a key would only share a lock.
+SEND_LOCK_NAME = ".send-{uid}-{key}.lock"
+SEND_LOCK_KEY_CHARS = 16
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -1189,10 +1271,16 @@ def shared_folder_mode(path):
     owns the inbox, still moves every message into read/, and no sender
     can touch another's.
 
+    SSH S1 (Claude Opus 5.5, unreviewed): D22 and D25. Each
+    outbox/to-<name>/ and its sent/ and refused/ take
+    SHARED_TOP_FOLDER_MODE too, sticky, so a member cannot move or delete
+    another member's queued, sent or refused mail. The user who made such
+    a folder owns it, and sticky still lets a folder's owner do that.
+
     @interacts  none; path work only.
-    @deps       pathlib; ROOT, MAIL, SHARED_FOLDER_NAMES,
-                SHARED_TOP_FOLDER_MODE, SHARED_INBOX_MODE,
-                SHARED_FOLDER_MODE.
+    @deps       pathlib; ROOT, MAIL, SHARED_FOLDER_NAMES, OUTBOX_NAME,
+                OUTBOX_SENT, OUTBOX_REFUSED, SHARED_TOP_FOLDER_MODE,
+                SHARED_INBOX_MODE, SHARED_FOLDER_MODE.
     @complexity O(1): a few name comparisons.
     @alloc      the parent paths it compares, freed on return.
     """
@@ -1201,6 +1289,9 @@ def shared_folder_mode(path):
     box = path.parent if path.name == "read" else path
     if box.parent == MAIL and box.name.startswith("to-"):
         return SHARED_INBOX_MODE
+    queue = path.parent if path.name in (OUTBOX_SENT, OUTBOX_REFUSED) else path  # SSH S1 (Claude Opus 5.5, unreviewed): D22
+    if queue.parent == ROOT / OUTBOX_NAME and queue.name.startswith("to-"):
+        return SHARED_TOP_FOLDER_MODE
     return SHARED_FOLDER_MODE
 
 
@@ -2395,8 +2486,10 @@ def route_and_deliver(sender, to, body, header_note=None):
     steps. One lock_deadline is taken before any lock and handed to
     deliver_local or deliver_codex, also when the card read under the
     lock turned codex, so no path waits two bounds (SHARED fix rounds 3
-    and 4); any other route gets C2's arguments alone. `header_note` goes
-    to the route, which ends the message's header line with it.
+    and 4); SSH S1 (Claude Opus 5.5, unreviewed): to deliver_ssh as well,
+    which waits on mail/.seq and its send lock (SHARED's DEBT-2). Any
+    other route gets C2's arguments alone. `header_note` goes to the
+    route, which ends the message's header line with it.
 
     Busy leaves two ways (D23). A lock held past the deadline exits 10
     through sys.exit inside inbox_lock or next_seq, so nothing after this
@@ -2411,7 +2504,7 @@ def route_and_deliver(sender, to, body, header_note=None):
                 nothing written) and reads the card again; calls one
                 ROUTES function, which writes the message.
     @deps       card_route, lock_deadline, inbox_lock, deliver_local,
-                deliver_codex; fcntl.
+                deliver_codex, deliver_ssh; fcntl.
     @complexity O(1) here, plus the route's own work; the inbox lock and
                 every mail/.seq wait take at most LOCK_WAIT_SECONDS in all.
     @alloc      the card dict, freed on return; whatever the route keeps.
@@ -2424,8 +2517,8 @@ def route_and_deliver(sender, to, body, header_note=None):
             card, deliver = card_route(to)
             if deliver is deliver_local:
                 return deliver_local(card, sender, to, body, header_note, deadline=deadline)
-    if deliver is deliver_codex:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-3, also after a turn to codex
-        return deliver_codex(card, sender, to, body, header_note, deadline=deadline)
+    if deliver is deliver_codex or deliver is deliver_ssh:  # SSH S1 (Claude Opus 5.5, unreviewed): ssh's too (DEBT-2)
+        return deliver(card, sender, to, body, header_note, deadline=deadline)
     return deliver(card, sender, to, body, header_note)
 
 
@@ -4113,11 +4206,541 @@ def ring_codex(card, sender, to, count):
     return None
 
 
+# ---------- ssh route: deliver_ssh and the outbox (C3, D22, D23, D25) ----------
+# SSH S1 (Claude Opus 5.5, unreviewed). Every ssh send leaves a record: it
+# is published into outbox/to-<to>/ first, then sent, then filed in sent/
+# or refused/ by the far tc's answer.
+
+# Where an ssh card sends: its target (user@host or host), the far tc's
+# path as the first word of the remote command (C3's quoting), and why the
+# card cannot be used (None when it can; then the other two are None).
+SshWhere = collections.namedtuple("SshWhere", "target remote why")
+# How one ssh run came out (ssh_run): kind is SSH_SENT, SSH_KEPT or
+# SSH_REFUSED; code the exit code (None when ssh never finished); out and
+# err the far side's stdout and stderr; reason, for a kept message, why in
+# words.
+SshOutcome = collections.namedtuple("SshOutcome", "kind code out err reason")
+# One message waiting directly in an outbox/to-<to>/: its number and
+# sender (from its name), the name it is for, its path and its lstat
+# result.
+OutboxFile = collections.namedtuple("OutboxFile", "n sender to path st")
+
+
+def ssh_where(card):
+    """The SshWhere for an ssh card: its target and the remote command's first word, or why it cannot be used.
+
+    C3: a remote path that starts with ~/ goes bare as ~/, the rest
+    quoted (shlex.quote), since a quoted ~ never expands on the far side;
+    any other path is quoted whole, so a space or a quote in it stays one
+    word. A hand-made card is checked again here, as tc card checks it
+    (C1): the target must match SSH_TARGET_PATTERN (no leading dash on
+    either part, no spaces), and the path must be a string that starts
+    with / or ~/, so ~ alone and ~user/... are refused, never guessed
+    (D13). A card with no ssh field, or no tc path in it, is refused too:
+    tc never guesses where the far tc lives.
+
+    @interacts  none; reads the card dict.
+    @deps       printable; shlex; SSH_TARGET_PATTERN, REMOTE_TC_PREFIXES.
+    @complexity O(c) over c characters of the target and the path.
+    @alloc      the quoted path and one SshWhere, returned.
+    """
+    ssh = card.get("ssh") if isinstance(card, dict) else None
+    if not isinstance(ssh, dict):
+        return SshWhere(None, None, "has no ssh field with a target and a tc path")
+    target, path = ssh.get("target"), ssh.get("tc")
+    if not isinstance(target, str) or not SSH_TARGET_PATTERN.fullmatch(target):
+        return SshWhere(None, None, f'has a bad ssh target "{printable(target)}": user@host or host, no '
+                                    f'leading dash on either part, no spaces')
+    if not isinstance(path, str) or not path.startswith(REMOTE_TC_PREFIXES):
+        return SshWhere(None, None, f'has a bad remote tc path "{printable(path)}": it starts with / or ~/, '
+                                    f'and ~ alone or ~user/... is refused')
+    remote = "~/" + shlex.quote(path[2:]) if path.startswith("~/") else shlex.quote(path)
+    return SshWhere(target, remote, None)
+
+
+def queue_route(to):
+    """The SshWhere for `to`'s card as it stands now: where tc flush and the queue check send `to`'s outbox mail.
+
+    The queue is keyed by target (C3), and a file's target is its `to`'s
+    card at the time it is looked at. A card that is missing, unreadable
+    or not route ssh gives why in words, so its mail stays in the outbox
+    and is never sent another way.
+
+    @interacts  reads cards/<to>.json (read_card). Writes nothing.
+    @deps       read_card, ssh_where, printable; SshWhere.
+    @complexity O(1): one small file.
+    @alloc      one SshWhere, returned.
+    """
+    try:
+        card = read_card(to)
+    except ValueError as problem:
+        return SshWhere(None, None, f"its card is unreadable ({problem})")
+    if card is None:
+        return SshWhere(None, None, f"{to} has no card now")
+    if card.get("route") != "ssh":
+        return SshWhere(None, None, f"{to}'s card no longer says ssh (it says route "
+                                    f"{printable(card.get('route'))})")
+    return ssh_where(card)
+
+
+def owned_by_me(st):
+    """True when the stat result `st` belongs to the Linux user running tc (D22: each member sends only their own outbox files).
+
+    A function of its own so a test can stand a second member's file in
+    for one this user owns: one user cannot make a file another user owns.
+
+    @interacts  reads this process's effective user id.
+    @deps       os.
+    @complexity O(1).
+    @alloc      none.
+    """
+    return st.st_uid == os.geteuid()
+
+
+def outbox_files():
+    """Every message waiting directly in an outbox/to-<name>/, sorted by number, as OutboxFiles; and (path, why) for each entry left out.
+
+    Only real folders named to-<name> with a C0 name are entered (lstat,
+    never a link), and only regular files named NNNNNN-from-<sender>.md
+    with a C0 sender count (message_files: a link, a FIFO or a folder is
+    left out with words). sent/ and refused/ are below, never listed
+    here. Whoever owns a file, it is listed: the caller asks owned_by_me.
+
+    @interacts  lists outbox/ and each outbox/to-<name>/, lstats each
+                entry (real_folder, message_files). Writes nothing.
+    @deps       real_folder, message_files, valid_name; os; ROOT,
+                OUTBOX_NAME, MESSAGE_NAME_PATTERN, OutboxFile.
+    @complexity O(q + w log w) over q entries in outbox/ (one per name
+                ever sent to over ssh, a few dozen) and w files waiting
+                (single digits, unless a target has been down a while).
+    @alloc      two lists, returned.
+    """
+    top = ROOT / OUTBOX_NAME
+    found, left_out = [], []
+    try:
+        names = os.listdir(top)
+    except FileNotFoundError:
+        return found, left_out
+    except OSError as err:
+        return found, [(top, f"tc could not list it ({err.strerror})")]
+    for entry in sorted(names):
+        if not entry.startswith("to-"):
+            continue
+        box = top / entry
+        if not valid_name(entry[len("to-"):]) or not real_folder(box):
+            left_out.append((box, "not a real folder named to-<name>, so tc never enters it"))
+            continue
+        messages, skipped, problem = message_files(box)
+        left_out += skipped
+        if problem is not None and not messages and not skipped:
+            left_out.append((box, problem))
+        for path, st in messages:
+            named = MESSAGE_NAME_PATTERN.fullmatch(path.name)
+            if named is None or not valid_name(named.group(2)):
+                left_out.append((path, "not named like a message (NNNNNN-from-<sender>.md)"))
+                continue
+            found.append(OutboxFile(int(named.group(1)), named.group(2), entry[len("to-"):], path, st))
+    found.sort(key=lambda f: (f.n, str(f.path)))
+    return found, left_out
+
+
+def queue_ahead(target, n):
+    """How many of this user's own outbox messages for `target` wait ahead of number `n` ("queue order first", C3, D22).
+
+    A file counts when this user owns it (owned_by_me), its number is
+    below `n`, and its `to`'s card points at `target` now (queue_route).
+    Other members' files never count: each member's queue is their own.
+
+    @interacts  lists the outbox (outbox_files) and reads the card of each
+                name with a file that could count. Writes nothing.
+    @deps       outbox_files, owned_by_me, queue_route.
+    @complexity O(q + w log w) as outbox_files, plus one card read per
+                name among the files counted.
+    @alloc      the outbox lists and one dict of routes, freed on return.
+    """
+    routes, ahead = {}, 0
+    for f in outbox_files()[0]:
+        if f.n >= n or not owned_by_me(f.st):
+            continue
+        if f.to not in routes:
+            routes[f.to] = queue_route(f.to)
+        ahead += routes[f.to].target == target
+    return ahead
+
+
+@contextlib.contextmanager
+def send_lock(target, deadline=None):
+    """Hold this user's send lock for `target` for the `with` block: yields (held, why).
+
+    outbox/SEND_LOCK_NAME, one per Linux user per target, so one tc at a
+    time sends a user's queue for a target, in order, and never sends one
+    file twice at once. held is True once the flock is held; False when it
+    was not taken by `deadline` (flock_within: another send or a flush is
+    sending to that target), with why None; or False with words when the
+    lock file would not open (a link or a FIFO at its name, D17, D19:
+    open_regular refuses both). A caller that cannot hold it keeps its
+    message in the outbox (exit 4), never exits here: the message is
+    already published by then. Made SHARED_OWNED_FILE_MODE under a shared
+    mailbox, so init finds it already right.
+
+    The lock is held through the ssh run, which may take
+    SSH_SEND_SECONDS. Nobody waits on it past `deadline`: a send that
+    finds it held keeps its message queued, and flush leaves that target
+    for the next flush. Neither the inbox locks nor mail/.seq is ever held
+    while ssh runs.
+
+    @interacts  reads ROOT/.shared and makes outbox/ (make_folder); opens
+                or makes outbox/.send-<uid>-<key>.lock (open_regular) and
+                waits for its flock no later than `deadline`
+                (flock_within); the kernel drops it when the block ends
+                or the process dies.
+    @deps       make_folder, open_regular, flock_within; contextlib,
+                fcntl, hashlib, os; ROOT, OUTBOX_NAME, SEND_LOCK_NAME,
+                SEND_LOCK_KEY_CHARS, SHARED_OWNED_FILE_MODE,
+                NEW_FILE_MODE.
+    @complexity O(t) over t characters of the target, plus waiting until
+                `deadline` at most.
+    @alloc      one open lock file for the block; the lock file, made on
+                first use and kept.
+    """
+    top = ROOT / OUTBOX_NAME
+    share = make_folder(top)
+    key = hashlib.sha256(target.encode()).hexdigest()[:SEND_LOCK_KEY_CHARS]
+    path = top / SEND_LOCK_NAME.format(uid=os.geteuid(), key=key)
+    mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
+    try:
+        fd = open_regular(path, os.O_WRONLY | os.O_APPEND, mode)
+    except (OSError, ValueError) as err:
+        why = "it is a symlink" if isinstance(err, OSError) and err.errno == errno.ELOOP else (
+            err.strerror if isinstance(err, OSError) and err.strerror else str(err))
+        yield False, f"tc could not open the send lock {path} ({why})"
+        return
+    with open(fd, "a") as lock:
+        yield flock_within(lock, fcntl.LOCK_EX, deadline), None
+
+
+def origin_token():
+    """This mailbox's origin token (D25): 2 x ORIGIN_TOKEN_BYTES hex digits, made once at outbox/ORIGIN_TOKEN_NAME and read back by every later ssh send and flush.
+
+    Made from os.urandom, never from the hostname. Published like a
+    message: written whole to a .tmp of this process's own, hard-linked
+    to its name (which never replaces a token another send made first,
+    and then that one is the mailbox's), and the .tmp removed. Raises
+    ValueError, with words naming the file, when it is not a regular
+    file holding one line of hex (a hand-made or planted one: tc never
+    replaces it), and OSError when it cannot be made.
+
+    @interacts  reads ROOT/.shared and makes outbox/ (make_folder); reads
+                outbox/.origin-token (read_regular_file), or creates
+                outbox/.origin-token.<pid>.tmp, links it to
+                outbox/.origin-token, removes the .tmp and reads it.
+    @deps       make_folder, read_regular_file, write_new_file; os; ROOT,
+                OUTBOX_NAME, ORIGIN_TOKEN_NAME, ORIGIN_TOKEN_BYTES,
+                ORIGIN_TOKEN_PATTERN, ORIGIN_TOKEN_READ_MAX_BYTES,
+                SHARED_OWNED_FILE_MODE, NEW_FILE_MODE.
+    @complexity O(1): one small file.
+    @alloc      the token string, returned; the token file, kept.
+    """
+    top = ROOT / OUTBOX_NAME
+    share = make_folder(top)
+    path = top / ORIGIN_TOKEN_NAME
+    try:
+        try:
+            text = read_regular_file(path, ORIGIN_TOKEN_READ_MAX_BYTES)
+        except FileNotFoundError:
+            tmp = top / f"{ORIGIN_TOKEN_NAME}.{os.getpid()}.tmp"
+            mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
+            write_new_file(tmp, f"{os.urandom(ORIGIN_TOKEN_BYTES).hex()}\n", mode)
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                pass  # another send made it first: that one is the mailbox's
+            finally:
+                tmp.unlink()  # this call's own .tmp, made just above
+            text = read_regular_file(path, ORIGIN_TOKEN_READ_MAX_BYTES)
+    except ValueError as err:
+        raise ValueError(f"the origin token {path} is unreadable ({err})") from err
+    token = text.strip()
+    if not ORIGIN_TOKEN_PATTERN.fullmatch(token):
+        raise ValueError(f"the origin token {path} does not hold {2 * ORIGIN_TOKEN_BYTES} hex digits on one line")
+    return token
+
+
+def printable_lines(text):
+    """`text` with each line through printable(), the lines kept apart: what tc prints of anything a far tc said.
+
+    @interacts  none; string work only.
+    @deps       printable.
+    @complexity O(c) over c characters.
+    @alloc      one string, returned.
+    """
+    return "\n".join(printable(line) for line in text.splitlines())
+
+
+def ssh_run(where, sender, to, origin, text):
+    """Send one message over ssh to `where` (an SshWhere) and sort the far side's answer: an SshOutcome.
+
+    The argv is C3's, with `--origin <id>` added for D25: ssh -T -o
+    BatchMode=yes -o ConnectTimeout=SSH_CONNECT_SECONDS -- <target>
+    "<remote tc> send --from <sender> --to <to> --origin <id>", the words
+    after the remote tc joined with shlex.join. `--` comes right before
+    the target, so no target reads as an option. The body goes on stdin,
+    never on the command line; output is decoded with errors="replace",
+    so odd bytes from the far side never fail a send. Sorted: exit 0 is
+    SSH_SENT; SSH_CONNECT_FAILED (255), a far EXIT_BUSY (10, D23), a run
+    past SSH_SEND_SECONDS, ssh killed by a signal, or ssh that would not
+    start is SSH_KEPT, with why; any other exit is the far tc's answer,
+    SSH_REFUSED (6 bad name, 7 refused by its gate, 8 too large, and the
+    rest).
+
+    @interacts  runs `ssh` (found on PATH) once, feeding `text` on its
+                stdin and reading its stdout and stderr, for at most
+                SSH_SEND_SECONDS, then kills it (subprocess.run). Writes
+                nothing here.
+    @deps       subprocess, shlex; SSH_CONNECT_SECONDS, SSH_SEND_SECONDS,
+                SSH_CONNECT_FAILED, EXIT_BUSY, SSH_SENT, SSH_KEPT,
+                SSH_REFUSED, SshOutcome; the ssh client.
+    @complexity O(b) over b bytes of `text`, plus one ssh run of at most
+                SSH_SEND_SECONDS.
+    @alloc      the argv, the captured output and one SshOutcome,
+                returned; one child and its pipes, reaped and closed
+                before return.
+    """
+    argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_CONNECT_SECONDS}",
+            "--", where.target,
+            where.remote + " " + shlex.join(["send", "--from", sender, "--to", to, "--origin", origin])]
+    try:
+        done = subprocess.run(argv, input=text, capture_output=True, encoding="utf-8", errors="replace",
+                              timeout=SSH_SEND_SECONDS)
+    except subprocess.TimeoutExpired:
+        return SshOutcome(SSH_KEPT, None, "", "", f"no answer in {SSH_SEND_SECONDS} s")
+    except OSError as err:
+        return SshOutcome(SSH_KEPT, None, "", "", f"could not run ssh ({err.strerror})")
+    code, first = done.returncode, (done.stderr.strip().splitlines() or [""])[0]
+    if code == 0:
+        return SshOutcome(SSH_SENT, code, done.stdout, done.stderr, None)
+    if code == SSH_CONNECT_FAILED:
+        return SshOutcome(SSH_KEPT, code, done.stdout, done.stderr,
+                          printable(first) if first else f"ssh exited {SSH_CONNECT_FAILED}")
+    if code == EXIT_BUSY:
+        return SshOutcome(SSH_KEPT, code, done.stdout, done.stderr,
+                          f"the far tc was busy, exit {EXIT_BUSY}" + (f": {printable(first)}" if first else ""))
+    if code < 0:
+        return SshOutcome(SSH_KEPT, code, done.stdout, done.stderr, f"ssh was killed by signal {-code}")
+    return SshOutcome(SSH_REFUSED, code, done.stdout, done.stderr, None)
+
+
+def file_away(path, folder):
+    """Move the outbox message at `path` into `folder` beside it (sent/ or refused/) without replacing anything: its new path. Raises OSError.
+
+    The folder is made through make_folder (sticky under a shared
+    mailbox) and lstat()ed: a link or anything but a folder there is
+    refused. The file is hard-linked into it, never renamed, since a
+    rename replaces what holds its target (D25: a move into sent/ or
+    refused/ never replaces a file already there); then its outbox name
+    is removed. A name the folder already holds takes BY_HAND_NAME with
+    the first free k (by_hand_name, cut to the folder's name limit), up
+    to PUBLISH_MAX_TRIES names, then FileExistsError. The link never
+    follows a link at `path`.
+
+    @interacts  reads ROOT/.shared and makes the folder (make_folder,
+                which refuses, exit 1, a shared folder in the wrong
+                group); lstats it; reads its name limit; links the file
+                in and unlinks its outbox name.
+    @deps       make_folder, by_hand_name; os, stat, errno;
+                PUBLISH_MAX_TRIES.
+    @complexity O(k) over k names already taken (none in an honest
+                outbox).
+    @alloc      one path per name tried; the new one, returned.
+    """
+    dest = path.parent / folder
+    make_folder(dest)
+    if not stat.S_ISDIR(os.lstat(dest).st_mode):
+        raise OSError(errno.ENOTDIR, "a link or not a folder, which tc never follows", str(dest))
+    limit = os.pathconf(dest, "PC_NAME_MAX")
+    for k in range(PUBLISH_MAX_TRIES):
+        filed = dest / (path.name if k == 0 else by_hand_name(k, path.name, limit))
+        try:
+            os.link(path, filed, follow_symlinks=False)
+        except FileExistsError:
+            continue
+        os.unlink(path)  # its outbox name; the message stays at `filed`
+        return filed
+    raise FileExistsError(errno.EEXIST, f"{PUBLISH_MAX_TRIES} names already taken", str(dest))
+
+
+def file_outcome(path, where, outcome):
+    """File the outbox message at `path` by the far side's answer `outcome`: (exit, words, warnings), C3's.
+
+    SSH_SENT: into sent/ (file_away); exit 0, words `sent over ssh to
+    <target>: <remote stdout>`, or `sent over ssh to <target>` alone when
+    the far tc printed nothing. A message sent and not filed (the move
+    failed) stays waiting, with a warning: the next tc flush sends it
+    again and the far side answers already delivered (D25). SSH_KEPT:
+    left where it is; exit 4, words `could not reach <target> (<reason>);
+    kept in outbox: <path>. Run: tc flush`. SSH_REFUSED: into refused/,
+    with the far exit code and stderr in a note beside it
+    (REFUSAL_NOTE_SUFFIX); exit the far code, words the far stderr and
+    then where the message went; nothing retries it. What the far side
+    said is printed through printable_lines.
+
+    @interacts  see file_away; for a refusal, creates the note beside
+                the message (write_new_file).
+    @deps       file_away, write_new_file, printable_lines, mailbox_share;
+                EXIT_QUEUED, OUTBOX_SENT, OUTBOX_REFUSED,
+                REFUSAL_NOTE_SUFFIX, SHARED_OWNED_FILE_MODE,
+                NEW_FILE_MODE, SSH_SENT, SSH_KEPT.
+    @complexity O(s) over s characters the far side printed.
+    @alloc      the words and warnings, returned; the filed message and
+                its note, kept.
+    """
+    if outcome.kind == SSH_KEPT:
+        return (EXIT_QUEUED, f"could not reach {where.target} ({outcome.reason}); kept in outbox: {path}. "
+                             f"Run: tc flush", [])
+    if outcome.kind == SSH_SENT:
+        answer = printable_lines(outcome.out.strip())
+        words = f"sent over ssh to {where.target}" + (f": {answer}" if answer else "")
+        try:
+            file_away(path, OUTBOX_SENT)
+        except OSError as err:
+            return (0, words, [f"sent, but {path} could not be filed in {OUTBOX_SENT}/ ({err.strerror}); it "
+                               f"stays in the outbox, so the next tc flush sends it again and the far side "
+                               f"answers already delivered"])
+        return (0, words, [])
+    said = printable_lines(outcome.err.strip())
+    lead = f"{said}\n" if said else ""
+    try:
+        filed = file_away(path, OUTBOX_REFUSED)
+    except OSError as err:
+        return (outcome.code, f"{lead}refused by {where.target} (exit {outcome.code}); {path} could not be filed "
+                              f"in {OUTBOX_REFUSED}/ ({err.strerror}), so it stays in the outbox and the next "
+                              f"tc flush sends it again", [])
+    warnings = []
+    note = filed.with_name(filed.name + REFUSAL_NOTE_SUFFIX)
+    mode = SHARED_OWNED_FILE_MODE if mailbox_share() is not None else NEW_FILE_MODE
+    try:
+        write_new_file(note, f"the far tc exited {outcome.code}; its stderr:\n{outcome.err}", mode)
+    except OSError as err:
+        warnings.append(f"the far stderr could not be kept beside it at {note} ({err.strerror})")
+    return (outcome.code, f"{lead}refused by {where.target} (exit {outcome.code}); filed in {filed}, and "
+                          f"nothing retries it", warnings)
+
+
+def outbox_text(body):
+    """The text an ssh send puts on ssh's stdin: the body as a message holds it, trailing whitespace cut, one newline at the end.
+
+    The same bytes a later tc flush reads back from the outbox file, so a
+    first try and a retry send exactly the same message.
+
+    @interacts  none; string work only.
+    @deps       none.
+    @complexity O(b) over b bytes of body.
+    @alloc      one string, returned.
+    """
+    return f"{body.rstrip()}\n"
+
+
+def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
+    """Route ssh (C3): publish the message in the outbox, then send it over ssh to the far tc, then file it by the answer. A Delivery.
+
+    1. The card is checked (ssh_where): a bad target or remote path is
+       Delivery exit 6, words, nothing written and ssh never run (D13).
+    2. The mailbox's origin token is read, or made (origin_token); one
+       that cannot be is Delivery exit 1, nothing written.
+    3. The message is published in outbox/to-<to>/ (D25) exactly as local
+       mail is (publish_message: same mail/.seq, same header, never a
+       replace, sent/ and refused/ as its history), as this user, at
+       SHARED_OWNED_FILE_MODE under a shared mailbox. From here every
+       send leaves a record.
+    4. This user's send lock for the target is taken (send_lock), no
+       later than `deadline`. Not taken: Delivery exit 4, kept, words
+       saying another tc is sending to the target.
+    5. Queue order first (C3, D22): when this user's own outbox already
+       holds older mail for the same target (queue_ahead), the message
+       stays queued behind it without trying, exit 4, `<target> has <n>
+       waiting in the outbox; queued behind them. Run: tc flush`.
+    6. Else one ssh run (ssh_run) with --origin <token>-<number>-<sender>
+       (D25), and the message is filed by the answer (file_outcome), all
+       under the send lock: sent/ and exit 0; kept, exit 4 (255, a
+       timeout, a far 10 busy, D23); refused/ with the far stderr beside
+       it and the far code. Then the lock is let go.
+
+    `deadline` is the command's lock_deadline (route_and_deliver), so
+    mail/.seq and the send lock together wait at most LOCK_WAIT_SECONDS;
+    None takes one here. No inbox lock is taken: there is no local inbox.
+    Neither mail/.seq's lock nor any inbox lock is held while ssh runs;
+    the send lock is (see send_lock). A crash after the send and before
+    the move leaves the message waiting: tc flush sends it again, a
+    duplicate the origin id turns into `already delivered`, never a loss.
+
+    @interacts  reads ROOT/.shared and makes outbox/, outbox/to-<to>/ and,
+                when it files one, sent/ or refused/ (make_folder);
+                lstats outbox/to-<to>/ (real_folder); reads or makes the
+                origin token; takes numbers from mail/.seq (next_seq,
+                publish_message) and publishes one file in
+                outbox/to-<to>/; takes the send lock; lists the outbox and
+                reads the card of each name waiting (queue_ahead); runs
+                ssh once (ssh_run); links the file into sent/ or refused/
+                and removes its outbox name, writing the far stderr beside
+                a refused one (file_outcome).
+    @deps       ssh_where, origin_token, lock_deadline, make_folder,
+                real_folder, next_seq, publish_message, send_lock,
+                queue_ahead, ssh_run, file_outcome, outbox_text, Delivery;
+                ROOT, CARDS, OUTBOX_NAME, OUTBOX_SENT, OUTBOX_REFUSED,
+                SHARED_OWNED_FILE_MODE, NEW_FILE_MODE, EXIT_BAD_NAME,
+                EXIT_REFUSED, EXIT_QUEUED.
+    @complexity O(b) over b bytes of body per publish try (one in an
+                honest mailbox), plus queue_ahead's O(q + w log w), plus
+                one ssh run of at most SSH_SEND_SECONDS; mail/.seq and the
+                send lock wait at most LOCK_WAIT_SECONDS in all.
+    @alloc      the message text while written; one outbox file, kept in
+                outbox/to-<to>/, sent/ or refused/ (D25); a refusal's
+                note, kept; one open lock file while the lock is held.
+    """
+    where = ssh_where(card)
+    if where.why is not None:
+        return Delivery(EXIT_BAD_NAME, f"tc send: the card {CARDS / f'{to}.json'} {where.why}; nothing sent. "
+                                       f"Write it again with tc card {to} --ssh <target>.", [])
+    if deadline is None:
+        deadline = lock_deadline()
+    try:
+        token = origin_token()
+    except (OSError, ValueError) as err:
+        why = (f"{err.strerror}" + (f" at {err.filename}" if err.filename else "")
+               if isinstance(err, OSError) else str(err))
+        return Delivery(EXIT_REFUSED, f"tc send: could not read or make the origin token ({why}); nothing sent", [])
+    box = ROOT / OUTBOX_NAME / f"to-{to}"
+    share = make_folder(box)
+    if not real_folder(box):
+        return Delivery(EXIT_REFUSED, f"tc send: {box} is a symlink or not a folder; tc never follows it, so "
+                                      f"nothing was written there", [])
+    mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
+    n = next_seq(deadline)
+    published = publish_message(box, (OUTBOX_SENT, OUTBOX_REFUSED), n, sender, to, body, header_note, mode,
+                                deadline)
+    if published.refusal is not None:
+        return published.refusal
+    path, warnings = published.path, published.warnings
+    with send_lock(where.target, deadline) as (held, why):
+        if not held:
+            busy = why if why is not None else "another tc is sending to it right now (a send or a tc flush)"
+            return Delivery(EXIT_QUEUED, f"{where.target} was not tried: {busy}; kept in outbox: {path}. "
+                                         f"Run: tc flush", warnings)
+        ahead = queue_ahead(where.target, published.n)
+        if ahead:
+            return Delivery(EXIT_QUEUED, f"{where.target} has {ahead} waiting in the outbox; queued behind them. "
+                                         f"Run: tc flush", warnings)
+        outcome = ssh_run(where, sender, to, f"{token}-{published.n}-{sender}", outbox_text(body))
+        code, words, filed = file_outcome(path, where, outcome)
+    return Delivery(code, words, warnings + filed)
+
+
 # One function per route; a card's route picks one. A route not here
 # answers "route <route> is not built yet" (C2). Each lane adds its own line.
 ROUTES = {
     "local": deliver_local,
     "codex": deliver_codex,
+    "ssh": deliver_ssh,  # SSH S1 (Claude Opus 5.5, unreviewed): C3
 }
 
 

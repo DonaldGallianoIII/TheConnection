@@ -247,21 +247,25 @@ class RouterTest(unittest.TestCase):
         self.assertTrue(out.getvalue().startswith("sent #1 to b: "), out.getvalue())
 
     def test_a_route_not_built_yet_is_refused_and_writes_nothing(self):
-        """An ssh card, and a hand-made card naming route pigeon: exit 1, `route <r> is not built yet`.
+        """A hand-made card naming route pigeon: exit 1, `route pigeon is not built yet`.
 
-        @interacts  one tc card, one hand-written card, two sends.
+        SSH S1 (Claude Opus 5.5, unreviewed): the ssh card this test also
+        sent to is built now; its send is
+        tests/test_ssh_route.py's
+        test_a_card_from_tc_card_is_sent_over_ssh_now_the_route_is_built,
+        on the fake.
+
+        @interacts  one hand-written card, one send.
         @deps       _root.TcRoot.tc, files_under, seq_of.
         @complexity O(1).
         @alloc      one TcRoot.
         """
         with _root.TcRoot() as root:
-            root.tc("card", "x", "--ssh", "u@h")
+            (root.path / "cards").mkdir()
             (root.path / "cards" / "p.json").write_text(json.dumps({"name": "p", "route": "pigeon"}))
             before, seq_before = files_under(root), seq_of(root)
-            ssh = root.tc("send", "--from", "a", "--to", "x", "hi")
             pigeon = root.tc("send", "--from", "a", "--to", "p", "hi")
             after, seq_after = files_under(root), seq_of(root)
-        self.assertEqual(ssh, (EXIT_REFUSED, "", NOT_BUILT_WORDS.format(route="ssh")))
         self.assertEqual(pigeon, (EXIT_REFUSED, "", NOT_BUILT_WORDS.format(route="pigeon")))
         self.assertEqual(after, before, f"a refused route wrote {sorted(set(after) - set(before))}")
         self.assertIsNone(seq_after, "a refused route took a number")
