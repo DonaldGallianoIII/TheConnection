@@ -39,7 +39,8 @@
  *             pagehide and made again on a pageshow from the back/forward
  *             cache; two click listeners, released with their buttons
  * @deps       look.js, theme.css; serve.py's /feed (C5, C6)
- * @complexity one poll: O(n log n + l + r) in patchBoard over n nodes, l
+ * @complexity one poll: O(n log n + l + r), plus look.js routeAround's
+ *             search per routed pair, in patchBoard over n nodes, l
  *             links and r recent wires (tens each)
  * @alloc      one board: its drawn nodes and wires are patched in place,
  *             and each answer builds one full view that replaces the last

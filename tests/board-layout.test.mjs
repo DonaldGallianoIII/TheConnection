@@ -7,21 +7,27 @@
  * check: fourteen names on a 1152 px desktop canvas and a 358 px phone
  * window, every box inside the width with no overlap and no text under
  * MIN_TEXT_PX, read against theme.css's own font sizes; and createFit,
- * which sizes the board from the ResizeObserver entry.
+ * which sizes the board from the ResizeObserver entry. Round 2 adds the
+ * frame growing to the board, and on the 14-name feeds at both widths: no
+ * wire or connector entering a node box, no label on a label or a box, a
+ * parent's mail running down its connector, and two boxes in one row joined
+ * straight across.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
  * @interacts  imports board/look.js; reads board/demo-script.json and
  *             board/theme.css as text; no DOM (a fake observer and kit)
  * @deps       node:test, node:assert, node:fs (Node 18+)
- * @complexity O(n^2) per shape over n <= 14 nodes, for the pairwise overlap check
+ * @complexity O(n^2) per shape over n <= 14 nodes, for the pairwise overlap
+ *             check; O(r * p * n) for the runs over r runs of p points, and
+ *             O(e^2 + e * n) for the labels over e labels
  * @alloc      the layouts, dropped at the end of each test
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  layoutLevels, layoutWidth, roleTitle, fitTransform, boardView, createBoard, createFit, STATES, CONFIG,
+  layoutLevels, layoutWidth, roleTitle, fitTransform, boardView, createBoard, createFit, levelPort, STATES, CONFIG,
 } from '../board/look.js';
 
 /** One feed node with the fields the layout reads. @complexity O(1)  @alloc one object */
@@ -285,4 +291,147 @@ test('createFit takes the canvas size from the ResizeObserver entry, never from 
   report([{ contentRect: { width: DESK_W - CONFIG.NODE_W, height: CANVAS_H } }]);
   assert.notDeepEqual(made.get('hub').view.pos, deskHub, 'a width change did not lay the board out again');
   fit.stop();
+});
+
+// Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+// Round 2, items 2 and 3, from the architect's screenshots: wires looped
+// through boxes and labels sat on each other and on node text. The
+// 14-name feeds at the desktop and phone widths, with every pair's newest
+// message fresh, so every mail wire flows and wants a label (the worst
+// case for labels). `mixed` is the screenshot's own shape.
+
+/** One feed node with an unread count, as serve.py gives it. @complexity O(1)  @alloc one object */
+function fed(id, role, source, level, parent, extra) {
+  return { ...n(id, role, source, level, parent), unread: 0, ...extra };
+}
+
+/**
+ * A feed of `nodes` with one mailbox link per pair and a fresh message on
+ * each, from the pair's first name to its second.
+ * @complexity O(p) over p pairs  @alloc one feed
+ */
+function routedFeed(nodes, pairs) {
+  return {
+    nodes,
+    links: pairs.map(([x, y]) => ({ from: x < y ? x : y, to: x < y ? y : x, kind: 'mailbox' })),
+    wires: pairs.map(([x, y], i) => ({ from: x, to: y, seq: i + 1, age_s: 0 })),
+  };
+}
+
+const ROUTED = {
+  mixed: routedFeed([
+    fed('a', 'orchestrator', 'declared', 0, null), fed('b', 'orchestrator', 'declared', 1, 'a', { reports_to: 'a' }),
+    ...['docs', 'e1', 'e2', 'e3'].map((id) => fed(id, 'worker', 'declared', 1, 'a', { reports_to: 'a' })),
+    ...['c', 'd'].map((id) => fed(id, 'worker', 'declared', 2, 'b', { reports_to: 'b' })),
+    fed('z', 'orchestrator', 'declared', 0, null),
+    ...['y1', 'y2', 'y3'].map((id) => fed(id, 'worker', 'declared', 1, 'z', { reports_to: 'z' })),
+    fed('p1', 'peer', 'inferred', 0, null), fed('p2', 'peer', 'inferred', 0, null),
+  ], [['b', 'a'], ['a', 'docs'], ['c', 'b'], ['y1', 'z'], ['z', 'y2'], ['z', 'y3'], ['a', 'z'], ['a', 'e1'],
+    ['a', 'e2'], ['a', 'e3'], ['p2', 'p1'], ['b', 'd']]),
+  // The hub mails every worker, and three pairs of workers in different rows mail each other.
+  star: routedFeed(FOURTEEN.star.map((x) => fed(x.id, x.role, x.role_source, x.level, x.parent)), [
+    ...Array.from({ length: 13 }, (_, i) => ['hub', `w${i + 1}`]), ['w1', 'w13'], ['w2', 'w7'], ['w6', 'w12'],
+  ]),
+  // Neighbors, far ends, and pairs across rows.
+  peers: routedFeed(FOURTEEN.peers.map((x) => fed(x.id, x.role, x.role_source, x.level, x.parent)), [
+    ['p1', 'p2'], ['p1', 'p14'], ['p3', 'p9'], ['p5', 'p6'], ['p7', 'p13'], ['p2', 'p11'],
+  ]),
+};
+const ROUTE_WIDTHS = [DESK_W, PHONE_W];
+
+/** A node's box from its view. @complexity O(1)  @alloc one object */
+const boxOf = (v) => ({ x: v.pos.x, y: v.pos.y, w: CONFIG.NODE_W, h: CONFIG.NODE_H, id: v.id });
+
+/** True when a level or upright piece from p to q enters the inside of box b. @complexity O(1)  @alloc none */
+function pieceEnters(p, q, b) {
+  if (p.y === q.y) return p.y > b.y && p.y < b.y + b.h && Math.max(p.x, q.x) > b.x && Math.min(p.x, q.x) < b.x + b.w;
+  return p.x > b.x && p.x < b.x + b.w && Math.max(p.y, q.y) > b.y && Math.min(p.y, q.y) < b.y + b.h;
+}
+
+/** True when point p lies on box b's edge. @complexity O(1)  @alloc none */
+function onEdge(p, b) {
+  const inX = p.x >= b.x && p.x <= b.x + b.w;
+  const inY = p.y >= b.y && p.y <= b.y + b.h;
+  return (inX && (p.y === b.y || p.y === b.y + b.h)) || (inY && (p.x === b.x || p.x === b.x + b.w));
+}
+
+/** True when two label or node boxes overlap. @complexity O(1)  @alloc none */
+function boxesOverlap(p, q) {
+  return p.x < q.x + q.w && q.x < p.x + p.w && p.y < q.y + q.h && q.y < p.y + p.h;
+}
+
+/**
+ * Every run on a board view, named: each edge's, and each node's connector.
+ * @complexity O(n + e)  @alloc one list
+ */
+function runsOf(view) {
+  return [
+    ...Object.values(view.edges).map((e) => ({ name: e.id, points: e.points, from: e.from, to: e.to })),
+    ...Object.values(view.nodes).filter((v) => v.connector).map((v) => ({
+      name: `connector to ${v.id}`, points: v.connector.points, to: v.id,
+    })),
+  ];
+}
+
+test('no wire or connector enters a node box, on the 14-name feeds at desktop and phone widths', () => {
+  for (const [shape, feed] of Object.entries(ROUTED)) {
+    for (const width of ROUTE_WIDTHS) {
+      const view = boardView(feed, layoutWidth(width));
+      const boxes = Object.values(view.nodes).map(boxOf);
+      const runs = runsOf(view);
+      assert.ok(runs.length >= feed.links.length, `${shape} at ${width} px draws ${runs.length} runs`);
+      for (const run of runs) {
+        const where = `${shape} at ${width} px: ${run.name}`;
+        assert.ok(run.points.length >= 2, `${where} has no run`);
+        for (let i = 1; i < run.points.length; i += 1) {
+          const [p, q] = [run.points[i - 1], run.points[i]];
+          assert.ok(p.x === q.x || p.y === q.y, `${where}: a piece is neither level nor upright`);
+          for (const b of boxes) assert.ok(!pieceEnters(p, q, b), `${where} enters ${b.id}`);
+        }
+        assert.ok(onEdge(run.points.at(-1), boxOf(view.nodes[run.to])), `${where} does not end on ${run.to}'s edge`);
+        if (run.from) assert.ok(onEdge(run.points[0], boxOf(view.nodes[run.from])), `${where} does not start on ${run.from}'s edge`);
+      }
+    }
+  }
+});
+
+test('no label overlaps another label or a node box, on the 14-name feeds at desktop and phone widths', () => {
+  for (const [shape, feed] of Object.entries(ROUTED)) {
+    for (const width of ROUTE_WIDTHS) {
+      const where = `${shape} at ${width} px`;
+      const view = boardView(feed, layoutWidth(width));
+      const boxes = Object.values(view.nodes).map(boxOf);
+      const labeled = Object.values(view.edges).filter((e) => e.label);
+      assert.equal(labeled.length, feed.links.length, `${where}: a flowing wire has no label words`);
+      const placed = labeled.filter((e) => e.at);
+      assert.ok(placed.length > 0, `${where}: no label was placed`);
+      if (width === DESK_W && shape === 'mixed') assert.equal(placed.length, labeled.length, `${where}: a label was dropped`);
+      for (const e of labeled) assert.ok(e.words.includes(e.label), `${where}: ${e.id}'s words lost its label`);
+      for (let i = 0; i < placed.length; i += 1) {
+        const at = placed[i].at;
+        assert.ok(at.x >= 0 && at.y >= 0 && at.x + at.w <= view.extent.w && at.y + at.h <= view.extent.h, `${where}: ${placed[i].id}'s label leaves the board`);
+        for (const b of boxes) assert.ok(!boxesOverlap(at, b), `${where}: ${placed[i].id}'s label "${placed[i].label}" is on ${b.id}`);
+        for (let j = i + 1; j < placed.length; j += 1) {
+          assert.ok(!boxesOverlap(at, placed[j].at), `${where}: "${placed[i].label}" is on "${placed[j].label}"`);
+        }
+      }
+    }
+  }
+  // A quiet wire and a connector carry no label.
+  const quiet = boardView({ ...ROUTED.mixed, wires: ROUTED.mixed.wires.map((w) => ({ ...w, age_s: CONFIG.FLOW_AGE_S + 1 })) }, layoutWidth(DESK_W));
+  for (const e of Object.values(quiet.edges)) assert.deepEqual([e.label, e.at, e.flow, e.arrow], ['', null, false, null], `${e.id} is quiet but labeled`);
+  for (const v of Object.values(quiet.nodes)) assert.ok(!v.connector || !('label' in v.connector), `${v.id}'s connector has a label`);
+});
+
+test('a parent\'s mail runs down its connector, port to port; two boxes side by side are joined straight across', () => {
+  const view = boardView(ROUTED.mixed, layoutWidth(DESK_W));
+  const wire = view.edges['mailbox:a>b'];
+  assert.deepEqual(wire.points, view.nodes.b.connector.points, 'a\'s mail to b leaves the connector');
+  assert.deepEqual(wire.points[0], levelPort(view.nodes.a.pos, 'out'), 'the wire does not leave a\'s out port');
+  assert.deepEqual(wire.points.at(-1), levelPort(view.nodes.b.pos, 'in'), 'the wire does not reach b\'s in port');
+  assert.deepEqual([wire.from, wire.back, wire.arrow], ['a', true, 'start'], 'b\'s reply to a does not point at a');
+  const peers = view.edges['mailbox:p1>p2'];
+  assert.equal(view.nodes.p1.pos.y, view.nodes.p2.pos.y, 'p1 and p2 are not in one row');
+  assert.equal(peers.points.length, 2, `p1 to p2 bends: ${JSON.stringify(peers.points)}`);
+  assert.equal(peers.points[0].y, peers.points[1].y, 'p1 to p2 is not level');
 });

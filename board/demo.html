@@ -35,7 +35,8 @@
  *             on pagehide and made again on a pageshow from the
  *             back/forward cache, the listeners with their buttons
  * @deps       look.js, theme.css, demo-script.json
- * @complexity one step: O(n log n + l) in patchBoard over n = 8 nodes and
+ * @complexity one step: O(n log n + l), plus look.js routeAround's search
+ *             per routed pair, in patchBoard over n = 8 nodes and
  *             l = 12 links; the script has s steps (9 in the shipped file)
  * @alloc      one board, built on the first step; later steps patch its
  *             nodes and wires in place, so none is rebuilt, though each step

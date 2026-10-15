@@ -12,7 +12,8 @@
  * glyph and a word, ports differ by shape (ring in, dot out), and a wire
  * carrying a message moves (dash flow toward the reader) and gets an arrow
  * and a text label. With reduced motion the dashes stop but the arrow and
- * label stay.
+ * label stay. Each kind of line differs by weight or dash, and the legend
+ * in the footer names each in words.
  *
  * Text size (round 1, a2's MEDIUM-1): no font-size here is under 11 px, and
  * the board is never scaled below 1 (look.js MIN_FIT_SCALE), so no text on
@@ -314,6 +315,9 @@
 }
 .tc-view { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 .tc-wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+/* A wire's words are its title, shown on hover (round 2): the line itself
+ * takes the pointer; the layer round it does not. */
+.tc-wires path.tc-wire { pointer-events: visibleStroke; }
 
 /* ---------- session node ---------- */
 .tc-node {
@@ -376,13 +380,18 @@
 }
 .tc-wire.flow.back { animation-direction: reverse; }
 .tc-wire.down { stroke: var(--tc-red); stroke-dasharray: 2 5; opacity: .8; }
-/* Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
- * Hint lines, each with its own words: reports_to is thin and solid, from a
- * child's top to its parent's bottom, under the mailbox wires; native is a
- * long dash between side ports. */
-.tc-wire.kind-reports_to { stroke: var(--tc-muted); stroke-width: 1.25px; opacity: .8; }
+/* Model: Claude Opus 5.5 (the BOARD lane agent; round 2 by the BOARD fixer),
+ * 2026-10-14. Status: unreviewed. The tree's connector is thin and solid,
+ * from a parent's bottom to its child's top, under every wire, with no
+ * words on the board (the legend names it); native is a long dash, its
+ * words in its title and the legend. */
+.tc-wire.kind-tree { stroke: var(--tc-muted); stroke-width: 1.25px; opacity: .8; }
 .tc-wire.kind-native { stroke: var(--tc-muted); stroke-width: 1.5px; stroke-dasharray: 10 4 2 4; opacity: .8; }
 .tc-arrow { fill: var(--tc-cyan); }
+/* Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status:
+ * unreviewed. A label's backing: the canvas's own face, so a label that
+ * must sit over another wire hides that bit of it and reads. */
+.tc-wire-label-back { fill: var(--tc-inset); }
 .tc-wire-label {
   font-family: var(--tc-mono);
   font-size: 11px;

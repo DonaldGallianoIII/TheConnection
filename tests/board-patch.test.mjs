@@ -4,7 +4,9 @@
  * drawing kit, so no DOM library is needed. Also the two new states, what
  * boardView draws for a feed's wires and links, and the pill's words. Round
  * 1 adds names that are Object.prototype keys, a pair with a mailbox wire
- * and a native line, a down node's stale status, and the page's poll loop
+ * and a native line (since round 2, one path with the native words in its
+ * title), a down node's stale status, the tree's own connector in place
+ * of the reports_to hint (round 2), and the page's poll loop
  * (createPoller) on fake timers and a fake fetch that the test settles by
  * hand, so no real clock or network is read.
  *
@@ -19,8 +21,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  STATES, NOTE_WORDS, CONN_WORDS, boardView, diffBoard, createBoard, patchBoard, pillText, layoutLevels,
-  labelPoints, createPoller, CONFIG,
+  STATES, NOTE_WORDS, CONN_WORDS, LINK_WORDS, boardView, diffBoard, createBoard, patchBoard, pillText, layoutLevels,
+  levelPort, createPoller, CONFIG,
 } from '../board/look.js';
 
 /**
@@ -149,7 +151,10 @@ test('a reply flows back: the arrow sits at the start, at the reader', () => {
   assert.deepEqual([wire.flow, wire.back, wire.arrow, wire.label], [true, true, 'start', 'b → a · #9']);
 });
 
-test('hint lines carry words: reports to, native, and a reports_to that names nobody', () => {
+// Round 2 (a2's direction): the tree draws its own thin connector, parent's
+// out port to child's in port, with no label; reports_to links draw nothing
+// of their own; a native line has no label, its words in its title.
+test('the tree draws its own connector, with no label; native words go in the title; a reports_to to nobody is a note', () => {
   const view = boardView({
     nodes: [
       node('a', { role: 'orchestrator', role_source: 'declared' }),
@@ -163,11 +168,16 @@ test('hint lines carry words: reports to, native, and a reports_to that names no
       { from: 'a', to: 'b', kind: 'native' }, mailbox('a', 'z'),
     ],
   });
-  const hint = view.edges['reports_to:b>a'];
-  assert.deepEqual([hint.label, hint.arrow], ['reports to', 'end']);
-  assert.ok(hint.a.y > hint.b.y, 'the hint runs up from the child to its parent');
-  assert.equal(view.edges['native:a>b'].label, 'native · not observed');
-  assert.equal(view.edges['reports_to:r>ghost'], undefined, 'a line to a node that is not there');
+  assert.deepEqual(Object.keys(view.edges).filter((id) => id.startsWith('reports_to')), [], 'a reports_to link drew a line of its own');
+  const stem = view.nodes.b.connector;
+  assert.ok(stem, 'b has no connector to its parent');
+  assert.deepEqual(stem.points[0], levelPort(view.nodes.a.pos, 'out'), 'the connector does not leave a\'s out port');
+  assert.deepEqual(stem.points.at(-1), levelPort(view.nodes.b.pos, 'in'), 'the connector does not reach b\'s in port');
+  assert.equal(stem.words, 'b reports to a');
+  assert.equal(view.nodes.a.connector, null, 'a root has a connector');
+  const native = view.edges['native:a>b'];
+  assert.equal(native.label, '', 'a native line carries a label on the board');
+  assert.ok(native.words.endsWith(LINK_WORDS.native), `native words not in the title: ${native.words}`);
   assert.equal(view.nodes.r.note, 'reports to ghost · not found');
   assert.equal(view.nodes.z.note, 'last status: gone quiet', 'a down node shows its status as current');
   assert.equal(view.edges['mailbox:a>z'].down, true, 'a wire to a down node is not marked down');
@@ -212,13 +222,13 @@ test('nodes named __proto__, constructor and toString lay out and draw like any 
   assert.deepEqual(Object.keys(view.nodes).sort(), names);
   const wire = view.edges['mailbox:__proto__>constructor'];
   assert.ok(wire && wire.flow, 'the wire from __proto__ to constructor does not flow');
-  for (const at of [wire.a, wire.b]) assert.ok(Number.isFinite(at.x) && Number.isFinite(at.y), 'a wire end is not finite');
+  for (const at of wire.points) assert.ok(Number.isFinite(at.x) && Number.isFinite(at.y), 'a wire point is not finite');
   const kit = fakeKit();
   patchBoard(createBoard(kit), feed);
   assert.deepEqual(kit.created, { nodes: 4, edges: 2 });
 });
 
-test('a mailbox wire and a native line on one pair keep their words apart, on one path', () => {
+test('a mailbox wire and a native line on one pair draw one path, the native words in its title', () => {
   const view = boardView({
     nodes: [node('a', { kind: 'claude' }), node('b', { kind: 'claude' })],
     wires: [{ from: 'a', to: 'b', seq: 5, age_s: 0 }],
@@ -227,10 +237,9 @@ test('a mailbox wire and a native line on one pair keep their words apart, on on
   const onPair = Object.values(view.edges).filter((e) => [e.from, e.to].sort().join('>') === 'a>b');
   assert.equal(onPair.length, 1, 'two paths on one pair: the native dashes lie on the mailbox wire');
   const [wire] = onPair;
-  assert.deepEqual([wire.label, wire.sub], ['a → b · #5', 'native · not observed']);
-  const at = labelPoints(wire);
-  const apart = Math.abs(at.label.y - at.sub.y);
-  assert.ok(apart >= CONFIG.BOARD_TEXT_MIN_PX, `the two label lines sit ${apart} px apart`);
+  assert.equal(wire.label, 'a → b · #5');
+  assert.ok(wire.at, 'the label found no room on a board of two boxes');
+  assert.equal(wire.words, `a → b · #5 · ${LINK_WORDS.native}`);
 });
 
 test('a down node\'s status reads as its last status, never as its state now', () => {
