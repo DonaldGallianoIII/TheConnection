@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D21) the same day, and D22 to D34 on
+        wave 2 rulings (D17 to D21) the same day, and D22 to D35 on
         2026-10-15.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
@@ -216,6 +216,11 @@ route <route> is not built yet; nothing sent`, exit 1, nothing written.
      sending ten messages to a dead Codex would otherwise wait 30 s on
      each. A fast failure (a non-zero exit, not a timeout) starts no
      backoff.
+  5. **The doorbell can't be switched off** (D35): a send to an unread
+     inbox rings again once `RING_BACKOFF_SECONDS` have passed since the
+     last ring, whatever the marker says, so a marker someone rewrote to
+     `clear` costs at most one backoff period, never the doorbell for
+     good.
   **The send still exits 0**: the mail landed. A card whose `thread_id` is
   not a string matching `[A-Za-z0-9][A-Za-z0-9._-]*` is not rung: the
   warning says `its card's thread_id is not a thread id`, and the marker is
@@ -441,10 +446,26 @@ For a separate Linux user per account on one machine.
   should be trusted that far, the top folders would have to belong to
   root, set up once with sudo; that is a possible later option, with no
   task now.
-- **A held lock costs a failed send, never a hang** (D20, D23). `mail/.seq`
-  and the inbox locks are group-writable, so a member can hold one. tc
-  waits at most `LOCK_WAIT_SECONDS` per command for them, then exits 10
-  with nothing written.
+- **A held lock costs a failed send, never a hang** (D20, D23, D35).
+  `mail/.seq` and the inbox locks are group-writable, so a member can
+  hold one. tc waits at most `LOCK_WAIT_SECONDS` per command for them,
+  then exits 10 with nothing written, and the words name who holds the
+  lock (user and pid, from `/proc/locks`) and what the stuck member can
+  do: ask that user, or ask the init user to act. `tc health` lists any
+  such lock held by someone other than the name's owner.
+- **Each member's listener is theirs alone** (D35). The wait and watch
+  locks live in the owner's own inbox folder, made by the owner at
+  `0600` and opened through the same pinned inbox handle as every other
+  inbox act, never followed, so no other member can hold them or swap the
+  inbox to redirect them. A file someone else planted at a lock's name is
+  moved aside by the owner's tc (it owns the folder) with words. `tc
+  health` and the board find listeners there. One code path for a
+  private and a shared mailbox.
+- **Every inbox act goes through one pinned handle** (D20, D35). Send,
+  read, peek, wait, log, health, flush's count and the far gate open the
+  inbox once, check with `fstat` that it is the folder tc judged, and do
+  everything by name inside that open folder, so a member who owns an
+  inbox can never swap it for a link to redirect another member's tc.
 - While `.shared` exists, `tc` sets `os.umask(0o002)` before it writes
   anything, and the setgid folders give what it makes group `g`. Files
   whose mode tc sets itself (messages, cards, status files at `0640`)
