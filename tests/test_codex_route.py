@@ -1540,16 +1540,16 @@ class DoorbellRecordTest(unittest.TestCase):
                     second = tc.deliver_codex(card, "a", "c", "two")
                 self.assertTrue((folder.parent / "calls.jsonl").exists(), "the fake codex never ran")
                 recorded = calls()
-            self.assertEqual((first.exit, second.exit), (0, 0), (first, second))
-            self.assertEqual([call["argv"] for call in recorded],
-                             [ring_argv(root, 1, "c", "a"), ring_argv(root, 2, "c", "a")],
-                             f"a record {case} was trusted as a fresh ring")
-            unwritten = [w for w in second.warnings if RECORD_NOT_WRITTEN_WORDS in w]
-            if case in ("a link", "a branch with no search", "a squatted branch"):
-                self.assertEqual(len(unwritten), 1, second.warnings)
-                self.assertIn(RECORD_LOST_WORDS.format(to="c"), unwritten[0])
-            else:
-                self.assertEqual(unwritten, [], second.warnings)
+                self.assertEqual((first.exit, second.exit), (0, 0), (first, second))
+                self.assertEqual([call["argv"] for call in recorded],
+                                 [ring_argv(root, 1, "c", "a"), ring_argv(root, 2, "c", "a")],
+                                 f"a record {case} was trusted as a fresh ring")
+                unwritten = [w for w in second.warnings if RECORD_NOT_WRITTEN_WORDS in w]
+                if case in ("a link", "a branch with no search", "a squatted branch"):
+                    self.assertEqual(len(unwritten), 1, second.warnings)
+                    self.assertIn(RECORD_LOST_WORDS.format(to="c"), unwritten[0])
+                else:
+                    self.assertEqual(unwritten, [], second.warnings)
 
 
 if __name__ == "__main__":

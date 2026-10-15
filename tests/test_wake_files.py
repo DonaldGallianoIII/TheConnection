@@ -500,15 +500,16 @@ class WakeLockPlaceTest(UmaskTestCase):
                 mail = root.path / "mail"
                 seen = {}
                 for kind in KINDS:
-                    st = os.lstat(mail / f"to-{OWNER}" / LOCK_NAME.format(kind=kind))
-                    seen[kind] = (stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid)
+                    path = mail / f"to-{OWNER}" / LOCK_NAME.format(kind=kind)
+                    st = os.lstat(path) if os.path.lexists(path) else None
+                    seen[kind] = None if st is None else (stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid)
                 old = [kind for kind in KINDS if os.path.lexists(mail / OLD_LOCK_NAME.format(kind=kind, name=OWNER))]
-            self.assertEqual(runs["wait"][0], EXIT_TIMEOUT, runs["wait"])
-            self.assertEqual(runs["watch"][0], 0, runs["watch"])
-            for kind in KINDS:
-                self.assertEqual(seen[kind], (True, WAKE_LOCK_MODE, os.geteuid()),
-                                 f"the {kind} lock is not this user's own regular file at 0600")
-            self.assertEqual(old, [], "a lock was made at the old place in mail/")
+                self.assertEqual(runs["wait"][0], EXIT_TIMEOUT, runs["wait"])
+                self.assertEqual(runs["watch"][0], 0, runs["watch"])
+                for kind in KINDS:
+                    self.assertEqual(seen[kind], (True, WAKE_LOCK_MODE, os.geteuid()),
+                                     f"the {kind} lock is not this user's own regular file at 0600")
+                self.assertEqual(old, [], "a lock was made at the old place in mail/")
 
     def test_a_link_or_fifo_at_a_locks_name_is_moved_aside_never_followed_or_waited_on(self):
         """A symlink to a file outside the mailbox, or a FIFO, at mail/to-x/.wait.lock or .watch.lock: tc wait x and tc watch x run as ever (exit 2, exit 0) within FIFO_CEILING_SECONDS, say what they moved and where, leave it at the first aside name unchanged (the link's target too), and hold a new 0600 lock of their own.
@@ -544,16 +545,17 @@ class WakeLockPlaceTest(UmaskTestCase):
                     except subprocess.TimeoutExpired:
                         self.fail(f"tc {kind} blocked on {planted} at its lock's name")
                     aside = box / FIRST_ASIDE.format(lock=lock.name)
-                    moved = os.lstat(aside).st_mode
+                    moved = os.lstat(aside).st_mode if os.path.lexists(aside) else None
                     st = os.lstat(lock)
                     after = target.read_text()
-                self.assertEqual(code, EXIT_TIMEOUT if kind == "wait" else 0, err)
-                self.assertIn(MOVED_WORDS.format(kind=kind, path=lock, what=planted, owner=login(os.geteuid()),
-                                                 aside=aside), err)
-                self.assertTrue(stat.S_ISLNK(moved) if planted == "a symlink" else stat.S_ISFIFO(moved),
-                                f"{planted} did not move to {aside} as itself")
-                self.assertEqual((stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode)), (True, WAKE_LOCK_MODE))
-                self.assertEqual(after, TARGET_TEXT, "the link's target changed")
+                    self.assertEqual(code, EXIT_TIMEOUT if kind == "wait" else 0, err)
+                    self.assertIn(MOVED_WORDS.format(kind=kind, path=lock, what=planted, owner=login(os.geteuid()),
+                                                     aside=aside), err)
+                    self.assertTrue(moved is not None and (stat.S_ISLNK(moved) if planted == "a symlink"
+                                                           else stat.S_ISFIFO(moved)),
+                                    f"{planted} did not move to {aside} as itself")
+                    self.assertEqual((stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode)), (True, WAKE_LOCK_MODE))
+                    self.assertEqual(after, TARGET_TEXT, "the link's target changed")
 
     def test_on_a_private_mailbox_a_listener_from_before_still_counts_until_it_rearms(self):
         """The switch-over, private: with mail/.wait-x.lock and .watch-x.lock held by listeners from before round 1b, tc health names their pids, a new tc wait x and tc watch x exit 3 with today's words and make no inbox; once they go, a new wait runs and health names none; a link or a FIFO at the old place stops nothing.
@@ -1162,13 +1164,13 @@ class WakeFilesAreTheirOwnersTest(UmaskTestCase):
                     moved = identity(aside) if os.path.lexists(aside) else None
                     st = os.lstat(lock)
                     text = target.read_text()
-                self.assertEqual(code, EXIT_TIMEOUT if kind == "wait" else 0,
-                                 f"ann's tc {kind} did not run to its end over {plant}: {out}{err}")
-                self.assertIn(MOVED_WORDS.format(kind=kind, path=lock, what=plant, owner=other, aside=aside), err)
-                self.assertEqual(moved, found, f"{plant} is not what sits at {aside}")
-                self.assertEqual((stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid),
-                                 (True, WAKE_LOCK_MODE, os.geteuid()), "ann's own lock was not made at its name")
-                self.assertEqual(text, TARGET_TEXT, "the planted link's target changed")
+                    self.assertEqual(code, EXIT_TIMEOUT if kind == "wait" else 0,
+                                     f"ann's tc {kind} did not run to its end over {plant}: {out}{err}")
+                    self.assertIn(MOVED_WORDS.format(kind=kind, path=lock, what=plant, owner=other, aside=aside), err)
+                    self.assertEqual(moved, found, f"{plant} is not what sits at {aside}")
+                    self.assertEqual((stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid),
+                                     (True, WAKE_LOCK_MODE, os.geteuid()), "ann's own lock was not made at its name")
+                    self.assertEqual(text, TARGET_TEXT, "the planted link's target changed")
 
 
 if __name__ == "__main__":
