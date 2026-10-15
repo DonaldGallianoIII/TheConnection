@@ -26,7 +26,9 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             way off the machine is `ssh` (SSH S1, Claude Opus 5.5,
             unreviewed): a send to an ssh card runs the ssh client once
             (C3), as the user who ran tc, with that user's keys, and
-            files the message in outbox/ by the answer. The waking side is
+            files the message in outbox/ by the answer; `flush` sends
+            that user's waiting outbox mail the same way, one ssh run per
+            message (SSH S2). The waking side is
             Claude Code's background Bash: `tc wait` or `tc watch` exiting is
             what re-invokes the session that started it. `health` and `watch`
             also read /proc (meminfo, locks, each process's comm and cmdline)
@@ -130,6 +132,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             an ssh send adds a scan of the outbox, O(q + w log w) over q
             outbox folders and w waiting files, and one ssh run of at
             most SSH_SEND_SECONDS (SSH S1, Claude Opus 5.5, unreviewed);
+            flush O(w x (q + w log w)) over w waiting files of this user
+            and q outbox folders, plus one ssh run per file (SSH S2);
             status O(1). A command's flocks on
             mail/.seq and its inbox lock wait at most LOCK_WAIT_SECONDS in
             all; each ring marker write at most LOCK_WAIT_SECONDS (a codex
@@ -4378,10 +4382,11 @@ def send_lock(target, deadline=None):
     was not taken by `deadline` (flock_within: another send or a flush is
     sending to that target), with why None; or False with words when the
     lock file would not open (a link or a FIFO at its name, D17, D19:
-    open_regular refuses both). A caller that cannot hold it keeps its
-    message in the outbox (exit 4), never exits here: the message is
-    already published by then. Made SHARED_OWNED_FILE_MODE under a shared
-    mailbox, so init finds it already right.
+    open_regular refuses both). It never exits here: a caller that cannot
+    hold it still publishes its message and keeps it in the outbox
+    (deliver_ssh, exit 4), or leaves the target for the next flush
+    (cmd_flush). Made SHARED_OWNED_FILE_MODE under a shared mailbox, so
+    init finds it already right.
 
     The lock is held through the ssh run, which may take
     SSH_SEND_SECONDS. Nobody waits on it past `deadline`: a send that
@@ -4647,14 +4652,18 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
        Delivery exit 6, words, nothing written and ssh never run (D13).
     2. The mailbox's origin token is read, or made (origin_token); one
        that cannot be is Delivery exit 1, nothing written.
-    3. The message is published in outbox/to-<to>/ (D25) exactly as local
+    3. This user's send lock for the target is taken (send_lock), no
+       later than `deadline`.
+    4. The message is published in outbox/to-<to>/ (D25) exactly as local
        mail is (publish_message: same mail/.seq, same header, never a
        replace, sent/ and refused/ as its history), as this user, at
        SHARED_OWNED_FILE_MODE under a shared mailbox. From here every
-       send leaves a record.
-    4. This user's send lock for the target is taken (send_lock), no
-       later than `deadline`. Not taken: Delivery exit 4, kept, words
-       saying another tc is sending to the target.
+       send leaves a record. It is published whether or not the lock
+       was taken, but after the wait for it: with the lock held, no
+       flush can send this file before this send does, and a flush that
+       held the lock meanwhile may find and send it (C3, lane note 5).
+       Lock not taken: Delivery exit 4, kept, words saying another tc is
+       sending to the target.
     5. Queue order first (C3, D22): when this user's own outbox already
        holds older mail for the same target (queue_ahead), the message
        stays queued behind it without trying, exit 4, `<target> has <n>
@@ -4676,9 +4685,9 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
     @interacts  reads ROOT/.shared and makes outbox/, outbox/to-<to>/ and,
                 when it files one, sent/ or refused/ (make_folder);
                 lstats outbox/to-<to>/ (real_folder); reads or makes the
-                origin token; takes numbers from mail/.seq (next_seq,
-                publish_message) and publishes one file in
-                outbox/to-<to>/; takes the send lock; lists the outbox and
+                origin token; takes the send lock; takes numbers from
+                mail/.seq (next_seq, publish_message) and publishes one
+                file in outbox/to-<to>/; lists the outbox and
                 reads the card of each name waiting (queue_ahead); runs
                 ssh once (ssh_run); links the file into sent/ or refused/
                 and removes its outbox name, writing the far stderr beside
@@ -4715,13 +4724,13 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
         return Delivery(EXIT_REFUSED, f"tc send: {box} is a symlink or not a folder; tc never follows it, so "
                                       f"nothing was written there", [])
     mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
-    n = next_seq(deadline)
-    published = publish_message(box, (OUTBOX_SENT, OUTBOX_REFUSED), n, sender, to, body, header_note, mode,
-                                deadline)
-    if published.refusal is not None:
-        return published.refusal
-    path, warnings = published.path, published.warnings
     with send_lock(where.target, deadline) as (held, why):
+        n = next_seq(deadline)  # under the lock when held, so no flush takes this file before this send does
+        published = publish_message(box, (OUTBOX_SENT, OUTBOX_REFUSED), n, sender, to, body, header_note, mode,
+                                    deadline)
+        if published.refusal is not None:
+            return published.refusal
+        path, warnings = published.path, published.warnings
         if not held:
             busy = why if why is not None else "another tc is sending to it right now (a send or a tc flush)"
             return Delivery(EXIT_QUEUED, f"{where.target} was not tried: {busy}; kept in outbox: {path}. "
@@ -4742,6 +4751,173 @@ ROUTES = {
     "codex": deliver_codex,
     "ssh": deliver_ssh,  # SSH S1 (Claude Opus 5.5, unreviewed): C3
 }
+
+
+# SSH S2 (Claude Opus 5.5, unreviewed): tc flush (C3, D22, D23).
+def outbox_body(path):
+    """The text an outbox message sends: what follows its header line and the blank line after it. Raises OSError or ValueError, with words.
+
+    Read through read_regular_file (no link followed, a FIFO never
+    waited on, at most MESSAGE_READ_MAX_BYTES), so it is the same text
+    deliver_ssh put on ssh's stdin the first time (outbox_text).
+
+    @interacts  opens, fstats and reads one file.
+    @deps       read_regular_file; MESSAGE_READ_MAX_BYTES.
+    @complexity O(b) over b bytes of the file.
+    @alloc      the file's text and the body, returned.
+    """
+    text = read_regular_file(path, MESSAGE_READ_MAX_BYTES)
+    _, blank, body = text.partition("\n\n")
+    if not blank:
+        raise ValueError("it has no header line and blank line, so it is not a message tc wrote")
+    return body
+
+
+def cmd_flush(args):
+    """`tc flush [--to <name>]`: send this user's waiting outbox mail over ssh, oldest first for each target (C3, D22, D23).
+
+    Each waiting file's target is its `to`'s card read now (queue_route).
+    For each target, this user's send lock is taken (send_lock; another
+    send or flush holding it past LOCK_WAIT_SECONDS leaves that target
+    for the next flush), and then, until none is left, the oldest of this
+    user's files for that target is sent (ssh_run, with its origin id
+    built from the token, its number and its sender, D25) and filed by
+    the answer (file_outcome): sent/; refused/ with the far stderr beside
+    it, and on to the next; or, on 255, a timeout or a far 10 (D23), kept
+    and the target stopped, so its mail stays in order. The outbox is
+    listed again before each file, so a message a send queued while this
+    flush runs goes out with it, behind every older one, or is left
+    (exit 4). A file that cannot be read stops its target too, with words.
+
+    D22: only files this user owns are sent (owned_by_me); for each
+    target, a line counts the files other members own and says each
+    member sends their own. A file whose card no longer says ssh (or is
+    missing or unreadable) stays where it is, with words saying why and
+    what fixes it; it is never sent another way. `--to <name>` sends the
+    queue of the target <name>'s card points at, so every name whose
+    card points there goes, in order; with no ssh card for <name>, only
+    outbox/to-<name>/ is looked at, and its files are left.
+
+    One line per file: sent ones on stdout, the rest on stderr, then a
+    line per file still waiting that was not tried. Exit 0 when none of
+    this user's files in the selection is left waiting, 4 when any is
+    (EXIT_QUEUED). Refused files are filed, not left.
+
+    @interacts  checks --to (C0, exit 6); lists the outbox
+                (outbox_files) and reads each waiting name's card
+                (queue_route), again before each file; reads or makes the
+                origin token (refused, exit 1, nothing sent, when it
+                cannot); per target takes the send lock (send_lock); per
+                file reads it (outbox_body), runs ssh once (ssh_run) and
+                files it in sent/ or refused/ (file_outcome); reads the
+                user database for other members' names; prints.
+    @deps       require_names, outbox_files, queue_route, owned_by_me,
+                origin_token, send_lock, outbox_body, ssh_run,
+                file_outcome, printable, user_name, refuse; sys; ROOT,
+                OUTBOX_NAME, SSH_SENT, SSH_KEPT, EXIT_QUEUED,
+                EXIT_REFUSED.
+    @complexity O(w x (q + w log w)) over w of this user's files waiting
+                for the targets flushed and q outbox folders, since the
+                outbox is listed again before each file, plus one ssh run
+                of at most SSH_SEND_SECONDS per file. w is single digits
+                unless a target has been down for a long time.
+    @alloc      the outbox lists, one dict of routes and the sets of
+                paths tried and said, freed on exit; one open lock file
+                per target while it is flushed.
+    """
+    require_names(args.to)
+    routes = {}
+
+    def route(name):
+        if name not in routes:
+            routes[name] = queue_route(name)
+        return routes[name]
+
+    pick = route(args.to) if args.to is not None else None
+
+    def chosen(f):
+        return args.to is None or f.to == args.to or (pick.target is not None and route(f.to).target == pick.target)
+
+    files, left_out = outbox_files()
+    box = ROOT / OUTBOX_NAME / f"to-{args.to}" if args.to is not None else None
+    for path, why in left_out:
+        if box is None or path == box or box in path.parents:
+            print(f"tc flush: skipped {printable(path)}: {why}", file=sys.stderr)
+    mine = [f for f in files if chosen(f) and owned_by_me(f.st)]
+    theirs = [f for f in files if chosen(f) and not owned_by_me(f.st)]
+    stopped, said, targets = {}, set(), []
+    if mine:
+        try:
+            token = origin_token()
+        except (OSError, ValueError) as err:
+            why = (f"{err.strerror}" + (f" at {err.filename}" if err.filename else "")
+                   if isinstance(err, OSError) else str(err))
+            refuse(f"tc flush: could not read or make the origin token ({why}); nothing sent", EXIT_REFUSED)
+    for f in mine:
+        target = route(f.to).target
+        if target is not None and target not in targets:
+            targets.append(target)
+    for target in targets:
+        with send_lock(target) as (held, why):
+            if not held:
+                stopped[target] = why if why is not None else (
+                    "another tc is sending to it right now (a send or a tc flush)")
+                continue
+            tried = set()
+            while True:
+                routes.clear()  # cards are read again before each file
+                queue = [f for f in outbox_files()[0]
+                         if owned_by_me(f.st) and f.path not in tried and route(f.to).target == target]
+                if not queue:
+                    break
+                f = queue[0]
+                tried.add(f.path)
+                said.add(f.path)
+                lead = f"#{f.n} to {printable(f.to)}"
+                try:
+                    body = outbox_body(f.path)
+                except (OSError, ValueError) as err:
+                    why = err.strerror if isinstance(err, OSError) and err.strerror else str(err)
+                    print(f"tc flush: {lead}: could not read {printable(f.path)} ({why}); stopped for {target}, "
+                          f"so its mail stays in order. Move it out of the outbox by hand, then run tc flush.",
+                          file=sys.stderr)
+                    stopped[target] = f"{lead}, ahead of it, could not be read"
+                    break
+                where = route(f.to)
+                outcome = ssh_run(where, f.sender, f.to, f"{token}-{f.n}-{f.sender}", body)
+                code, words, warnings = file_outcome(f.path, where, outcome)
+                print(f"{lead}: {words}" if outcome.kind == SSH_SENT else f"tc flush: {lead}: {words}",
+                      file=sys.stdout if outcome.kind == SSH_SENT else sys.stderr)
+                for warning in warnings:
+                    print(f"tc flush: {lead}: {warning}", file=sys.stderr)
+                if outcome.kind == SSH_KEPT:
+                    stopped[target] = f"{target} could not be reached ({outcome.reason}); it waits behind {lead}"
+                    break
+    routes.clear()
+    left = [f for f in outbox_files()[0] if chosen(f) and owned_by_me(f.st)]
+    for f in left:
+        if f.path in said:
+            continue
+        where = route(f.to)
+        if where.target is None:
+            why = (f"{where.why}; it is never sent another way. To send it over ssh, write the card again with "
+                   f"tc card {printable(f.to)} --ssh <target>, then run tc flush")
+        else:
+            why = stopped.get(where.target, "it came in after this flush looked; the next tc flush sends it")
+        print(f"tc flush: left {printable(f.path)}: {why}", file=sys.stderr)
+    owners = {}
+    for f in theirs:
+        target = route(f.to).target or "a name with no ssh card"
+        owners.setdefault(target, []).append(user_name(f.st.st_uid))
+    for target, names in owners.items():
+        print(f"{len(names)} waiting for {target} belong to other members ({', '.join(sorted(set(names)))}); "
+              f"each member sends their own with tc flush")
+    if not mine and not theirs:
+        print("nothing waiting in the outbox")
+    elif not mine:
+        print("nothing of yours waiting in the outbox")
+    if left:
+        sys.exit(EXIT_QUEUED)
 
 
 # ---------- health: machine, sessions, listeners, mail ----------
@@ -5301,6 +5477,11 @@ def main():
 
     cs = sub.add_parser("cards", help="every card, one line each")
     cs.set_defaults(fn=cmd_cards)
+
+    # SSH S2 (Claude Opus 5.5, unreviewed): tc flush (C3).
+    fl = sub.add_parser("flush", help="send your ssh mail waiting in the outbox, oldest first for each target")
+    fl.add_argument("--to", help="only the target this name's card points at")
+    fl.set_defaults(fn=cmd_flush)
 
     # SHARED H1 (Claude Opus 5.5, unreviewed): tc init --shared --group <g> (C4).
     ini = sub.add_parser("init", help="share this mailbox with a group of Linux users (one per account)")

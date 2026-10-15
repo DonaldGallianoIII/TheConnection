@@ -13,7 +13,9 @@ Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
         Claude Opus 5.5, 2026-10-15; the lead paragraph changed, and
         step 33 added, in round 7 by the SHARED fixer, Claude Opus 5.5,
         2026-10-15; the lead paragraph changed in round 8 by the SHARED
-        fixer, Claude Opus 5.5, 2026-10-15
+        fixer, Claude Opus 5.5, 2026-10-15; steps 34 to 39 (D22) added,
+        and the last step renumbered, by the SSH lane agent, Claude Opus
+        5.5, 2026-10-15
 Status: unreviewed
 
 What this checks: two Linux users in one group share one mailbox. Each
@@ -469,7 +471,57 @@ mail.
       /srv/tc-shared/mail/to-ann/read`. As ben: `rm ~/tc-qa-folder2/notes`,
       then `rmdir ~/tc-qa-folder2/sub ~/tc-qa-folder2`.
 
+## Each member's outbox is their own (D22)
+
+Added by the SSH lane agent (Claude Opus 5.5), 2026-10-15. Status:
+unreviewed.
+
+ssh runs as the Linux user who ran `tc send`, with that user's keys, so
+one member's dead queue must never hold up another's mail, and each
+member's `tc flush` sends only that member's files. These steps need a
+far machine that ann's ssh key reaches through `tc gate` and ben's does
+not. `qa/human/route-ssh.md` sets one up; do its setup as ann only.
+`farbox-tc` below is the ssh alias that file makes, and `far-b` the name
+on the far machine. Both are made up; use yours.
+
+34. As ann: `tc card far-b --ssh farbox-tc --remote-tc '~/tc-qa/tc'`.
+    - It prints `card written: far-b (other, account unknown, route ssh
+      to farbox-tc)`. ben reads the same card: `tc cards` as ben shows
+      the same line.
+35. As ben: `tc send --from ben --to far-b "from ben"`.
+    - ben has no key there, so ssh fails: it exits 4 and says `could not
+      reach farbox-tc (...); kept in outbox:
+      /srv/tc-shared/outbox/to-far-b/<n>-from-ben.md. Run: tc flush`.
+      The words in the parentheses are ssh's own, such as `Permission
+      denied (publickey).` or a host it could not resolve.
+    - `ls -ld /srv/tc-shared/outbox/to-far-b` shows `drwxrwsr-t`, owner
+      `ben`, group `tcshare` (3775: setgid, sticky). `ls -l` of the file
+      shows `-rw-r-----`, owner `ben` (0640).
+36. As ann: `tc send --from ann --to far-b "from ann"`.
+    - It goes out at once, ben's waiting file notwithstanding: exit 0,
+      `sent over ssh to farbox-tc: sent #... to far-b: ...`. ann's queue
+      holds only ann's files, so ben's file is not ahead of hers.
+    - `ls /srv/tc-shared/outbox/to-far-b/sent/` lists ann's message.
+    - On the far machine, `tc read far-b` shows it, from the gate's key
+      name, never from `ann`.
+37. As ann: `tc flush`.
+    - It prints `1 waiting for farbox-tc belong to other members (ben);
+      each member sends their own with tc flush`, then `nothing of yours
+      waiting in the outbox`, and exits 0.
+    - ben's file is where it was, unchanged: `ls -l` shows the same
+      line as in step 35.
+    - As ann: `mv /srv/tc-shared/outbox/to-far-b/<n>-from-ben.md /tmp/`
+      is refused, `Operation not permitted`: the folder is sticky and
+      ben owns both the file and the folder.
+38. A known limit, not a pass or a fail: whoever makes an
+    `outbox/to-<name>/` first owns it, and sticky still lets a folder's
+    owner move any file in it. Here ben made `to-far-b/`, so ben could
+    move ann's queued files there; ann cannot move ben's. Record what
+    you see. The SSH handoff names it for the architect.
+39. Put it back. As ben: `rm /srv/tc-shared/outbox/to-far-b/<n>-from-ben.md`
+    (ben's own file). As ann: run `qa/human/route-ssh.md`'s undo steps.
+
 ## Afterward
 
-34. The mailbox, `/srv/team` and the group stay until you remove them
+40. The mailbox, `/srv/team` and the group stay until you remove them
     yourself.
