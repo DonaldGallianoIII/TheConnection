@@ -22,7 +22,7 @@ pause; no lane reuses a number for a new meaning.
 | Code | Meaning | Who exits with it | Since |
 |---|---|---|---|
 | 0 | ok (`wait`: mail; `watch`: heartbeat) | every command | today |
-| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force`, a body that is not UTF-8 text, an outbox branch another user owns or that is a link (D33) | `send`, `join`, `card`, router, `gate` (empty message), `flush` (a refused branch) | today (empty message), this plan (D33) |
+| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force`, a body that is not UTF-8 text, an outbox branch another user owns or that is a link (D33); also a link or FIFO planted where tc opens a file, an inbox that is a link, not a folder, or one tc cannot list, a `.shared` tc cannot read, and on a shared mailbox an inbox not its owner's and `wait` or `watch` on a name the running user does not own (C4, D36) | `send`, `join`, `card`, router, `gate` (empty message), `flush` (a refused branch), `wait`, `watch`, `read`, `peek`, `log`, `status`, `init` | today (empty message), this plan (D17 to D21, D33, D36) |
 | 2 | `wait` timed out or hit its keepalive | `wait` | today |
 | 3 | another listener or watcher already holds this name's lock | `wait`, `watch` | today |
 | 4 | kept in the outbox: ssh could not reach the target, the target already has a queue, or another tc holds this member's send lock or it would not open | `send` (ssh route), `flush` | this plan (C3, D33) |
@@ -260,10 +260,14 @@ path = card["ssh"]["tc"]
 remote_tc = "~/" + shlex.quote(path[2:]) if path.startswith("~/") else shlex.quote(path)
 argv = ["ssh", "-T", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_CONNECT_SECONDS}",
         "--", card["ssh"]["target"],
-        remote_tc + " " + shlex.join(["send", "--from", sender, "--to", to])]
-subprocess.run(argv, input=body, text=True, capture_output=True,
-               timeout=SSH_SEND_SECONDS)
+        remote_tc + " " + shlex.join(["send", "--from", sender, "--to", to, "--origin", origin])]
 ```
+
+The body goes to that child's stdin, and its stdout and stderr are read
+together, at most `SSH_SEND_SECONDS` in all and at most a named number
+of bytes of each kept, so a far side that prints while it reads never
+deadlocks it (`ssh_capture` in `tc`, not a plain `subprocess.run`).
+`origin` is the origin id below (D25, D33).
 
 - **The far side's login shell must be POSIX** (sh, bash, dash, zsh). ssh
   hands the remote command line to that shell, and the quoting above is
@@ -509,7 +513,9 @@ For a separate Linux user per account on one machine.
   whose mode tc sets itself (messages, cards, status files at `0640`)
   keep that mode; the umask cannot add bits. Any folder `tc` creates
   later gets group `g` and the mode for its place as it is made (`3775`
-  for one of the four, `3770` for an inbox and its `read/`, `2775`
+  for one of the four and for `mail/.origins/`, `3770` for an inbox and
+  its `read/`, `2750` for an outbox branch `outbox/<user>/` and for
+  `mail/.origins/<user>/` and every folder in either, `2775`
   otherwise). Init only reaches the folders that exist at the time
   (D16).
 - **No planted links** (D17). The shared folders are group-writable, so
