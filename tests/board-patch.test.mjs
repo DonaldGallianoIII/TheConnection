@@ -10,7 +10,8 @@
  * (createPoller) on fake timers and a fake fetch that the test settles by
  * hand, so no real clock or network is read. Since then: the badge lines
  * on a native pair's boxes and outline rows, with mail or without and
- * never on account `unknown`, and on a reports_to cycle's root.
+ * never on account `unknown`, and on a reports_to cycle's root; and the
+ * poller's stale line over the board once an answer is late or refused.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
@@ -436,6 +437,40 @@ test('before any answer the pill says no answer, and a 401 says the token was re
   net.calls[1].resolve({ status: 401, ok: false });
   await flush();
   assert.deepEqual(pills.at(-1), [CONN_WORDS.tokenRefused, 'down']);
+  poller.stop();
+});
+
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// A stale feed froze the board while its wires kept moving under a legend
+// that calls them mail now. The page now says stale over the board.
+test('once a board is drawn, a late or refused answer says stale over the board, and the next good answer clears it', async () => {
+  const timers = createFakeTimers();
+  const net = createFakeFetch();
+  const stale = [];
+  const poller = createPoller({
+    fetchFeed: net.fetchFeed, pollMs: POLL_MS, timeoutMs: TIMEOUT_MS, timers, now: timers.now,
+    onFeed() {}, onConn() {}, onStale: (text) => stale.push(text),
+  });
+  poller.start();
+  timers.advance(TIMEOUT_MS);
+  await flush();
+  assert.deepEqual(stale, [], 'stale said over a board never drawn');
+  timers.advance(POLL_MS);
+  net.calls[1].resolve(okAnswer(FEED_A));
+  await flush();
+  assert.deepEqual(stale, [null], 'a good answer did not clear the stale line');
+  timers.advance(POLL_MS + TIMEOUT_MS);
+  await flush();
+  const late = Math.round((POLL_MS + TIMEOUT_MS) / 1000);
+  assert.equal(stale.at(-1), `${CONN_WORDS.stale} · last answer ${late} s ago`, 'a late answer did not say stale over the board');
+  timers.advance(POLL_MS);
+  net.calls[3].resolve({ status: 401, ok: false });
+  await flush();
+  assert.match(String(stale.at(-1)), /^stale · last answer \d+ s ago$/, 'a refused token left the board looking live');
+  timers.advance(POLL_MS);
+  net.calls[4].resolve(okAnswer(FEED_B));
+  await flush();
+  assert.equal(stale.at(-1), null, 'the board stayed stale after a good answer');
   poller.stop();
 });
 

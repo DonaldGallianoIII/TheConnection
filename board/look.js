@@ -69,6 +69,11 @@ const BOARD_TEXT_MIN_PX = 11;
 // A tree connector to a wrapped row runs down a lane of its own parent's
 // block, this far from the block's edge and from the children beside it.
 const ROUTE_GUTTER_PX = 12;
+// The stage width under which the board draws the outline (CONFIG says
+// why), and how much wider the stage must grow before it draws the graph
+// again.
+const OUTLINE_BELOW_PX = 560;
+const VIEW_HYSTERESIS_PX = 24;
 
 export const CONFIG = Object.freeze({
   // Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status:
@@ -114,11 +119,15 @@ export const CONFIG = Object.freeze({
   // PORT_SIZE / 2 over the box).
   HEAD_H: 20,
   HEAD_GAP: 8,
-  // a2's direction: under this stage width (about a 600 px phone, less the
+  // Under OUTLINE_BELOW_PX of stage width (about a 600 px phone, less the
   // page's two 16 px margins, the window's borders and the body's 8 px
-  // padding) the board draws the outline view instead of the graph. Each
-  // outline row is indented OUTLINE_INDENT px per level under its parent.
-  OUTLINE_BELOW_PX: 560,
+  // padding) the board draws the outline view instead of the graph. Back
+  // to the graph only from GRAPH_FROM_PX: the gap is wider than a classic
+  // scrollbar (about 15 to 17 px), so a scrollbar that comes or goes with
+  // the view cannot flip it back every frame. Each outline row is indented
+  // OUTLINE_INDENT px per level under its parent.
+  OUTLINE_BELOW_PX,
+  GRAPH_FROM_PX: OUTLINE_BELOW_PX + VIEW_HYSTERESIS_PX,
   OUTLINE_INDENT: 16,
   // A message at most this many seconds old flows on its wire. The feed's
   // WRITING_WINDOW_S, so the wire moves while its sender reads as writing.
@@ -304,10 +313,15 @@ export function levelPort(pos, side, h = CONFIG.NODE_H) {
 }
 
 /**
- * Window frame: title bar with traffic dots, a status pill, a body and a footer.
+ * Window frame: title bar with traffic dots, a status pill, a body and a
+ * footer. The body starts with a line, hidden until setStale(text) gives
+ * it words: while the feed is stale it reads, over the board, `stale ·
+ * last answer N s ago`, and the window's data-conn turns `stale`, which
+ * stops every flowing wire's dashes (theme.css), so nothing on the board
+ * looks live that is not. setStale(null) hides it again.
  * @interacts  appends to parent
  * @complexity O(1)  @alloc one window subtree
- * @returns {{ root, title, body, foot, setConn(text, state) }}  state: 'up' | 'warn' | 'down'
+ * @returns {{ root, title, body, foot, setConn(text, state), setStale(text) }}  state: 'up' | 'warn' | 'down'
  */
 export function createWindow(doc, parent, { file, sub }) {
   const root = el(doc, 'div', 'tc-win');
@@ -320,12 +334,21 @@ export function createWindow(doc, parent, { file, sub }) {
   conn.append(cdot, ctext);
   title.append(conn);
   const body = el(doc, 'div', 'tc-body');
+  // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+  const stale = el(doc, 'div', 'tc-stale');
+  stale.hidden = true;
+  body.append(stale);
   const foot = el(doc, 'div', 'tc-foot');
   root.append(title, body, foot);
   parent.append(root);
   return {
     root, title, body, foot,
     setConn(text, state) { ctext.textContent = text; conn.dataset.state = state; },
+    setStale(text) {
+      stale.textContent = text || '';
+      stale.hidden = !text;
+      root.dataset.conn = text ? 'stale' : 'live';
+    },
   };
 }
 
@@ -596,14 +619,19 @@ function nativeAllowed(p, q) {
 }
 
 /**
- * The legend: what each kind of line on the board means, in words. It is a
- * row of the footer, never over the board (round 2, item 4); `empty` stands
- * in for it while the feed holds no sessions.
- * Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+ * The legend: what each kind of line on the board means, in words, the
+ * quiet mail wire too, and the thin line's parent whether a card declared
+ * it or the feed inferred it from mail. It is a row of the footer, never
+ * over the board; `empty` stands in for it while the feed holds no
+ * sessions.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  */
 export const LEGEND_WORDS = Object.freeze({
-  outline: 'outline: each session under the one it reports to · traffic: newest first, arrow toward the reader',
-  graph: 'thin line: reports to · dashes, arrow and words: mail now, arrow at the reader · long dash: native, not observed · dotted: no listener',
+  outline: 'outline: each session under the one it reports to, or that mail shows it works for · '
+    + 'traffic: newest first, arrow toward the reader',
+  graph: 'thin line: reports to, or inferred from mail · '
+    + `thick line: mail, none in the last ${CONFIG.FLOW_AGE_S} s · `
+    + 'dashes, arrow and words: mail now, arrow at the reader · long dash: native, not observed · dotted: no listener',
   empty: 'no sessions yet · send a message or start a listener',
 });
 
@@ -1440,8 +1468,9 @@ function agoWords(ageS) {
 }
 
 /**
- * The outline view of a feed, for a phone (a2's direction): no wires.
- * One group per root, in name order, headed by headWords; in it one row
+ * The outline view of a feed, for a phone: no wires. One group per root,
+ * in name order, headed by headWords (null for a tree of one session,
+ * whose row says the same); in it one row
  * per session of that tree, parent before children, each `depth` levels
  * under its root, with its name, its role words, its state's glyph and
  * word, its unread count, its note (as boardView's) and its badges'
@@ -1450,7 +1479,7 @@ function agoWords(ageS) {
  * m ago`, newest first.
  * @interacts  none; pure
  * @complexity O(n log n + l + r log r) over n nodes, l links and r recent wires  @alloc the returned model
- * @returns {{ groups: { root, heading, rows: { id, depth, role, state, glyph, word, unread, note, badges }[] }[],
+ * @returns {{ groups: { root, heading: string | null, rows: { id, depth, role, state, glyph, word, unread, note, badges }[] }[],
  *            traffic: { from, to, seq, text }[] }}
  */
 export function outlineView(feed) {
@@ -1469,7 +1498,8 @@ export function outlineView(feed) {
       const children = kids.get(id) || [];
       for (let i = children.length - 1; i >= 0; i -= 1) stack.push([children[i], depth + 1]);
     }
-    return { root, heading: headWords(roleTitle(known.get(root)), rows.length), rows };
+    // A tree of one session needs no heading over its one row.
+    return { root, heading: rows.length > 1 ? headWords(roleTitle(known.get(root)), rows.length) : null, rows };
   });
   const newest = new Map();
   for (const w of (feed && feed.wires) || []) {
@@ -1763,23 +1793,59 @@ export function drawEdge(doc, canvas, view) {
  * The DOM kit patchBoard draws through: nodes with createNode (ports on the
  * top and bottom edges), each with its connector from its parent as a thin
  * path under every wire (first in the layer, with its words as a title)
- * and, on a root, the heading over its tree (round 2, item 5); and edges
- * with drawEdge, all on `canvas`. A node's reveal() scrolls its heading (or
- * its box) to the top of the view. drawOutline(model) draws outlineView's
- * model into canvas.outline, replacing what was there, and
- * revealOutline(id) scrolls root id's group heading to the top.
+ * and, on a root, the heading over its tree; and edges with drawEdge, all
+ * on `canvas`. A node's reveal() scrolls its heading (or its box) to the
+ * top of the view. drawOutline(model) brings canvas.outline to outlineView's
+ * model in place: each group, row and traffic line keeps its element from
+ * one call to the next, only words that changed are written, and an
+ * element moves only when the order changed, so a poll that only ages the
+ * traffic leaves every row alone (a selection or a screen reader's place
+ * survives it). revealOutline(id) scrolls root id's group heading, or its
+ * one row, to the top.
  * @interacts  see createNode and drawEdge; a node's remove() takes its
- *             connector and heading out too; drawOutline replaces
- *             canvas.outline's children; the reveals scroll the page
+ *             connector and heading out too; drawOutline adds, updates,
+ *             moves and removes canvas.outline's elements; the reveals
+ *             scroll the page
  * @complexity O(1) per node call plus O(p) over p connector points; edges
- *             as drawEdge; drawOutline O(n + t) over n rows and t traffic lines
+ *             as drawEdge; drawOutline O(n + t) over n rows and t traffic
+ *             lines
  * @alloc      one node subtree, one connector path and one heading per
  *             node, or one edge's elements per create; drawOutline one
- *             element tree for the outline, dropping the last, and a map of
- *             its group headings
+ *             element tree per new group, row or traffic line, each kept
+ *             until its group, row or line leaves the model
  */
 export function createKit(doc, canvas) {
-  let outlineHeads = new Map();
+  // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+  const groups = new Map();
+  let traffic = null;
+  const setText = (e, text) => { if (e.textContent !== text) e.textContent = text; };
+  // Put `kids` under `parent` in order, moving only the ones out of place.
+  const place = (parent, kids) => {
+    kids.forEach((kid, i) => { if (parent.children[i] !== kid) parent.insertBefore(kid, parent.children[i] || null); });
+    while (parent.children.length > kids.length) parent.lastElementChild.remove();
+  };
+  const makeRow = () => {
+    const row = { root: el(doc, 'div', 'tc-row'), title: el(doc, 'span', 'tc-row-title'), name: el(doc, 'span', 'tc-row-name'),
+      role: el(doc, 'span', 'tc-row-role'), state: el(doc, 'span', 'tc-row-state'), note: el(doc, 'span', 'tc-row-note'), badges: [] };
+    row.title.append(row.name, row.role);
+    return row;
+  };
+  const fillRow = (row, r) => {
+    const cls = r.depth ? 'tc-row nested' : 'tc-row';
+    if (row.root.className !== cls) row.root.className = cls;
+    if (row.root.dataset.state !== r.state) row.root.dataset.state = r.state;
+    const indent = `${r.depth * CONFIG.OUTLINE_INDENT}px`;
+    if (row.root.style.marginLeft !== indent) row.root.style.marginLeft = indent;
+    setText(row.name, r.id);
+    setText(row.role, r.role);
+    setText(row.state, `${r.glyph} ${r.word}${r.unread ? ` · ${r.unread}` : ''}`);
+    setText(row.note, r.note);
+    if (row.note.hidden !== !r.note) row.note.hidden = !r.note;
+    while (row.badges.length < r.badges.length) row.badges.push(el(doc, 'span', 'tc-row-badge'));
+    while (row.badges.length > r.badges.length) row.badges.pop().remove();
+    r.badges.forEach((words, i) => setText(row.badges[i], words));
+    place(row.root, [row.title, row.state, row.note, ...row.badges]);
+  };
   return {
     createNode(v) {
       const node = createNode(doc, canvas, { ...v, hue: HUES[hueFor(v.id)], levels: true });
@@ -1823,34 +1889,48 @@ export function createKit(doc, canvas) {
     },
     createEdge(v) { return drawEdge(doc, canvas, v); },
     drawOutline(model) {
-      outlineHeads = new Map();
-      const parts = model.groups.map((g) => {
-        const group = el(doc, 'section', 'tc-group');
-        const head = el(doc, 'div', 'tc-group-head', g.heading);
-        outlineHeads.set(g.root, head);
-        group.append(head);
-        for (const r of g.rows) {
-          const row = el(doc, 'div', r.depth ? 'tc-row nested' : 'tc-row');
-          row.dataset.state = r.state;
-          row.style.marginLeft = `${r.depth * CONFIG.OUTLINE_INDENT}px`;
-          const title = el(doc, 'span', 'tc-row-title');
-          title.append(el(doc, 'span', 'tc-row-name', r.id), el(doc, 'span', 'tc-row-role', r.role));
-          row.append(title, el(doc, 'span', 'tc-row-state', `${r.glyph} ${r.word}${r.unread ? ` · ${r.unread}` : ''}`));
-          if (r.note) row.append(el(doc, 'span', 'tc-row-note', r.note));
-          for (const words of r.badges) row.append(el(doc, 'span', 'tc-row-badge', words));
-          group.append(row);
+      const sections = model.groups.map((g) => {
+        if (!groups.has(g.root)) groups.set(g.root, { root: el(doc, 'section', 'tc-group'), head: el(doc, 'div', 'tc-group-head'), rows: new Map() });
+        const group = groups.get(g.root);
+        setText(group.head, g.heading || '');
+        if (group.head.hidden !== !g.heading) group.head.hidden = !g.heading;
+        const ids = new Set(g.rows.map((r) => r.id));
+        for (const [id, row] of group.rows) {
+          if (!ids.has(id)) {
+            row.root.remove();
+            group.rows.delete(id);
+          }
         }
-        return group;
+        const rows = g.rows.map((r) => {
+          if (!group.rows.has(r.id)) group.rows.set(r.id, makeRow());
+          const row = group.rows.get(r.id);
+          fillRow(row, r);
+          return row.root;
+        });
+        place(group.root, [group.head, ...rows]);
+        group.jump = g.heading ? group.head : rows[0];
+        return group.root;
       });
-      const traffic = el(doc, 'section', 'tc-traffic');
-      traffic.append(el(doc, 'div', 'tc-group-head', OUTLINE_WORDS.traffic));
-      const lines = model.traffic.length ? model.traffic.map((t) => t.text) : [OUTLINE_WORDS.noTraffic];
-      for (const text of lines) traffic.append(el(doc, 'div', 'tc-traffic-line', text));
-      canvas.outline.replaceChildren(...parts, traffic);
+      const roots = new Set(model.groups.map((g) => g.root));
+      for (const [id, group] of groups) {
+        if (!roots.has(id)) {
+          group.root.remove();
+          groups.delete(id);
+        }
+      }
+      if (!traffic) {
+        traffic = { root: el(doc, 'section', 'tc-traffic'), head: el(doc, 'div', 'tc-group-head', OUTLINE_WORDS.traffic), lines: [] };
+      }
+      const words = model.traffic.length ? model.traffic.map((t) => t.text) : [OUTLINE_WORDS.noTraffic];
+      while (traffic.lines.length < words.length) traffic.lines.push(el(doc, 'div', 'tc-traffic-line'));
+      while (traffic.lines.length > words.length) traffic.lines.pop().remove();
+      words.forEach((text, i) => setText(traffic.lines[i], text));
+      place(traffic.root, [traffic.head, ...traffic.lines]);
+      place(canvas.outline, [...sections, traffic.root]);
     },
     revealOutline(id) {
-      const head = outlineHeads.get(id);
-      if (head) head.scrollIntoView({ block: 'start' });
+      const group = groups.get(id);
+      if (group && group.jump) group.jump.scrollIntoView({ block: 'start' });
     },
   };
 }
@@ -1874,20 +1954,22 @@ export function fitTransform(width, height, extent, padding) {
 /**
  * Keep a board laid out to its canvas. The stage's width comes from the
  * ResizeObserver's own entry, never from a layout read after a patch, so a
- * poll that changes the board forces no layout (round 1, LOW-4). The width
- * picks the view (a2's direction): under OUTLINE_BELOW_PX the outline
- * (outlineView, drawn by board.kit.drawOutline, only when it changed),
- * else the graph. `mark`'s data-view names the view drawn, so theme.css
- * shows that one and its legend. In the graph, draw(feed) lays the feed out
- * at that width (layoutLevels wraps it) and patches the board; a resize
- * that changes the width draws the last feed again, and one that changes
- * only the height (the frame growing) draws nothing. The frame takes the
- * board's height plus `padding` (round 2, item 1), so the page scrolls down
- * as far as the board goes, never sideways, and the fit never shrinks the
- * board to the frame's height; the view and its wire layer take the
- * board's extent. jump(id) brings root id's tree into view (item 5).
- * `Observer` is ResizeObserver on a page; a test passes a fake.
- * Model: Claude Opus 5.5 (the BOARD fixer, rounds 1 and 2), 2026-10-14. Status: unreviewed.
+ * poll that changes the board forces no layout. The width picks the view:
+ * the outline (outlineView, brought up to date in place by
+ * board.kit.drawOutline, and only when it changed) once the stage is under
+ * OUTLINE_BELOW_PX, the graph again once it is GRAPH_FROM_PX or wider, so a
+ * scrollbar that comes or goes with the view never flips it back.
+ * `mark`'s data-view names the view drawn, so theme.css shows that one and
+ * its legend. In the graph, draw(feed) lays the feed out at that width
+ * (layoutLevels wraps it) and patches the board; a resize that changes the
+ * width draws the last feed again, and one that changes only the height
+ * (the frame growing) draws nothing. The frame takes the board's height
+ * plus `padding`, so the page scrolls down as far as the board goes, never
+ * sideways, and the fit never shrinks the board to the frame's height; the
+ * view and its wire layer take the board's extent. jump(id) brings root
+ * id's tree into view. `Observer` is ResizeObserver on a page; a test
+ * passes a fake.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @interacts  observes canvas.root (the stage) from start() until stop()
  *             (the page calls them on load and pageshow, and on pagehide);
  *             writes mark's data-view, canvas.frame's height, canvas.view's
@@ -1909,7 +1991,10 @@ export function createFit(canvas, board, { padding, Observer, mark }) {
   let drawnOutline = null;
   const apply = () => {
     if (width === null) return;
-    view = width < CONFIG.OUTLINE_BELOW_PX ? 'outline' : 'graph';
+    // Hysteresis: the outline under OUTLINE_BELOW_PX, the graph again only
+    // from GRAPH_FROM_PX, so a stage near the line never flips every frame.
+    const below = view === 'outline' ? CONFIG.GRAPH_FROM_PX : CONFIG.OUTLINE_BELOW_PX;
+    view = width < below ? 'outline' : 'graph';
     if (mark) mark.dataset.view = view;
     if (view === 'outline') {
       if (!feed) return;
@@ -1980,33 +2065,40 @@ const MS_PER_S = 1000;
  * (C6's newest answer wins, by construction). A request still out after
  * `timeoutMs` is aborted. When an answer fails or is late the pill says so
  * in words: `no answer · <why>` before any answer, else `stale · last
- * answer N s ago · <why>`; a 401 says the token was refused. A good answer
- * goes to onFeed, which writes the pill itself. fetchFeed(signal) returns a
- * fetch Response; timers is { setTimeout, clearTimeout }; now() is a
- * monotonic clock in ms (performance.now on a page, a fake in a test).
- * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
- * @interacts  calls fetchFeed, timers, now, onFeed and onConn, nothing
- *             else. start() polls; stop() clears both timers and aborts the
- *             request in flight (the page calls them on load and pageshow,
- *             and on pagehide)
+ * answer N s ago · <why>`; a 401 says the token was refused. Once a board
+ * has been drawn, every failure (a 401 too) also calls onStale(`stale ·
+ * last answer N s ago`), so the page can say it over the board and stop
+ * its moving wires, and the next good answer calls onStale(null) before
+ * onFeed. A good answer goes to onFeed, which writes the pill itself.
+ * fetchFeed(signal) returns a fetch Response; timers is { setTimeout,
+ * clearTimeout }; now() is a monotonic clock in ms (performance.now on a
+ * page, a fake in a test).
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * @interacts  calls fetchFeed, timers, now, onFeed, onConn and onStale,
+ *             nothing else. start() polls; stop() clears both timers and
+ *             aborts the request in flight (the page calls them on load
+ *             and pageshow, and on pagehide)
  * @complexity O(1) per poll, plus the caller's onFeed
  * @alloc      one AbortController and two timers while a request is out,
  *             one timer between polls; none after stop()
  * @returns {{ start(), stop() }}
  */
-export function createPoller({ fetchFeed, pollMs, timeoutMs, timers, now, onFeed, onConn }) {
+export function createPoller({ fetchFeed, pollMs, timeoutMs, timers, now, onFeed, onConn, onStale = () => {} }) {
   let running = false;
   let next = null;
   let deadline = null;
   let inFlight = null;
   let answeredAt = null;
+  // The board's own line once an answer is late: `stale · last answer N s ago`.
+  const staleWords = () => `${CONN_WORDS.stale} · last answer ${Math.round((now() - answeredAt) / MS_PER_S)} s ago`;
   const failed = (why) => {
     if (answeredAt === null) {
       onConn(`${CONN_WORDS.noAnswer} · ${why}`, 'down');
       return;
     }
-    const ago = Math.round((now() - answeredAt) / MS_PER_S);
-    onConn(`${CONN_WORDS.stale} · last answer ${ago} s ago · ${why}`, 'down');
+    const words = staleWords();
+    onConn(`${words} · ${why}`, 'down');
+    onStale(words);
   };
   const poll = async () => {
     next = null;
@@ -2024,12 +2116,14 @@ export function createPoller({ fetchFeed, pollMs, timeoutMs, timers, now, onFeed
       if (inFlight !== ctl) return;
       if (answer.status === HTTP_UNAUTHORIZED) {
         onConn(CONN_WORDS.tokenRefused, 'down');
+        if (answeredAt !== null) onStale(staleWords());
       } else if (!answer.ok) {
         failed(`HTTP ${answer.status}`);
       } else {
         const feed = await answer.json();
         if (inFlight !== ctl) return;
         answeredAt = now();
+        onStale(null);
         onFeed(feed);
       }
     } catch {

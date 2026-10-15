@@ -13,12 +13,16 @@
  * two boxes in one row joined straight across. Since then: a parent's mail
  * (or native line) runs beside its connector and shares no piece of it,
  * and two parents' connectors share no piece (a relay over a relay whose
- * workers wrap, at a 1180 px window and a 700 px stage).
+ * workers wrap, at a 1180 px window and a 700 px stage); the switch
+ * between graph and outline has two breakpoints; the outline is brought up
+ * to date in place (a fake document counts its writes) and heads no tree
+ * of one; the legend names the quiet wire and the inferred thin line.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
  * @interacts  imports board/look.js; reads board/demo-script.json and
- *             board/theme.css as text; no DOM (a fake observer and kit)
+ *             board/theme.css as text; no DOM (a fake observer, kit and
+ *             document)
  * @deps       node:test, node:assert, node:fs (Node 18+)
  * @complexity O(n^2) per shape over n <= 14 nodes, for the pairwise overlap
  *             check; O(r * p * n) for the runs over r runs of p points, and
@@ -29,8 +33,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  layoutLevels, layoutWidth, roleTitle, fitTransform, boardView, createBoard, createFit, levelPort, rootsList, outlineView,
-  STATES, CONFIG,
+  layoutLevels, layoutWidth, roleTitle, fitTransform, boardView, createBoard, createFit, createKit, levelPort, rootsList,
+  outlineView, STATES, CONFIG, LEGEND_WORDS,
 } from '../board/look.js';
 
 /** One feed node with the fields the layout reads. @complexity O(1)  @alloc one object */
@@ -576,9 +580,12 @@ test('the outline lists every session once, indented by level under its parent, 
   assert.deepEqual(rows.map((r) => r.id).sort(), ROUTED.mixed.nodes.map((x) => x.id).sort(), 'a session is missing or twice');
   assert.deepEqual(model.groups.map((g) => g.root), ['a', 'p1', 'p2', 'z']);
   for (const g of model.groups) {
-    assert.ok(g.heading.startsWith(`${g.root} · `), `group ${g.root} is headed "${g.heading}"`);
+    // A tree of one session draws no heading: its one row says the same.
+    if (g.rows.length === 1) assert.equal(g.heading, null, `the one-session tree ${g.root} is headed "${g.heading}"`);
+    else assert.ok(g.heading.startsWith(`${g.root} · `), `group ${g.root} is headed "${g.heading}"`);
     assert.equal(g.rows[0].id, g.root, `group ${g.root} does not start with its root`);
   }
+  assert.deepEqual(model.groups.filter((g) => g.heading === null).map((g) => g.root), ['p1', 'p2']);
   const level = Object.fromEntries(ROUTED.mixed.nodes.map((x) => [x.id, x.level]));
   for (const r of rows) assert.equal(r.depth, level[r.id], `${r.id} sits at depth ${r.depth}, level ${level[r.id]}`);
   // A parent comes before its children, and each child right under its own parent's subtree.
@@ -625,10 +632,137 @@ test('createFit draws the outline under OUTLINE_BELOW_PX and the graph above it,
   fit.draw(ROUTED.mixed);
   assert.equal(outlines.length, 1, 'an unchanged outline was drawn again');
   fit.jump('z');
+  // From the outline, the graph comes back only at GRAPH_FROM_PX.
   report([{ contentRect: { width: CONFIG.OUTLINE_BELOW_PX, height: CANVAS_H } }]);
-  assert.equal(mark.dataset.view, 'graph', `${CONFIG.OUTLINE_BELOW_PX} px does not draw the graph`);
+  assert.equal(mark.dataset.view, 'outline', `${CONFIG.OUTLINE_BELOW_PX} px flipped the outline back to the graph`);
+  report([{ contentRect: { width: CONFIG.GRAPH_FROM_PX, height: CANVAS_H } }]);
+  assert.equal(mark.dataset.view, 'graph', `${CONFIG.GRAPH_FROM_PX} px does not draw the graph`);
   assert.equal(board.nodes.size, ROUTED.mixed.nodes.length);
   fit.jump('z');
   assert.deepEqual(revealed, [['outline', 'z'], ['graph', 'z']]);
   fit.stop();
+});
+
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// Near the line, a classic scrollbar moved the stage across it with each
+// view, so the page flipped every frame. Two breakpoints stop that.
+test('the switch between graph and outline has two breakpoints, so a stage near the line never flips back', () => {
+  let report = null;
+  class FakeObserver {
+    constructor(callback) { report = callback; }
+    observe() {}
+    disconnect() {}
+  }
+  const kit = {
+    createNode() { return { update() {}, remove() {} }; },
+    createEdge() { return { update() {}, remove() {} }; },
+    drawOutline() {},
+  };
+  const mark = { dataset: {} };
+  const fit = createFit({ root: {}, frame: { style: {} }, view: { style: {} }, wires: { setAttribute() {} } }, createBoard(kit),
+    { padding: FIT_PADDING, Observer: FakeObserver, mark });
+  fit.start();
+  fit.draw(ROUTED.mixed);
+  assert.ok(CONFIG.GRAPH_FROM_PX - CONFIG.OUTLINE_BELOW_PX > 17, 'the two breakpoints are no wider apart than a classic scrollbar');
+  const scrollbar = 15;
+  const seen = [];
+  for (const width of [CONFIG.OUTLINE_BELOW_PX + 5, CONFIG.OUTLINE_BELOW_PX + 5 - scrollbar, CONFIG.OUTLINE_BELOW_PX + 5,
+    CONFIG.OUTLINE_BELOW_PX + 5 - scrollbar, CONFIG.GRAPH_FROM_PX]) {
+    report([{ contentRect: { width, height: CANVAS_H } }]);
+    seen.push(`${width}:${mark.dataset.view}`);
+  }
+  const [a, b, c, d, e] = [CONFIG.OUTLINE_BELOW_PX + 5, CONFIG.OUTLINE_BELOW_PX + 5 - scrollbar, CONFIG.OUTLINE_BELOW_PX + 5,
+    CONFIG.OUTLINE_BELOW_PX + 5 - scrollbar, CONFIG.GRAPH_FROM_PX];
+  assert.deepEqual(seen, [`${a}:graph`, `${b}:outline`, `${c}:outline`, `${d}:outline`, `${e}:graph`],
+    'a scrollbar coming and going flipped the view');
+  fit.stop();
+});
+
+/**
+ * A fake document for createKit's outline: elements with children, words
+ * and attributes, each counting the writes to its words, so a test can
+ * tell an element kept from one made new, and words kept from words
+ * written again.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * @complexity O(1) per element, O(k) per insert over k siblings  @alloc one object per element
+ */
+function fakeDoc() {
+  const make = (tag) => {
+    const e = {
+      tag, className: '', dataset: {}, style: {}, hidden: false, title: '', children: [], parentNode: null, writes: 0, text: '', scrolled: 0,
+      get textContent() { return e.children.length ? e.children.map((c) => c.textContent).join('') : e.text; },
+      set textContent(v) {
+        e.writes += 1;
+        for (const c of e.children) c.parentNode = null;
+        e.children = [];
+        e.text = String(v);
+      },
+      get lastElementChild() { return e.children.at(-1) || null; },
+      append(...kids) { for (const k of kids) e.insertBefore(k, null); },
+      insertBefore(k, ref) {
+        if (k.parentNode) k.remove();
+        const i = ref ? e.children.indexOf(ref) : -1;
+        if (i < 0) e.children.push(k);
+        else e.children.splice(i, 0, k);
+        k.parentNode = e;
+        return k;
+      },
+      remove() {
+        if (!e.parentNode) return;
+        e.parentNode.children.splice(e.parentNode.children.indexOf(e), 1);
+        e.parentNode = null;
+      },
+      replaceChildren(...kids) {
+        for (const c of [...e.children]) c.remove();
+        e.append(...kids);
+      },
+      scrollIntoView() { e.scrolled += 1; },
+    };
+    return e;
+  };
+  return { createElement: make, createElementNS: (ns, tag) => make(tag) };
+}
+
+/** Every element under `e`, itself first, in order. @complexity O(n) over n elements  @alloc one list */
+const everyEl = (e) => [e, ...e.children.flatMap(everyEl)];
+
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// The phone's outline was rebuilt whenever a traffic age ticked, which
+// lost a selection and a screen reader's place. C5 and C6: never rebuild.
+test('the outline is brought up to date in place: an age tick rewrites only traffic words; a new session adds one row', () => {
+  const doc = fakeDoc();
+  const canvas = { outline: doc.createElement('div') };
+  const kit = createKit(doc, canvas);
+  const aged = (age, feed = ROUTED.mixed) => ({ ...feed, wires: feed.wires.map((w) => ({ ...w, age_s: age })) });
+  kit.drawOutline(outlineView(aged(3)));
+  const before = everyEl(canvas.outline);
+  const rows = before.filter((e) => e.className === 'tc-row' || e.className === 'tc-row nested');
+  assert.equal(rows.length, ROUTED.mixed.nodes.length);
+  for (const e of before) e.writes = 0;
+  kit.drawOutline(outlineView(aged(6)));
+  const after = everyEl(canvas.outline);
+  assert.ok(after.length === before.length && after.every((e, i) => e === before[i]), 'an age tick made new elements or moved old ones');
+  const written = after.filter((e) => e.writes > 0).map((e) => e.className);
+  assert.ok(written.length > 0, 'the ages were not written');
+  assert.deepEqual([...new Set(written)], ['tc-traffic-line'], `an age tick rewrote ${written.join(', ')}`);
+  // A new worker under z: one new row, every other row kept.
+  const grown = aged(6, { ...ROUTED.mixed, nodes: [...ROUTED.mixed.nodes, fed('y4', 'worker', 'declared', 1, 'z', { reports_to: 'z' })] });
+  kit.drawOutline(outlineView(grown));
+  const now = everyEl(canvas.outline).filter((e) => e.className === 'tc-row' || e.className === 'tc-row nested');
+  assert.equal(now.length, rows.length + 1);
+  assert.deepEqual(now.filter((e) => !rows.includes(e)).map((e) => e.children[0].children[0].textContent), ['y4']);
+  // A tree of one session shows no heading; its jump goes to its row.
+  const p1 = canvas.outline.children.find((g) => g.children.some((e) => e.className === 'tc-row' && e.children[0].children[0].textContent === 'p1'));
+  assert.equal(p1.children[0].hidden, true, 'p1\'s tree of one draws a heading');
+  kit.revealOutline('p1');
+  assert.equal(p1.children[1].scrolled, 1, 'the jump to p1 did not reach its row');
+});
+
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+test('the legend names the quiet mail wire and says the thin line may be inferred; a title keeps its space; a stale board stops its dashes', () => {
+  assert.ok(LEGEND_WORDS.graph.includes(`thick line: mail, none in the last ${CONFIG.FLOW_AGE_S} s`), LEGEND_WORDS.graph);
+  assert.ok(LEGEND_WORDS.graph.includes('thin line: reports to, or inferred from mail'), LEGEND_WORDS.graph);
+  const rule = (selector) => [...CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(([, sel]) => sel.trim() === selector);
+  assert.match((rule('.tc-node-role') || [])[2] || '', /white-space:\s*pre/, 'the role words drop their leading space');
+  assert.match((rule('.tc-win[data-conn="stale"] .tc-wire.flow') || [])[2] || '', /animation:\s*none/, 'a stale board keeps its dashes moving');
 });

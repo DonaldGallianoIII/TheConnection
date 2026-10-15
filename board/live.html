@@ -18,7 +18,9 @@
  * next starts POLL_MS after the last settles, so a slow old answer can
  * never overwrite a newer one, and one still out after FETCH_TIMEOUT_MS is
  * aborted. A late or failed answer turns the pill to words such as
- * `stale · last answer 12 s ago · timed out`, never `live`. A page restored
+ * `stale · last answer 12 s ago · timed out`, never `live`; once a board is
+ * drawn, a line over it says `stale · last answer 12 s ago` too and every
+ * moving wire stops, until the next good answer. A page restored
  * from the back/forward cache starts polling again on pageshow. It only
  * reads; nothing on the page writes to the mailbox. The window is at least
  * the viewport's height, the board's frame grows to the board and the page
@@ -128,6 +130,8 @@ const poller = createPoller({
   now: () => performance.now(),
   onFeed: draw,
   onConn: (text, state) => win.setConn(text, state),
+  // Over the board, `stale · last answer N s ago`, and no wire moves.
+  onStale: (text) => win.setStale(text),
 });
 
 // Start on load, and again when the back/forward cache restores the page:
