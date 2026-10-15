@@ -108,7 +108,9 @@ the owner's human QA (D4, qa/human/route-shared.md).
             root is removed), and load tc in process to run deliver_local,
             unread, claim_inbox, make_folder, cmd_init, cmd_read,
             write_card and health_snapshot with os.lstat, os.fchown,
-            os.fchmod, os.rename, Path.rename or share_entry wrapped.
+            os.fchmod, os.rename or share_entry wrapped (os.rename for
+            cmd_read since P3 fix round 1a, Claude Opus 5.5, unreviewed:
+            it moves by name between open folders, D35).
             The D21 tests make an inbox and its read/ by hand, write
             and chmod .shared by hand, chmod ROOT read-only and back, and
             load tc in process to run cmd_init with os.lstat wrapped or
@@ -140,7 +142,7 @@ the owner's human QA (D4, qa/human/route-shared.md).
             cmd_init in process with os.geteuid replaced (and os.lstat
             wrapped); plant a name of dots and md in an inbox and its
             read/; plant a file at a .tmp name in an inbox; and run
-            cmd_read in process with Path.rename replaced by a hard link
+            cmd_read in process with os.rename replaced by a hard link
             at its target. The round 6 tests write, chown and chmod a
             member's old message in another inbox's read/ by hand, make
             a folder outside TC_ROOT and a link to it at that message's
@@ -1200,11 +1202,13 @@ class RegularFilesOnlyTest(UmaskTestCase):
 
         @interacts  one send; a link, a FIFO and a linked folder made by
                     hand; peek, read, log and a one-poll wait; loads tc in
-                    process for show(), with stdout captured.
-        @deps       _root.TcRoot.tc, plant, load_tc; contextlib, io;
+                    process for show(), handed the link by its name in the
+                    inbox's open descriptor, with stdout captured.
+        @deps       _root.TcRoot.tc, plant, load_tc; contextlib, io, os;
                     tc.show.
         @complexity O(1).
-        @alloc      one TcRoot and one module.
+        @alloc      one TcRoot and one module; one descriptor while show()
+                    runs.
         """
         with _root.TcRoot() as root:
             root.tc("send", "--from", "a", "--to", "x", REAL_TEXT)
@@ -1228,8 +1232,12 @@ class RegularFilesOnlyTest(UmaskTestCase):
             moved = sorted(p.name for p in (box / "read").iterdir())
             after = target.read_text()
             tc = load_tc(root)
-            with contextlib.redirect_stdout(io.StringIO()) as printed:
-                unshown = tc.show([box / "000099-from-z.md"])
+            box_fd = os.open(box, os.O_RDONLY | os.O_DIRECTORY)  # P3 fix round 1a (Claude Opus 5.5, unreviewed): show() reads by name in an open folder (D35)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()) as printed:
+                    unshown = tc.show([(box / "000099-from-z.md", box_fd)])
+            finally:
+                os.close(box_fd)
         for label, (code, out, err) in runs.items():
             with self.subTest(run=label):
                 self.assertNotIn(TARGET_TEXT.strip(), out + err, f"tc {label} printed a link's target")
@@ -1706,7 +1714,7 @@ class NobodyTouchesAnotherMembersMailTest(UmaskTestCase):
         the stuck message gone.
 
         @interacts  three sends; loads tc in process and runs cmd_read twice
-                    with Path.rename wrapped and stdout and stderr captured.
+                    with os.rename wrapped and stdout and stderr captured.
         @deps       _root.TcRoot.tc, load_tc; argparse, contextlib, errno,
                     io, unittest.mock; tc.cmd_read.
         @complexity O(1).
@@ -1716,18 +1724,19 @@ class NobodyTouchesAnotherMembersMailTest(UmaskTestCase):
             for sender in ("a", "c", "d"):
                 root.tc("send", "--from", sender, "--to", "b", f"from {sender}")
             tc = load_tc(root)
-            real = pathlib.Path.rename
+            real = os.rename
 
-            def rename(path, target):
-                if path.name == "000002-from-c.md":
-                    raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), str(path))
-                return real(path, target)
+            # P3 fix round 1a (Claude Opus 5.5, unreviewed): tc read moves by name between open folders (os.rename, D35).
+            def rename(src, dst, *args, **kwargs):
+                if os.path.basename(src) == "000002-from-c.md":
+                    raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), str(src))
+                return real(src, dst, *args, **kwargs)
             out, err, again = io.StringIO(), io.StringIO(), io.StringIO()
-            with mock.patch.object(pathlib.Path, "rename", rename), contextlib.redirect_stdout(out), \
+            with mock.patch.object(os, "rename", rename), contextlib.redirect_stdout(out), \
                     contextlib.redirect_stderr(err):
                 with self.assertRaises(SystemExit) as stop:
                     tc.cmd_read(argparse.Namespace(name="b"))
-            with mock.patch.object(pathlib.Path, "rename", rename), contextlib.redirect_stdout(again), \
+            with mock.patch.object(os, "rename", rename), contextlib.redirect_stdout(again), \
                     contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     tc.cmd_read(argparse.Namespace(name="b"))
@@ -2799,7 +2808,7 @@ class NoLostMailNoHangTest(UmaskTestCase):
 
     # SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's LOW-1 (audits/2026-10-15-0201-quick).
     def test_a_rename_a_hard_link_turned_into_nothing_is_never_claimed_as_read(self):
-        """In process, Path.rename for one inbox file replaced by a hard link at its target, which is what rename(2) leaves when a member links the file there first: tc read exits 1, names that file as not moved with STILL_THERE_WORDS, never prints it, and moves and prints the other; the file stays in the inbox.
+        """In process, os.rename for one inbox file replaced by a hard link at its target, which is what rename(2) leaves when a member links the file there first: tc read exits 1, names that file as not moved with STILL_THERE_WORDS, never prints it, and moves and prints the other; the file stays in the inbox.
 
         rename(2) between two names of one file does nothing and returns
         0, and a member who owns an inbox file may link it at the name tc
@@ -2810,7 +2819,7 @@ class NoLostMailNoHangTest(UmaskTestCase):
         the next tc wait wakes for it at once.
 
         @interacts  two sends; loads tc in process and runs cmd_read with
-                    Path.rename replaced and stdout and stderr captured;
+                    os.rename replaced and stdout and stderr captured;
                     makes one hard link (the stand-in rename); lists the
                     inbox.
         @deps       _root.TcRoot.tc, load_tc; argparse, contextlib, io, os,
@@ -2825,15 +2834,17 @@ class NoLostMailNoHangTest(UmaskTestCase):
             box = root.path / "mail" / "to-b"
             linked = box / "000001-from-a.md"
             tc = load_tc(root)
-            real = pathlib.Path.rename
+            real = os.rename
 
-            def rename(path, target):
-                if path == linked:
-                    os.link(path, target)  # the member's link at the target: rename(2) between the two names does nothing
-                    return pathlib.Path(target)
-                return real(path, target)
+            # P3 fix round 1a (Claude Opus 5.5, unreviewed): tc read moves by name between open folders (os.rename, D35).
+            def rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+                if os.path.basename(src) == linked.name:
+                    # the member's link at the target: rename(2) between the two names does nothing
+                    os.link(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd, follow_symlinks=False)
+                    return None
+                return real(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
             out, err = io.StringIO(), io.StringIO()
-            with mock.patch.object(pathlib.Path, "rename", rename), contextlib.redirect_stdout(out), \
+            with mock.patch.object(os, "rename", rename), contextlib.redirect_stdout(out), \
                     contextlib.redirect_stderr(err):
                 with self.assertRaises(SystemExit) as stop:
                     tc.cmd_read(argparse.Namespace(name="b"))

@@ -108,9 +108,19 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             it prints is D23's chmod g-w,o-w, to the owner of ROOT or of
             a folder above it, which the walk judges by path. Shared
             or not, the locks, mail/.seq, status files and the ring marker
-            are opened without following a symlink, and an inbox or its
-            read/ is lstat()ed before use: a link at any of them is
-            refused, exit 1 (D17). A FIFO or anything else that is not a
+            are opened without following a symlink, and a link at any of
+            them, or at an inbox or its read/, is refused, exit 1 (D17).
+            P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, every
+            inbox act through one pinned handle. A command opens each
+            inbox and its read/ once, by name in mail/'s descriptor and
+            never through a link (pinned_inbox), and lists, stats,
+            reads, publishes, moves and counts only by name inside those
+            descriptors (send, the gate, read, peek, wait, log, health,
+            the codex route's counts, join's and card's counts); flush
+            opens each other member's outbox branch and its queues the
+            same way to count them. So a member who swaps an inbox or a
+            branch for a link or another folder mid-command leads tc
+            nowhere. A FIFO or anything else that is not a
             regular file at a lock, mail/.seq or a status file is refused
             at once, exit 1, never waited on (D19). Messages are read only
             from regular files: read, peek and log name anything else and
@@ -161,16 +171,23 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             mail/.seq and its inbox lock wait at most LOCK_WAIT_SECONDS in
             all; each ring marker write at most LOCK_WAIT_SECONDS (a codex
             send may wait on the marker twice).
-            read/peek/wait-poll O(u), u unread messages in one inbox,
-            single digits in practice; read adds two lstats per message
+            read/peek/wait-poll O(U + u log u), U names in one inbox and
+            u unread messages among them, single digits in practice,
+            sorted (P3 fix round 1a, Claude Opus 5.5, unreviewed: the
+            audit's LOW-9, and three folder opens per command or poll,
+            D35); read adds two lstats per message
             (before and after its move), and one per by-hand name already
             taken (plus a name-limit lookup and two owner lstats per
-            by-hand move). log O(t), t total messages ever,
-            low hundreds per job. health O(p + k + n + m + c): p processes
-            on the machine (hundreds), k lines in /proc/locks (tens), n
-            mailbox names and c cards (a few dozen each), m message files in
-            every inbox and read/ (one stat each: hundreds to thousands, and
-            it grows with the history). Each watch poll O(k + n) plus one
+            by-hand move). log O(n log n + T + t log t): n inboxes, T
+            names in every inbox and read/, t total messages ever (low
+            hundreds per job), sorted per folder and then all together.
+            health O(p + k + n log n + M + m log m + c): p processes on
+            the machine (hundreds), k lines in /proc/locks (tens), n
+            mailbox names and c cards (a few dozen each), M names in
+            every inbox and read/ and the m message files among them
+            (one stat each and a sort per folder: hundreds to thousands,
+            and it grows with the history; the board's feed runs the same
+            count every poll, mailbox_summary). Each watch poll O(k + n) plus one
             nvidia-smi run where it exists; it reads no cards. O(p) once per
             heartbeat. join O(1), or O(u) for a codex card's unread count;
             card O(u) for its unread count; cards O(c). init O(f + d) over f
@@ -182,10 +199,12 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             log and cards 1 in all; peek, wait (never per poll), status,
             watch, health and init 2; read and card 3; send 4, plus one
             per publish try past the first (next_seq); join up to 5 (a
-            codex join that makes the inbox). A private send, read,
-            peek or wait that makes an inbox's read/ adds 1. Each read is
-            one small file, O(1), and each make_folder call one group
-            lookup when shared.
+            codex join that makes the inbox). A private send, read, peek
+            or wait that makes an inbox or its read/ adds none: since P3
+            fix round 1a (Claude Opus 5.5, unreviewed) they are made by
+            name in an open folder (pin_folder), and only a missing mail/
+            goes through make_folder. Each read is one small file, O(1),
+            and each make_folder call one group lookup when shared.
 @alloc      one file per message, kept forever (read/ is the history); one
             card per name, replaced on a rejoin; one inbox lock file per
             name (mail/.box-<name>.lock), kept; one ring marker per codex
@@ -201,7 +220,11 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             mail/.origins/<user>/<key-name>/, one folder per user and
             per key name, made on first use and kept (SSH fix round 1,
             D33).
-            Nothing held in memory past one command. `wait` measured flat at
+            Nothing held in memory past one command. P3 fix round 1a
+            (Claude Opus 5.5, unreviewed): D35. A command holds each inbox
+            it acts on open, two descriptors, until it is done with it
+            (log holds every inbox's until it has printed), and closes
+            them on every way out. `wait` measured flat at
             13 MB RSS over 200k polls; it also hard-caps itself at
             WAIT_MEMORY_CAP_BYTES so a runaway dies alone. `wait` holds
             mail/.wait-<name>.lock for its lifetime; the kernel releases it
@@ -398,6 +421,14 @@ FOLDER_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_NONBLOCK
 # How it opens each entry, by its name in its folder's descriptor: a link
 # fails (ELOOP), and a FIFO never blocks.
 ENTRY_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+# P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, every inbox act goes
+# through one pinned handle (the audit's HIGH-1, audits/2026-10-15-1409-full).
+# How a command opens mail/ and outbox/ themselves, by their paths: read
+# only, only a folder, never blocking. A link at either is followed, as
+# every command always did: only the init user, who owns ROOT, can swap
+# one (D34). Every inbox, its read/ and every outbox branch tc counts is
+# then opened with FOLDER_FLAGS by its name in one of these descriptors.
+TOP_FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK
 # Why the walk skips a link, and a top (mail/, status/, cards/, outbox/)
 # that is something other than a folder.
 LINK_WHY = "a symlink, which tc never follows"
@@ -1016,7 +1047,12 @@ def in_shared_folders(path):
 
 
 def make_folder(path):
-    """Make the folder `path`, and any missing folder above it. Every folder tc makes is made here. The mailbox's Share, or None when private.
+    """Make the folder `path`, and any missing folder above it. Every folder tc makes by its path is made here. The mailbox's Share, or None when private.
+
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35. A private
+    mailbox's inbox and its read/ are made by name in their open parent
+    instead (pin_folder), a plain mkdir, as this call makes them in a
+    private mailbox; a shared one makes no inbox there (D20).
 
     A folder already there is left as it is. Under a shared mailbox (D16),
     each folder this call makes gets the group named in .shared and its
@@ -1667,10 +1703,15 @@ def open_by_name(path, flags, mode=NEW_FILE_MODE):
 def check_inbox(name, shared):
     """Refuse (exit 1) a bad mail/to-<name> or read/: a link or not a folder (D17), or, when `shared`, not its card owner's (D20). (box, read/) lstat results.
 
-    Checked with lstat before tc uses an inbox (send, read, peek, wait),
-    so a symlink planted at an inbox's name, or at its read/, is refused
-    and no mail is written, moved or read through it. Nothing at the name
-    passes: each result is None for what is not there.
+    Checked with lstat before tc join makes the joiner's own inbox
+    (claim_inbox), so a symlink planted at an inbox's name, or at its
+    read/, is refused. Nothing at the name passes: each result is None
+    for what is not there. P3 fix round 1a (Claude Opus 5.5, unreviewed):
+    D35. Every other command (send, the gate, read, peek, wait, log,
+    health, the counts) opens the inbox once instead and works inside
+    the open folder (pinned_inbox), refusing the same entries with these
+    same words (refuse_bad_inbox); a check by lstat keeps no descriptor,
+    so an inbox swapped after it would lead the next act elsewhere.
 
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 4. Under a
     shared mailbox an inbox, or its read/, whose owner differs from the
@@ -2410,83 +2451,338 @@ def cmd_init(args):
         os.close(root_fd)
 
 
-def inbox(name, shared):
-    """mail/to-<name>/, checked; in a private mailbox made with its read/ when missing (through make_folder, D16).
+# P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, every inbox act goes
+# through one pinned handle (the audit's HIGH-1, audits/2026-10-15-1409-full;
+# known bug no-follow-open-guards-only-the-last-name). A member who owns an
+# inbox, or an outbox branch, may rename it in the sticky, group-writable
+# mail/ or outbox/ and put a link or another folder at its name, and D34
+# protects members from each other. So a command opens each such folder
+# once, by its name in its parent's descriptor and never through a link,
+# and every act on it after is by name in that descriptor, never by a path.
+# What pin_folder found: the folder's descriptor and fstat result (None
+# when it was not opened); when the open failed, the lstat result of what
+# has the name (None when there is nothing, or lstat failed too), which
+# tells a link or a non-folder; for a folder there that could not be
+# opened or looked at, the words every command said for one before
+# ("tc could not list <path> (<why>)", "tc could not look at <path>
+# (<why>)") and the why alone; and whether this call made it.
+Pinned = collections.namedtuple("Pinned", "fd st found problem why made")
+# Nothing at the name, or nothing tried (the read/ of an inbox that did not open).
+NOT_PINNED = Pinned(None, None, None, None, None, False)
 
-    Refuses (exit 1) an inbox or read/ that is a symlink or not a folder
-    (check_inbox, D17), so every send, read, peek and wait poll is checked.
-    SHARED fix round 1 (Claude Opus 5.5, unreviewed): when `shared`, an
-    inbox whose owner is not its card's owner is refused too, and nothing
-    is made: only tc join makes an inbox there, as its recipient (D20).
-    The path is returned whether or not the folder is there.
 
-    @interacts  lstats mail/to-<name>, its read/ and, when `shared`, the
-                card (check_inbox); private only: makes mail/,
-                mail/to-<name>/ and its read/ when read/ is missing.
-    @deps       check_inbox, make_folder.
-    @complexity O(1).
-    @alloc      the path, returned.
+def pin_folder(folder_fd, name, path, make=False):
+    """The folder `name` in the folder open at `folder_fd`, opened once and never through a link: a Pinned. `path` names it, in the words only.
+
+    Opened with FOLDER_FLAGS by its name in the open folder, so a link at
+    the name fails the open (Linux says ENOTDIR or ELOOP) and no folder
+    above it is resolved again. `make` True makes a missing one first by
+    its name in the open folder, a plain mkdir as make_folder makes one in
+    a private mailbox (the caller passes it for a private mailbox only),
+    then opens it. When the open fails, the name is lstat()ed in the open
+    folder for the words only: a link or anything but a folder comes back
+    as `found` with no problem; a folder this user may not open (no read)
+    as `tc could not list <path>`; a name lstat cannot reach (no search on
+    the open folder) as `tc could not look at <path>`.
+
+    @interacts  opens one folder by its name in `folder_fd` and fstats it;
+                when `make` and it is missing, makes it first; when the
+                open fails, lstats the name. Writes nothing else.
+    @deps       os, stat, contextlib; FOLDER_FLAGS, Pinned, NOT_PINNED.
+    @complexity O(1): at most two opens, one mkdir and one lstat.
+    @alloc      one descriptor in the Pinned (the caller closes it, unpin),
+                or none; one stat result.
     """
-    box = MAIL / f"to-{name}"
-    box_st, read_st = check_inbox(name, shared)  # SHARED D17 (Claude Opus 5.5, unreviewed)
-    if not shared and read_st is None:
-        make_folder(box / "read")  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
-    return box
+    try:
+        fd = os.open(name, FOLDER_FLAGS, dir_fd=folder_fd)
+    except FileNotFoundError:
+        if not make:
+            return NOT_PINNED
+        try:
+            os.mkdir(name, dir_fd=folder_fd)
+            made = True
+        except FileExistsError:
+            made = False  # made meanwhile: opened and judged like any other
+        return pin_folder(folder_fd, name, path)._replace(made=made)
+    except OSError as err:
+        try:
+            found = os.lstat(name, dir_fd=folder_fd)
+        except FileNotFoundError:
+            return NOT_PINNED
+        except OSError as stuck:
+            return Pinned(None, None, None, f"tc could not look at {path} ({stuck.strerror})", stuck.strerror, False)
+        if stat.S_ISDIR(found.st_mode):
+            return Pinned(None, None, found, f"tc could not list {path} ({err.strerror})", err.strerror, False)
+        return Pinned(None, None, found, None, None, False)
+    try:
+        return Pinned(fd, os.fstat(fd), None, None, None, False)
+    except BaseException:
+        os.close(fd)
+        raise
 
 
-# SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, a message is a
-# regular file; anything else among them is skipped and named, never read.
-def real_folder(path):
-    """True when lstat finds a real folder at `path`: not a symlink to one, not missing.
+def unpin(*pinned):
+    """Close the descriptor of each Pinned in `pinned` that holds one.
 
-    @interacts  lstats `path`. Writes nothing.
-    @deps       os, stat.
+    @interacts  closes descriptors.
+    @deps       os.
+    @complexity O(p) over p Pinned given (one or two).
+    @alloc      none.
+    """
+    for folder in pinned:
+        if folder.fd is not None:
+            os.close(folder.fd)
+
+
+def name_taken(name, folder_fd):
+    """True when anything, a link included, has the name `name` in the folder open at `folder_fd`: os.path.lexists, by name in an open folder. False when lstat cannot reach it for any reason, as lexists answers.
+
+    @interacts  lstats one name in `folder_fd`. Writes nothing.
+    @deps       os.
     @complexity O(1).
     @alloc      one stat result, freed on return.
     """
     try:
-        return stat.S_ISDIR(os.lstat(path).st_mode)
+        os.lstat(name, dir_fd=folder_fd)
     except OSError:
         return False
+    return True
 
 
-def message_files(folder):
-    """The *.md entries in `folder` as (messages, skipped, problem): (path, lstat result) for each regular file, by name; (path, why) for the rest (D19); words when a count from them is not the whole truth, else None.
+def open_mail(make=False):
+    """mail/'s descriptor, opened by its path (TOP_FOLDER_FLAGS), or None when there is no mail/. With `make`, a missing mail/ is made first (make_folder). Raises OSError for any other failure.
 
-    Checked with lstat, never followed: a symlink, a FIFO or a folder
-    named like a message is skipped, so read, peek, log, wait and the
-    counts leave it out, and no wait wakes for it. A missing folder holds
-    nothing, and an entry gone before its lstat is left out. The caller
-    makes sure `folder` itself is a real folder.
+    @interacts  opens mail/; when `make` and it is missing, reads
+                ROOT/.shared and makes it (make_folder).
+    @deps       make_folder; os; MAIL, TOP_FOLDER_FLAGS.
+    @complexity O(1), plus make_folder's when it makes mail/.
+    @alloc      one descriptor, returned (the caller closes it).
+    """
+    try:
+        return os.open(MAIL, TOP_FOLDER_FLAGS)
+    except FileNotFoundError:
+        if not make:
+            return None
+    make_folder(MAIL)
+    return os.open(MAIL, TOP_FOLDER_FLAGS)
+
+
+# An inbox as one command holds it (open_inbox, pinned_inbox): its path,
+# for the words only; whether the mailbox is shared (None when the caller
+# had no need to know); and the Pinned of mail/to-<name>/ and of its read/
+# (NOT_PINNED when the inbox itself did not open).
+Inbox = collections.namedtuple("Inbox", "path shared box read")
+
+
+def open_inbox(mail_fd, name, shared=None, make_inbox=False, make_read=False):
+    """mail/to-<name>/ and its read/, each opened once by its name and never through a link (pin_folder): an Inbox. The caller closes both (unpin). `mail_fd` is mail/'s descriptor, or None when there is no mail/.
+
+    read/ is opened by its name in the inbox's own descriptor, so it is
+    the read/ of the folder that was opened. `make_inbox` makes a missing
+    inbox and its read/, and `make_read` a missing read/ in an inbox that
+    is there; a caller passes them for a private mailbox only, whose inbox
+    tc makes on first use (a send, a wait; a read or a peek makes only
+    read/, never the inbox: O2). `shared` is kept in the Inbox as given.
+
+    @interacts  opens mail/to-<name>/ by its name in `mail_fd` and its
+                read/ by name in the inbox's descriptor (pin_folder),
+                making each when told and missing. Writes nothing else.
+    @deps       pin_folder, unpin; MAIL, Inbox, NOT_PINNED.
+    @complexity O(1): two folders.
+    @alloc      up to two descriptors in the Inbox, which the caller
+                closes.
+    """
+    path = MAIL / f"to-{name}"
+    if mail_fd is None:
+        return Inbox(path, shared, NOT_PINNED, NOT_PINNED)
+    box = pin_folder(mail_fd, path.name, path, make_inbox)
+    if box.fd is None:
+        return Inbox(path, shared, box, NOT_PINNED)
+    try:
+        return Inbox(path, shared, box, pin_folder(box.fd, "read", path / "read", make_inbox or make_read))
+    except BaseException:
+        unpin(box)
+        raise
+
+
+def refuse_bad_inbox(inbox, name):
+    """Refuse (exit 1, check_inbox's words) what check_inbox refused, judged on the open folders of `inbox`, the Inbox of `name`: a link or not a folder at the inbox's name or its read/'s (D17); a read/ there that could not be opened or looked at; and, when shared, an inbox or read/ whose owner is not its card's owner (D20 item 4). Else nothing.
+
+    An inbox that is there and could not be opened is not refused here:
+    its `box.problem` says why, and the caller words it for its own act
+    (inbox_messages for a listing, deliver_local for a send).
+
+    @interacts  lstats cards/<name>.json when shared and the inbox is
+                there; reads the user database for the words; on a
+                refusal, one line to stderr and exit 1.
+    @deps       refuse, user_name; os, stat; CARDS, EXIT_REFUSED.
+    @complexity O(1).
+    @alloc      the words, on a refusal.
+    """
+    read_path = inbox.path / "read"
+    for path, folder in ((inbox.path, inbox.box), (read_path, inbox.read)):
+        if folder.found is not None and stat.S_ISLNK(folder.found.st_mode):
+            refuse(f"tc: {path} is a symlink, not a real folder; tc never follows it, so nothing "
+                   f"was read or written there", EXIT_REFUSED)
+        if folder.found is not None and not stat.S_ISDIR(folder.found.st_mode):
+            refuse(f"tc: {path} is not a folder; nothing was read or written there", EXIT_REFUSED)
+    if inbox.read.problem is not None:
+        refuse(f"tc: could not look at {read_path} ({inbox.read.why}); nothing was read or written there. "
+               f"{inbox.path} belongs to {user_name(inbox.box.st.st_uid)}.", EXIT_REFUSED)
+    box_st = inbox.box.st or inbox.box.found
+    if inbox.shared and box_st is not None:
+        card = CARDS / f"{name}.json"
+        try:
+            card_uid = os.lstat(card).st_uid
+        except FileNotFoundError:
+            card_uid = None
+        for path, st in ((inbox.path, box_st), (read_path, inbox.read.st)):
+            if card_uid is not None and st is not None and st.st_uid != card_uid:
+                refuse(f"tc: {path} belongs to {user_name(st.st_uid)}, but its card {card} belongs to "
+                       f"{user_name(card_uid)}; under a shared mailbox an inbox belongs to the owner of "
+                       f"its card, and tc never guesses which one is right. Nothing was read or written "
+                       f"there.", EXIT_REFUSED)
+
+
+@contextlib.contextmanager
+def pinned_inbox(name, shared=None, make_inbox=False, make_read=False, check=True):
+    """mail/to-<name>/ and its read/, opened once for one command and held open for the `with` block: yields an Inbox. Every descriptor is closed when the block ends, whatever happens.
+
+    mail/ is opened by its path (open_mail; only the init user can swap
+    it, D34), then the inbox and its read/ by name (open_inbox), and
+    mail/'s descriptor is closed at once. From here every act on the inbox
+    is by name in these descriptors (D35), so a member who swaps the
+    inbox, or its read/, for a link or another folder after this point
+    leads tc nowhere: the descriptors still hold the folders opened.
+    `shared` None means look it up here (mailbox_share) when it is
+    needed: to check, or to make. A private mailbox makes what
+    `make_inbox` and `make_read` say (and mail/ itself, through
+    make_folder, when `make_inbox` finds none); a shared one makes
+    nothing: only tc join makes an inbox there, as its recipient (D20).
+
+    `check` True (send, the gate, read, peek, wait, the codex route)
+    refuses before anything is read or written, as check_inbox did
+    (refuse_bad_inbox), and refuses a mail/ it cannot open with
+    check_inbox's words. `check` False (unread_count) refuses nothing and
+    reads no .shared: the caller reads what came back.
+
+    @interacts  reads ROOT/.shared when `shared` is None and it checks or
+                makes (mailbox_share); opens mail/ (open_mail, making it
+                when a private `make_inbox` finds none), the inbox and its
+                read/ (open_inbox); with `check`, see refuse_bad_inbox;
+                closes every descriptor when the block ends.
+    @deps       mailbox_share, open_mail, open_inbox, refuse_bad_inbox,
+                unpin, refuse; contextlib, os; MAIL, EXIT_REFUSED.
+    @complexity O(1): three folders opened, one closed at once.
+    @alloc      up to two descriptors, held for the block and closed after.
+    """
+    if shared is None and (check or make_inbox or make_read):
+        shared = mailbox_share() is not None
+    make = shared is not None and not shared
+    try:
+        mail_fd = open_mail(make and make_inbox)
+    except OSError as err:
+        if check:
+            refuse(f"tc: could not look at {MAIL / f'to-{name}'} ({err.strerror}); nothing was read or written "
+                   f"there.", EXIT_REFUSED)
+        mail_fd = None
+    try:
+        inbox = open_inbox(mail_fd, name, shared, make and make_inbox, make and make_read)
+    finally:
+        if mail_fd is not None:
+            os.close(mail_fd)
+    try:
+        if check:
+            refuse_bad_inbox(inbox, name)
+        yield inbox
+    finally:
+        unpin(inbox.read, inbox.box)
+
+
+@contextlib.contextmanager
+def inbox_made(inbox, name):
+    """`inbox`, the open Inbox of `name`, with what a private mailbox lacks made now and opened: yields an Inbox, and closes what it opened itself when the block ends (the caller closes its own).
+
+    For a private send, which makes the inbox and its read/ on first use
+    only after it took its number (deliver_local), as before, so a send
+    refused before it lands makes nothing. A missing inbox was never
+    pinned: it is made by its name in mail/ (mail/ too when missing),
+    opened then and judged as pinned_inbox judges one (refuse_bad_inbox,
+    exit 1); a missing read/ is made by its name in the inbox's open
+    descriptor (pin_folder). A shared mailbox makes nothing here (D20):
+    `inbox` comes back as it was.
+
+    @interacts  private only: may read ROOT/.shared and make mail/
+                (open_mail), make and open the inbox and read/ by name
+                (open_inbox, pin_folder), refuse a bad one (exit 1); closes
+                what it opened when the block ends.
+    @deps       open_mail, open_inbox, refuse_bad_inbox, pin_folder, unpin;
+                contextlib, os.
+    @complexity O(1).
+    @alloc      up to two descriptors, held for the block and closed after.
+    """
+    opened = []
+    try:
+        if inbox.shared is False and inbox.box.fd is None:
+            mail_fd = open_mail(make=True)
+            try:
+                inbox = open_inbox(mail_fd, name, inbox.shared, make_inbox=True)
+            finally:
+                os.close(mail_fd)
+            opened += [inbox.read, inbox.box]
+            refuse_bad_inbox(inbox, name)
+        elif (inbox.shared is False and inbox.read.fd is None and inbox.read.found is None
+              and inbox.read.problem is None):
+            inbox = inbox._replace(read=pin_folder(inbox.box.fd, "read", inbox.path / "read", make=True))
+            opened.append(inbox.read)
+        yield inbox
+    finally:
+        unpin(*opened)
+
+
+def message_files(folder, folder_fd):
+    """The message entries of the folder open at `folder_fd` as (messages, skipped, problem): (path, stat result) for each regular file whose name ends in MESSAGE_SUFFIX, in name order; (path, why) for the rest of those names (D19); words when a count from them is not the whole truth, else None. `folder` is the folder's path, for the paths and the words only.
+
+    Listed and stat'ed by name in the open folder, never by a path (P3
+    fix round 1a, Claude Opus 5.5, unreviewed: D35), and never followed:
+    a symlink, a FIFO or a folder named like a message is skipped, so
+    read, peek, log, wait and the counts leave it out, and no wait wakes
+    for it. An entry gone before its stat is left out. The names are
+    sorted as strings, and MESSAGE_SUFFIX picks them (the audit's LOW-7
+    and LOW-8).
 
     SHARED fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-2
-    and BOARD's review. The folder is listed with os.listdir, not
-    pathlib's glob, which says nothing when it cannot list: a folder this
-    user may not read holds no messages, and `problem` says why. An entry
-    lstat cannot reach (any OSError but gone: a folder its owner left
-    readable without search, say) is skipped with words and named in
-    `problem`, never a traceback. So `problem` None means every entry was
-    looked at. read, peek and log name the skipped ones; mailbox_summary
-    reports a count it cannot know as unknown, with `problem`.
+    and BOARD's review. A folder tc could not list holds no messages, and
+    `problem` says why. An entry stat cannot reach (any OSError but gone:
+    a folder its owner left readable without search, say) is skipped
+    with words and named in `problem`, never a traceback. So `problem`
+    None means every entry was looked at. read, peek and log name the
+    skipped ones; mailbox_summary reports a count it cannot know as
+    unknown, with `problem`.
 
-    @interacts  lists `folder` and lstats each *.md entry. Writes nothing.
-    @deps       os, stat, pathlib.
-    @complexity O(e) over e *.md entries: single digits in an inbox; a
-                read/ is the history (hundreds to thousands), listed only
-                by log and health.
-    @alloc      two lists and at most one string, returned.
+    @interacts  lists the folder at `folder_fd` and stats each name ending
+                in MESSAGE_SUFFIX in it, never following a link. Writes
+                nothing.
+    @deps       os, stat, pathlib; MESSAGE_SUFFIX.
+    @complexity O(E + e log e) over E names in the folder and the e of
+                them that end in MESSAGE_SUFFIX: one listing, a sort of
+                e name strings and one stat each. e is single digits in an
+                inbox; a read/ is the history (hundreds to thousands, and
+                growing), listed by log, by health and by every poll of
+                the board's feed (mailbox_summary, every 3 s).
+    @alloc      the E names while it runs; two lists of e entries and at
+                most one string, returned.
     """
     messages, skipped = [], []
     try:  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): a folder tc could not list is said, never a silent 0
-        names = os.listdir(folder)
-    except FileNotFoundError:
-        return messages, skipped, None
+        names = os.listdir(folder_fd)
     except OSError as err:
         return messages, skipped, f"tc could not list {folder} ({err.strerror})"
     problem = None
-    for path in sorted(folder / name for name in names if name.endswith(".md")):
+    for name in sorted(name for name in names if name.endswith(MESSAGE_SUFFIX)):
+        path = folder / name
         try:
-            st = os.lstat(path)
+            st = os.stat(name, dir_fd=folder_fd, follow_symlinks=False)
         except FileNotFoundError:
             continue
         except OSError as err:  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): from BOARD's review
@@ -2501,47 +2797,57 @@ def message_files(folder):
     return messages, skipped, problem
 
 
-def inbox_messages(name, shared=None):
-    """The unread mail in mail/to-<name>/ as (paths, skipped): the regular files, by name, and (path, why) for each other *.md entry.
+def inbox_messages(inbox):
+    """The unread mail in the open inbox `inbox` (an Inbox from pinned_inbox) as (paths, skipped): the regular files, by name, and (path, why) for each other message name.
 
-    Goes through inbox(), so a linked inbox or read/ refuses (exit 1,
-    check_inbox), and in a private mailbox a missing one is made; in a
-    shared one a missing inbox holds nothing. `shared` None means look it
-    up here (mailbox_share); a caller that polls passes what it found once.
+    Listed in the inbox's own descriptor (message_files), never by its
+    path, so it is always the folder pinned_inbox opened and checked
+    (P3 fix round 1a, Claude Opus 5.5, unreviewed: D35). No inbox holds
+    nothing.
 
     SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's REC-1.
-    An inbox tc cannot list (message_files gives a problem and nothing
-    else) refuses, exit 1, with the reason, so peek, read and wait say
-    they could not list it instead of `0 unread`, `no unread mail` or a
-    quiet timeout. An entry tc could not look at stays in skipped, named
-    by the caller, as before.
+    An inbox tc cannot list (one that would not open, or message_files
+    gives a problem and nothing else) refuses, exit 1, with the reason,
+    so peek, read and wait say they could not list it instead of `0
+    unread`, `no unread mail` or a quiet timeout. An entry tc could not
+    look at stays in skipped, named by the caller, as before.
 
-    @interacts  reads ROOT/.shared when `shared` is None; see inbox and
-                message_files; on an inbox it cannot list, one line to
-                stderr and exit 1.
-    @deps       mailbox_share, inbox, message_files, refuse; EXIT_REFUSED.
-    @complexity O(u) over u *.md entries in the inbox (single digits).
+    @interacts  see message_files; on an inbox it cannot list, one line
+                to stderr and exit 1.
+    @deps       message_files, refuse; EXIT_REFUSED.
+    @complexity O(U + u log u) over U names in the inbox and the u of
+                them that are messages (single digits).
     @alloc      two lists, returned.
     """
-    if shared is None:
-        shared = mailbox_share() is not None
-    messages, skipped, problem = message_files(inbox(name, shared))  # an entry tc could not look at is in skipped
+    if inbox.box.fd is None:
+        if inbox.box.problem is not None:
+            refuse(f"{inbox.box.problem}, so its unread mail is unknown; nothing was read or moved", EXIT_REFUSED)
+        return [], []
+    messages, skipped, problem = message_files(inbox.path, inbox.box.fd)  # an entry tc could not look at is in skipped
     if problem is not None and not messages and not skipped:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): REC-1, not listed
         refuse(f"{problem}, so its unread mail is unknown; nothing was read or moved", EXIT_REFUSED)
     return [path for path, _ in messages], skipped
 
 
 def unread(name, shared=None):
-    """The unread messages in mail/to-<name>/: each *.md there that is a regular file, by name (D19).
+    """The unread messages in mail/to-<name>/: each message there that is a regular file, by path (D19). One poll of tc wait.
 
-    `shared` as in inbox_messages.
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35. The inbox is
+    opened and checked once for this call (pinned_inbox, which refuses a
+    linked inbox or read/, and one not its card owner's, exit 1) and
+    listed in its own descriptor (inbox_messages). In a private mailbox a
+    missing one is made; in a shared one a missing inbox holds nothing.
+    `shared` as in pinned_inbox: a caller that polls passes what it
+    found once.
 
-    @interacts  see inbox_messages.
-    @deps       inbox_messages.
-    @complexity O(u) over u *.md entries in the inbox (single digits).
-    @alloc      one list of paths, returned.
+    @interacts  see pinned_inbox and inbox_messages.
+    @deps       pinned_inbox, inbox_messages.
+    @complexity O(U + u log u) over U names in the inbox and the u of
+                them that are messages (single digits).
+    @alloc      one list of paths, returned; two descriptors for the call.
     """
-    return inbox_messages(name, shared)[0]
+    with pinned_inbox(name, shared, make_inbox=True) as inbox:
+        return inbox_messages(inbox)[0]
 
 
 # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20, a held lock makes a
@@ -2727,8 +3033,10 @@ def write_new_file(path, text, mode=NEW_FILE_MODE, dir_fd=None):
     SHARED D21 (Claude Opus 5.5, unreviewed): .shared passes
     SHARED_MARKER_MODE. SHARED fix round 8 (Claude Opus 5.5, unreviewed):
     the audit's HIGH-1. `dir_fd`, when given, is the folder `path` is a
-    name in (.shared's .tmp, by its name in ROOT's descriptor), so no
-    folder on the way is resolved by name.
+    name in (.shared's .tmp, by its name in ROOT's descriptor; P3 fix
+    round 1a, Claude Opus 5.5, unreviewed: a message's .tmp, by its name
+    in its open inbox or outbox folder, publish_message), so no folder on
+    the way is resolved by name.
 
     @interacts  creates and writes one file; nothing else.
     @deps       os; NEW_FILE_FLAGS, NEW_FILE_MODE.
@@ -3153,25 +3461,31 @@ def cmd_send(args):
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, every message
 # printed is read through read_regular_file.
-def show(paths):
-    """Print each message at `paths`, then `---`; return (path, why) for each one read_regular_file will not read (D19).
+def show(messages):
+    """Print each message in `messages`, then `---`; return (path, why) for each one read_regular_file will not read (D19).
+
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35. `messages` holds
+    (path, folder_fd) pairs: the file is opened by its name, path.name,
+    in the folder open at folder_fd (the pinned inbox, or its read/),
+    never by its path; `path` names it in the words only.
 
     Each file is opened with O_NOFOLLOW and O_NONBLOCK and read only when
     fstat calls it a regular file of at most MESSAGE_READ_MAX_BYTES, so a
     link put in place of a message is never followed and a FIFO never
     blocks. Line ends print as read_text gave them (universal newlines).
 
-    @interacts  opens, fstats and reads each file; prints to stdout.
+    @interacts  opens, fstats and reads each file by its name in its
+                folder's descriptor; prints to stdout.
     @deps       read_regular_file; MESSAGE_READ_MAX_BYTES.
-    @complexity O(u + b) over u paths and b bytes read, each file at most
-                MESSAGE_READ_MAX_BYTES + 1.
+    @complexity O(u + b) over u messages and b bytes read, each file at
+                most MESSAGE_READ_MAX_BYTES + 1.
     @alloc      each file's text while it prints; the list of the unshown,
                 returned.
     """
     unshown = []
-    for p in paths:
+    for p, folder_fd in messages:
         try:
-            text = read_regular_file(p, MESSAGE_READ_MAX_BYTES)
+            text = read_regular_file(p.name, MESSAGE_READ_MAX_BYTES, folder_fd)
         except (OSError, ValueError) as err:
             unshown.append((p, err.strerror if isinstance(err, OSError) and err.strerror else str(err)))
             continue
@@ -3229,20 +3543,23 @@ def by_hand_name(k, name, limit):
 
 
 # SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, tc read never replaces a file in read/.
-def by_hand_target(path):
-    """Where tc read moves the inbox file at `path` when read/ already holds its name: read/BY_HAND_NAME, k the first count from 1 that nothing holds.
+def by_hand_target(path, read_fd):
+    """Where tc read moves the inbox file at `path` when read/ already holds its name: read/BY_HAND_NAME, k the first count from 1 that nothing holds. `read_fd` is read/'s open descriptor.
 
     For cmd_read, under the inbox lock it holds alone. Each name is
     checked with lstat, never followed. SHARED fix round 4 (Claude Opus
     5.5, unreviewed): the audit's HIGH-1. Each name is cut to fit read/'s
-    name limit (os.pathconf PC_NAME_MAX, by_hand_name), and only
+    name limit (os.fpathconf PC_NAME_MAX, by_hand_name), and only
     FileNotFoundError makes a name free. Any other OSError (the name limit
     or a by-hand name tc cannot look at) is raised, never taken as free,
     so the search always ends and cmd_read names the file, left unread.
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35. read/ is the open
+    one (pinned_inbox): the limit and each name are read in its
+    descriptor, never by a path; the path returned names it in the words.
 
-    @interacts  reads read/'s name limit (pathconf); lstats
-                read/by-hand-<k>-<name> for k = 1, 2, ... until one is
-                free. Writes nothing. Raises OSError as above.
+    @interacts  reads read/'s name limit (fpathconf); lstats
+                by-hand-<k>-<name> by name in `read_fd` for k = 1, 2, ...
+                until one is free. Writes nothing. Raises OSError as above.
     @deps       by_hand_name; os, pathlib.
     @complexity O(t * c) over t names by-hand-<k>-<name> already in read/
                 (none in an honest mailbox; each one a file someone made by
@@ -3250,35 +3567,38 @@ def by_hand_target(path):
     @alloc      one path per k tried; the free one, returned.
     """
     read = path.parent / "read"
-    limit = os.pathconf(read, "PC_NAME_MAX")
+    limit = os.fpathconf(read_fd, "PC_NAME_MAX")
     k = 1
     while True:
         target = read / by_hand_name(k, path.name, limit)
         try:
-            os.lstat(target)
+            os.lstat(target.name, dir_fd=read_fd)
         except FileNotFoundError:
             return target
         k += 1
 
 
 # SHARED fix round 4 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, owners as plain facts.
-def owner_words(path):
-    """` (owned by <login>)` for the entry at `path`, lstat()ed, never followed; an empty string when lstat cannot reach it.
+def owner_words(path, folder_fd):
+    """` (owned by <login>)` for the entry named path.name in the folder open at `folder_fd`, lstat()ed, never followed; an empty string when lstat cannot reach it.
 
-    @interacts  lstats `path`; reads the user database.
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, by its name in
+    the pinned read/, never by its path.
+
+    @interacts  lstats one name in `folder_fd`; reads the user database.
     @deps       user_name, printable; os.
     @complexity O(1).
     @alloc      one short string, returned.
     """
     try:
-        return f" (owned by {printable(user_name(os.lstat(path).st_uid))})"
+        return f" (owned by {printable(user_name(os.lstat(path.name, dir_fd=folder_fd).st_uid))})"
     except OSError:
         return ""
 
 
 # SHARED fix round 5 (Claude Opus 5.5, unreviewed): the audit's LOW-1, a rename that did nothing.
-def still_in_inbox(path, target):
-    """Words when the inbox file at `path` is still in the inbox after tc read renamed it to `target`; None when it left.
+def still_in_inbox(path, target, box_fd, read_fd):
+    """Words when the inbox file at `path` is still in the inbox after tc read renamed it to `target`; None when it left. `box_fd` and `read_fd` are the inbox's and read/'s open descriptors.
 
     rename(2) between two names of one file does nothing and returns 0.
     So a member who hard-links their own inbox file at `target`, between
@@ -3287,21 +3607,22 @@ def still_in_inbox(path, target):
     moved. Still there as the same file as `target` (os.path.samestat),
     or with `target` gone: not moved. Still there as another file: the
     move was made and a new file took the name after it; the next read
-    meets that one.
+    meets that one. P3 fix round 1a (Claude Opus 5.5, unreviewed): D35,
+    each name lstat()ed in its pinned folder, never by its path.
 
-    @interacts  lstats `path` and, when it is still there, `target`.
-                Writes nothing. Raises OSError when lstat cannot reach
-                either for any reason but absence.
+    @interacts  lstats path.name in `box_fd` and, when it is still there,
+                target.name in `read_fd`. Writes nothing. Raises OSError
+                when lstat cannot reach either for any reason but absence.
     @deps       printable; os.
     @complexity O(1): at most two lstat calls.
     @alloc      one string or none, returned.
     """
     try:
-        here = os.lstat(path)
+        here = os.lstat(path.name, dir_fd=box_fd)
     except FileNotFoundError:
         return None
     try:
-        if not os.path.samestat(here, os.lstat(target)):
+        if not os.path.samestat(here, os.lstat(target.name, dir_fd=read_fd)):
             return None
     except FileNotFoundError:
         pass
@@ -3364,75 +3685,91 @@ def cmd_read(args):
     claimed as read. Each race a member wins costs one more wake, the
     floor D20 allows, never a loop.
 
-    @interacts  checks the name first (C0, exit 6, nothing written); a name
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, one pinned
+    handle. The inbox and its read/ are opened once (pinned_inbox) and
+    held open to the last print; the listing, each lstat, each move
+    (os.rename by name, from the inbox's descriptor to read/'s) and each
+    file printed are by name in those descriptors, never by a path. So a
+    member who swaps the inbox, or its read/, for a link or another folder
+    after it opened leads none of them elsewhere.
+
+    @interacts  checks the name first (C0, exit 6, nothing written); reads
+                ROOT/.shared (mailbox_share); opens mail/, the inbox and
+                its read/ once (pinned_inbox), refusing an inbox or read/
+                that is a symlink or not a folder, a read/ it cannot look
+                at, or under a shared mailbox one not its card owner's
+                (exit 1, nothing moved: refuse_bad_inbox, D17, D20); a name
                 with no inbox gets `no unread mail` and nothing is created
-                (O2); else reads ROOT/.shared (mailbox_share), holds
-                mail/.box-<name>.lock alone from its glob to its last rename
-                (D14; held past LOCK_WAIT_SECONDS by another process, exit
-                10, nothing moved: inbox_lock, D20, D23), refuses an inbox or
-                read/ that is a symlink, or under
-                a shared mailbox not its card owner's (exit 1, nothing
-                moved: check_inbox, D17, D20), or that it cannot list
-                (exit 1, inbox_messages, SHARED fix round 3), in a private mailbox makes
-                mail/to-<name>/read/ if missing, lstats each *.md entry,
-                lstats read/<name> for each regular file (and, when it is
-                taken, reads read/'s name limit and lstats
-                read/by-hand-<k>-<name> until one is free) and
-                renames the file there, then lstats the old name (and,
-                when something is still there, the target:
-                still_in_inbox); then, with the lock released,
-                prints the by-hand note before each file that has one
-                (under a shared mailbox lstatting both files and reading
-                the user database for their owners), reads each moved
-                file (read_regular_file) and prints to stdout, and names
-                each one it will not show or could not move on stderr.
-    @deps       require_names, mailbox_share, inbox_lock, inbox_messages,
-                by_hand_target, still_in_inbox, owner_words, show,
-                refuse_lines, printable; os.
-    @complexity O(u + t * c) over u *.md entries in the inbox (single
-                digits), t names by-hand-<k>-<name> already in read/ (none
-                in an honest mailbox) and c characters of a by-hand name
-                (at most 255).
+                (O2); in a private mailbox makes read/ in the inbox if
+                missing; holds mail/.box-<name>.lock alone from its listing
+                to its last move (D14; held past LOCK_WAIT_SECONDS by
+                another process, exit 10, nothing moved: inbox_lock, D20,
+                D23); refuses an inbox it cannot list (exit 1,
+                inbox_messages, SHARED fix round 3); stats each message
+                name, lstats <name> in read/ for each regular file (and,
+                when it is taken, reads read/'s name limit and lstats
+                by-hand-<k>-<name> until one is free) and moves the file
+                there, then lstats the old name (and, when something is
+                still there, the target: still_in_inbox); then, with the
+                lock released, prints the by-hand note before each file
+                that has one (under a shared mailbox lstatting both files
+                and reading the user database for their owners), reads
+                each moved file (read_regular_file) and prints to stdout,
+                and names each one it will not show or could not move on
+                stderr. Every name is reached in the inbox's or read/'s
+                descriptor; both are closed when it returns.
+    @deps       require_names, mailbox_share, pinned_inbox, inbox_lock,
+                inbox_messages, name_taken, by_hand_target, still_in_inbox,
+                owner_words, show, refuse_lines, printable; errno, os.
+    @complexity O(U + u log u + t * c) over U names in the inbox, the u of
+                them that are messages (single digits, sorted), t names
+                by-hand-<k>-<name> already in read/ (none in an honest
+                mailbox) and c characters of a by-hand name (at most 255).
     @alloc      the lists of paths and each file's text while printed; one
-                open lock file while the lock is held.
+                open lock file while the lock is held; two descriptors, the
+                inbox's and read/'s, until it returns.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
-    if not (MAIL / f"to-{args.name}").is_dir():  # CARDS R3 (Claude Opus 5.5, unreviewed): O2
-        print(f"no unread mail for {args.name}")
-        return
     # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14. A codex send
     # cannot land between this glob and these renames, so it never skips its
     # ring for mail this read did not print.
     # Phase fix round 1 (Claude Opus 5.5, unreviewed): print after the
     # release, so a stalled stdout holds no lock.
     shared = mailbox_share() is not None  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20
-    with inbox_lock(args.name):
-        messages, skipped = inbox_messages(args.name, shared)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19
-        moved, stuck = [], []
-        for p in messages:
-            target, twin = p.parent / "read" / p.name, None
-            try:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): HIGH-1, a failed by-hand search is stuck, never a traceback
-                if os.path.lexists(target):  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): MEDIUM-1, never over read/
-                    twin, target = target, by_hand_target(p)
-                p.rename(target)
-                left = still_in_inbox(p, target)  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): LOW-1, a rename that did nothing
-            except OSError as err:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, not this user's to move
-                stuck.append((p, err.strerror))
-                continue
-            if left is not None:
-                stuck.append((p, left))
-                continue
-            moved.append((target, twin))
-    if not moved and not stuck:  # mail it could not move is still unread
-        print(f"no unread mail for {args.name}")
-    unshown = []
-    for path, twin in moved:
-        if twin is not None:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): MEDIUM-1, neither file named the forgery
-            print(f"tc read: two files had the name {printable(twin.name)}, one in read/ and one in the inbox. "
-                  f"tc never reuses a number, so one of them was not written by tc. Both are kept: "
-                  f"{printable(twin)}{owner_words(twin) if shared else ''}, unchanged, and "
-                  f"{printable(path)}{owner_words(path) if shared else ''}, from the inbox, shown below:")
-        unshown += show([path])
+    with pinned_inbox(args.name, shared, make_read=True) as inbox:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35
+        if inbox.box.fd is None and inbox.box.problem is None:  # CARDS R3 (Claude Opus 5.5, unreviewed): O2
+            print(f"no unread mail for {args.name}")
+            return
+        box_fd, read_fd = inbox.box.fd, inbox.read.fd
+        with inbox_lock(args.name):
+            messages, skipped = inbox_messages(inbox)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19
+            moved, stuck = [], []
+            for p in messages:
+                target, twin = inbox.path / "read" / p.name, None
+                try:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): HIGH-1, a failed by-hand search is stuck, never a traceback
+                    if read_fd is None:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): no read/ to move it into
+                        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT))
+                    if name_taken(target.name, read_fd):  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): MEDIUM-1, never over read/
+                        twin, target = target, by_hand_target(p, read_fd)
+                    os.rename(p.name, target.name, src_dir_fd=box_fd, dst_dir_fd=read_fd)  # P3 fix round 1a: D35, by name
+                    left = still_in_inbox(p, target, box_fd, read_fd)  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): LOW-1, a rename that did nothing
+                except OSError as err:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, not this user's to move
+                    stuck.append((p, err.strerror))
+                    continue
+                if left is not None:
+                    stuck.append((p, left))
+                    continue
+                moved.append((target, twin))
+        if not moved and not stuck:  # mail it could not move is still unread
+            print(f"no unread mail for {args.name}")
+        unshown = []
+        for path, twin in moved:
+            if twin is not None:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): MEDIUM-1, neither file named the forgery
+                print(f"tc read: two files had the name {printable(twin.name)}, one in read/ and one in the inbox. "
+                      f"tc never reuses a number, so one of them was not written by tc. Both are kept: "
+                      f"{printable(twin)}{owner_words(twin, read_fd) if shared else ''}, unchanged, and "
+                      f"{printable(path)}{owner_words(path, read_fd) if shared else ''}, from the inbox, shown below:")
+            unshown += show([(path, read_fd)])
     refuse_lines([f"tc read: {printable(p)} not shown and left in place ({why})" for p, why in skipped]
                  + [f"tc read: {printable(p)} not moved to read/ ({why}); left unread" for p, why in stuck]
                  + [f"tc read: {printable(p)} not shown ({why})" for p, why in unshown])
@@ -3443,30 +3780,40 @@ def cmd_peek(args):
 
     Only regular files count and print (D19). A symlink, a FIFO or a
     folder named like a message is named on stderr and never read, and the
-    peek exits 1 after it prints the rest.
+    peek exits 1 after it prints the rest. P3 fix round 1a (Claude Opus
+    5.5, unreviewed): D35. The inbox is opened once (pinned_inbox), and
+    the listing and every message printed are by name in its descriptor,
+    never by a path.
 
-    @interacts  checks the name first (C0, exit 6, nothing written); a name
-                with no inbox gets `no unread mail` and nothing is created
-                (O2); else reads ROOT/.shared (inbox_messages), refuses an
-                inbox or read/ that is a symlink, or under a shared mailbox
-                not its card owner's (exit 1, nothing read: check_inbox,
-                D17, D20), or that it cannot list (exit 1, inbox_messages,
-                SHARED fix round 3), in a private mailbox makes mail/to-<name>/read/
-                if missing, lstats each *.md entry and reads each regular
-                file (read_regular_file); prints to stdout, and names each
-                one it will not show on stderr.
-    @deps       require_names, inbox_messages, show, refuse_lines,
-                printable.
-    @complexity O(u) over u *.md entries in the inbox (single digits).
-    @alloc      the lists of paths and each file's text while printed.
+    @interacts  checks the name first (C0, exit 6, nothing written); reads
+                ROOT/.shared (pinned_inbox's mailbox_share); opens mail/,
+                the inbox and its read/ once (pinned_inbox), refusing an
+                inbox or read/ that is a symlink or not a folder, a read/
+                it cannot look at, or under a shared mailbox one not its
+                card owner's (exit 1, nothing read: refuse_bad_inbox, D17,
+                D20); a name with no inbox gets `no unread mail` and
+                nothing is created (O2); in a private mailbox makes read/
+                in the inbox if missing; refuses an inbox it cannot list
+                (exit 1, inbox_messages, SHARED fix round 3); stats each
+                message name and reads each regular file
+                (read_regular_file), by name in the inbox's descriptor;
+                prints to stdout, and names each one it will not show on
+                stderr.
+    @deps       require_names, pinned_inbox, inbox_messages, show,
+                refuse_lines, printable.
+    @complexity O(U + u log u) over U names in the inbox and the u of
+                them that are messages (single digits, sorted).
+    @alloc      the lists of paths and each file's text while printed; two
+                descriptors, the inbox's and read/'s, until it returns.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
-    if not (MAIL / f"to-{args.name}").is_dir():  # CARDS R3 (Claude Opus 5.5, unreviewed): O2
-        print(f"no unread mail for {args.name}")
-        return
-    msgs, skipped = inbox_messages(args.name)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, D20
-    print(f"{len(msgs)} unread for {args.name}")
-    unshown = show(msgs)
+    with pinned_inbox(args.name, make_read=True) as inbox:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35
+        if inbox.box.fd is None and inbox.box.problem is None:  # CARDS R3 (Claude Opus 5.5, unreviewed): O2
+            print(f"no unread mail for {args.name}")
+            return
+        msgs, skipped = inbox_messages(inbox)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, D20
+        print(f"{len(msgs)} unread for {args.name}")
+        unshown = show([(path, inbox.box.fd) for path in msgs])
     refuse_lines([f"tc peek: {printable(p)} not shown ({why})" for p, why in skipped + unshown])
 
 
@@ -3481,21 +3828,26 @@ def cmd_wait(args):
                 mail/.wait-<name>.lock (flock) until it exits, opened
                 through open_by_name, which refuses a symlink or a FIFO
                 there (exit 1, D17, D19); reads ROOT/.shared once
-                (make_folder's mailbox_share); in a private mailbox makes
-                mail/to-<name>/read/ on the first poll; a linked inbox, or
-                under a shared mailbox one not its card owner's, refuses
-                there (exit 1, check_inbox), and so does one it cannot
-                list (exit 1, never a quiet timeout: inbox_messages,
-                SHARED fix round 3); prints one line. Under a shared
-                mailbox it makes no inbox: a name nobody joined polls as no
-                mail (D20).
+                (make_folder's mailbox_share); each poll opens mail/, the
+                inbox and its read/ once and lists the inbox in its own
+                descriptor (unread, pinned_inbox; P3 fix round 1a, Claude
+                Opus 5.5, unreviewed: D35), and in a private mailbox makes
+                the inbox and read/ on the first poll; a linked inbox or
+                read/, a read/ it cannot look at, or under a shared mailbox
+                one not its card owner's, refuses there (exit 1,
+                refuse_bad_inbox), and so does one it cannot list (exit 1,
+                never a quiet timeout: inbox_messages, SHARED fix round 3);
+                prints one line. Under a shared mailbox it makes no inbox:
+                a name nobody joined polls as no mail (D20).
     @deps       require_names, make_folder, open_by_name, unread,
                 keepalive_seconds; fcntl, os, resource.
-    @complexity O(u) per poll over u *.md entries in the inbox (single
-                digits): two lstat calls for the inbox and read/, one for
-                the card when shared, one per entry; no .shared read per
-                poll. One poll every POLL_SECONDS until the timeout.
-    @alloc      one open lock file for its lifetime; flat at about 13 MB.
+    @complexity O(U + u log u) per poll over U names in the inbox and the
+                u of them that are messages (single digits): three folder
+                opens, one lstat for the card when shared, one listing and
+                one stat per message name; no .shared read per poll. One
+                poll every POLL_SECONDS until the timeout.
+    @alloc      one open lock file for its lifetime, and two descriptors
+                for each poll; flat at about 13 MB.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     resource.setrlimit(resource.RLIMIT_AS, (WAIT_MEMORY_CAP_BYTES, WAIT_MEMORY_CAP_BYTES))
@@ -3597,43 +3949,66 @@ def cmd_log(args):
     search): `tc log: tc could not look at <folder> (<why>); the mail in
     it is not shown`, exit 1, and no `mailbox empty`.
 
-    @interacts  lists mail/, lstats each inbox, its read/ and each *.md
-                entry, reads each message shown (read_regular_file);
-                prints to stdout, and to stderr for what it will not show
-                or could not list or look at. Writes nothing.
-    @deps       message_files, show, refuse_lines, printable; os, stat;
-                MAIL.
-    @complexity O(t) over t message files ever (low hundreds per job), one
-                lstat each and one read for each one shown.
-    @alloc      the list of every message path, the skipped entries and
-                the folders not listed, freed on exit; each file's text
-                while it prints.
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, one pinned handle
+    per inbox. mail/ is opened once, each inbox by its name in it and its
+    read/ by name in the inbox's descriptor (open_inbox), and every
+    listing, stat and message read is by name in those descriptors, which
+    stay open until the log is printed. So an inbox's owner who swaps it
+    for a link or another folder mid-walk leads the log nowhere. A read/
+    is reached only through its inbox: the read/ of an inbox tc cannot
+    open is not listed.
+
+    @interacts  opens mail/ and lists it; opens each mail/to-*/ and its
+                read/ by name (open_inbox), lists each and stats each
+                message name in it, reads each message shown
+                (read_regular_file), all by name in their folders'
+                descriptors; prints to stdout, and to stderr for what it
+                will not show or could not list or look at. Writes
+                nothing.
+    @deps       open_mail, open_inbox, unpin, message_files, show,
+                refuse_lines, printable; contextlib, os, stat.
+    @complexity O(n log n + T + t log t) over n inboxes, T names in every
+                inbox and read/, and t message files ever (low hundreds
+                per job): one listing per folder, one stat per message
+                name, a sort per folder and one of all t, and one read for
+                each one shown.
+    @alloc      two descriptors per inbox, held until the log is printed;
+                the list of every message, the skipped entries and the
+                folders not listed, freed on exit; each file's text while
+                it prints.
     """
     every, skipped, unlisted = [], [], []
-    for box in sorted(MAIL.glob("to-*")) if MAIL.is_dir() else []:
-        for folder in (box, box / "read"):
-            try:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-4, a folder tc cannot look at is said
-                st = os.lstat(folder)
-            except FileNotFoundError:
-                st = None
-            except OSError as err:
-                unlisted.append(f"tc could not look at {folder} ({err.strerror})")
-                st = None
-            if st is None or not stat.S_ISDIR(st.st_mode):
-                if st is not None and stat.S_ISLNK(st.st_mode):
-                    skipped.append((folder, "it is a symlink, not a real folder; tc never enters it"))
-                if folder == box:
-                    break
-                continue
-            messages, bad, problem = message_files(folder)  # an entry tc could not look at is in bad
-            every += [path for path, _ in messages]
-            skipped += bad
-            if problem is not None and not messages and not bad:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): REC-1
-                unlisted.append(problem)
-    every.sort(key=lambda p: p.name)
-    if not every and not unlisted:
-        print("mailbox empty")
-    unshown = show(every[-args.last:] if args.last else every)
+    with contextlib.ExitStack() as held:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, every descriptor closed
+        try:
+            mail_fd = open_mail()
+        except OSError:
+            mail_fd = None
+        names = []
+        if mail_fd is not None:
+            held.callback(os.close, mail_fd)
+            try:
+                names = sorted(name for name in os.listdir(mail_fd) if name.startswith("to-"))
+            except OSError:
+                names = []
+        for entry in names:
+            inbox = open_inbox(mail_fd, entry[len("to-"):])
+            held.callback(unpin, inbox.read, inbox.box)
+            for folder, pinned in ((inbox.path, inbox.box), (inbox.path / "read", inbox.read)):
+                if pinned.fd is None:
+                    if pinned.found is not None and stat.S_ISLNK(pinned.found.st_mode):
+                        skipped.append((folder, "it is a symlink, not a real folder; tc never enters it"))
+                    elif pinned.problem is not None:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-4, a folder tc cannot look at is said
+                        unlisted.append(pinned.problem)
+                    continue
+                messages, bad, problem = message_files(folder, pinned.fd)  # an entry tc could not look at is in bad
+                every += [(path, pinned.fd) for path, _ in messages]
+                skipped += bad
+                if problem is not None and not messages and not bad:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): REC-1
+                    unlisted.append(problem)
+        every.sort(key=lambda message: message[0].name)
+        if not every and not unlisted:
+            print("mailbox empty")
+        unshown = show(every[-args.last:] if args.last else every)
     refuse_lines([f"tc log: {printable(p)} not shown ({why})" for p, why in skipped + unshown]
                  + [f"tc log: {printable(problem)}; the mail in it is not shown" for problem in unlisted])
 
@@ -3642,31 +4017,44 @@ def cmd_log(args):
 # CARDS R2 (Claude Opus 5.5, unreviewed). No card names a hub (D7):
 # reports_to is a hint for tc cards, tc health and the board, never a route.
 
-def unread_count(name):
-    """How many unread messages mail/to-<name>/ holds; 0 with no inbox.
+def unread_count(name, inbox=None):
+    """How many unread messages mail/to-<name>/ holds; 0 with no inbox. `inbox`, when given, is the Inbox the caller holds open for `name` (deliver_codex's).
 
     Unlike unread(), it never creates the inbox. SHARED fix round 1
-    (Claude Opus 5.5, unreviewed): only a real folder counts (lstat), so a
-    linked inbox holds 0, as send, read and wait refuse it; and only
-    regular files count (message_files), as `tc read` moves only those.
-    SHARED fix round 2 (Claude Opus 5.5, unreviewed): an entry lstat
-    cannot reach is not counted, and an inbox this user cannot list
-    holds 0 here (message_files), never a traceback. SHARED fix round 4
-    (Claude Opus 5.5, unreviewed): the audit's LOW-7. So this count's own
-    callers get a silent 0 for such an inbox: cmd_join (the ring marker),
-    cmd_card (its refusal over unread mail) and deliver_codex (the ring
-    decision), as the handoff's pause 8 says. Peek, read and wait say
-    they could not list it (inbox_messages), log names it (cmd_log), and
-    mailbox_summary reports the count as unknown.
+    (Claude Opus 5.5, unreviewed): only a real folder counts, so a linked
+    inbox holds 0, as send, read and wait refuse it; and only regular
+    files count (message_files), as `tc read` moves only those. SHARED fix
+    round 2 (Claude Opus 5.5, unreviewed): an entry stat cannot reach is
+    not counted, and an inbox this user cannot list holds 0 here, never a
+    traceback. SHARED fix round 4 (Claude Opus 5.5, unreviewed): the
+    audit's LOW-7. So this count's own callers get a silent 0 for such an
+    inbox: cmd_join (the ring marker), cmd_card (its refusal over unread
+    mail) and deliver_codex (the ring decision), as the handoff's pause 8
+    says. Peek, read and wait say they could not list it
+    (inbox_messages), log names it (cmd_log), and mailbox_summary reports
+    the count as unknown.
 
-    @interacts  lstats mail/to-<name>; lists it and lstats each *.md
-                entry. Writes nothing.
-    @deps       real_folder, message_files; MAIL.
-    @complexity O(u) over u *.md entries in the inbox (single digits).
-    @alloc      two lists, freed on return.
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35. The count is
+    taken in the inbox's own descriptor, never by its path: the caller's
+    open `inbox`, so a codex send counts, lands and counts again in one
+    folder, or else the inbox opened here once (pinned_inbox, refusing
+    nothing and reading no .shared) and closed again.
+
+    @interacts  without `inbox`, opens mail/, the inbox and its read/
+                (pinned_inbox) and closes them after; lists the inbox and
+                stats each message name in it. Writes nothing.
+    @deps       pinned_inbox, message_files.
+    @complexity O(U + u log u) over U names in the inbox and the u of
+                them that are messages (single digits).
+    @alloc      two lists, freed on return; without `inbox`, two
+                descriptors for the call.
     """
-    box = MAIL / f"to-{name}"
-    return len(message_files(box)[0]) if real_folder(box) else 0
+    if inbox is None:
+        with pinned_inbox(name, check=False) as opened:
+            return unread_count(name, opened)
+    if inbox.box.fd is None:
+        return 0
+    return len(message_files(inbox.path, inbox.box.fd)[0])
 
 
 def refuse(words, code):
@@ -3837,7 +4225,7 @@ def describe_card(card, file_name=None):
 
 # Phase fix round 1 (Claude Opus 5.5, unreviewed): every card file, and the
 # ring marker, is read here.
-def read_regular_file(path, limit):
+def read_regular_file(path, limit, dir_fd=None):
     """The text of the file at `path`, read only when it is a regular file of at most `limit` bytes.
 
     Opened with O_NONBLOCK and O_NOFOLLOW and checked with fstat before
@@ -3848,7 +4236,10 @@ def read_regular_file(path, limit):
     for a symlink, anything that is not a regular file, a file over
     `limit`, or bytes that are not UTF-8; OSError for any other failure to
     open or read. A card's callers treat each but the first as an
-    unreadable card.
+    unreadable card. P3 fix round 1a (Claude Opus 5.5, unreviewed): D35.
+    `dir_fd`, when given, is the open folder `path` is a name in (a
+    message, by its name in the pinned inbox or read/, show), so no
+    folder on the way is resolved by name.
 
     @interacts  opens, fstats and reads one file, and closes it.
     @deps       os, stat, errno.
@@ -3857,7 +4248,7 @@ def read_regular_file(path, limit):
                 one descriptor, closed on return.
     """
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=dir_fd)
     except OSError as err:
         if err.errno == errno.ELOOP:
             raise ValueError("it is a symlink, which tc never follows") from err
@@ -4221,20 +4612,39 @@ def read_body(message):
         refuse(SEND_NOT_UTF8_WORDS, EXIT_REFUSED)
 
 
-def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on_landed=None):
+def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on_landed=None, inbox=None):
     """Route local: today's send. Seq under flock, write a new .tmp, link it into the inbox under a name nothing has.
 
     Warns `new inbox: nobody has joined as <to>` only when the inbox did
     not exist before this send and the name has no card (O1, D13): a card
     is the record of a join. It looks for cards/<to>.json on disk, not at
-    `card`, because the gate (C3) calls this directly with no card in
-    hand. `header_note`, when given, ends the header line after a comma
-    (the gate's, C3). The .tmp is made by write_new_file, so nothing is
-    ever written through a file or link already at its name; since SHARED
-    fix round 5 such a name takes the next number (below), where before
-    it refused the send, exit 1. An inbox or
-    read/ that is a symlink refuses it before a number is taken (exit 1,
-    check_inbox, D17), and so does a symlink at mail/.seq (next_seq).
+    `card`: a caller may pass none (C2's route signature allows it). P3
+    fix round 1a (Claude Opus 5.5, unreviewed): the audit's LOW-6. Since
+    SSH task 0 the gate (C3) comes through route_and_deliver, as tc send
+    does, never here directly. `header_note`, when given, ends the header
+    line after a comma (the gate's, C3). The .tmp is made by
+    write_new_file, so nothing is ever written through a file or link
+    already at its name; since SHARED fix round 5 such a name takes the
+    next number (below), where before it refused the send, exit 1. An
+    inbox or read/ that is a symlink refuses it before a number is taken
+    (exit 1, refuse_bad_inbox, D17), and so does a symlink at mail/.seq
+    (next_seq).
+
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35 and the audit's
+    HIGH-1, one pinned handle. The inbox and its read/ are opened once,
+    before a number is taken (pinned_inbox), and every step of the
+    publish (each read/ lstat, the .tmp's create, the link, the .tmp's
+    removal) is by name in their descriptors (publish_message), never by
+    a path. So a recipient who swaps the inbox for a link or another
+    folder while this send waits on mail/.seq leads the message nowhere:
+    it lands in the folder that was opened. The words still name the
+    inbox's path. `inbox`, a keyword C2's route signature leaves out, is
+    an Inbox the caller holds open for `to` (deliver_codex's, which
+    counts in the same folder); None opens one here. An inbox that is
+    there and could not be opened refuses the send, exit 1, with
+    check_inbox's words (`could not look at`). In a private mailbox a
+    missing inbox or read/ is made after the number is taken, as before,
+    so a send refused before it lands makes nothing (inbox_made).
 
     SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20, a send never
     replaces a message. The finished .tmp is hard-linked to the message's
@@ -4298,7 +4708,7 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on
 
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): under a shared
     mailbox (D20), before a number is taken: an inbox not owned by its
-    card's owner refuses the send (exit 1, check_inbox, item 4); a name
+    card's owner refuses the send (exit 1, refuse_bad_inbox, item 4); a name
     with no card is refused, Delivery exit 1, `tc send: nobody has joined
     as <to> on this shared mailbox`, and one with a card but no inbox is
     refused with words telling its owner to rejoin (item 3). SHARED D21
@@ -4315,24 +4725,28 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on
     Delivery's: the far gate files the origin id there, before a codex
     ring (deliver_once). None calls nothing.
 
-    @interacts  reads ROOT/.shared (mailbox_share); lstats mail/to-<to>,
-                its read/ and, when shared, cards/<to>.json (check_inbox,
-                then once more for the no-card refusal); takes the
-                mail/.seq flock (next_seq, once per try, every try under
-                one deadline; held past it, exit 10); private only:
-                makes mail/to-<to>/read/; per try lstats
-                read/NNNNNN-from-<sender>.md, creates
-                NNNNNN-from-<sender>.tmp in mail/to-<to>/ (a name already
-                taken there: the next number), links it to
-                NNNNNN-from-<sender>.md there and removes the .tmp's name;
-                stats cards/<to>.json. Every name taken: Delivery exit 10.
-                SSH task 0 (Claude Opus 5.5, unreviewed): every try's
-                steps run in publish_message, with ("read",) as the
-                history it checks; nothing about them changed. Once
-                published, calls `on_landed` when given.
-    @deps       mailbox_share, check_inbox, lock_deadline, next_seq, inbox,
-                publish_message, Delivery; os; CARDS,
-                SHARED_OWNED_FILE_MODE, NEW_FILE_MODE, EXIT_REFUSED.
+    @interacts  reads ROOT/.shared (mailbox_share) unless `inbox` is
+                given; opens mail/, mail/to-<to>/ and its read/ once
+                (pinned_inbox, unless `inbox` is given), refusing a bad
+                inbox (exit 1, refuse_bad_inbox: a link, not a folder, a
+                read/ it cannot look at, when shared not its card owner's);
+                when shared, lstats cards/<to>.json for the no-card
+                refusal; takes the mail/.seq flock (next_seq, once per
+                try, every try under one deadline; held past it, exit 10);
+                private only, then makes mail/, the inbox and read/ when
+                missing, by name, and opens them (inbox_made); per try
+                lstats NNNNNN-from-<sender>.md in read/,
+                creates NNNNNN-from-<sender>.tmp in the inbox (a name
+                already taken there: the next number), links it to
+                NNNNNN-from-<sender>.md there and removes the .tmp's name,
+                each by name in the inbox's or read/'s descriptor
+                (publish_message); stats cards/<to>.json. Every name
+                taken: Delivery exit 10. Once published, calls `on_landed`
+                when given. Closes what it opened before it returns.
+    @deps       mailbox_share, pinned_inbox, inbox_made, refuse,
+                lock_deadline, next_seq, publish_message, Delivery; errno,
+                os; CARDS, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE,
+                EXIT_REFUSED.
     @complexity O(b) over b bytes of body, once per try: one try in an
                 honest mailbox, at most PUBLISH_MAX_TRIES, a bound reached
                 by a set-back mail/.seq or by names planted ahead of it
@@ -4341,12 +4755,20 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on
                 until `deadline` at most, all tries together.
     @alloc      the message text while written; one message file, kept;
                 at most one .tmp per try, removed before the next; the
-                last taken name, one short string.
+                last taken name, one short string; without `inbox`, two
+                descriptors for the call, and up to two more while a
+                private inbox or read/ made here is published in.
     """
-    share = mailbox_share()  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20
-    box_st, _ = check_inbox(to, share is not None)  # SHARED D17 (Claude Opus 5.5, unreviewed): before a number is taken
-    box_existed = box_st is not None
-    if share is not None:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 3
+    if inbox is None:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, pinned before a number is taken
+        share = mailbox_share()  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20
+        with pinned_inbox(to, share is not None) as pinned:
+            return deliver_local(card, sender, to, body, header_note, deadline=deadline, on_landed=on_landed,
+                                 inbox=pinned)
+    if inbox.box.fd is None and inbox.box.problem is not None:  # P3 fix round 1a: there, and would not open
+        refuse(f"tc: could not look at {inbox.path} ({inbox.box.why}); nothing was read or written there.",
+               EXIT_REFUSED)
+    box_existed = inbox.box.fd is not None
+    if inbox.shared:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 3
         if not os.path.lexists(CARDS / f"{to}.json"):  # SHARED D21 (Claude Opus 5.5, unreviewed): inbox or not
             return Delivery(EXIT_REFUSED, f"tc send: nobody has joined as {to} on this shared mailbox", [])
         if not box_existed:
@@ -4356,10 +4778,14 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on
     if deadline is None:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one deadline for every try
         deadline = lock_deadline()
     n = next_seq(deadline)
-    box = MAIL / f"to-{to}" if share is not None else inbox(to, False)
-    mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 2
-    # SSH task 0 (Claude Opus 5.5, unreviewed): the publish loop lives in publish_message, which the outbox shares (D25).
-    published = publish_message(box, ("read",), n, sender, to, body, header_note, mode, deadline)
+    mode = SHARED_OWNED_FILE_MODE if inbox.shared else NEW_FILE_MODE  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 2
+    with inbox_made(inbox, to) as made:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): private only, after the number
+        if made.box.fd is None:  # nothing to publish in, though one was made a moment ago
+            refuse(f"tc: could not look at {made.path} ({os.strerror(errno.ENOENT)}); nothing was read or written "
+                   f"there.", EXIT_REFUSED)
+        # SSH task 0 (Claude Opus 5.5, unreviewed): the publish loop lives in publish_message, which the outbox shares (D25).
+        published = publish_message(made.path, made.box.fd, (("read", made.read.fd),), n, sender, to, body,
+                                    header_note, mode, deadline)
     if published.refusal is not None:
         return published.refusal
     warnings = published.warnings
@@ -4379,16 +4805,25 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on
 Published = collections.namedtuple("Published", "n path warnings refusal")
 
 
-def publish_message(box, history, n, sender, to, body, header_note, mode, deadline):
-    """Publish one message in the folder `box` at number `n`, or the first number after it nothing has: a Published.
+def publish_message(box, box_fd, history, n, sender, to, body, header_note, mode, deadline):
+    """Publish one message in the folder open at `box_fd` (its path `box`) at number `n`, or the first number after it nothing has: a Published.
+
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35 and the audit's
+    HIGH-1. Every step is by name in the open folders, never by a path:
+    the .tmp is made in `box_fd`, linked to its name there and removed
+    there, and `history` holds (name, descriptor) pairs, the subfolders
+    open (descriptor None when one is not there). So a folder swapped for
+    a link after the caller opened it leads no step elsewhere; `box`
+    names the paths in the words and in the Published only.
 
     The message is written whole to a new .tmp (write_new_file, so
     nothing at that name is ever written through), hard-linked to
     NNNNNN-from-<sender>.md (os.link fails on anything at that name, where
-    a rename would replace it), and the .tmp's name removed. It skips to
-    the next number (next_seq) three ways: a name already in one of the
-    subfolders named in `history` (read/ for an inbox; sent/ and refused/
-    for an outbox), the message's own name taken, or its .tmp name taken.
+    a rename would replace it; it never follows a link at the .tmp's
+    name), and the .tmp's name removed. It skips to the next number
+    (next_seq) three ways: a name already in one of the subfolders in
+    `history` (read/ for an inbox; sent/ and refused/ for an outbox), the
+    message's own name taken, or its .tmp name taken.
     The .tmp's FileExistsError is caught ahead of any other OSError. All
     three share PUBLISH_MAX_TRIES and the command's one `deadline` (each
     next_seq waits no later than it, then exits 10). Out of tries: a
@@ -4410,15 +4845,17 @@ def publish_message(box, history, n, sender, to, body, header_note, mode, deadli
     D23, DEBT-1, LOW-1 to LOW-3); their record is in deliver_local's
     block.
 
-    @interacts  per try: lstats <box>/<h>/NNNNNN-from-<sender>.md for each
-                h in `history`, creates <box>/NNNNNN-from-<sender>.tmp at
-                `mode` (write_new_file), links it to its .md name and
-                removes the .tmp's name; every try after the first takes
-                a number (next_seq: the mail/.seq flock, waiting no later
-                than `deadline`, then exit 10). Reads the clock (now_iso).
-    @deps       next_seq, write_new_file, now_iso, Delivery; os; ROOT,
-                SEQ_WIDTH, PUBLISH_MAX_TRIES, NO_HARD_LINK_ERRNOS,
-                TMP_TAKEN_WHY, EXIT_REFUSED, EXIT_BUSY.
+    @interacts  per try: lstats NNNNNN-from-<sender>.md by name in each
+                open folder of `history`, creates NNNNNN-from-<sender>.tmp
+                by name in `box_fd` at `mode` (write_new_file), links it
+                to its .md name there and removes the .tmp's name there;
+                every try after the first takes a number (next_seq: the
+                mail/.seq flock, waiting no later than `deadline`, then
+                exit 10). Reads the clock (now_iso).
+    @deps       next_seq, write_new_file, name_taken, now_iso, Delivery;
+                os; ROOT, SEQ_WIDTH, PUBLISH_MAX_TRIES,
+                NO_HARD_LINK_ERRNOS, TMP_TAKEN_WHY, EXIT_REFUSED,
+                EXIT_BUSY.
     @complexity O(b) over b bytes of body, once per try: one try in an
                 honest mailbox, at most PUBLISH_MAX_TRIES, a bound reached
                 by a set-back mail/.seq or by names planted ahead of it;
@@ -4435,8 +4872,8 @@ def publish_message(box, history, n, sender, to, body, header_note, mode, deadli
         if tries:
             n = next_seq(deadline)
         path = box / f"{n:0{SEQ_WIDTH}d}-from-{sender}.md"
-        kept = next((f"{folder}/{path.name}" for folder in history if os.path.lexists(box / folder / path.name)),
-                    None)
+        kept = next((f"{folder}/{path.name}" for folder, folder_fd in history
+                     if folder_fd is not None and name_taken(path.name, folder_fd)), None)  # P3 fix round 1a: D35, by name
         if kept is not None:
             taken, behind = kept, True
             continue  # a filed message has this name (in read/, tc read would rename over it)
@@ -4444,20 +4881,20 @@ def publish_message(box, history, n, sender, to, body, header_note, mode, deadli
         note = header_note(n) if callable(header_note) else header_note  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 4
         header = f"# #{n} from {sender} to {to}, {now_iso()}" + (f", {note}" if note else "")
         try:  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): a planted link is refused
-            write_new_file(tmp, f"{header}\n\n{body.rstrip()}\n", mode)
+            write_new_file(tmp.name, f"{header}\n\n{body.rstrip()}\n", mode, dir_fd=box_fd)  # P3 fix round 1a: D35
         except FileExistsError:  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): DEBT-1, a taken .tmp takes the next number
             taken = tmp.name
             continue
         except OSError as err:
             return Published(n, path, [], Delivery(EXIT_REFUSED, f"tc send: could not create {tmp} "
                                                                 f"({err.strerror}); nothing sent", []))
-        try:
-            os.link(tmp, path)  # whole when it appears, and never replaces what has the name
+        try:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, by name in the open folder, never through a link
+            os.link(tmp.name, path.name, src_dir_fd=box_fd, dst_dir_fd=box_fd, follow_symlinks=False)
             failed = None
         except OSError as err:
             failed = err
         try:
-            tmp.unlink()  # this send's own .tmp, made just above; a linked message stays at path
+            os.unlink(tmp.name, dir_fd=box_fd)  # this send's own .tmp, made just above; a linked message stays at path
         except OSError as err:
             warnings.append(f"tc send: could not remove {tmp} ({err.strerror})")
         if failed is None:
@@ -4686,11 +5123,25 @@ def deliver_codex(card, sender, to, body, header_note=None, *, deadline=None, on
     published, under the inbox lock, so the far gate's origin id is filed
     before the ring runs.
 
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35 and the audit's
+    HIGH-1. The inbox is opened once under the lock (pinned_inbox, which
+    refuses a bad one, exit 1, as deliver_local did), and the count
+    before, the publish (deliver_local, handed this Inbox) and the count
+    after all happen in that one open folder (unread_count), never by a
+    path. So the ring decision always counts the folder the message
+    lands in, and a swap mid-send leads none of the three elsewhere. A
+    private inbox the send makes (it was not there to pin) is counted
+    after in its own descriptor, opened then.
+
     @interacts  holds mail/.box-<to>.lock while it lstats the marker,
-                counts mail/to-<to>/*.md (before and after), reads and
-                stats mail/.ring-pending-<to>, writes the message through
-                deliver_local and, when a ring is owed, the marker
-                (write_ring_marker). SHARED fix round 3 (Claude Opus 5.5,
+                reads ROOT/.shared and opens mail/, the inbox and its
+                read/ once (pinned_inbox), counts the inbox's messages in
+                its descriptor (before and after; after, in one opened
+                then when this send made the inbox), reads and stats
+                mail/.ring-pending-<to>, writes the message through
+                deliver_local in the same open inbox and, when a ring is
+                owed, the marker (write_ring_marker); closes the inbox's
+                descriptors before the ring. SHARED fix round 3 (Claude Opus 5.5,
                 unreviewed): one lock_deadline, taken before the inbox
                 lock and passed to deliver_local, bounds the inbox lock
                 and mail/.seq together; either held past it by another
@@ -4709,18 +5160,21 @@ def deliver_codex(card, sender, to, body, header_note=None, *, deadline=None, on
                 exit 0, else the failure. Reads the clock through
                 wall_clock.
     @deps       lock_deadline, inbox_lock, ring_marker_problem,
-                unread_count, ring_owed, deliver_local, ring_backoff,
-                write_ring_marker, ring_codex, clock_words, wall_clock,
-                Delivery; RING_RINGING, RING_FAILED, RING_TIMED_OUT,
-                RING_CLEAR, RING_BACKOFF_SECONDS, EXIT_REFUSED.
-    @complexity O(u + b) over u unread messages (counted twice) and b
+                pinned_inbox, unread_count, ring_owed, deliver_local,
+                ring_backoff, write_ring_marker, ring_codex, clock_words,
+                wall_clock, Delivery; RING_RINGING, RING_FAILED,
+                RING_TIMED_OUT, RING_CLEAR, RING_BACKOFF_SECONDS,
+                EXIT_REFUSED.
+    @complexity O(U + u log u + b) over U names in the inbox, the u of
+                them that are messages (listed and counted twice) and b
                 bytes of body, plus one codex run of at most
                 CODEX_RING_SECONDS; no run while a backoff holds. The inbox
                 lock and mail/.seq wait at most LOCK_WAIT_SECONDS in all
                 (one deadline); each marker write, before and after the
                 ring, at most LOCK_WAIT_SECONDS of its own.
     @alloc      the ring's words, freed on return; one message file, kept;
-                the marker file, kept (never removed, D20).
+                the marker file, kept (never removed, D20); two
+                descriptors while the lock is held.
     """
     marker = MAIL / f".ring-pending-{to}"
     if deadline is None:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-3, the command's own when given
@@ -4729,11 +5183,14 @@ def deliver_codex(card, sender, to, body, header_note=None, *, deadline=None, on
         bad = ring_marker_problem(marker)  # SHARED D17 (Claude Opus 5.5, unreviewed): a planted link; D19 a FIFO
         if bad is not None:
             return Delivery(EXIT_REFUSED, f"tc send: {marker} {bad}; nothing sent", [])
-        waiting = unread_count(to)
-        owed = ring_owed(marker)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, the state, not the file
-        held = ring_backoff(marker) if owed else None
-        landed = deliver_local(card, sender, to, body, header_note, deadline=deadline, on_landed=on_landed)
-        count = unread_count(to)
+        with pinned_inbox(to) as inbox:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, one folder
+            waiting = unread_count(to, inbox)
+            owed = ring_owed(marker)  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, the state, not the file
+            held = ring_backoff(marker) if owed else None
+            landed = deliver_local(card, sender, to, body, header_note, deadline=deadline, on_landed=on_landed,
+                                   inbox=inbox)
+            # A private inbox this send made was not there to pin: it is counted in its own, fresh.
+            count = unread_count(to, inbox if inbox.box.fd is not None else None)
         ring = landed.exit == 0 and held is None and (owed or not waiting)
         if ring:
             write_ring_marker(to, RING_RINGING, f"a send from {sender} is ringing")
@@ -5164,14 +5621,14 @@ def owned_by_me(st):
     return st.st_uid == os.geteuid()
 
 
-def outbox_files(branch):
-    """Every message waiting directly in a to-<name>/ of the outbox branch `branch`, in queue order, as OutboxFiles; and (path, why) for each entry left out.
+def outbox_files(branch, branch_fd=None):
+    """Every message waiting directly in a to-<name>/ of the outbox branch `branch`, in queue order, as OutboxFiles; and (path, why) for each entry left out. `branch_fd`, when given, is the branch's open descriptor (other_branches); None opens it here.
 
-    Only real folders named to-<name> with a C0 name are entered (lstat,
-    never a link), and only regular files named NNNNNN-from-<sender>.md
-    with a C0 sender count (message_files: a link, a FIFO or a folder is
-    left out with words). sent/ and refused/ are below, never listed
-    here. Whoever owns a file, it is listed: the caller asks owned_by_me.
+    Only real folders named to-<name> with a C0 name are entered (never a
+    link), and only regular files named NNNNNN-from-<sender>.md with a C0
+    sender count (message_files: a link, a FIFO or a folder is left out
+    with words). sent/ and refused/ are below, never listed here. Whoever
+    owns a file, it is listed: the caller asks owned_by_me.
 
     SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and the audit's
     REC-12. One branch, outbox/<user>/, is listed (this user's, for a
@@ -5182,65 +5639,121 @@ def outbox_files(branch):
     its number, so a newer message whose number a set-back mail/.seq made
     lower still waits behind an older one.
 
-    @interacts  lists `branch` and each to-<name>/ in it, lstats each
-                entry (real_folder, message_files). Writes nothing.
-    @deps       real_folder, message_files, valid_name; os;
-                MESSAGE_NAME_PATTERN, OutboxFile.
-    @complexity O(q + w log w) over q entries in the branch (one per name
-                this user ever sent to over ssh, a few dozen) and w files
-                waiting in it (single digits, unless a target has been
-                down a while).
-    @alloc      two lists, returned.
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35 and the audit's
+    HIGH-1. The branch is listed in its open descriptor (the caller's,
+    or one opened here by its path with FOLDER_FLAGS: its last name never
+    followed, the folder above it the init user's, D34), and each
+    to-<name>/ is opened by its name in it (pin_folder) and listed and
+    stat'ed in its own descriptor, never by a path. So another member who
+    swaps their branch, or a queue in it, for a link after it was opened
+    leads flush's count nowhere. The paths returned name the files for the
+    caller's words, and for this user's own later moves of its own files.
+
+    @interacts  opens `branch` when no descriptor is given; lists it,
+                opens each to-<name>/ in it by name (pin_folder), lists
+                each and stats each message name in it (message_files);
+                closes every descriptor it opened. Writes nothing.
+    @deps       pin_folder, unpin, message_files, valid_name; os;
+                FOLDER_FLAGS, NOT_PINNED, MESSAGE_NAME_PATTERN, OutboxFile.
+    @complexity O(q log q + w log w) over q entries in the branch (one per
+                name this user ever sent to over ssh, a few dozen) and w
+                files waiting in it (single digits, unless a target has
+                been down a while): one listing per folder, one stat per
+                message name, and the sorts.
+    @alloc      two lists, returned; one descriptor for the branch (when
+                opened here) and one per queue while it is listed.
     """
-    top = branch
     found, left_out = [], []
+    own = branch_fd is None  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, opened once
+    if own:
+        try:
+            branch_fd = os.open(branch, FOLDER_FLAGS)
+        except FileNotFoundError:
+            return found, left_out
+        except OSError as err:
+            return found, [(branch, f"tc could not list it ({err.strerror})")]
     try:
-        names = os.listdir(top)
-    except FileNotFoundError:
-        return found, left_out
-    except OSError as err:
-        return found, [(top, f"tc could not list it ({err.strerror})")]
-    for entry in sorted(names):
-        if not entry.startswith("to-"):
-            continue
-        box = top / entry
-        if not valid_name(entry[len("to-"):]) or not real_folder(box):
-            left_out.append((box, "not a real folder named to-<name>, so tc never enters it"))
-            continue
-        messages, skipped, problem = message_files(box)
-        left_out += skipped
-        if problem is not None and not messages and not skipped:
-            left_out.append((box, problem))
-        for path, st in messages:
-            named = MESSAGE_NAME_PATTERN.fullmatch(path.name)
-            if named is None or not valid_name(named.group(2)):
-                left_out.append((path, "not named like a message (NNNNNN-from-<sender>.md)"))
+        try:
+            names = os.listdir(branch_fd)
+        except OSError as err:
+            return found, [(branch, f"tc could not list it ({err.strerror})")]
+        for entry in sorted(names):
+            if not entry.startswith("to-"):
                 continue
-            found.append(OutboxFile(int(named.group(1)), named.group(2), entry[len("to-"):], path, st))
+            box = branch / entry
+            queue = pin_folder(branch_fd, entry, box) if valid_name(entry[len("to-"):]) else NOT_PINNED
+            if queue.fd is None:
+                left_out.append((box, queue.problem or "not a real folder named to-<name>, so tc never enters it"))
+                continue
+            try:
+                messages, skipped, problem = message_files(box, queue.fd)
+            finally:
+                unpin(queue)
+            left_out += skipped
+            if problem is not None and not messages and not skipped:
+                left_out.append((box, problem))
+            for path, st in messages:
+                named = MESSAGE_NAME_PATTERN.fullmatch(path.name)
+                if named is None or not valid_name(named.group(2)):
+                    left_out.append((path, "not named like a message (NNNNNN-from-<sender>.md)"))
+                    continue
+                found.append(OutboxFile(int(named.group(1)), named.group(2), entry[len("to-"):], path, st))
+    finally:
+        if own:
+            os.close(branch_fd)
     found.sort(key=lambda f: (f.st.st_mtime_ns, f.n, str(f.path)))  # SSH fix round 1 (Claude Opus 5.5, unreviewed): LOW-7
     return found, left_out
 
 
+@contextlib.contextmanager
 def other_branches():
-    """The outbox branches of every other member: each real folder directly in outbox/ but this user's own, whose name starts with no dot (D32). A list of paths.
+    """The outbox branches of every other member, each opened once, held open for the `with` block: yields a list of (path, descriptor), one per real folder directly in outbox/ but this user's own whose name starts with no dot (D32). Every descriptor is closed when the block ends.
 
     For tc flush's count of other members' waiting files (D22). Names
     starting with a dot (the origin token, a folder moved aside) are not
-    branches.
+    branches. P3 fix round 1a (Claude Opus 5.5, unreviewed): D35 and the
+    audit's HIGH-1. outbox/ is opened by its path (only the init user can
+    swap it, D34) and each branch by its name in it (pin_folder), never
+    through a link; the caller lists each in its descriptor
+    (outbox_files). So a member who swaps their branch for a link or
+    another folder after it was opened leads the count nowhere. A link,
+    anything but a folder, and a folder this user cannot open are left
+    out, as before.
 
-    @interacts  lists outbox/ and lstats each entry (real_folder); reads
-                the user database (outbox_branch). Writes nothing.
-    @deps       outbox_branch, real_folder; os; ROOT, OUTBOX_NAME.
-    @complexity O(m) over m entries in outbox/ (one per member).
-    @alloc      one list of paths, returned.
+    @interacts  opens and lists outbox/, opens each entry in it by name
+                (pin_folder); reads the user database (branch_user);
+                closes every descriptor. Writes nothing.
+    @deps       branch_user, pin_folder; contextlib, os; ROOT,
+                OUTBOX_NAME, TOP_FOLDER_FLAGS.
+    @complexity O(m log m) over m entries in outbox/ (one per member).
+    @alloc      one list of (path, descriptor), and one descriptor per
+                branch, held for the block.
     """
-    top, mine = ROOT / OUTBOX_NAME, outbox_branch()
+    top, mine = ROOT / OUTBOX_NAME, branch_user()
+    found = []
     try:
-        names = sorted(os.listdir(top))
-    except OSError:
-        return []
-    return [top / name for name in names
-            if not name.startswith(".") and top / name != mine and real_folder(top / name)]
+        try:
+            top_fd = os.open(top, TOP_FOLDER_FLAGS)
+        except OSError:
+            top_fd = None
+        if top_fd is not None:
+            try:
+                try:
+                    names = sorted(os.listdir(top_fd))
+                except OSError:
+                    names = []
+                for name in names:
+                    if name.startswith(".") or name == mine:
+                        continue
+                    branch = pin_folder(top_fd, name, top / name)
+                    if branch.fd is not None:
+                        found.append((top / name, branch.fd))
+            finally:
+                os.close(top_fd)
+        yield found
+    finally:
+        for _, fd in found:
+            os.close(fd)
 
 
 def queue_ahead(target, path):
@@ -5774,19 +6287,22 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
                 (claim_branch); reads or makes the origin token; takes the
                 send lock; takes numbers from mail/.seq (next_seq,
                 publish_message) and publishes one file in
-                outbox/<user>/to-<to>/; lists this user's branch and reads
+                outbox/<user>/to-<to>/, opened once by its path with its
+                sent/ and refused/ by name in it, every publish step by
+                name in those descriptors, closed after (P3 fix round 1a,
+                Claude Opus 5.5, unreviewed: D35); lists this user's branch and reads
                 the card of each name waiting (queue_ahead); runs ssh once
                 (ssh_run); links the file into sent/ or refused/ and
                 removes its outbox name, writing the far stderr beside a
                 refused one (file_outcome).
     @deps       ssh_where, outbox_queue, claim_branch, origin_token,
                 origin_nonce, origin_id, lock_deadline, next_seq,
-                publish_message, send_lock, queue_ahead, ssh_run,
-                file_outcome, file_away, outbox_text, Delivery; CARDS,
-                SEQ_FILE, OUTBOX_SENT, OUTBOX_REFUSED, ORIGIN_HEADER_NOTE,
-                ORIGIN_SEQ_MAX_DIGITS, SEQ_TOO_LONG_WORDS,
-                SHARED_OWNED_FILE_MODE, NEW_FILE_MODE, EXIT_BAD_NAME,
-                EXIT_REFUSED, EXIT_QUEUED.
+                pin_folder, publish_message, send_lock, queue_ahead,
+                ssh_run, file_outcome, file_away, outbox_text, Delivery;
+                os; CARDS, SEQ_FILE, SEQ_WIDTH, FOLDER_FLAGS, OUTBOX_SENT,
+                OUTBOX_REFUSED, ORIGIN_HEADER_NOTE, ORIGIN_SEQ_MAX_DIGITS,
+                SEQ_TOO_LONG_WORDS, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE,
+                EXIT_BAD_NAME, EXIT_REFUSED, EXIT_QUEUED.
     @complexity O(b) over b bytes of body per publish try (one in an
                 honest mailbox), plus queue_ahead's O(q + w log w) over
                 this user's branch, plus one ssh run of at most
@@ -5796,7 +6312,7 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
     @alloc      the message text while written; one outbox file, kept in
                 outbox/<user>/to-<to>/, sent/ or refused/ (D25, D32); a
                 refusal's note, kept; one open lock file while the lock
-                is held.
+                is held; up to three descriptors while it publishes.
     @rng        one origin_nonce draw per call that gets past the card,
                 branch and token checks (D33 part 4).
     """
@@ -5829,8 +6345,21 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
         if len(str(n)) > ORIGIN_SEQ_MAX_DIGITS:  # SSH fix round 1 (Claude Opus 5.5, unreviewed): LOW-6
             return Delivery(EXIT_REFUSED, SEQ_TOO_LONG_WORDS.format(seq=SEQ_FILE, n=n, digits=len(str(n)),
                                                                     most=ORIGIN_SEQ_MAX_DIGITS), [])
-        published = publish_message(box, (OUTBOX_SENT, OUTBOX_REFUSED), n, sender, to, body, note, mode,
-                                    deadline)
+        try:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, publish_message works by name in an open folder
+            queue_fd = os.open(box, FOLDER_FLAGS)  # claim_branch judged each level just above
+        except OSError as err:
+            return Delivery(EXIT_REFUSED, f"tc send: could not create {box / f'{n:0{SEQ_WIDTH}d}-from-{sender}.tmp'} "
+                                          f"({err.strerror}); nothing sent", [])
+        history = []
+        try:
+            for folder in (OUTBOX_SENT, OUTBOX_REFUSED):
+                history.append((folder, pin_folder(queue_fd, folder, box / folder).fd))
+            published = publish_message(box, queue_fd, history, n, sender, to, body, note, mode, deadline)
+        finally:
+            for _, folder_fd in history:
+                if folder_fd is not None:
+                    os.close(folder_fd)
+            os.close(queue_fd)
         if published.refusal is not None:
             return published.refusal
         path, warnings = published.path, published.warnings
@@ -5947,8 +6476,11 @@ def cmd_flush(args):
     @interacts  checks --to (C0, exit 6); lstats this user's branch and
                 each level of it (claim_branch, exit 1 on a refusal);
                 lists it (outbox_files) and reads each waiting name's card
-                once (queue_route); lists the other members' branches once
-                (other_branches, outbox_files); per target takes the send
+                once (queue_route); opens each other member's branch once
+                and lists it and each queue in it by name in its
+                descriptor, never by a path (other_branches, outbox_files;
+                P3 fix round 1a, Claude Opus 5.5, unreviewed: D35, the
+                audit's HIGH-1), closing them after; per target takes the send
                 lock (send_lock), lists this user's branch before each
                 file and once more before letting the lock go; per file
                 reads it and the origin id its header ends with
@@ -5999,7 +6531,8 @@ def cmd_flush(args):
         if box is None or path == box or box in path.parents:
             print(f"tc flush: skipped {printable(path)}: {why}", file=sys.stderr)
     mine = [f for f in files if chosen(f) and owned_by_me(f.st)]
-    theirs = [f for other in other_branches() for f in outbox_files(other)[0] if chosen(f)]
+    with other_branches() as others:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, each branch counted in its descriptor
+        theirs = [f for other, other_fd in others for f in outbox_files(other, other_fd)[0] if chosen(f)]
     left, said, targets = [], set(), []  # left: (file, why); said: every file this run tried
     for f in mine:
         where = route(f.to)
@@ -6369,46 +6902,76 @@ def mailbox_summary():
     cannot search can no longer make this raise PermissionError, and so
     stop tc health.
 
-    @interacts  lists mail/; lstats each inbox, its read/, each *.md
-                entry and each name's status file; lists each inbox and
-                read/ (message_files). Writes nothing.
-    @deps       real_folder, message_files; os, stat, time; MAIL, STATUS.
-    @complexity O(n + m) over n inboxes (a few dozen) and m message files
-                in every inbox and read/ (hundreds to thousands, growing
-                with the history), one lstat each.
-    @alloc      one dict per inbox, returned; each inbox's message lists
-                while it is counted.
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35 and the audit's
+    HIGH-1 (breaker's MEDIUM-1 on this function). mail/ is opened once,
+    each inbox by its name in it and its read/ by name in the inbox's
+    descriptor (open_inbox), and each is listed and its messages stat'ed
+    in its own descriptor (message_files), never by a path. So an inbox's
+    owner who swaps it for a link after it was opened cannot make tc
+    health, the gate's health --json or the board's feed count or date
+    the link's target. The read/ of an inbox tc could not open is not
+    reached; its count is unknown already.
+
+    @interacts  opens and lists mail/; opens each mail/to-*/ and its read/
+                by name (open_inbox), lists each and stats each message
+                name in it (message_files), closing both before the next
+                inbox; lstats each name's status file. Writes nothing.
+    @deps       open_mail, open_inbox, unpin, message_files; os, stat,
+                time; STATUS.
+    @complexity O(n log n + M + m log m) over n inboxes (a few dozen,
+                sorted), M names listed in every inbox and read/, and m
+                message files among them (hundreds to thousands, growing
+                with the history: read/ is kept), one stat each and a sort
+                per folder. tc health runs it once; the board's feed runs
+                it on every poll (every 3 s while a page is open).
+    @alloc      one dict per inbox, returned; each inbox's name and
+                message lists, and its two descriptors, while it is
+                counted.
     """
     now = time.time()
     out = {}
-    for box in sorted(MAIL.glob("to-*")) if MAIL.exists() else []:
-        if not real_folder(box):
-            continue
-        name = box.name[len("to-"):]
-        unread, _, unread_problem = message_files(box)  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): LOW-2
-        read = box / "read"
+    try:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, mail/ opened once, each inbox by name in it
+        mail_fd = open_mail()
+    except OSError:
+        mail_fd = None
+    if mail_fd is None:
+        return out
+    try:
         try:
-            read_is_folder, history_problem = stat.S_ISDIR(os.lstat(read).st_mode), None
-        except FileNotFoundError:
-            read_is_folder, history_problem = False, None
-        except OSError as err:
-            read_is_folder, history_problem = False, f"tc could not look at {read} ({err.strerror})"
-        if read_is_folder:
-            history, _, history_problem = message_files(read)
-        else:
-            history = []
-        problem = unread_problem or history_problem
-        newest = None if problem else max((st.st_mtime for _, st in unread + history), default=None)
-        try:  # SHARED, from BOARD's review (Claude Opus 5.5, unreviewed): lstat, never through a link
-            st = os.lstat(STATUS / f"{name}.md")
+            names = sorted(name for name in os.listdir(mail_fd) if name.startswith("to-"))
         except OSError:
-            st = None
-        out[name] = {
-            "unread": None if unread_problem else len(unread),
-            "newest_mail_age_s": None if newest is None else round(now - newest),
-            "status_age_s": round(now - st.st_mtime) if st is not None and stat.S_ISREG(st.st_mode) else None,
-            "mail_problem": problem,
-        }
+            names = []
+        for entry in names:
+            inbox = open_inbox(mail_fd, entry[len("to-"):])
+            try:
+                box, read = inbox.box, inbox.read
+                if box.fd is None and (box.found is None or not stat.S_ISDIR(box.found.st_mode)):
+                    continue  # nothing, a link or not a folder: left out, as send, read and wait refuse it
+                if box.fd is None:
+                    unread, unread_problem, history, history_problem = [], box.problem, [], None
+                else:
+                    unread, _, unread_problem = message_files(inbox.path, box.fd)  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): LOW-2
+                    if read.fd is not None:
+                        history, _, history_problem = message_files(inbox.path / "read", read.fd)
+                    else:
+                        history, history_problem = [], read.problem
+            finally:
+                unpin(inbox.read, inbox.box)
+            name = entry[len("to-"):]
+            problem = unread_problem or history_problem
+            newest = None if problem else max((st.st_mtime for _, st in unread + history), default=None)
+            try:  # SHARED, from BOARD's review (Claude Opus 5.5, unreviewed): lstat, never through a link
+                st = os.lstat(STATUS / f"{name}.md")
+            except OSError:
+                st = None
+            out[name] = {
+                "unread": None if unread_problem else len(unread),
+                "newest_mail_age_s": None if newest is None else round(now - newest),
+                "status_age_s": round(now - st.st_mtime) if st is not None and stat.S_ISREG(st.st_mode) else None,
+                "mail_problem": problem,
+            }
+    finally:
+        os.close(mail_fd)
     return out
 
 
@@ -6477,11 +7040,13 @@ def health_snapshot(cards=True, gpu=True, branches=True):
     @deps       now_iso, machine_stats, session_counts, listeners,
                 mailbox_summary, cards_summary, squatted_branches,
                 shared_group.
-    @complexity O(p + k + n + m + c + e): p processes, k lines in
-                /proc/locks, n mailbox names, m message files in every
-                inbox and read/ (mailbox_summary stats each one: hundreds
-                to thousands), c cards, e entries in outbox/ and
-                mail/.origins/ (one per member each).
+    @complexity O(p + k + n log n + M + m log m + c + e): p processes, k
+                lines in /proc/locks, n mailbox names, M names in every
+                inbox and read/ and the m message files among them
+                (mailbox_summary lists each folder in its descriptor,
+                sorts its message names and stats each one: hundreds to
+                thousands, growing with the history), c cards, e entries
+                in outbox/ and mail/.origins/ (one per member each).
     @alloc      one dict, returned.
     """
     try:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): LOW-8, a field, never a raise
