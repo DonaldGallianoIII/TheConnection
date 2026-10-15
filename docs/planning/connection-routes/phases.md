@@ -213,6 +213,10 @@ the fake-codex tests always.
 - **Verify:** `python3 -m unittest tests.test_usage -v`.
 - **PR:** Make a usage error exit 9, so a mistyped listener cannot pass for a timeout.
 
+---
+
+## SSH (P3, wave 2b, after SHARED merges)
+
 SSH starts from SHARED's merge, not beside it: both edit `main()`'s
 argparse block and `tc`'s doc block, and SHARED is small. SSH adds its
 `"ssh": deliver_ssh` line to `ROUTES`.
