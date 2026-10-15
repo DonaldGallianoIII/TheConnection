@@ -15,7 +15,9 @@
  *             arguments; patchBoard writes only the board object it is given
  *             and calls only its kit; createFit observes the canvas's scroll
  *             area through the observer it is given and writes the view's
- *             size and transform
+ *             size and transform; createPoller asks for the feed through
+ *             the fetch and timers it is given and reports through its two
+ *             callbacks
  * @deps       browser DOM and SVG for the drawing functions; the pure layer
  *             needs neither (node --test runs it with no DOM library)
  * @complexity every drawing function is O(1) per call; a board with n nodes
@@ -965,5 +967,114 @@ export function createFit(canvas, board, { padding, Observer }) {
     },
     start() { observer.observe(canvas.scroll); },
     stop() { observer.disconnect(); },
+  };
+}
+
+/**
+ * The pill's words when the feed is not answering, each a plain statement;
+ * none of them says live. Model: Claude Opus 5.5 (the BOARD fixer, round 1),
+ * 2026-10-14. Status: unreviewed.
+ */
+export const CONN_WORDS = Object.freeze({
+  asking: 'asking the server',
+  noToken: 'no token · open the URL serve.py printed',
+  tokenRefused: 'token refused · open the URL serve.py printed',
+  noAnswer: 'no answer',
+  stale: 'stale',
+  timedOut: 'timed out',
+  badAnswer: 'bad answer',
+  noServer: 'is serve.py running?',
+});
+// The status serve.py gives /feed without the right token (C6).
+const HTTP_UNAUTHORIZED = 401;
+// The pill counts the age of the last answer in whole seconds.
+const MS_PER_S = 1000;
+
+/**
+ * Ask for the feed one request at a time: the next poll starts `pollMs`
+ * after the last one settles, so requests never pile up behind a slow or
+ * stopped server, and an older answer can never land after a newer one
+ * (C6's newest answer wins, by construction). A request still out after
+ * `timeoutMs` is aborted. When an answer fails or is late the pill says so
+ * in words: `no answer · <why>` before any answer, else `stale · last
+ * answer N s ago · <why>`; a 401 says the token was refused. A good answer
+ * goes to onFeed, which writes the pill itself. fetchFeed(signal) returns a
+ * fetch Response; timers is { setTimeout, clearTimeout }; now() is a
+ * monotonic clock in ms (performance.now on a page, a fake in a test).
+ * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+ * @interacts  calls fetchFeed, timers, now, onFeed and onConn, nothing
+ *             else. start() polls; stop() clears both timers and aborts the
+ *             request in flight (the page calls them on load and pageshow,
+ *             and on pagehide)
+ * @complexity O(1) per poll, plus the caller's onFeed
+ * @alloc      one AbortController and two timers while a request is out,
+ *             one timer between polls; none after stop()
+ * @returns {{ start(), stop() }}
+ */
+export function createPoller({ fetchFeed, pollMs, timeoutMs, timers, now, onFeed, onConn }) {
+  let running = false;
+  let next = null;
+  let deadline = null;
+  let inFlight = null;
+  let answeredAt = null;
+  const failed = (why) => {
+    if (answeredAt === null) {
+      onConn(`${CONN_WORDS.noAnswer} · ${why}`, 'down');
+      return;
+    }
+    const ago = Math.round((now() - answeredAt) / MS_PER_S);
+    onConn(`${CONN_WORDS.stale} · last answer ${ago} s ago · ${why}`, 'down');
+  };
+  const poll = async () => {
+    next = null;
+    const ctl = new AbortController();
+    let late = false;
+    let reached = false;
+    inFlight = ctl;
+    deadline = timers.setTimeout(() => {
+      late = true;
+      ctl.abort();
+    }, timeoutMs);
+    try {
+      const answer = await fetchFeed(ctl.signal);
+      reached = true;
+      if (inFlight !== ctl) return;
+      if (answer.status === HTTP_UNAUTHORIZED) {
+        onConn(CONN_WORDS.tokenRefused, 'down');
+      } else if (!answer.ok) {
+        failed(`HTTP ${answer.status}`);
+      } else {
+        const feed = await answer.json();
+        if (inFlight !== ctl) return;
+        answeredAt = now();
+        onFeed(feed);
+      }
+    } catch {
+      if (inFlight === ctl) failed(late ? CONN_WORDS.timedOut : (reached ? CONN_WORDS.badAnswer : CONN_WORDS.noServer));
+    } finally {
+      if (inFlight === ctl) {
+        timers.clearTimeout(deadline);
+        deadline = null;
+        inFlight = null;
+        if (running) next = timers.setTimeout(poll, pollMs);
+      }
+    }
+  };
+  return {
+    start() {
+      if (running) return;
+      running = true;
+      poll();
+    },
+    stop() {
+      running = false;
+      timers.clearTimeout(next);
+      timers.clearTimeout(deadline);
+      next = null;
+      deadline = null;
+      const ctl = inFlight;
+      inFlight = null;
+      if (ctl) ctl.abort();
+    },
   };
 }

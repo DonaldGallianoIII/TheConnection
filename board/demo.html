@@ -31,7 +31,8 @@
  *             on <html>; rewrites ?theme in place on a pick; builds the
  *             board under #app with look.js; one interval timer, one
  *             ResizeObserver and two click listeners, the first two released
- *             on pagehide, the listeners with their buttons
+ *             on pagehide and made again on a pageshow from the
+ *             back/forward cache, the listeners with their buttons
  * @deps       look.js, theme.css, demo-script.json
  * @complexity one step: O(n log n + l) in patchBoard over n = 8 nodes and
  *             l = 12 links; the script has s steps (9 in the shipped file)
@@ -98,7 +99,6 @@ setFooter(document, win.foot, [
 // Lay the board out to the canvas's width (renderer only): it wraps, keeps
 // its size, and the canvas scrolls down if it must (look.js createFit).
 const fit = createFit(canvas, board, { padding: FIT_PADDING, Observer: ResizeObserver });
-fit.start();
 
 // One step's feed: the fixed nodes and links, plus the step's message as a
 // wire with age 0. Its sender reads writing, listener or not, as in the live
@@ -115,8 +115,21 @@ const tick = () => {
   step += 1;
 };
 tick();
-const timer = setInterval(tick, demo.stepMs);
-addEventListener('pagehide', () => { clearInterval(timer); fit.stop(); });
+// Start on load, and again when the back/forward cache restores the page,
+// so a restored demo moves instead of showing a frozen frame.
+let timer = null;
+const start = () => {
+  fit.start();
+  if (timer === null) timer = setInterval(tick, demo.stepMs);
+};
+const stop = () => {
+  clearInterval(timer);
+  timer = null;
+  fit.stop();
+};
+start();
+addEventListener('pagehide', stop);
+addEventListener('pageshow', (event) => { if (event.persisted) start(); });
 </script>
 </body>
 </html>

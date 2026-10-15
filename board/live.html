@@ -12,25 +12,30 @@
 <script type="module">
 /**
  * live.html: the live board (C6). Reads the token from the URL fragment
- * (#token=...), asks serve.py's /feed for the mailbox every POLL_MS with the
- * token in the X-TC-Token header, and draws each answer with patchBoard, so
- * nodes and wires move in place. The newest answer wins: every request is
- * numbered, and an answer older than the one on screen is dropped, so a
- * slow old answer never overwrites a newer one. It only reads; nothing on
- * the page writes to the mailbox. ?theme=dark or ?theme=daylight picks a
+ * (#token=...), asks serve.py's /feed for the mailbox with the token in the
+ * X-TC-Token header, and draws each answer with patchBoard, so nodes and
+ * wires move in place. One request at a time (look.js createPoller): the
+ * next starts POLL_MS after the last settles, so a slow old answer can
+ * never overwrite a newer one, and one still out after FETCH_TIMEOUT_MS is
+ * aborted. A late or failed answer turns the pill to words such as
+ * `stale · last answer 12 s ago · timed out`, never `live`. A page restored
+ * from the back/forward cache starts polling again on pageshow. It only
+ * reads; nothing on the page writes to the mailbox. ?theme=dark or ?theme=daylight picks a
  * look, the switch flips it, and ?gray=1 draws the page in grayscale, the
  * colorblind check.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
  * @interacts  reads #token from the fragment and ?theme and ?gray from the
- *             URL; GETs ./feed every POLL_MS; reads and writes the last look
+ *             URL; GETs ./feed, one request at a time, POLL_MS after the
+ *             last answer; reads and writes the last look
  *             in localStorage (per browser only, and the page works without
  *             it); sets data-theme and the grayscale filter on <html>;
  *             rewrites ?theme in place on a pick; builds the board under
- *             #app with look.js. One interval timer, one ResizeObserver and
- *             each request's AbortController, all released on pagehide; two
- *             click listeners, released with their buttons
+ *             #app with look.js. The poller's timers and its request's
+ *             AbortController and one ResizeObserver, all released on
+ *             pagehide and made again on a pageshow from the back/forward
+ *             cache; two click listeners, released with their buttons
  * @deps       look.js, theme.css; serve.py's /feed (C5, C6)
  * @complexity one poll: O(n log n + l + r) in patchBoard over n nodes, l
  *             links and r recent wires (tens each)
@@ -39,12 +44,15 @@
  */
 import {
   createWindow, createCanvas, setFooter, createLookSwitch, pickLook, applyLook,
-  createBoard, createKit, createFit, pillText,
+  createBoard, createKit, createFit, createPoller, pillText, CONN_WORDS,
 } from './look.js';
 
 // C6 and O7: a wire moves within 3 s of a send, and one feed costs the
 // server tens of ms, so a poll this often is cheap.
 const POLL_MS = 3000;
+// A feed answers in tens of ms. One still out after this is late: the pill
+// says so, and the request is dropped before the next poll would be due.
+const FETCH_TIMEOUT_MS = 2500;
 // Room fitTransform leaves around a board it scales down. The board's
 // smallest text is at MIN_TEXT_PX already, so today it never scales down:
 // it wraps to the canvas's width and the canvas scrolls (look.js createFit).
@@ -79,7 +87,6 @@ const board = createBoard(createKit(document, canvas));
 // The canvas's size comes from the observer's own entry, never a layout
 // read after a patch; a resize lays the last feed out again at the new width.
 const fit = createFit(canvas, board, { padding: FIT_PADDING, Observer: ResizeObserver });
-fit.start();
 
 const draw = (feed) => {
   fit.draw(feed);
@@ -96,48 +103,32 @@ const draw = (feed) => {
   ]);
 };
 
-let asked = 0;
-let shown = 0;
-const inFlight = new Set();
-const poll = async () => {
-  const n = ++asked;
-  const ctl = new AbortController();
-  inFlight.add(ctl);
-  try {
-    const answer = await fetch('feed', { headers: { [TOKEN_HEADER]: token }, cache: 'no-store', signal: ctl.signal });
-    if (answer.status === 401) {
-      if (n > shown) { shown = n; win.setConn('token refused · open the URL serve.py printed', 'down'); }
-      return;
-    }
-    if (!answer.ok) {
-      if (n > shown) { shown = n; win.setConn(`no answer · HTTP ${answer.status}`, 'down'); }
-      return;
-    }
-    const feed = await answer.json();
-    if (n <= shown) return;
-    shown = n;
-    draw(feed);
-  } catch (err) {
-    if (err.name !== 'AbortError' && n > shown) { shown = n; win.setConn('no answer · is serve.py running?', 'down'); }
-  } finally {
-    inFlight.delete(ctl);
-  }
-};
-
-let timer = null;
-if (token) {
-  win.setConn('asking the server', 'warn');
-  poll();
-  timer = setInterval(poll, POLL_MS);
-} else {
-  win.setConn('no token · open the URL serve.py printed', 'down');
-}
-addEventListener('pagehide', () => {
-  clearInterval(timer);
-  for (const ctl of inFlight) ctl.abort();
-  inFlight.clear();
-  fit.stop();
+const poller = createPoller({
+  fetchFeed: (signal) => fetch('feed', { headers: { [TOKEN_HEADER]: token }, cache: 'no-store', signal }),
+  pollMs: POLL_MS,
+  timeoutMs: FETCH_TIMEOUT_MS,
+  timers: { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) },
+  now: () => performance.now(),
+  onFeed: draw,
+  onConn: (text, state) => win.setConn(text, state),
 });
+
+// Start on load, and again when the back/forward cache restores the page:
+// the pill says it is asking until an answer lands, never a frozen `live`.
+const start = () => {
+  fit.start();
+  if (!token) return;
+  win.setConn(CONN_WORDS.asking, 'warn');
+  poller.start();
+};
+const stop = () => {
+  poller.stop();
+  fit.stop();
+};
+if (!token) win.setConn(CONN_WORDS.noToken, 'down');
+start();
+addEventListener('pagehide', stop);
+addEventListener('pageshow', (event) => { if (event.persisted) start(); });
 </script>
 </body>
 </html>

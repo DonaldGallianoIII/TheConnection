@@ -4,11 +4,14 @@
  * drawing kit, so no DOM library is needed. Also the two new states, what
  * boardView draws for a feed's wires and links, and the pill's words. Round
  * 1 adds names that are Object.prototype keys, a pair with a mailbox wire
- * and a native line, and a down node's stale status.
+ * and a native line, a down node's stale status, and the page's poll loop
+ * (createPoller) on fake timers and a fake fetch that the test settles by
+ * hand, so no real clock or network is read.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
- * @interacts  imports board/look.js; no DOM
+ * @interacts  imports board/look.js; no DOM; flushes promise callbacks with
+ *             setImmediate, never waits on a real timer for a result
  * @deps       node:test, node:assert (Node 18+)
  * @complexity O(n + l) per test over a handful of nodes and links
  * @alloc      one board and one fake kit per test, dropped at its end
@@ -16,7 +19,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  STATES, NOTE_WORDS, boardView, diffBoard, createBoard, patchBoard, pillText, layoutLevels, labelPoints, CONFIG,
+  STATES, NOTE_WORDS, CONN_WORDS, boardView, diffBoard, createBoard, patchBoard, pillText, layoutLevels,
+  labelPoints, createPoller, CONFIG,
 } from '../board/look.js';
 
 /**
@@ -236,4 +240,145 @@ test('a down node\'s status reads as its last status, never as its state now', (
   });
   assert.equal(view.nodes.d.note, `${NOTE_WORDS.lastStatus} ● listening`);
   assert.equal(view.nodes.l.note, 'reviewing the parser');
+});
+
+// Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+// The page's poll loop. live.html's numbers, written here: a poll every
+// 3 s, and a request still out after 2.5 s is late.
+const POLL_MS = 3000;
+const TIMEOUT_MS = 2500;
+
+/**
+ * Fake timers: setTimeout records; advance(ms) moves the fake clock and runs
+ * each timer that comes due, in order.
+ * @complexity O(t) per advance over t pending timers  @alloc one entry per pending timer
+ */
+function createFakeTimers() {
+  let nowMs = 0;
+  let ids = 0;
+  const pending = new Map();
+  return {
+    pending,
+    now: () => nowMs,
+    setTimeout(fn, ms) {
+      ids += 1;
+      pending.set(ids, { fn, at: nowMs + ms });
+      return ids;
+    },
+    clearTimeout(id) { pending.delete(id); },
+    advance(ms) {
+      const until = nowMs + ms;
+      for (;;) {
+        const due = [...pending].filter(([, t]) => t.at <= until).sort((x, y) => x[1].at - y[1].at)[0];
+        if (!due) break;
+        pending.delete(due[0]);
+        nowMs = due[1].at;
+        due[1].fn();
+      }
+      nowMs = until;
+    },
+  };
+}
+
+/**
+ * A fake fetch: each call is a promise the test settles by hand; an abort
+ * rejects it the way fetch does.
+ * @complexity O(1) per call  @alloc one record per call
+ */
+function createFakeFetch() {
+  const calls = [];
+  const fetchFeed = (signal) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    calls.push({ signal, resolve, reject });
+  });
+  return { calls, fetchFeed };
+}
+
+/** A 200 answer carrying `feed`. @complexity O(1)  @alloc one object */
+const okAnswer = (feed) => ({ status: 200, ok: true, json: async () => feed });
+/** Let settled promises run their callbacks. @complexity O(1)  @alloc one promise */
+const flush = () => new Promise((resolve) => { setImmediate(resolve); });
+
+/** A poller on fake timers and a fake fetch, recording what it reports. @complexity O(1)  @alloc one poller */
+function rig() {
+  const timers = createFakeTimers();
+  const net = createFakeFetch();
+  const seen = [];
+  const pills = [];
+  const poller = createPoller({
+    fetchFeed: net.fetchFeed, pollMs: POLL_MS, timeoutMs: TIMEOUT_MS, timers, now: timers.now,
+    onFeed: (feed) => seen.push(feed), onConn: (text, state) => pills.push([text, state]),
+  });
+  return { timers, net, seen, pills, poller };
+}
+
+test('the poll loop asks one request at a time, drops a late one, and says so in words, never live', async () => {
+  const { timers, net, seen, pills, poller } = rig();
+  poller.start();
+  assert.equal(net.calls.length, 1);
+  net.calls[0].resolve(okAnswer(FEED_A));
+  await flush();
+  assert.deepEqual(seen, [FEED_A]);
+  timers.advance(POLL_MS - 1);
+  assert.equal(net.calls.length, 1, 'the next poll came before POLL_MS');
+  timers.advance(1);
+  assert.equal(net.calls.length, 2);
+  // This one hangs. No second request goes out while it does, and at
+  // TIMEOUT_MS it is aborted and the pill says how old the last answer is.
+  timers.advance(TIMEOUT_MS - 1);
+  assert.equal(net.calls.length, 2, 'a second request went out while one was still in flight');
+  assert.equal(net.calls[1].signal.aborted, false);
+  timers.advance(1);
+  await flush();
+  assert.equal(net.calls[1].signal.aborted, true, 'a late request was never aborted');
+  assert.deepEqual(pills.at(-1), [`${CONN_WORDS.stale} · last answer 6 s ago · ${CONN_WORDS.timedOut}`, 'down']);
+  // The next poll waits POLL_MS after the last one settled, so a slow
+  // server never gets a queue of requests.
+  timers.advance(POLL_MS - 1);
+  assert.equal(net.calls.length, 2, 'a poll went out before POLL_MS had passed since the last one settled');
+  timers.advance(1);
+  assert.equal(net.calls.length, 3, 'the loop stopped after a late answer');
+  net.calls[2].reject(new TypeError('fetch failed'));
+  await flush();
+  assert.deepEqual(pills.at(-1), [`${CONN_WORDS.stale} · last answer 9 s ago · ${CONN_WORDS.noServer}`, 'down']);
+  timers.advance(POLL_MS);
+  net.calls[3].resolve({ status: 500, ok: false });
+  await flush();
+  assert.deepEqual(pills.at(-1), [`${CONN_WORDS.stale} · last answer 12 s ago · HTTP 500`, 'down']);
+  assert.ok(pills.every(([text]) => !text.startsWith('live')), 'the pill said live with no answer behind it');
+  poller.stop();
+});
+
+test('before any answer the pill says no answer, and a 401 says the token was refused', async () => {
+  const { timers, net, pills, poller } = rig();
+  poller.start();
+  timers.advance(TIMEOUT_MS);
+  await flush();
+  assert.deepEqual(pills.at(-1), [`${CONN_WORDS.noAnswer} · ${CONN_WORDS.timedOut}`, 'down']);
+  timers.advance(POLL_MS);
+  net.calls[1].resolve({ status: 401, ok: false });
+  await flush();
+  assert.deepEqual(pills.at(-1), [CONN_WORDS.tokenRefused, 'down']);
+  poller.stop();
+});
+
+test('stop clears every timer and aborts the request in flight; start polls again (pagehide, pageshow)', async () => {
+  const { timers, net, seen, pills, poller } = rig();
+  poller.start();
+  assert.equal(timers.pending.size, 1, 'no deadline on the request in flight');
+  poller.stop();
+  assert.equal(timers.pending.size, 0, 'a timer outlived stop');
+  assert.equal(net.calls[0].signal.aborted, true, 'stop left the request in flight');
+  await flush();
+  assert.deepEqual(pills, [], 'a request that stop aborted wrote the pill');
+  timers.advance(10 * POLL_MS);
+  assert.equal(net.calls.length, 1, 'it polled after stop');
+  poller.start();
+  assert.equal(net.calls.length, 2, 'start did not poll again');
+  net.calls[1].resolve(okAnswer(FEED_B));
+  await flush();
+  assert.deepEqual(seen, [FEED_B]);
+  assert.equal(timers.pending.size, 1, 'more than the next poll is pending');
+  poller.stop();
+  assert.equal(timers.pending.size, 0, 'the next poll outlived stop');
 });
