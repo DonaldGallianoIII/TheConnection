@@ -488,7 +488,8 @@ of `tc health` is not on the board's path.
   whatever mail reaches it later. The board keeps that first poll's time
   in memory beside `last_listening_at` and clears it on the next
   sighting. Where the board cannot list the inbox, it cannot tell, and
-  the name reads `down` with the words `inbox unreadable`. It is:
+  the name reads `down` with the words `inbox unreadable`, and its node
+  carries `inbox_unreadable: true`. It is:
   - `working` when there is evidence it is alive after the wake: the
     waking message has moved to `read/`, or its status file or a message
     it sent is newer than when it was last seen listening. Working fades
@@ -587,11 +588,14 @@ levels. Each node's title carries its role word (`a · orchestrator`,
 `inferred`, never on a peer.
 Role never rides on color.
 
-Cost: O(n + m + e) for n names, m message file names scanned (every
-inbox and `read/` folder, names only, for `links`; `wires` keeps the last
-`WIRE_HISTORY`), and e parent edges. m grows with the mailbox's history:
-about 800 names after two weeks of heavy use on Donald's machine, read
-once per poll.
+Cost: O(k + m (log W + log K) + n + c^2) per poll for k cards, m message
+file names scanned (every inbox and `read/` folder, names only, for
+`links`; `wires` keeps the last `WIRE_HISTORY` = W in a heap, and each
+name that stopped listening keeps its newest K candidate wakes), n names
+and c cards on one account (the native links, c(c-1)/2 of them). m grows
+with the mailbox's history: about 800 names after two weeks of heavy use
+on Donald's machine, read once per poll. serve.py's module block names
+each term.
 
 ## C6. The board server
 
