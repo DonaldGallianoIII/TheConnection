@@ -433,14 +433,10 @@ For a separate Linux user per account on one machine.
 
 ## C5. The board feed
 
-`board/serve.py` loads `tc` as a module, never edits it, the way
-`tests/test_keepalive.py` already does:
-
-```python
-loader = importlib.machinery.SourceFileLoader("tc", str(TC_PATH))
-tc = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-loader.exec_module(tc)
-```
+`board/serve.py` loads `tc` as a module and never edits it. It reads
+tc's source, compiles it in memory and runs it in a fresh module, so it
+never reads or writes a bytecode cache beside tc, which a member could
+plant on a shared mailbox.
 
 `feed()` returns one JSON object built from the parts of tc's health
 that it reads (the machine's load and memory, the live listeners from
@@ -589,8 +585,11 @@ once per poll.
 - Requests whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>` get
   421. This stops DNS rebinding.
 - Static files: an allow list (`live.html`, `look.js`, `theme.css`,
-  `demo.html`, `demo-script.json`, `compare.html`). Anything else 404. No
-  folder listing.
+  `demo.html`, `demo-script.json`, `compare.html`, and the six files in
+  `fonts/`: two faces in two subsets each, as woff2, and their two
+  licenses, D26), matched as exact strings; no path is joined from the
+  request beyond them. Anything else 404. No folder listing. The page
+  asks no host but 127.0.0.1 (D26).
 - Any method but GET and HEAD: 405. Nothing on the board writes.
 - `live.html` polls `/feed` every `POLL_MS` = 3000, keeps the newest answer
   only (a slow old answer never overwrites a newer one), and calls
