@@ -46,9 +46,11 @@ NODE_PATH=<a Playwright install>/node_modules node tests/board-browser-check.mjs
   on screen, no box over another, the window at least the viewport's
   height, no label on a label, a box or a heading, no wire through a box,
   the legend below the last session, the roots listed with a working link
-  to `z`, no outline row, group heading or root button past the window's
-  edge, the long names' role words on screen at the phone size, nothing
-  cut off in the pill or the footer, each of `p1`, `p2`,
+  to `z` (z's heading starts out of view and the click brings it in), no
+  outline row, group heading or root button past the window's edge, the
+  long names' role words on screen at the phone size, no request to any
+  host but 127.0.0.1, the board's two faces loaded from `serve.py`
+  (D26), nothing cut off in the pill or the footer, each of `p1`, `p2`,
   `e2` and `e3` saying `native with <the other> · not observed` in full,
   and on the desktop the wires of `d` and `e2` dotted, with only the
   canvas showing in their gaps (read pixel by pixel).

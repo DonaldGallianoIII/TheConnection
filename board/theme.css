@@ -2,9 +2,13 @@
  * theme.css: the board look. Window frame, canvas, session nodes, ports and
  * wires, taken from the Greener Pastures notebook's node graph.
  *
- * @interacts  styles elements built by look.js; reads no data
- * @deps       optional Google Fonts (Space Grotesk, JetBrains Mono); falls
- *             back to system fonts offline
+ * @interacts  styles elements built by look.js; reads no data; the page
+ *             fetches a face's file from fonts/ beside this file when it
+ *             first draws a character in that file's range, and asks no
+ *             other host (D26)
+ * @deps       the faces in board/fonts/ (Space Grotesk, JetBrains Mono,
+ *             SIL Open Font License 1.1); falls back to system fonts if a
+ *             file is missing
  * @complexity n/a (static stylesheet)
  * @alloc      none
  *
@@ -31,7 +35,48 @@
  * <html> and overrides only tokens; no rule
  * below names a color of its own, so a look is a token set and nothing else.
  */
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status:
+ * unreviewed. The two faces ship beside the board, so the page asks no
+ * host but its own (D26): the variable woff2 files, latin and latin-ext
+ * subsets, of the npm packages @fontsource-variable/space-grotesk 5.3.0
+ * and @fontsource-variable/jetbrains-mono 5.3.0, each under the SIL Open
+ * Font License 1.1 (board/fonts/space-grotesk-ofl.txt and
+ * jetbrains-mono-ofl.txt). Weight ranges and unicode-range are copied from
+ * the packages' wght.css; a subset loads only when the page draws a
+ * character in its range. The family names are the ones the stacks below
+ * use, and look.js LABEL_CHAR_W assumes JetBrains Mono's width. */
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300 700;
+  src: url('fonts/space-grotesk-latin-ext-wght-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300 700;
+  src: url('fonts/space-grotesk-latin-wght-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url('fonts/jetbrains-mono-latin-ext-wght-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url('fonts/jetbrains-mono-latin-wght-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
 
 :root {
   color-scheme: dark;

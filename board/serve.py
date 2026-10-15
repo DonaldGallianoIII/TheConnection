@@ -229,7 +229,12 @@ TOKEN_HEADER = "X-TC-Token"
 HOST_NAMES = ("127.0.0.1", "localhost")
 FEED_PATH = "/feed"
 # The only files the server sends (C6). Anything else is 404, with no
-# folder listing, so serve.py, tc and the mailbox never leave.
+# folder listing, so serve.py, tc and the mailbox never leave. A request's
+# path is matched whole against these keys and the key alone is read from
+# board/, so no part of a request is ever joined into a path.
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status:
+# unreviewed. The two faces and their licenses ship in board/fonts/, so the
+# page asks no other host (D26).
 STATIC_FILES = {
     "live.html": "text/html; charset=utf-8",
     "look.js": "text/javascript; charset=utf-8",
@@ -237,7 +242,15 @@ STATIC_FILES = {
     "demo.html": "text/html; charset=utf-8",
     "demo-script.json": "application/json; charset=utf-8",
     "compare.html": "text/html; charset=utf-8",
+    "fonts/space-grotesk-latin-wght-normal.woff2": "font/woff2",
+    "fonts/space-grotesk-latin-ext-wght-normal.woff2": "font/woff2",
+    "fonts/jetbrains-mono-latin-wght-normal.woff2": "font/woff2",
+    "fonts/jetbrains-mono-latin-ext-wght-normal.woff2": "font/woff2",
+    "fonts/space-grotesk-ofl.txt": "text/plain; charset=utf-8",
+    "fonts/jetbrains-mono-ofl.txt": "text/plain; charset=utf-8",
 }
+# Each allowed file's path, built from its key once, here.
+STATIC_PATHS = {name: BOARD_DIR / name for name in STATIC_FILES}
 FEED_TYPE = "application/json; charset=utf-8"
 # Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
 # The longest one request may take, start to end: reading its request line
@@ -1193,11 +1206,11 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
             self.send_bytes(FEED_TYPE, data, with_body)
             return
         name = path[1:] if path.startswith("/") else ""
-        if name not in STATIC_FILES:
+        if name not in STATIC_PATHS:
             self.send_empty(http.server.HTTPStatus.NOT_FOUND)
             return
         try:
-            data = (BOARD_DIR / name).read_bytes()
+            data = STATIC_PATHS[name].read_bytes()
         except OSError:
             self.send_empty(http.server.HTTPStatus.NOT_FOUND)
             return

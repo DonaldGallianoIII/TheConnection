@@ -24,9 +24,10 @@
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
- * @interacts  imports board/look.js; reads board/demo-script.json and
- *             board/theme.css as text; no DOM (a fake observer, kit and
- *             document)
+ * @interacts  imports board/look.js; reads board/demo-script.json,
+ *             board/theme.css and board/serve.py as text, and looks for
+ *             the font files in board/fonts/; no DOM (a fake observer, kit
+ *             and document)
  * @deps       node:test, node:assert, node:fs (Node 18+)
  * @complexity O(n^2) per shape over n <= 14 nodes, for the pairwise overlap
  *             check; O(r * p * n) for the runs over r runs of p points, and
@@ -35,7 +36,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import {
   layoutLevels, layoutWidth, roleTitle, fitTransform, boardView, createBoard, createFit, createKit, levelPort, rootsList,
   outlineView, createCanvas, patchBoard, STATES, CONFIG, LEGEND_WORDS,
@@ -924,6 +925,25 @@ test('a relay over w1 to w4 it has mailed, w2 down, at 1152 px: the down wire is
   assert.ok(face && cssRule('.tc-knockout').includes(`stroke: ${face[1].trim()}`), 'the knockout is not the canvas\'s own face');
   assert.match(cssRule('.tc-knockout'), /stroke-width:\s*calc\(var\(--tc-wire-w\) \+ var\(--tc-wire-w-knockout-pad\)\)/);
   assert.match(CSS, /--tc-wire-w-knockout-pad:\s*var\(--tc-wire-w\);/, 'the knockout is not one quiet wire wider than its wire');
+});
+
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// D26: the board asks no host but its own. The browser check watches the
+// page's requests; this is the same promise read from the files.
+test('theme.css names no other host, and each face it names ships in board/fonts/ and is on serve.py\'s allow list', () => {
+  assert.ok(!/@import/.test(CSS), 'theme.css imports another stylesheet');
+  assert.ok(!/url\(\s*['"]?[a-z][a-z0-9+.-]*:/i.test(CSS), 'theme.css names a URL with a scheme');
+  const urls = [...CSS.matchAll(/url\(\s*['"]?([^'")]+)['"]?\s*\)/g)].map((m) => m[1]);
+  assert.equal(urls.length, 4, `theme.css names ${urls.length} files: ${urls.join(', ')}`);
+  const serve = readFileSync(new URL('../board/serve.py', import.meta.url), 'utf8');
+  for (const url of urls) {
+    assert.match(url, /^fonts\/[a-z0-9-]+\.woff2$/, `${url} is not a face in board/fonts/`);
+    assert.ok(existsSync(new URL(`../board/${url}`, import.meta.url)), `${url} is not in board/fonts/`);
+    assert.ok(serve.includes(`"${url}": "font/woff2"`), `${url} is not on serve.py's allow list`);
+  }
+  for (const family of ['Space Grotesk', 'JetBrains Mono']) {
+    assert.ok(CSS.includes(`font-family: '${family}'`), `no face for ${family}, which the stacks name`);
+  }
 });
 
 // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.

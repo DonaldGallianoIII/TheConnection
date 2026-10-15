@@ -29,7 +29,10 @@
  * less its margins, a wire label over another label, a node box or a tree
  * heading, a wire or connector through a node box, the legend not below the
  * last session, no list of roots (or a root link that does not bring its
- * tree into view), an outline row, group heading or root button past the
+ * tree into view: at a short viewport z's heading must start out of view,
+ * and the click must scroll the page and bring it in), a request to any
+ * host but 127.0.0.1 or one of the board's two faces not loaded from
+ * serve.py (D26), an outline row, group heading or root button past the
  * window's right edge, a long name's role words off screen on the phone,
  * an ellipsis or cut words in the pill or the footer, a
  * native pair whose two sessions do not both say `native with <the other> ·
@@ -77,8 +80,8 @@
  *             mailbox's messages, once before the down workers are made
  *             and again before each page, so the newest wires flow while
  *             the page is open and no down worker reads woken; takes one more screenshot per desktop page, kept in
- *             memory, to read the down wires' pixels; listens for SIGTERM
- *             and SIGINT. --self-test writes a
+ *             memory, to read the down wires' pixels; watches every
+ *             request each page makes; listens for SIGTERM and SIGINT. --self-test writes a
  *             fake playwright module to a temp folder, runs this file as a
  *             child seven times, signals or kills five of them, and stops
  *             anything they left by its pid
@@ -181,6 +184,17 @@ const VIEWS = [
   { label: '1280', width: 1280, height: 900, expect: 'graph' },
   { label: '390', width: 390, height: 844, expect: 'outline' },
 ];
+// Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+// The root link check's viewport height: short enough that z's heading
+// starts below the fold at either width, with the roots list on screen, so
+// only a working jump brings the heading into view.
+const JUMP_VIEW_H = 400;
+// D26: the page asks no host but the one serve.py binds. Requests by these
+// schemes count; data: and blob: URLs never leave the page.
+const HOME_HOST = '127.0.0.1';
+const WEB_SCHEMES = ['http:', 'https:', 'ws:', 'wss:'];
+// The board's two faces, shipped in board/fonts/ (theme.css @font-face).
+const FACES = ['Space Grotesk', 'JetBrains Mono'];
 const MIN_TEXT_PX = 11;
 // Two boxes may touch at an edge; this much overlap is a real overlap.
 const OVERLAP_PX = 1;
@@ -220,7 +234,7 @@ const PNG = Object.freeze({
   DEPTH: 8, CHANNELS: { 2: 3, 6: 4 }, NONE: 0, SUB: 1, UP: 2, AVERAGE: 3, PAETH: 4,
 });
 // Setup and settle times. The page polls every 3 s and draws the first
-// answer at once; fonts may come from the network.
+// answer at once; its fonts come from serve.py, as every file does.
 const SERVER_START_MS = 10000;
 const PROOF_MS = 5000;
 const PROOF_STEP_MS = 100;
@@ -752,20 +766,36 @@ function judge(view, m, errors, jump) {
 }
 
 /**
- * Click the roots list's `z` and say whether z's heading is then on screen.
- * @complexity O(1)  @alloc one small object
+ * Prove the roots list's `z` brings z's tree into view: at JUMP_VIEW_H of
+ * height and the top of the page, z's heading must start out of view (else
+ * the check fails as a precondition, since it would prove nothing); then a
+ * click event on the button, which scrolls nothing by itself (Playwright's
+ * click() would scroll the button into view first); then the page must have
+ * scrolled and the heading be in view. The viewport keeps the new height:
+ * the page closes after its last check.
+ * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+ * @complexity O(1)  @alloc a few small objects
  */
-async function jumpToZ(page) {
+async function jumpToZ(page, view) {
   const button = page.locator('.tc-roots button', { hasText: /^z$/ });
   if (await button.count() !== 1) return { ok: false, detail: 'no button named z in the roots list' };
-  await button.click();
-  return page.evaluate(() => {
+  await page.setViewportSize({ width: view.width, height: JUMP_VIEW_H });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const where = () => page.evaluate(() => {
     const heads = [...document.querySelectorAll('.tc-head, .tc-group-head')].filter((el) => el.getClientRects().length);
     const head = heads.find((el) => el.textContent.startsWith('z ·'));
-    if (!head) return { ok: false, detail: 'no heading for z' };
+    if (!head) return null;
     const r = head.getBoundingClientRect();
-    return { ok: r.top >= 0 && r.bottom <= innerHeight, detail: `z's heading at ${r.top.toFixed(0)} to ${r.bottom.toFixed(0)} in a ${innerHeight} px viewport` };
+    return { top: r.top, bottom: r.bottom, inView: r.top >= 0 && r.bottom <= innerHeight, scrollY, innerHeight };
   });
+  const before = await where();
+  if (!before) return { ok: false, detail: 'no heading for z' };
+  const said = (w) => `z's heading at ${w.top.toFixed(0)} to ${w.bottom.toFixed(0)} in a ${w.innerHeight} px viewport, scrollY ${w.scrollY}`;
+  if (before.inView) return { ok: false, detail: `precondition: before the click ${said(before)}, already in view` };
+  await button.dispatchEvent('click');
+  const after = await where();
+  if (!after) return { ok: false, detail: 'z\'s heading went away after the click' };
+  return { ok: after.inView && after.scrollY !== before.scrollY, detail: `before the click ${said(before)}; after it ${said(after)}` };
 }
 
 /**
@@ -786,6 +816,13 @@ async function runView(browser, url, root, view, shots, halt) {
     const errors = [];
     page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
     page.on('pageerror', (err) => errors.push(String(err)));
+    // Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    // Every request the page makes, watched from before it loads (D26).
+    const offHost = [];
+    page.on('request', (req) => {
+      const at = new URL(req.url());
+      if (WEB_SCHEMES.includes(at.protocol) && at.hostname !== HOME_HOST) offHost.push(masked(req.url()));
+    });
     const [base, hash] = url.split('#');
     await page.goto(`${base}${gray ? '?gray=1' : ''}#${hash}`);
     halt();
@@ -793,6 +830,15 @@ async function runView(browser, url, root, view, shots, halt) {
     halt();
     await page.evaluate(() => document.fonts.ready);
     halt();
+    const faces = await page.evaluate((families) => families.map((family) => ({
+      family,
+      check: document.fonts.check(`12px "${family}"`),
+      loaded: [...document.fonts].filter((f) => f.family.replace(/["']/g, '') === family && f.status === 'loaded').length,
+    })), FACES);
+    halt();
+    const prefix = gray ? 'grayscale page: ' : '';
+    results.rows.push([`${prefix}the board's own faces load (${FACES.join(', ')})`, faces.every((f) => f.check && f.loaded > 0),
+      faces.map((f) => `${f.family}: check ${f.check}, ${f.loaded} loaded`).join('; ')]);
     await page.waitForTimeout(SETTLE_MS);
     halt();
     const file = join(shots, `board-${view.label}-${gray ? 'gray' : 'color'}.png`);
@@ -810,7 +856,7 @@ async function runView(browser, url, root, view, shots, halt) {
         halt();
         for (const d of m.downs) if (d.drawn) d.dots = readDots(shot, d);
       }
-      const jump = await jumpToZ(page);
+      const jump = await jumpToZ(page, view);
       halt();
       results.rows.push(...judge(view, m, errors, jump));
       results.pill = m.pill;
@@ -818,6 +864,7 @@ async function runView(browser, url, root, view, shots, halt) {
     } else {
       results.rows.push(['grayscale page: no console errors', errors.length === 0, errors.join(' | ')]);
     }
+    results.rows.push([`${prefix}the page asked no host but ${HOME_HOST}`, offHost.length === 0, offHost.length ? `asked: ${offHost.join(' | ')}` : '']);
     await page.close();
     halt();
   }

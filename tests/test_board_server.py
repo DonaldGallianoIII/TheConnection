@@ -18,7 +18,8 @@ once BOARD merges these tests could start serve.py as a child instead.
             tests/_root.py. Talks to it with http.client over loopback, and
             with raw sockets for the deadline and the cap. The deadline
             tests set serve.REQUEST_DEADLINE_S to SHORT_DEADLINE_S while
-            they run; the cap test starts a second server of its own.
+            they run; the cap test starts a second server of its own. The
+            font test reads board/fonts/ to compare what it is served.
 @deps       python3 stdlib (http.client, importlib, json, pathlib, socket,
             sys, threading, time, unittest, unittest.mock); tests/_root.py;
             board/serve.py; ../tc.
@@ -77,6 +78,9 @@ TEST_CAP = 2
 AT_ONCE_S = 0.5
 # How often the test looks for a freed slot while it waits.
 LOOK_STEP_S = 0.05
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+# board/fonts/: two faces in two subsets each, and one license per face.
+FONT_FILES = 6
 
 
 def load_serve():
@@ -216,6 +220,33 @@ class ServerTest(unittest.TestCase):
         self.assertIn(b"export function", body)
         self.assertTrue(headers["Content-Type"].startswith("text/javascript"), headers["Content-Type"])
         self.assertEqual(self.ask("GET", "/theme.css")[0], 200)
+
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def test_the_fonts_are_served_from_the_allow_list_and_nothing_beside_them(self):
+        """Each face and license in board/fonts/ is served whole with its type (D26); the folder and its neighbors are 404.
+
+        Must reject a server that leaves the fonts off the allow list (the
+        page would ask another host for its faces, or draw without them),
+        and one that joins a request's path under fonts/.
+
+        @interacts  one request per font file and six refused paths; reads
+                    board/fonts/.
+        @deps       ask.
+        @complexity O(1): six files, about 100 KB in all.
+        @alloc      each body, dropped after its check.
+        """
+        fonts = SERVE_PATH.parent / "fonts"
+        files = sorted(p.name for p in fonts.iterdir())
+        self.assertEqual(len(files), FONT_FILES, f"board/fonts/ holds {files}")
+        for name in files:
+            status, body, headers = self.ask("GET", f"/fonts/{name}")
+            self.assertEqual(status, 200, name)
+            want = "font/woff2" if name.endswith(".woff2") else "text/plain"
+            self.assertTrue(headers["Content-Type"].startswith(want), f"{name}: {headers['Content-Type']}")
+            self.assertEqual(body, (fonts / name).read_bytes(), f"{name} was not served whole")
+        for path in ("/fonts/", "/fonts", "/fonts/../serve.py", "/fonts/%2e%2e/serve.py",
+                     f"/fonts/{files[0]}/..", "/fonts/missing.woff2"):
+            self.assertEqual(self.ask("GET", path)[:2], (404, b""), path)
 
     def test_the_socket_is_bound_to_loopback_only(self):
         """The listening socket's address is 127.0.0.1.
