@@ -43,9 +43,13 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             owner of .shared gets no trust, round 5, D28), or
             that its group or anyone may write without the sticky bit
             (D23); on a ROOT that one other user owns with its .shared,
-            the words name that user as the one who ran init, accuse no
-            one, and give the chgrp and chmod lines for this user's own
-            entries that are not right yet (round 5). It makes the four
+            the words name that user as the one who ran init and accuse
+            no one (round 5), then tc fixes this user's own folders and
+            files under the four that are not right yet itself, each
+            opened without following a link and changed through that
+            descriptor (fchown, fchmod), never by path; it skips and
+            names a link, changes nothing else, prints one line per fix
+            and per skip, and exits 1 (round 6, D29). It makes the four
             when missing (D19), sets the group
             and mode of every folder and file under them that is not right
             yet, then writes .shared at 0644, owner-write only (D21),
@@ -54,8 +58,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             is writable. When another user owns .shared and it names
             another group or cannot be read, init refuses before it
             changes anything (D21). An entry init skips, and a folder in
-            the wrong group, are named with the chgrp and chmod lines its
-            owner runs (round 5). Shared
+            the wrong group, are named, and the words say its owner runs
+            tc init --shared --group <g>, which fixes their own entries
+            that way; tc prints no chgrp or chmod line to paste (round
+            6, D29). Shared
             or not, the locks, mail/.seq, status files and the ring marker
             are opened without following a symlink, and an inbox or its
             read/ is lstat()ed before use: a link at any of them is
@@ -277,6 +283,12 @@ SHARED_MARKER_MODE = 0o644
 # D21's words for who may change a shared mailbox's group, with the
 # login name of the user who owns .shared.
 INIT_USER_WORDS = "only the user who ran init ({owner}) can change the group"
+# SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29. What tc tells the
+# owner of an entry it may not fix. That owner's own init fixes their own
+# entries through a no-follow open (on the init user's ROOT, refuse_walk;
+# else init's own walk), so tc prints no chgrp or chmod line to paste: a
+# pasted line follows a link the folder's owner could swap in first.
+OWN_FIX_WORDS = "runs tc init --shared --group {group}, which fixes their own entries through a no-follow open"
 # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D21, ROOT never
 # group-writable. .shared and mail/ live directly in ROOT, and in a folder
 # its group may write (without the sticky bit) any member may rename
@@ -646,10 +658,12 @@ def make_folder(path):
     The Share is returned, so a caller that makes its folder first knows
     the mailbox's mode without reading .shared again.
 
-    SHARED fix round 5 (Claude Opus 5.5, unreviewed): D21 and D28. The
-    refusal of a folder in the wrong group ends with the chgrp and chmod
-    lines its owner runs by hand (fix_lines), not a rerun of init, which
-    the walk refuses on another user's ROOT.
+    SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29. The refusal of
+    a folder in the wrong group says its owner runs tc init --shared
+    --group <g> (OWN_FIX_WORDS): on the init user's ROOT a member's init
+    is refused and fixes that member's own entries through a no-follow
+    open, and the init user's own init fixes theirs. Round 5 printed
+    chgrp and chmod lines to paste instead, which follow a link.
 
     @interacts  reads ROOT/.shared and the group database (mailbox_share);
                 lstats `path` (under the shared folders, shared) or stats
@@ -675,8 +689,8 @@ def make_folder_with(path, share):
     """make_folder's work, with the mailbox's Share (or None) resolved once by the caller and passed down each level.
 
     @interacts  see make_folder.
-    @deps       in_shared_folders, shared_folder_mode, fix_lines, refuse,
-                printable, user_name, group_name; os, stat, errno.
+    @deps       in_shared_folders, shared_folder_mode, refuse, printable,
+                user_name, group_name; os, stat, errno; OWN_FIX_WORDS.
     @complexity O(d) over d missing folders, as make_folder.
     @alloc      one descriptor per new folder under a shared mailbox,
                 closed before return.
@@ -692,13 +706,12 @@ def make_folder_with(path, share):
                        f"was written there", EXIT_REFUSED)
             if not stat.S_ISDIR(st.st_mode):
                 raise FileExistsError(errno.EEXIST, "not a folder", str(path))
-            if st.st_gid != share.gid:  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28, the lines its owner runs
-                refuse("\n".join([
-                    f"tc: {path} is in group {printable(group_name(st.st_gid))}, not "
-                    f"{printable(share.group)}; under a shared mailbox every folder under mail/, "
-                    f"status/, cards/ and outbox/ is in that group, or other members cannot use it. "
-                    f"Nothing written. Its owner, {user_name(st.st_uid)}, fixes it by hand:",
-                    *fix_lines(path, share.group, shared_folder_mode(path))]), EXIT_REFUSED)
+            if st.st_gid != share.gid:  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, its owner's init, no line to paste
+                refuse(f"tc: {path} is in group {printable(group_name(st.st_gid))}, not "
+                       f"{printable(share.group)}; under a shared mailbox every folder under mail/, "
+                       f"status/, cards/ and outbox/ is in that group, or other members cannot use it. "
+                       f"Nothing written. Its owner, {user_name(st.st_uid)}, "
+                       f"{OWN_FIX_WORDS.format(group=printable(share.group))}.", EXIT_REFUSED)
             return
     elif path.is_dir():
         return
@@ -730,8 +743,8 @@ def make_folder_with(path, share):
                f"group {printable(share.group)} (id -nG).", EXIT_REFUSED)
 
 
-def share_entry(path, gid):
-    """Give one folder or file that init found group `gid` and its shared mode. (kind, why).
+def share_entry(path, gid, owner=None):
+    """Give one folder or file group `gid` and its shared mode, through a descriptor. (kind, why, changed).
 
     A folder's mode comes from shared_folder_mode (sticky for the four
     shared folders themselves, D17; SHARED_INBOX_MODE for an inbox and its
@@ -740,12 +753,12 @@ def share_entry(path, gid):
 
     kind is "folder" or "file" whenever fstat found one, else None; why
     is None when the entry now has group `gid` and its mode, or the words
-    for a skip. Nothing at the name is (None, None). The entry is opened
-    with O_NOFOLLOW and O_NONBLOCK and changed through that descriptor, so
-    a link is skipped, never followed (D17's rule, in init), and a FIFO
-    never blocks. Anything but a folder or a regular file is skipped, and
-    so is an entry tc may not change (one another user owns: its owner is
-    named).
+    for a skip; changed is True when this call set them. Nothing at the
+    name is (None, None, False). The entry is opened with O_NOFOLLOW and
+    O_NONBLOCK and changed through that descriptor, so a link is skipped,
+    never followed (D17's rule, in init), and a FIFO never blocks.
+    Anything but a folder or a regular file is skipped, and so is an
+    entry tc may not change (one another user owns: its owner is named).
 
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-2
     and LOW-3. An entry already in group `gid` at its mode is left alone:
@@ -754,8 +767,20 @@ def share_entry(path, gid):
     other members own. A folder keeps its kind even when it could not be
     changed, so init still walks it.
 
-    @interacts  opens and fstats `path`; sets its group and mode unless
-                they are right; reads the user database for a skip's words.
+    SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, for a member's
+    own entries (fix_own_entries). `owner`, when given, is the one user
+    whose entry may change: fstat on the open descriptor must find that
+    user's own folder or regular file, else the entry is skipped and its
+    owner named. So an entry swapped, after the caller's lstat, for
+    another user's is never changed, and one swapped for a link fails the
+    open. fchown and fchmod act on the descriptor, never on the path, so
+    a link swapped in after the open is never followed either. `changed`
+    tells a fix from an entry already right.
+
+    @interacts  opens and fstats `path`; sets its group and mode on the
+                descriptor unless they are right (or, given `owner`, it
+                is not that user's); reads the user database for a skip's
+                words.
     @deps       shared_folder_mode, shared_file_mode, user_name; os, stat,
                 errno.
     @complexity O(1).
@@ -764,9 +789,9 @@ def share_entry(path, gid):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return None, None
+        return None, None, False
     except OSError as err:
-        return None, ("a symlink, which tc never follows" if err.errno == errno.ELOOP else err.strerror)
+        return None, ("a symlink, which tc never follows" if err.errno == errno.ELOOP else err.strerror), False
     try:
         st = os.fstat(fd)
         if stat.S_ISDIR(st.st_mode):
@@ -774,18 +799,20 @@ def share_entry(path, gid):
         elif stat.S_ISREG(st.st_mode):
             kind, want = "file", shared_file_mode(path)
         else:
-            return None, "not a regular file or a folder"
+            return None, "not a regular file or a folder", False
+        if owner is not None and st.st_uid != owner:  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, this user's own only
+            return kind, f"owned by {user_name(st.st_uid)}, not by this user", False
         if st.st_gid == gid and stat.S_IMODE(st.st_mode) == want:
-            return kind, None  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): already right
+            return kind, None, False  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): already right
         try:
             os.fchown(fd, -1, gid)
             os.fchmod(fd, want)  # after fchown, which may clear setgid
         except OSError as err:
-            owner = f" (owned by {user_name(st.st_uid)})" if err.errno == errno.EPERM else ""
-            return kind, f"{err.strerror}{owner}"
+            owner_said = f" (owned by {user_name(st.st_uid)})" if err.errno == errno.EPERM else ""
+            return kind, f"{err.strerror}{owner_said}", False
     finally:
         os.close(fd)
-    return kind, None
+    return kind, None, True
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-3 and
@@ -805,14 +832,14 @@ def shared_entries(top, gid):
                 under mail/: read/ is the history).
     @alloc      one folder's listing at a time (os.walk); nothing kept.
     """
-    kind, why = share_entry(top, gid)
+    kind, why, _ = share_entry(top, gid)  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): changed is fix_own_entries'
     yield top, kind, why
     if kind != "folder":
         return
     for here, folders, files in os.walk(top):
         for entry in folders + files:
             path = pathlib.Path(here) / entry
-            yield (path, *share_entry(path, gid))
+            yield (path, *share_entry(path, gid)[:2])
 
 
 # SHARED D17 (Claude Opus 5.5, unreviewed): the sticky folders, opens that never
@@ -858,26 +885,6 @@ def shared_file_mode(path):
     @alloc      none.
     """
     return SHARED_WRITABLE_FILE_MODE if path.parent == MAIL else SHARED_OWNED_FILE_MODE
-
-
-# SHARED fix round 5 (Claude Opus 5.5, unreviewed): D21 and D28, a member
-# fixes their own entries by hand, so tc prints the lines.
-def fix_lines(path, group, mode):
-    """The two shell lines that give the entry at `path` group `group` and mode `mode`: chgrp first, then chmod (a chgrp may clear setgid).
-
-    Each word is quoted for the shell (shlex.quote) and then escaped by
-    printable, so a line runs as printed and no name reaches the
-    terminal raw; a name holding a character printable escapes prints
-    escaped, and that line then needs the real name. Only the entry's
-    owner (or root) may run them.
-
-    @interacts  none; string work only.
-    @deps       printable; shlex.
-    @complexity O(c) over c characters of `path` and `group`.
-    @alloc      two strings, returned in a list.
-    """
-    where = printable(shlex.quote(str(path)))
-    return [f"chgrp {printable(shlex.quote(group))} {where}", f"chmod {mode:04o} {where}"]
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, a FIFO at a lock's
@@ -1145,7 +1152,8 @@ def settle_marker_mode(marker):
 # SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28. What init's walk
 # refuses: its words, and, on the init user's ROOT (ROOT and its .shared
 # both one other user's), that user's id as the one who ran init, else
-# None. refuse_walk adds this user's own fixes when it is there.
+# None. When it is there, refuse_walk fixes this user's own entries (SHARED
+# fix round 6, Claude Opus 5.5, unreviewed: D29).
 WalkProblem = collections.namedtuple("WalkProblem", "words ran_init")
 
 
@@ -1171,8 +1179,10 @@ def swap_words(path, st, is_root, marker_owner=None):
     first passed the init user's own first init. `marker_owner`, the user
     id of ROOT/.shared's owner (root_walk_problem), now changes the words
     only. When ROOT itself belongs to that user, the words name them as
-    the one who ran init, accuse no one, and say a member fixes their own
-    entries by hand, and the WalkProblem carries their id (ran_init).
+    the one who ran init and accuse no one, and the WalkProblem carries
+    their id (ran_init). SHARED fix round 6 (Claude Opus 5.5,
+    unreviewed): D29. Those words end there; refuse_walk says what
+    happens next (it fixes this user's own entries) and how it ended.
 
     @interacts  reads this process's user id and the user database.
                 Writes nothing.
@@ -1185,8 +1195,7 @@ def swap_words(path, st, is_root, marker_owner=None):
     if st.st_uid not in (SUPERUSER_UID, os.geteuid()):
         if is_root and st.st_uid == marker_owner:  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28, no charge
             return WalkProblem(f"tc init: {path} and its .shared belong to {owner}, who ran init on this "
-                               f"mailbox, so only {owner} runs init on it. A member fixes their own entries by "
-                               f"hand. Nothing changed.", st.st_uid)
+                               f"mailbox, so only {owner} runs init on it.", st.st_uid)  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29
         return WalkProblem(f"tc init: {path} belongs to {owner} (mode {mode:04o}), who is neither root nor you, "
                            f"so {owner} could put a ROOT of their own, with their own .shared, in place of {ROOT} "
                            f"and change the group. Keep the mailbox under folders only root or you own. Nothing "
@@ -1266,77 +1275,113 @@ def root_walk_problem():
     return None
 
 
-# SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28, a member's own
-# entries on the init user's ROOT, fixed by hand.
-def own_entry_fixes(group, gid):
-    """fix_lines for each folder or regular file under mail/, status/, cards/ and outbox/ that this user owns and that is not in group `gid` at its shared mode yet. Read only.
+# SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, tc fixes a
+# member's own entries on the init user's ROOT itself, through a no-follow
+# open, never by path, and prints no line to paste.
+def fix_own_entries(group, gid):
+    """Give this user's own folders and files under mail/, status/, cards/ and outbox/ group `gid` and their shared mode through share_entry, one stderr line per fix and per skip. (fixed, skipped), counted.
 
     For a member's init that the walk refused on the init user's ROOT
-    (refuse_walk): init changes nothing there, so it prints what the
-    member runs by hand, as round 4's rerun would have done. Each entry
-    is lstat()ed, never followed: a top that is not a real folder is
-    not entered, a link or anything that is not a folder or a regular
-    file is passed over, and so is a folder os.walk cannot list.
+    (refuse_walk). Each entry is lstat()ed first, never followed. A
+    folder or regular file another user owns is theirs to fix and is
+    passed over without a word. Every other entry (this user's own folder
+    or file, and a link or anything else, whoever owns it) goes to
+    share_entry with this user's id: it is opened with O_NOFOLLOW and
+    O_NONBLOCK, fstat on that descriptor must find this user's own folder
+    or regular file, and fchown and fchmod change it through the
+    descriptor, never by path. So a link is skipped and named (its open
+    fails), and so is an entry swapped after the lstat for a link or for
+    another user's: no file or folder outside the mailbox, and none of
+    another user's, is changed. An entry already right says nothing. A
+    top that is not a real folder is not entered, a linked folder is
+    listed and never entered (os.walk), and a folder os.walk cannot list
+    is passed over. ROOT, .shared and the group setting are never
+    touched. Each line is printed as it happens, so what was printed is
+    what was done.
 
     @interacts  lstats each top and each entry under it, and lists each
-                folder (os.walk); reads this process's user id. Writes
-                nothing.
-    @deps       real_folder, shared_folder_mode, shared_file_mode,
-                fix_lines; os, stat, pathlib; ROOT, SHARED_FOLDER_NAMES.
+                folder (os.walk); opens and fstats this user's own folders
+                and files, and every link or other entry, and fchowns and
+                fchmods through the descriptor each of this user's that is
+                not right (share_entry); reads this process's user id and
+                the user database for a skip's words; writes one line to
+                stderr per fix and per skip.
+    @deps       share_entry, real_folder, shared_folder_mode,
+                shared_file_mode, printable; os, stat, sys, pathlib; ROOT,
+                SHARED_FOLDER_NAMES.
     @complexity O(f) over f entries under the four (hundreds to
-                thousands; read/ is the history).
-    @alloc      two lines per entry found, returned; one folder's listing
-                at a time (os.walk).
+                thousands; read/ is the history): one lstat each, plus one
+                open and fstat for each of this user's and each link or
+                other entry.
+    @alloc      one folder's listing at a time (os.walk), and one
+                descriptor at a time, closed before the next; nothing kept
+                but the two counts.
     """
-    me, lines = os.geteuid(), []
+    me, fixed, skipped = os.geteuid(), 0, 0
 
     def fix(path):
+        nonlocal fixed, skipped
         try:
             st = os.lstat(path)
         except OSError:
-            return
-        if st.st_uid != me:
-            return
-        if stat.S_ISDIR(st.st_mode):
-            want = shared_folder_mode(path)
-        elif stat.S_ISREG(st.st_mode):
-            want = shared_file_mode(path)
-        else:
-            return
-        if st.st_gid != gid or stat.S_IMODE(st.st_mode) != want:
-            lines.extend(fix_lines(path, group, want))
+            return  # gone, or out of reach: nothing tc could change
+        if (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)) and st.st_uid != me:
+            return  # another user's folder or file: theirs to fix
+        kind, why, changed = share_entry(path, gid, me)
+        if why is not None:
+            skipped += 1
+            print(f"tc init: skipped {printable(path)}: {why}", file=sys.stderr)
+        elif changed:
+            fixed += 1
+            mode = shared_folder_mode(path) if kind == "folder" else shared_file_mode(path)
+            print(f"tc init: fixed {printable(path)}: group {printable(group)}, mode {mode:04o}", file=sys.stderr)
     for top in (ROOT / name for name in SHARED_FOLDER_NAMES):
         fix(top)
         for here, folders, files in os.walk(top) if real_folder(top) else ():
             for entry in folders + files:
                 fix(pathlib.Path(here) / entry)
-    return lines
+    return fixed, skipped
 
 
-def refuse_walk(problem, group, gid):
-    """Refuse init, exit 1, with the walk's WalkProblem `problem`; on the init user's ROOT (problem.ran_init) add this user's own entries that are not right yet, each with the lines that fix it.
+def refuse_walk(problem, group, gid, current):
+    """Refuse init, exit 1, with the walk's WalkProblem `problem`; on the init user's ROOT (problem.ran_init), first fix this user's own entries (fix_own_entries) when .shared named `group` as init read it (`current`).
 
-    SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28. A member who
-    reruns init on the init user's ROOT, to fix their own entries as
-    round 4 let them, gets the chgrp and chmod lines for those entries
-    (own_entry_fixes) after the words, or one sentence saying none needs
-    a fix. Any other walk problem is its words alone.
+    SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29. A member who
+    reruns init on the init user's ROOT gets the words naming that user
+    as the one who ran init, then the sentence saying tc fixes the
+    entries the member owns under it, and nothing else. tc then fixes
+    them itself (fix_own_entries: a no-follow open, fchown and fchmod on
+    the descriptor), one stderr line per fix and per skip, and the
+    refusal stands, exit 1, with a last line counting them, or saying
+    none needed a fix and nothing changed. Round 5 printed chgrp and
+    chmod lines to paste instead, and a pasted line follows a link that
+    the owner of the folder holding the entry can swap in first (the
+    audit's HIGH-1). The group is the one .shared names and --group
+    asks for: init's D21 refusals make sure of that before the walk. If
+    .shared did not name `group` when init read it (it changed between
+    the read and the walk), nothing is changed. Any other walk problem
+    is its words alone.
 
-    @interacts  on the init user's ROOT, lstats each entry under the four
-                shared folders (own_entry_fixes); writes to stderr and
-                exits 1.
-    @deps       own_entry_fixes, refuse; EXIT_REFUSED.
+    @interacts  on the init user's ROOT, when `current` is `group`: one
+                line to stderr, then this user's own entries under the
+                four changed through a descriptor, one line each
+                (fix_own_entries); then the last words to stderr and exit
+                1.
+    @deps       fix_own_entries, refuse; sys; EXIT_REFUSED.
     @complexity O(1), or O(f) over f entries under the four on the init
                 user's ROOT.
-    @alloc      the lines and the joined text, freed on exit.
+    @alloc      the words, freed on exit.
     """
     if problem.ran_init is None:
         refuse(problem.words, EXIT_REFUSED)
-    lines = own_entry_fixes(group, gid)
-    if not lines:
-        refuse(f"{problem.words} No entry you own under it needs a fix.", EXIT_REFUSED)
-    refuse("\n".join([f"{problem.words} Run these for the entries you own under it that are not right yet:",
-                      *lines]), EXIT_REFUSED)
+    if current != group:  # .shared changed since init read it: no group to fix toward
+        refuse(f"{problem.words} Nothing changed.", EXIT_REFUSED)
+    print(f"{problem.words} tc fixes the entries you own under it itself, and changes nothing else.",
+          file=sys.stderr)
+    fixed, skipped = fix_own_entries(group, gid)
+    if not fixed and not skipped:
+        refuse("tc init: no entry you own under it needs a fix. Nothing changed.", EXIT_REFUSED)
+    refuse(f"tc init: {fixed} fixed and {skipped} skipped, each named above. Nothing else changed.", EXIT_REFUSED)
 
 
 # SHARED H1 (Claude Opus 5.5, unreviewed): tc init --shared (C4, D19, D20).
@@ -1414,11 +1459,17 @@ def cmd_init(args):
     only root and this user pass again, a ROOT another user made first
     is refused, and so is a member's rerun on the init user's ROOT. When
     ROOT and its .shared are one other user's, the refusal names that
-    user as the one who ran init, with no charge, and adds the chgrp and
-    chmod lines for this user's own entries that are not right yet
-    (refuse_walk). An entry init skips is named, and the refusal at the
-    end gives the same two lines, for its owner, for each skipped folder
-    or file (fix_lines), never a rerun of init.
+    user as the one who ran init, with no charge.
+
+    SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29 and the audit's
+    HIGH-1 (audits/2026-10-15-0300-quick). On that refusal tc fixes this
+    user's own entries itself (refuse_walk, fix_own_entries), each through
+    a no-follow open and fchown and fchmod on the descriptor, one line
+    per fix and per skip, and exits 1. Round 5's chgrp and chmod lines to
+    paste are gone everywhere: an entry init skips is named, and when a
+    folder or file is among them the last refusal says its owner runs
+    tc init --shared --group <g> (OWN_FIX_WORDS), which fixes their own
+    entries that way.
 
     @interacts  reads the group database and this process's groups;
                 reads ROOT/.shared (shared_group) and, unless it names g,
@@ -1429,8 +1480,11 @@ def cmd_init(args):
                 user database for the words (root_walk_problem), before
                 and after it makes a missing ROOT and its missing parents
                 at ROOT_MODE under ROOT_UMASK; on a refusal of the init
-                user's ROOT, lstats each entry under the four for this
-                user's own (refuse_walk); sets
+                user's ROOT, when .shared named g, lstats each entry under
+                the four and opens, fstats and changes through the
+                descriptor this user's own that are not right, writing one
+                stderr line per fix and per skip (refuse_walk,
+                fix_own_entries); sets
                 its umask (SHARED_UMASK); makes each missing top folder;
                 walks the four folders and opens, fstats and changes each
                 entry (shared_entries); when .shared names g, opens it and
@@ -1439,21 +1493,20 @@ def cmd_init(args):
                 creates ROOT/.shared.<pid>.tmp at SHARED_MARKER_MODE and
                 renames it to ROOT/.shared, removing its own .tmp if the
                 rename fails. Prints one line, plus one stderr line per
-                skipped entry, first, and the fix lines last.
+                skipped entry, first, and the last refusal's line after.
     @deps       shared_entries, shared_group, marker_other_owner,
                 root_walk_problem, refuse_walk, settle_marker_mode,
-                write_new_file, shared_folder_mode, shared_file_mode,
-                fix_lines, refuse, printable; grp, os, sys;
+                write_new_file, refuse, printable; grp, os, sys;
                 SHARED_FOLDER_NAMES, SHARED_MARKER_NAME, SHARED_MARKER_MODE,
-                INIT_USER_WORDS, SHARED_UMASK, ROOT_MODE, ROOT_UMASK.
+                INIT_USER_WORDS, OWN_FIX_WORDS, SHARED_UMASK, ROOT_MODE,
+                ROOT_UMASK.
     @complexity O(f + d) over f folders and files under the four folders:
                 the inboxes and every read/ (hundreds to thousands, growing
                 with the history), and d folders from ROOT up to / (about
                 ten, walked twice).
     @alloc      one folder's listing at a time (os.walk), one skipped
-                line and two fix lines per entry it could not change,
-                freed on exit; the four top folders when missing and the
-                .shared file, kept.
+                line per entry it could not change, freed on exit; the
+                four top folders when missing and the .shared file, kept.
     """
     group = args.group
     try:
@@ -1478,7 +1531,7 @@ def cmd_init(args):
     # SHARED fix round 3 (Claude Opus 5.5, unreviewed): D21, D23, nobody can swap ROOT; walked before anything is made.
     problem = root_walk_problem()
     if problem is not None:
-        refuse_walk(problem, group, gid)  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28
+        refuse_walk(problem, group, gid, current)  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29
     # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D21, ROOT is never made or left group-writable.
     os.umask(ROOT_UMASK)
     try:
@@ -1488,9 +1541,9 @@ def cmd_init(args):
                f"every folder from / down to it. Nothing changed.", EXIT_REFUSED)
     problem = root_walk_problem()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): again, with ROOT there
     if problem is not None:
-        refuse_walk(problem, group, gid)  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28
+        refuse_walk(problem, group, gid, current)  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29
     os.umask(SHARED_UMASK)
-    done, skipped, fixes = {"folder": 0, "file": 0}, [], []
+    done, skipped, fixable = {"folder": 0, "file": 0}, [], 0
     for top in (ROOT / name for name in SHARED_FOLDER_NAMES):
         try:
             os.mkdir(top)  # D19: no other user has to make a top folder in a ROOT this user owns
@@ -1502,9 +1555,8 @@ def cmd_init(args):
         for path, kind, why in shared_entries(top, gid):
             if why is not None:
                 skipped.append(f"tc init: skipped {printable(path)}: {why}")
-                if kind is not None:  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28, the lines its owner runs
-                    fixes += fix_lines(path, group, shared_folder_mode(path) if kind == "folder"
-                                       else shared_file_mode(path))
+                if kind is not None:  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, its owner's own init fixes it
+                    fixable += 1
             elif kind is not None:
                 done[kind] += 1
     for line in skipped:  # reported first, whatever happens to .shared
@@ -1527,10 +1579,11 @@ def cmd_init(args):
                    f"folders and {done['file']} files are in group {printable(group)}.", EXIT_REFUSED)
     print(f"mailbox shared with group {printable(group)}: {done['folder']} folders and "
           f"{done['file']} files in group {printable(group)}")
-    if skipped:  # SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28, by hand, never a rerun of init
-        lead = f"tc init: {len(skipped)} skipped, each named above; its owner fixes each by hand"
-        refuse("\n".join([f"{lead}, a folder or a file with these lines:", *fixes]) if fixes else f"{lead}.",
-               EXIT_REFUSED)
+    if skipped:  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, its owner's init, never a line to paste
+        lead = f"tc init: {len(skipped)} skipped, each named above"
+        refuse(f"{lead}. The owner of each folder or file among them "
+               f"{OWN_FIX_WORDS.format(group=printable(group))}." if fixable
+               else f"{lead}; its owner fixes each by hand.", EXIT_REFUSED)
 
 
 def inbox(name, shared):
