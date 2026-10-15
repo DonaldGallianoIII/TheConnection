@@ -2,7 +2,27 @@
 
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
-Pause:  open. Built to the recommendation below; the tests pin it.
+Pause:  settled by D15 (2026-10-14). Overruled: the order is a2's, not
+        the recommendation below. Built in fix round 1.
+
+## The ruling (D15)
+
+a2, for Donald, overruled option 1. When more than one state holds, the
+first in this order wins: `writing`, `down`, `listening`, `doorbell`,
+`remote`, `idle`. Writing comes first because nearly every session has a
+listener, and the moving activity is the point of the board. A node shows
+`writing` for `WRITING_WINDOW_S` after a send, then its standing state.
+
+Built in `board/serve.py` (`Board.feed`). `down` also needs no pid now:
+every live listener is in `last_listening_at` before the chain runs, so
+the map alone would call each one down. `live.html` counts listeners by
+`listener_pid` (look.js `pillText`), so a listener that is writing still
+counts. `tests/test_board_feed.py` pins the order in
+`test_state_order_follows_d15`, and the main feed test checks writing
+inside the window and listening past it. B1's own test still reads
+`listening`, `listening`: its feed's clock is moved past the window first.
+
+The rest of this file is the question as first asked.
 
 ## The question
 

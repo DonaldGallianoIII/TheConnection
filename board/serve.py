@@ -81,7 +81,9 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             it exists, and globs and stats mail/ and status/ under tc's
             ROOT. Reads cards/*.json and the head of status/<name>.md; lists
             mail/to-*/ and mail/to-*/read/ and stats a few message files.
-            Opens no message body. Writes nothing to disk. main() binds one
+            Opens no message body. Writes nothing to the mailbox; the first
+            load of tc may write tc's bytecode cache (__pycache__/ beside
+            tc), as any import of it does. main() binds one
             TCP socket on 127.0.0.1, prints the URL with the token once to
             stdout, reads the allow-listed files in board/ per request, and
             writes no request log. A failed feed writes one line to stderr,
@@ -92,16 +94,24 @@ partner is a lower relay is drawn as that relay's `worker`, marked
 @deps       python3 stdlib (argparse, collections, heapq, hmac, http.server,
             importlib, io, json, os, pathlib, re, secrets, signal, stat,
             sys, threading, time, urllib.parse); ../tc; Linux (/proc via tc).
-@complexity feed(): O(n + m + e) plus tc's own health_snapshot (O(p + k + n),
-            see tc's header): n names (single digits to tens), m message
-            file names (about 800 after two weeks of heavy use; each is
-            matched once, no body read), e parent edges (at most n). The
-            last WIRE_HISTORY messages are picked in O(m log W), W = 50.
-            Stats: at most W + n + l files, l linked pairs (at most n^2/2,
-            tens in practice). One request: O(1) to route, plus one feed()
-            or one read of a board file (tens of KB).
-@alloc      per feed(): one list of m small tuples and the returned dict,
-            freed when the caller drops them. Held across calls: the
+@complexity feed(), per poll: O(p + k + m log W + n + c^2). tc's health
+            snapshot is O(p + k + m), more than the O(p + k + n) tc's header
+            gives, because its mailbox_summary stats every message file: p
+            processes (hundreds), k lines in /proc/locks (tens), m message
+            files (about 800 after two weeks of heavy use, and only growing,
+            since read/ is kept). Here: every inbox listed again and each
+            of the m names matched once (no body read); the last
+            WIRE_HISTORY picked in O(m log W), W = 50; W + n + l more stats
+            for n names (single digits to tens) and l linked pairs (at most
+            n^2/2, tens in practice); levels in O(n + e), e parent edges (at
+            most n); and c(c-1)/2 native links over c claude cards on one
+            named account. In all m + W + n + l stats per poll. One request:
+            O(1) to route, plus one feed() or one read of a board file (tens
+            of KB).
+@alloc      per feed(): tc's snapshot builds m path and stat objects; here
+            one Message per message file, the per-pair counts, and the
+            returned dict (n nodes, at most W wires, l + n + c(c-1)/2
+            links); all freed when the caller drops them. Held across calls: the
             loaded tc module and last_listening_at, one float per name
             seen listening, pruned past DOWN_WINDOW_S on every feed(), and
             the names of cards found nested too deep, one each. The server
@@ -154,8 +164,10 @@ WIRE_HISTORY = 50
 # has at least this many partners (O11). With two, one partner alone is a
 # pair of peers, and a relay needs a second partner to be one.
 HUB_MIN_PARTNERS = 2
-# A card is a few hundred bytes (C1). A file in cards/ bigger than this is
-# not a card, and the board skips it instead of reading it on every poll.
+# A card is a few hundred bytes (C1). The board reads at most this much of a
+# file in cards/ and skips a bigger one, which is not a card. This bounds the
+# board's own read only: once CARDS merges, tc's health snapshot reads every
+# card whole on every poll (cards_summary), so a huge file costs that read.
 CARD_READ_MAX_BYTES = 65536
 
 # The server (C6). 8780 because 8765 was taken on the owner's machine on
@@ -610,8 +622,10 @@ class Board:
         @deps       tc.health_snapshot, read_cards, scan_messages,
                     status_preview, file_age, parents_of, roles_of,
                     levels_of, note_nested.
-        @complexity O(n + m + e), see the module block.
-        @alloc      the returned dict; last_listening_at gains one float per
+        @complexity O(p + k + m log W + n + c^2) per poll; the module block
+                    names each term.
+        @alloc      the per-poll objects the module block lists, and the
+                    returned dict; last_listening_at gains one float per
                     name listening now and drops each past DOWN_WINDOW_S.
         """
         now = self.clock()

@@ -1,6 +1,8 @@
 # Handoff: BOARD (P4)
 
-Model:  Claude Opus 5.5 (the BOARD lane agent)
+Model:  Claude Opus 5.5 (the BOARD lane agent); fix round 1 by Claude Opus
+        5.5 (the BOARD fixer), from
+        audits/2026-10-14-1811-full/fixes/round-1.md
 Status: unreviewed
 Date:   2026-10-14
 Branch: Claude-Development-TheConnection-BOARD, from
@@ -19,7 +21,12 @@ Where:  ~/TheConnection-lanes/board
 | B6 | `798b0bc` | Make the demo draw D7's shapes: two orchestrators side by side, one over a relay. |
 | Follow-up | `f6365cd` | Give every helper the board lane added a doc block of its own. |
 | Cross-lane fix | `d3e4051` | Send no test mail to a codex or ssh card, and stop calling health's keys a full list. |
-| Handoff | the commit that adds this file | Write the BOARD handoff. |
+| Handoff | `d250036` | Write the BOARD handoff. |
+| Fix round 1 (a) | `062dec9` | Put the feed on D15's rules: writing first, no inverted edge, no native on unknown |
+| Fix round 1 (b) | `280a200` | Make the board read at 14 names on a phone: wrap, keep text at 11 px, scroll down |
+| Fix round 1 (c) | `6eafef6` | Poll one request at a time with a timeout, say stale in words, restart on pageshow |
+| Fix round 1 (d) | `a2aa9c2` | Keep hostile files and slow clients from stalling the board's feed and server |
+| Fix round 1 (e) | the commit that brings this file up to date | Make the stale tags true, allow for the writing window in QA, settle the pauses |
 
 No amend, reset or rebase. Nothing pushed or merged. `tc` and
 `tests/_root.py` were not edited.
@@ -38,11 +45,21 @@ health. Messages come from file names under `mail/to-*/` and
 Roles and levels follow C5 step by step: partners, a declared or inferred
 parent (`HUB_MIN_PARTNERS = 2`), role and `role_source`, and a breadth
 first level walk that breaks each `reports_to` cycle, so it ends on any
-cycle. `last_listening_at` lives on the Board and is pruned past
-`DOWN_WINDOW_S` on every call. 13 tests: the main feed test, the status
-line, writing then idle, and every D7 shape in phases.md B1, plus a node
-below a cycle, links from every message, and the reports_to and native
-links.
+cycle. Since fix round 1 the feed follows D15: states in the order
+writing, down, listening, doorbell, remote, idle (down needs no pid);
+inference never inverts a declared edge; no native link on account
+`unknown` (`ACCOUNT_UNKNOWN`); each node carries the parent the walk used,
+so a cycle's root has none. A future mtime gives no age, so it never reads
+as writing. Card and status files go through `read_regular` (O_NONBLOCK,
+O_NOFOLLOW, regular files only), a card nested past the recursion limit is
+skipped and named once on stderr, and one bad `to-*` entry skips only
+itself. `last_listening_at` lives on the Board and is pruned past
+`DOWN_WINDOW_S` on every call. 21 tests: the main feed test, the status
+line, writing then idle, every D7 shape in phases.md B1 with a check that
+each parent is the one the walk used, a node below a cycle, links from
+every message, the reports_to and native links; round 1 added the D15
+state order, the inversion in both name orders, account `unknown`, the
+future mtime, and four hostile-mailbox tests.
 
 **B2, the server in `board/serve.py`, and `tests/test_board_server.py`.**
 `python3 board/serve.py [--port 8780]` binds 127.0.0.1, makes a token with
@@ -52,32 +69,51 @@ Ctrl+C or SIGTERM. `/feed` needs `X-TC-Token` (compared with
 `hmac.compare_digest`), else 401 with no body. A foreign Host gets 421. Any
 method but GET and HEAD gets 405, made-up methods too. Only C6's six files
 are served; everything else is 404. No request log. Requests run on daemon
-threads and `feed()` runs under one lock. 5 tests. **The server runs in the
+threads and `feed()` runs under one lock. Since round 1, `REQUEST_DEADLINE_S`
+(10) bounds each whole request through `DeadlineSocket`, and at most
+`MAX_CONNECTIONS` (16) are served at once; one past that is closed at once.
+7 tests: the first 5, a trickling client dropped by the deadline, and a
+connection past the cap closed at once. **The server runs in the
 test's own process, on a thread, on a port the OS picks:** the harness in
 this tree has no `start(argv=...)` yet (a P0 fixer adds it on its own
 branch), so no test starts `serve.py` as a child.
 
 **B3, `board/look.js`, `board/theme.css`, `tests/board-patch.test.mjs`,
-`tests/board-layout.test.mjs`.** A pure layer: `layoutLevels(feed)` (roots
-side by side in name order, levels top to bottom, one column per leaf, no
-overlap), `boardView(feed)` (what to draw), `diffBoard(prev, next)` (what
-changed by id). `patchBoard(board, feed)` applies the diff through a kit:
+`tests/board-layout.test.mjs`.** A pure layer: `layoutLevels(feed, width)`
+(roots in name order, levels top to bottom, no overlap; since round 1 each
+parent's children wrap into rows that fit the width, and on a phone, where
+a row holds one box, they indent under their parent), `boardView(feed,
+width)` (what to draw), `diffBoard(prev, next)` (what changed by id). `patchBoard(board, feed)` applies the diff through a kit:
 `createKit(doc, canvas)` for the DOM, a fake in the tests, so no DOM
 library is needed. Two states: `doorbell` (◎, double border) and `remote`
 (⇄, `remote · not checked`, dotted border). Every title carries its role
 word, and `· inferred` exactly when `role_source` says so; the role words
-never shorten. Nodes are 208 by 60 (were 132 by 48) to hold that and a
+never shorten. Nodes are 208 by 64 (were 132 by 48) to hold that and a
 status line. A fresh wire flows toward its reader with `from → to · #seq`;
 `reports to` hints run from a child's top to its parent's bottom with
-their words; `native · not observed` lines carry theirs. No `innerHTML`.
+their words; `native · not observed` lines carry theirs, and on a pair that
+also has mail they ride on the wire as a second label line under it
+(`labelPoints`). No `innerHTML`. Since round 1 (a2's item for Donald): no
+font-size in theme.css is under 11 px and `MIN_FIT_SCALE` is
+`MIN_TEXT_PX / BOARD_TEXT_MIN_PX`, 1, so the board is never shrunk;
+`createFit` lays it out at the canvas width from the ResizeObserver entry,
+and the canvas scrolls down, never sideways. Every map keyed by session
+name has no prototype, so `__proto__` lays out like any other name. A down
+node's status reads `last status: ...`; the pill names down nodes `no
+listener`, as their boxes do.
 
 **B4, `board/live.html` and `qa/human/board-live.md`.** The page reads the
-token from the fragment, asks `./feed` every `POLL_MS` (3000), numbers its
-requests and drops any answer older than the one on screen, and draws with
-`patchBoard`. It has the look switch, `?theme` and `?gray=1`, and says in
-the pill when the token is missing or refused or the server is gone. On
-`pagehide` it clears the timer, aborts requests in flight and disconnects
-its ResizeObserver. **The human script is written, not run.** Donald runs
+token from the fragment and draws each answer with `patchBoard`. Since
+round 1 it asks `./feed` through look.js `createPoller`: one request at a
+time, the next `POLL_MS` (3000) after the last settles, so an older answer
+can never land after a newer one; a request still out after
+`FETCH_TIMEOUT_MS` (2500) is aborted, and a late or failed answer turns the
+pill to `stale · last answer N s ago · <why>` or `no answer · <why>`, never
+`live`. It counts listeners by `listener_pid`. It has the look switch,
+`?theme` and `?gray=1`, and says in the pill when the token is missing or
+refused. On `pagehide` it stops the poller and the ResizeObserver; on a
+`pageshow` from the back/forward cache it starts both again. **The human
+script is written, not run.** Donald runs
 it; it includes a grayscale pass where every state, port and wire must
 read.
 
@@ -104,8 +140,11 @@ scripted wire present.
 ## What was not built
 
 - No automated test drives `live.html` in a browser; there is no browser
-  on this machine. "Newest answer wins" and the cleanup were checked in a
-  scratch run only (below). B4's verify is the human script.
+  on this machine. Since round 1 the poll loop is look.js `createPoller`,
+  tested on fake timers in `tests/board-patch.test.mjs`; the page's own
+  wiring (its pageshow listener, createFit with a real ResizeObserver) was
+  checked with a fake DOM in a scratch run only. B4's verify is the human
+  script.
 - No test for `main()` (the printed URL, SIGTERM). Checked by hand only.
 - The README's board section still names four states and serves the demo
   on port 8765. README is the DOCS lane's file, so it was left alone.
@@ -114,8 +153,10 @@ scripted wire present.
 
 ## Assumptions
 
-1. **State precedence** is C5's list order, first match wins (pause
-   BOARD-1). A listening sender reads `listening`, not `writing`.
+1. **State precedence** is D15's order, first match wins: writing, down,
+   listening, doorbell, remote, idle (pause BOARD-1, overruled). A
+   listening sender reads `writing` for `WRITING_WINDOW_S`, then
+   `listening`.
 2. **A parent is always a node.** Declared needs it (C5); for an inferred
    parent the one partner must be a node too, or the walk has nowhere to
    hang the child. Partners themselves need not be nodes, and count toward
@@ -124,7 +165,8 @@ scripted wire present.
    parents to the cycle; the cycle member that sorts first becomes the
    root. C5 says unreached nodes "sit on a cycle", but a node below a cycle
    is unreached and not on it; making it a root would draw it above its own
-   parent. Pinned by `test_a_node_below_a_cycle_stays_below_it`.
+   parent. Pinned by `test_a_node_below_a_cycle_stays_below_it`. The
+   cycle's root carries `parent: null` (D15).
 4. **A `reports_to` naming no node, or the node itself,** gives no parent
    and stops inference for that node (C5: "gives no parent"). A self
    report draws no `reports_to` link.
@@ -134,7 +176,8 @@ scripted wire present.
 6. **`last_mail_age_s`** is health's `newest_mail_age_s`: mail the name
    received. `writing` uses the newest message the name sent.
 7. **No card:** `kind` and `account` are null and `route` is `local`.
-8. **`parent` added to each node** for `layoutLevels` (pause BOARD-3).
+8. **`parent` added to each node** for `layoutLevels`: the parent the walk
+   used (pause BOARD-3, settled by D15).
 9. **Hand-written cards** in the tests and QA scripts use C1's fields;
    CARDS' code is not in this tree.
 10. **The leak run's PATH** holds a fake `nvidia-smi` that prints one GPU
@@ -147,15 +190,17 @@ scripted wire present.
 
 ## Pauses
 
-- `pauses/BOARD-1.md`: which state wins when two hold. Built to C5's list
-  order.
-- `pauses/BOARD-2.md`: an inferred parent can turn a declared one upside
-  down (`b` reports to `z`, `z` mails only `b`, `x` also mails `b`: `z` is
-  drawn under `b`). Built to C5 as written; recommends one guard in rule 2.
-- `pauses/BOARD-3.md`: the feed adds `parent` to each node. Built.
-- `pauses/BOARD-4.md`: C5 links every pair of Claude cards on account
-  `unknown` as native. Built to C5 as written; recommends skipping
-  `unknown`.
+All four are settled by D15, and fix round 1 built each ruling.
+
+- `pauses/BOARD-1.md`: which state wins when two hold. Overruled: the
+  order is writing, down, listening, doorbell, remote, idle.
+- `pauses/BOARD-2.md`: an inferred parent could turn a declared one upside
+  down. Option 2 built: inference skips a node whose one partner's card
+  reports to it.
+- `pauses/BOARD-3.md`: the feed adds `parent` to each node. Option 1, with
+  a cycle's root carrying `parent: null`.
+- `pauses/BOARD-4.md`: native links on account `unknown`. Option 2 built:
+  none.
 
 ## Cross-lane notes
 
@@ -194,6 +239,38 @@ bodies to `...`.
 | B5 | `500 feeds that add and remove nodes ...` | `patchBoard` never deletes removed nodes from its map | `nodes: 503`, expected `nodes: 2` |
 | B6 | `the demo holds two level 0 orchestrators ...` | `z` demoted to worker in the script | `not ok 9 - the demo holds two level 0 orchestrators and one level 1 orchestrator, side by side` |
 
+Fix round 1, each applied by hand, run, seen red, and restored byte for
+byte (a scratch helper compared the file before and after):
+
+| Item | Test | Mutation | Red line |
+|---|---|---|---|
+| 1 | `test_state_order_follows_d15` | the old chain, listening first | diff line `'d1': ('doorbell', None)`, expected `'d1': ('down', None)`; `'w1': ('listening', 4242)`, expected `('writing', 4242)` |
+| 1 | `test_state_order_follows_d15` | down without `not pid` | diff line `'l1': ('down', 4242)`, expected `('listening', 4242)` |
+| 1 | `the pill counts listeners by pid, ...` | count by `state === 'listening'` | `text: 'live · 1 listening'`, expected `'live · 2 listening'` |
+| 2 | `test_inference_never_inverts_a_declared_edge` | rule 2 with no D15 guard | (top z) diff line `'z': ('orchestrator', 'declared', 1, 'b')`, expected `0, None` |
+| 3 | `test_no_native_link_on_account_unknown` | `is not None` filter only | extra `{'from': 'p', 'kind': 'native', 'to': 'q'}` |
+| 15 | `test_a_message_from_the_future_is_not_writing` | `max(0, age)` | `AssertionError: 'writing' != 'idle'` |
+| 18 | `test_a_node_below_a_cycle_stays_below_it` | cycle root keeps its edge | `AssertionError: 'q' is not None : p is a root at level 0 but carries parent q` |
+| 4 | `fourteen names fit a desktop and a phone, ...` | layoutLevels ignores the width (the old one-column-per-leaf layout) | `star at 1152 px: hub runs from 1440 to 1648` |
+| 4 | same | that layout and the old 0.2 floor | `star at 1152 px: the smallest text is drawn at 4.018134715025907 px` |
+| 4 | `no font-size in theme.css is under MIN_TEXT_PX, ...` | `.tc-node-sub` back to 9 px | `under 11 px: .tc-node-sub 9px` |
+| 6 | `a mailbox wire and a native line on one pair ...` | no fold | `two paths on one pair: the native dashes lie on the mailbox wire` |
+| 6 | same | second line on the first | `the two label lines sit 0 px apart` |
+| 7 | `nodes named __proto__, constructor and toString ...` | `pos` a plain `{}` | diff line `- '__proto__',` (missing from the keys) |
+| 11 | `createFit takes the canvas size from the ResizeObserver entry, ...` | size from `getBoundingClientRect` | `a layout read after a patch` |
+| 16 | `a down node's status reads as its last status, ...` | no prefix | `Expected values to be strictly equal` (`● listening` for `last status: ● listening`) |
+| 19 | `the pill names down nodes in the word their boxes show` | the old word | `text: '1 listening · 1 down'`, expected `'1 listening · 1 no listener'` |
+| 5 | `the poll loop asks one request at a time, ...` | no timeout | `a late request was never aborted` |
+| 5 | same | a poll every POLL_MS whether or not the last settled | `a poll went out before POLL_MS had passed since the last one settled` |
+| 5, 12 | `stop clears every timer and aborts the request in flight; ...` | stop leaves the deadline timer | `a timer outlived stop` |
+| 12 | same | stop leaves the request in flight | `stop left the request in flight` |
+| 8 | `test_a_card_nested_past_the_recursion_limit_is_skipped` | no `except RecursionError` | `RecursionError: maximum recursion depth exceeded while decoding a JSON array from a unicode string` |
+| 9 | `test_one_bad_inbox_entry_skips_only_itself` | the whole-scan `try` | `AssertionError: Lists differ: [] != [('a', 'b'), ('b', 'a')]` |
+| 10 | `test_a_fifo_card_or_status_does_not_block_the_feed` | a plain blocking open that follows links | `AssertionError: True is not false : feed() blocked on the FIFO at cards/pipe.json` (and at `status/a.md`) |
+| 10 | `test_a_symlinked_status_or_card_is_not_followed` | same | `Lists differ: ['a', 'b'] != ['a'] : a symlinked card was read` |
+| 13 | `test_a_trickling_client_is_dropped_at_the_deadline` | a timeout per read only | `AssertionError: unexpectedly None : a trickling client held its connection past 3 s` |
+| 13 | `test_a_connection_past_the_cap_is_closed_at_once` | no cap | `AssertionError: None != b'' : a connection past the cap of 2 was held open` |
+
 The first B5 RSS run did not catch the keep-every-feed mutant: with three
 names it grew 1,536 kB and passed. The test's mailbox was grown to 23
 names before B5 was committed; the line above is from that version. After
@@ -207,6 +284,20 @@ shown.
 Port 8766, a temp `TC_ROOT`, each server stopped by its own pid with
 SIGTERM. Scratch drivers, not in the repo; the token was masked in all
 output.
+
+- Fix round 1, `serve.py` on 8766: one printed line of the expected shape
+  (token 32 characters), `/feed` without the token 401, with it 200 and
+  C5's five keys (the token not in the body), `/live.html` 200,
+  `Host: evil.example` 421, exit 0 on SIGTERM, port free after, nothing on
+  stderr. A first try backgrounded a subshell, so its SIGTERM missed the
+  server; the server was then found by port and stopped by its own pid.
+- Fix round 1, `live.html` and `demo.html` scripts in Node with a fake DOM,
+  a stub fetch and a fake ResizeObserver: at a 338 px canvas, 14 names
+  (live) and 8 (demo) drawn at scale 1, x from 24 to 264 (live) and to 296
+  (demo); the down node's note read `last status: ● listening`; the pair
+  with mail and a native link showed both label lines, 25 px apart; on
+  pagehide the observer stopped, and a persisted pageshow observed again
+  and (live) asked for a new feed.
 
 - `serve.py` on 8766: printed `board: http://127.0.0.1:8766/live.html#token=<token>`
   (token 32 characters); `/feed` with no token 401, `Host: evil.example`
@@ -230,6 +321,12 @@ output.
   the script.
 
 ## Verify commands and their output
+
+Fix round 1, run in `~/TheConnection-lanes/board` before its last commit:
+`tests.test_board_feed` 21 OK, `tests.test_board_server` 7 OK,
+`tests.test_board_leak` 2 OK; discover 55 OK (45 plus 8 feed and 2 server
+tests); `node --test tests/*.test.mjs` 36 pass (25 plus 3 layout and 8
+patch tests). The run below is the lane's own, at `d3e4051`.
 
 Run in `~/TheConnection-lanes/board` at `d3e4051`.
 
@@ -271,7 +368,18 @@ and this file.
 - **The board in a browser.** No browser here. Layout, fit, fonts, colors,
   the grayscale pass, reduced motion and phone width are for Donald's
   human scripts, `qa/human/board-live.md` and `qa/human/board-look.md`,
-  neither of them run.
+  neither of them run, and for the architect's screenshot check at 1280
+  and 390 px. Round 1's 14-name test checks positions and sizes from the
+  layout and theme.css's numbers, not pixels on a screen.
+- **Long wires on a phone.** With one box per row, a wire from a parent to
+  its fifth child crosses the boxes between them, and its label sits at
+  the wire's middle, under those boxes (the wire layer is under the node
+  layer). The arrow at the reader stays in the gap beside it. Not fixed in
+  round 1; the screenshot check will show how much it costs.
+- **The demo at the window's 1180 px cap** draws `z`'s tree under `a`'s:
+  side by side at full text size needs about 1,244 px. Worked out from the
+  layout's numbers (about 592 px tall against an estimated 595 px canvas),
+  not seen.
 - Anything with CARDS' `tc`: these tests ran against this tree's `tc`.
   The cross-lane fix follows CARDS' description of its router; it was not
   run against CARDS' branch.

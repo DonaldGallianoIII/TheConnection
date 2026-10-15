@@ -2,7 +2,19 @@
 
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
-Pause:  open. Built to C5 as written; the fix below is not built.
+Pause:  settled by D15 (2026-10-14): option 2. Built in fix round 1.
+
+## The ruling (D15)
+
+Rule 2 never infers a parent that inverts a declared edge: inference skips
+a node whose one partner's card reports to that node. C5 on the dev branch
+says so in rule 2. Built in `board/serve.py` (`parents_of`).
+`tests/test_board_feed.py` `test_inference_never_inverts_a_declared_edge`
+runs the first case below with the top node named `z`, then `a`: the top
+node is level 0 and `b` level 1 under it either way. The milder case stays
+a known limit, as option 2 says.
+
+The rest of this file is the question as first asked.
 
 ## The question
 

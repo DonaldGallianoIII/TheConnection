@@ -2,7 +2,23 @@
 
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
-Pause:  open. Built to the recommendation below.
+Pause:  settled by D15 (2026-10-14): option 1, with one change. Built in
+        fix round 1.
+
+## The ruling (D15)
+
+Each node carries the `parent` the level walk used, declared or inferred,
+or null. That differs from option 1's note below in one case: a cycle's
+root carries `parent: null`, not its edge, because the walk used no parent
+for it. Its `reports_to` stays on the node. C5's node example on the dev
+branch has `"parent": null`. Built in `board/serve.py`; `look.js` still
+hangs a node under its parent only when the levels match, which now never
+has to catch a cycle's root. `tests/test_board_feed.py` checks in every
+shape that each parent is the one the walk used
+(`check_parents_match_walk`), and `test_a_node_below_a_cycle_stays_below_it`
+pins the cycle's root at `(0, None)`.
+
+The rest of this file is the question as first asked.
 
 ## The question
 

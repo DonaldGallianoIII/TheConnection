@@ -51,13 +51,19 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
      `○ idle · 1 unread` (`a` has an inbox now, and no listener).
    - The wire between `a` and `b` turns dashed and moves, with the words
      `b → a · #1` and an arrow at `a`, the reader.
+   - `b` reads `✎ writing` with a thicker border for about 10 s, then
+     `● listening` again: a send shows first, listener or not (D15). The
+     pill still reads `live · 2 listening` the whole time.
 7. In terminal 4: `./tc send --from a --to b "first task"`
    - Within 3 s the same wire flows the other way, `a → b · #2`, with the
      arrow at `b`.
    - `a` reads `✎ writing` with a thicker border, for about 10 s.
-   - `b`'s listener in terminal 2 exits with `MAIL:`. Within 3 s `b` reads
-     `✕ no listener` with a dashed border, its wire turns dotted, and the
-     pill reads `1 listening · 1 no listener`, the same words as the box.
+   - `b`'s listener in terminal 2 exits with `MAIL:`. If step 6 was less
+     than 10 s ago, `b` still reads `✎ writing` from its own send; that is
+     expected, not a failure. Within 3 s of those 10 s running out (at once,
+     if they already have), `b` reads `✕ no listener` with a dashed border,
+     its wire turns dotted, and the pill reads `1 listening · 1 no
+     listener`, the same words as the box.
 8. In terminal 2: `./tc read b`, then `./tc wait b` again.
    - Within 3 s `b` reads `● listening` again and the pill goes back to
      `live · 2 listening`.

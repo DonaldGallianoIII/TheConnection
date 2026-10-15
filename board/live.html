@@ -39,8 +39,11 @@
  * @deps       look.js, theme.css; serve.py's /feed (C5, C6)
  * @complexity one poll: O(n log n + l + r) in patchBoard over n nodes, l
  *             links and r recent wires (tens each)
- * @alloc      one board, patched in place; one AbortController per request
- *             in flight, dropped when it settles
+ * @alloc      one board: its drawn nodes and wires are patched in place,
+ *             and each answer builds one full view that replaces the last
+ *             (look.js patchBoard); the poller's one AbortController and two
+ *             timers while a request is out; the last feed, which createFit
+ *             keeps to lay out again on a resize
  */
 import {
   createWindow, createCanvas, setFooter, createLookSwitch, pickLook, applyLook,

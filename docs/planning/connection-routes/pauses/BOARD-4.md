@@ -2,7 +2,17 @@
 
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
-Pause:  open. Built to C5 as written.
+Pause:  settled by D15 (2026-10-14): option 2. Built in fix round 1.
+
+## The ruling (D15)
+
+No `native` link when the shared account is the word `unknown`: the link
+would claim a shared account no card knows. C5 on the dev branch says so.
+Built in `board/serve.py` with the named constant `ACCOUNT_UNKNOWN`.
+`tests/test_board_feed.py` `test_no_native_link_on_account_unknown` pins
+it, with a pair on account `home` as the control.
+
+The rest of this file is the question as first asked.
 
 ## The question
 

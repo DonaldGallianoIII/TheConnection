@@ -21,15 +21,19 @@
  * @deps       browser DOM and SVG for the drawing functions; the pure layer
  *             needs neither (node --test runs it with no DOM library)
  * @complexity every drawing function is O(1) per call; a board with n nodes
- *             and w wires costs O(n + w) to build. layoutLevels, boardView,
- *             diffBoard and patchBoard are O(n + l + r) over n feed nodes,
- *             l links and r recent wires (C5: n tens, l tens, r <= 50);
- *             pillText is O(n)
- * @alloc      one element tree per node, one path + label per wire, each
- *             released by its own remove(); removeBoard releases everything
- *             createBoard made. A board object from createBoard holds one
- *             handle per drawn node and edge, dropped when patchBoard
- *             removes it
+ *             and w wires costs O(n + w) to build. layoutLevels, boardView
+ *             and patchBoard are O(n log n + l + r) over n feed nodes, l
+ *             links and r recent wires (C5: n tens, l tens, r <= 50), the
+ *             log from the sort by name; diffBoard is O(n + e) over two
+ *             views' nodes and e edges; pillText is O(n); createPoller is
+ *             O(1) per poll
+ * @alloc      one element tree per node, one path and two labels per wire,
+ *             each released by its own remove(). removeBoard clears the DOM
+ *             under a parent and nothing else: a board object from
+ *             createBoard goes with it, since nothing else holds its
+ *             handles. That board holds one handle per drawn node and edge,
+ *             dropped when patchBoard removes it, and the last full view
+ *             (board.view), replaced on every patch
  */
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -381,7 +385,8 @@ export function drawWire(doc, canvas, from, to) {
 }
 
 /**
- * Remove everything a board created under parent.
+ * Clear every element under parent. A board object from createBoard still
+ * holds its handles and its view; the caller drops it with the elements.
  * @complexity O(n) children  @alloc none
  */
 export function removeBoard(parent) {
@@ -789,7 +794,9 @@ export function createBoard(kit) {
  * @interacts  calls board.kit and the handles it made; writes board.nodes,
  *             board.edges and board.view
  * @complexity O(n log n + l + r) for boardView, plus O(c) kit calls for c changes
- * @alloc      one handle per added node or edge; each removed one is dropped
+ * @alloc      one full view per call (an object per node and edge, plus the
+ *             layout's maps), kept as board.view until the next call; one
+ *             handle per added node or edge; each removed one is dropped
  *             from the maps after its remove()
  */
 export function patchBoard(board, feed, width) {
