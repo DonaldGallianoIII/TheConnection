@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D21) the same day, and D22 to D35 on
+        wave 2 rulings (D17 to D21) the same day, and D22 to D36 on
         2026-10-15.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
@@ -31,7 +31,7 @@ pause; no lane reuses a number for a new meaning.
 | 7 | refused by the gate | `gate` | this plan (C3) |
 | 8 | message over `SEND_BODY_MAX_BYTES` | `send`, `gate` | this plan (C0) |
 | 9 | usage error: an unknown command, flag or missing argument, or a malformed `--origin` on `tc send`; the usage text goes to stderr | every command (the parser) | this plan (D12, D33) |
-| 10 | busy: another process held `mail/.seq` or an inbox lock past `LOCK_WAIT_SECONDS`, or a send found `PUBLISH_MAX_TRIES` message numbers in a row taken by hand-made files (the next send starts past them); nothing written; try again. Never from `wait` or `watch`, so the re-arm rule below is unchanged. The ssh route and `flush` treat a far 10 like a dropped connection: the message stays queued (C3) | `send`, `read`, `card`, `join`, the codex route, `gate` | this plan (D23, D33) |
+| 10 | busy: another process held `mail/.seq` or an inbox lock past `LOCK_WAIT_SECONDS`, or a send found `PUBLISH_MAX_TRIES` message numbers in a row taken by hand-made files (the next send starts past them), or a gate that could not write the message for a reason that passes (no space, a quota, an I/O error, D36); nothing written; try again. Never from `wait` or `watch`, so the re-arm rule below is unchanged. The ssh route and `flush` treat a far 10 like a dropped connection: the message stays queued (C3) | `send`, `read`, `card`, `join`, the codex route, `gate` | this plan (D23, D33, D36) |
 | 11 | refused by the far side with a code tc does not know (anything but 0, 255, 10, 1, 6, 7, 8): the far code is in the words and in the note beside the file in `refused/`; nothing retries it. `flush` files it the same way and keeps its own exit, 0 or 4 | `send` (ssh route) | this plan (D33) |
 
 Why 9 (D12): argparse exits 2 on a usage error, the same code as a `wait`
@@ -216,11 +216,23 @@ route <route> is not built yet; nothing sent`, exit 1, nothing written.
      sending ten messages to a dead Codex would otherwise wait 30 s on
      each. A fast failure (a non-zero exit, not a timeout) starts no
      backoff.
-  5. **The doorbell can't be switched off** (D35): a send to an unread
-     inbox rings again once `RING_BACKOFF_SECONDS` have passed since the
-     last ring, whatever the marker says, so a marker someone rewrote to
-     `clear` costs at most one backoff period, never the doorbell for
-     good.
+  5. **The doorbell can't be switched off** (D35, D36): a send rings
+     whenever this sender's own last ring to that name is
+     `RING_BACKOFF_SECONDS` old or older, whatever the marker says, as
+     well as in the cases above. So a marker someone rewrote to `clear`,
+     to timed out, or touched to look new, costs at most one backoff
+     period, never the doorbell for good. The marker is group-writable,
+     so its words and its time can be forged by any member; the time this
+     rule reads is one only the sender can write. Each sender keeps its
+     own last-ring record in its own outbox branch,
+     `outbox/<user>/.rang-<to>`, made `0600` by that user, its mtime the
+     time, written before the ring (as the marker is). A record dated
+     after now (the clock was set back), or one that cannot be read or
+     written, counts as old, with a warning for one that cannot be
+     written: a ring too many, never a lost wake (D14). A member can then
+     hold off only their own rings. The cost: at most one ring per sender
+     per name per backoff, and on a dead Codex one `CODEX_RING_SECONDS`
+     wait per sender per backoff instead of one in all.
   **The send still exits 0**: the mail landed. A card whose `thread_id` is
   not a string matching `[A-Za-z0-9][A-Za-z0-9._-]*` is not rung: the
   warning says `its card's thread_id is not a thread id`, and the marker is
@@ -309,9 +321,19 @@ subprocess.run(argv, input=body, text=True, capture_output=True,
 - Exit 255 or a timeout (the connection failed): the message stays where
   it was published; words to stderr `could not reach <target> (<reason>);
   kept in outbox: <path>. Run: tc flush`, exit 4.
-- **A far 10 is busy, not a refusal** (D23): the far tc could not get a
-  lock in time and wrote nothing. Treat it like exit 255: keep the
-  message in `outbox/`, exit 4, and `tc flush` retries it.
+- **A far 10 is busy, not a refusal** (D23, D36): the far tc could not
+  get a lock in time, or could not write the message for a reason that
+  passes (no space, a quota, an I/O error), and wrote nothing. Treat it
+  like exit 255: keep the message in `outbox/`, exit 4, and `tc flush`
+  retries it.
+- **A queue that stays stuck is shown, not hidden** (D36). Each failed
+  try (a connection failure, a timeout, a far 10) writes the far side's
+  last words, or the connection's reason, into a note beside the waiting
+  file (`REFUSAL_NOTE_SUFFIX`, the same capped and printable text a
+  refusal note holds), replaced on each try. `tc health` lists every
+  waiting file in any branch it can read that has waited longer than
+  `OUTBOX_STALE_SECONDS` (a day), retried or not: the member, the target
+  name, the age and the last words. The gate's health leaves it out.
 - **A far 1, 6, 7 or 8 is the far `tc`'s answer** (refused, bad name,
   refused by the gate, too large): the file moves to `refused/` with the
   far stderr beside it, tc prints that stderr and exits with its code,
@@ -358,7 +380,12 @@ command="/home/you/TheConnection/tc gate --as homebox-b",no-pty,no-port-forwardi
   name is rung and a card's route is respected (D16). A key can never
   speak as the relay or any other local name. Size limit (C0) applies.
 - `<any> health --json`. Runs `cmd_health` **without the `cards` key**: a
-  far key never reads account labels or ssh targets (D16).
+  far key never reads account labels or ssh targets (D16). What it gives
+  is an allow list (D36): the keys it gave at `616b9db`, less the two
+  that carry this mailbox's folder path (`mail_problem` and
+  `shared_problem`). A key health gains later stays home unless it is
+  added to the list by name, so D35's line naming who holds a lock, and
+  D36's stuck-queue lines, never reach a far key.
 
 **What the gate may run** (D18). The gate starts no shell. Its one
 program is the codex ring, reached through the router for a recipient
@@ -392,7 +419,10 @@ For a separate Linux user per account on one machine.
 - `tc init --shared --group <g>`: refuses unless the running user is in
   group `g` (`os.getgroups()`); creates `mail/`, `status/`, `cards/` and
   `outbox/` if they are missing, so no other user ever has to create a
-  top folder inside a ROOT the first user owns (D19); then sets group
+  top folder inside a ROOT the first user owns (D19), and `mail/.origins/`
+  too, so the folder every member's gate files under belongs to the init
+  user, D34's one trusted owner, and never to the first member whose
+  gate filed (D36); then sets group
   `g` and the mode for each entry's place: `3775` on the four and on
   `mail/.origins/`, `3770` on an inbox and its `read/`, `2750` on an
   outbox branch `outbox/<user>/` and on `mail/.origins/<user>/` and every
@@ -461,6 +491,14 @@ For a separate Linux user per account on one machine.
   moved aside by the owner's tc (it owns the folder) with words. `tc
   health` and the board find listeners there. One code path for a
   private and a shared mailbox.
+- **Only a name's owner listens for it** (D36). On a shared mailbox,
+  `tc wait <name>` and `tc watch <name>` run by anyone but the owner of
+  the name's card are refused, exit 1, nothing made: `tc wait: <name>'s
+  inbox belongs to <owner>; only <owner> listens for it`. On a name
+  nobody has joined: `tc wait: nobody has joined as <name> on this
+  shared mailbox; its owner runs tc join <name> first`, exit 1 (`tc
+  watch:` for watch). A private mailbox keeps its behavior exactly: wait
+  and watch make the inbox they need, and a test pins that.
 - **Every inbox act goes through one pinned handle** (D20, D35). Send,
   read, peek, wait, log, health, flush's count and the far gate open the
   inbox once, check with `fstat` that it is the folder tc judged, and do
@@ -476,15 +514,19 @@ For a separate Linux user per account on one machine.
   (D16).
 - **No planted links** (D17). The shared folders are group-writable, so
   one member could plant a link where another user's tc opens a file.
-  - Every file tc opens by name (the wait, watch and inbox locks,
-    `mail/.seq`, `status/<name>.md`, the ring marker) opens with
+  - Every file tc opens by name in a shared folder (the inbox locks,
+    `mail/.seq`, `status/<name>.md`, the ring marker; the wait and watch
+    locks live in the owner's inbox since D35) opens with
     `O_NOFOLLOW`; a link there is refused with words, exit 1, and nothing
     is written through it.
   - The shared folders (`mail/`, `status/`, `cards/`, `outbox/`) carry the
     sticky bit as well (mode `3775`), so a member cannot delete or rename
     another user's inbox, card or file, as in `/tmp`.
-  - Before tc uses an inbox folder it checks it with `lstat` and refuses,
-    exit 1, if it is a link and not a real folder.
+  - tc opens an inbox folder once, never through a link, refuses with
+    words, exit 1, a link or anything but a real folder, and then works
+    inside the open folder (D35, "Every inbox act goes through one pinned
+    handle"). A check by `lstat` alone guards only the moment of the
+    check.
   - Messages are read only from regular files (`O_NOFOLLOW`, `S_ISREG`, a
     size cap) by `read`, `peek` and `log`; a link or anything else in an
     inbox is skipped with words, left in place, and never printed, so a
