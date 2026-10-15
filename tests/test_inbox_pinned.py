@@ -464,7 +464,8 @@ class InboxPinnedTest(UmaskTestCase):
         elif row.family == "g":
             self.assertEqual((ran.code, ran.err), (0, ""))
             mine = json.loads(ran.out)["mail"][OWNER]
-            self.assertEqual((mine["unread"], mine["mail_problem"]), (1, None), mine)
+            # P3 fix round 1c (Claude Opus 5.5, unreviewed): the gate's health gives no mail_problem (D36 (5)).
+            self.assertEqual((mine["unread"], mine.get("mail_problem")), (1, None), mine)
             self.assertLessEqual(abs(mine["newest_mail_age_s"] - REAL_AGE_SECONDS), AGE_SLACK_SECONDS,
                                  f"the newest mail's age is not the real inbox's: {mine}")
         elif row.target == "branch":

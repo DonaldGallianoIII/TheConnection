@@ -44,6 +44,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             S3, C3): it reads SSH_ORIGINAL_COMMAND, delivers a send as
             from its --as name through the router (never to an ssh card,
             D18), answers `health --json` without cards or a GPU query,
+            and with only the keys GATE_HEALTH_KEYS names (P3 fix round
+            1c, Claude Opus 5.5, unreviewed: an allow list, D36 (5)),
             files each origin id it delivers in
             mail/.origins/<user>/<key-name>/ as soon as the message lands
             (D25, D33), and starts no shell and no program but the codex
@@ -834,6 +836,24 @@ GATE_HEADER_NOTE = "via ssh gate, key {key}"
 # argv the gate compares, never words it prints (SSH fix round 1, Claude
 # Opus 5.5, unreviewed: the audit's LOW-17, once GATE_HEALTH_WORDS).
 GATE_HEALTH_ARGV = ["health", "--json"]
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (5), the audit's
+# DEBT-5 and LOW-2. What the gate's `health --json` gives a far key is an
+# allow list, never the snapshot less a few keys: the keys it gave at
+# 616b9db, less mail_problem and shared_problem, which carry this
+# mailbox's folder path. A key health gains later (who holds a lock, say)
+# stays home unless it is named here. None keeps a value
+# whole; a dict keeps only the keys it names of a value; "*" (never a C0
+# name) stands for every name of a value keyed by mailbox name, each kept
+# as the dict under it says (gate_health).
+GATE_HEALTH_KEYS = {
+    "time": None,
+    "machine": {"load1": None, "cores": None, "mem_avail_pct": None, "gpus": None},
+    "sessions": {"claude": None, "codex": None},
+    "listeners": None,
+    "watchers": None,
+    "mail": {"*": {"unread": None, "newest_mail_age_s": None, "status_age_s": None}},
+    "shared_group": None,
+}
 # Where D25's origin ids are filed once their message lands:
 # mail/ORIGINS_NAME/<user>/<key-name>/<id>, one empty file each (its
 # mtime holds the time), made by the Linux user whose gate or send
@@ -7248,6 +7268,31 @@ def gate_command(text):
     return GateCommand("send", sender, to, origin)
 
 
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (5), the gate's health is an allow list.
+def gate_health(value, allow=GATE_HEALTH_KEYS):
+    """The part of the health snapshot `value` that `allow` names (GATE_HEALTH_KEYS at the top): what the gate's `health --json` gives a far key.
+
+    `allow` None keeps `value` whole. A dict keeps only the keys it names,
+    each through its own entry; a "*" entry keeps every key of `value` (a
+    mailbox name) through the entry under it. A value that should be a
+    dict and is not becomes None, so nothing unnamed passes. A key not in
+    `allow` never reaches the far key, however health came by it.
+
+    @interacts  none; dict work only.
+    @deps       GATE_HEALTH_KEYS.
+    @complexity O(v) over v entries kept: the names under listeners,
+                watchers and mail (a few dozen) and the fixed keys.
+    @alloc      one new dict per level kept, returned.
+    """
+    if allow is None:
+        return value
+    if not isinstance(value, dict):
+        return None
+    if "*" in allow:
+        return {name: gate_health(entry, allow["*"]) for name, entry in value.items()}
+    return {key: gate_health(value[key], sub) for key, sub in allow.items() if key in value}
+
+
 def cmd_gate(args):
     """`tc gate --as <name>`: what one far key may do here, as the forced command in authorized_keys (C3).
 
@@ -7264,13 +7309,16 @@ def cmd_gate(args):
     fix round 1, Claude Opus 5.5, unreviewed: D33 parts 3 and 5, under
     mail/.origins/<user>/<as>/). The size limit holds (exit 8, C0), and an empty
     body is refused, exit 1. A health shape prints `tc health --json`'s
-    snapshot without its `cards` key and without a GPU query (D16, D18),
-    and without its `squatted` key (SSH fix round 1, Claude Opus 5.5,
-    unreviewed: paths that name this machine's users), and without its
-    `held_by_others` key (P3 fix round 1b, Claude Opus 5.5, unreviewed:
-    D35 (3)'s line naming who holds a lock stays home; round 1c makes
-    this an allow list, D36 (5)). Anything else: `tc gate: refused`, exit
-    7, nothing written.
+    snapshot without reading cards and without a GPU query (D16, D18),
+    or listing outbox/ and mail/.origins/ (SSH fix round 1, Claude Opus
+    5.5, unreviewed: paths that name this machine's users). P3 fix round
+    1c (Claude Opus 5.5, unreviewed): D36 (5), the audit's DEBT-5 and
+    LOW-2. What it prints is an allow list (gate_health,
+    GATE_HEALTH_KEYS): the keys the gate gave at 616b9db less
+    `mail_problem` and `shared_problem`, which carry this mailbox's
+    path, so `held_by_others` and any key health gains later stay home
+    unless named there. Anything else: `tc gate:
+    refused`, exit 7, nothing written.
 
     It starts no shell and no program but the codex ring, reached through
     the router for a card that says codex (D18): an argv list, a checked
@@ -7283,15 +7331,16 @@ def cmd_gate(args):
                 routes it reaches, local and codex; an inbox lock or
                 mail/.seq held past LOCK_WAIT_SECONDS exits 10, row 10,
                 nothing written); for health, reads /proc and mail/
-                (health_snapshot); prints; on a refusal one line to stderr
-                and exit 7.
+                (health_snapshot) and prints only what GATE_HEALTH_KEYS
+                names (gate_health); prints; on a refusal one line to
+                stderr and exit 7.
     @deps       require_names, gate_command, read_body, refuse,
-                deliver_once, print_delivery, health_snapshot; json, os;
-                GATE_REFUSED_WORDS, GATE_HEADER_NOTE, EXIT_GATE_REFUSED,
-                EXIT_REFUSED.
+                deliver_once, print_delivery, health_snapshot,
+                gate_health; json, os; GATE_REFUSED_WORDS,
+                GATE_HEADER_NOTE, EXIT_GATE_REFUSED, EXIT_REFUSED.
     @complexity O(c + b) over c characters of the far command and b bytes
                 of body, plus the route's own work; or health_snapshot's,
-                less its cards.
+                less its cards and branches, plus gate_health's.
     @alloc      the split command and the body, freed on exit; whatever
                 the route keeps.
     """
@@ -7300,7 +7349,8 @@ def cmd_gate(args):
     if command is None:
         refuse(GATE_REFUSED_WORDS, EXIT_GATE_REFUSED)
     if command.shape == "health":
-        print(json.dumps(health_snapshot(cards=False, gpu=False, branches=False, held=False), indent=2))  # P3 fix round 1b (Claude Opus 5.5, unreviewed): held
+        # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (5), only the keys GATE_HEALTH_KEYS names.
+        print(json.dumps(gate_health(health_snapshot(cards=False, gpu=False, branches=False)), indent=2))
         return
     body = read_body(None)
     if not body.strip():
@@ -7574,7 +7624,7 @@ def held_by_others(shared):
     lets any member, for a send's moment), or a file someone planted at
     a wait or watch lock's name and holds. lock is "wait", "watch" or
     "inbox"; user and owner are logins (user_name). The gate's health
-    leaves this out (health_snapshot's `held`).
+    leaves this out (GATE_HEALTH_KEYS does not name it; P3 fix round 1c).
 
     @interacts  reads /proc/locks; opens and lists mail/, opens each inbox
                 by name, lstats each lock by name; lstats cards/<name>.json;
@@ -7781,15 +7831,16 @@ def cards_summary():
     return out
 
 
-def health_snapshot(cards=True, gpu=True, branches=True, held=True):
+def health_snapshot(cards=True, gpu=True, branches=True):
     """One snapshot of the machine, sessions, listeners, watchers, mail and cards.
 
     P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3).
     `held_by_others` lists each wait, watch or inbox lock held by a
     process whose user is not the name's owner (held_by_others; [] on a
-    private mailbox). The gate passes `held` False and the key is left
-    out: until round 1c makes the gate's health an allow list (D36 (5)),
-    this projection drops it, so who holds what never reaches a far key.
+    private mailbox). P3 fix round 1c (Claude Opus 5.5, unreviewed): D36
+    (5). Round 1b's `held` switch is gone: the gate prints only the keys
+    GATE_HEALTH_KEYS names (gate_health), so who holds what never reaches
+    a far key, nor anything else this snapshot gains.
 
     SSH S3 (Claude Opus 5.5, unreviewed): the gate's `health --json`
     passes both False. `cards` False leaves the `cards` key out, so a far
@@ -7829,8 +7880,8 @@ def health_snapshot(cards=True, gpu=True, branches=True, held=True):
     @interacts  reads /proc, mail/ and each inbox in it, status/, cards/ (only when `cards`)
                 and ROOT/.shared; lists outbox/ and mail/.origins/ (only
                 when `branches`); on a shared mailbox lstats each name's
-                locks and card and stats each holder's /proc/<pid> (only
-                when `held`); may run nvidia-smi (machine_stats, only
+                locks and card and stats each holder's /proc/<pid>
+                (held_by_others); may run nvidia-smi (machine_stats, only
                 when `gpu`). Writes nothing.
     @deps       now_iso, machine_stats, session_counts, listeners,
                 mailbox_summary, cards_summary, squatted_branches,
@@ -7857,8 +7908,7 @@ def health_snapshot(cards=True, gpu=True, branches=True, held=True):
         snap["cards"] = cards_summary()
     if branches:  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 1, never for the gate
         snap["squatted"] = squatted_branches()
-    if held:  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), never for the gate
-        snap["held_by_others"] = held_by_others(shared)
+    snap["held_by_others"] = held_by_others(shared)  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3); the gate's list leaves it out (1c)
     snap["shared_group"], snap["shared_problem"] = group, problem  # SHARED H1 (Claude Opus 5.5, unreviewed): C4
     return snap
 

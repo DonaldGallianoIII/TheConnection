@@ -24,7 +24,7 @@ that the fake is reachable.
             an inbox lock itself. One test puts a wrapper `codex` of its
             own in front of the fake, which writes whether the origin
             filing is there when the ring runs (SSH fix round 1, Claude
-            Opus 5.5, unreviewed). Five tests load tc as a module
+            Opus 5.5, unreviewed). Six tests load tc as a module
             (TC_ROOT set to the harness root first, put back after) and
             call cmd_gate or cmd_send in process, with
             SSH_ORIGINAL_COMMAND and stdin set for the call: one with
@@ -34,12 +34,15 @@ that the fake is reachable.
             with route_and_deliver swapped for a recorder; one with
             owned_by_me patched so a planted filing counts as another
             member's; one with os.fstat patched so this user's folder in
-            mail/.origins/ reads as another member's. One class shares the
+            mail/.origins/ reads as another member's; one with
+            health_snapshot wrapped to add a key at every level (P3 fix
+            round 1c, Claude Opus 5.5, unreviewed). One class shares the
             mailbox with the user's own primary group (tc init --shared).
             P3 fix round 1b (Claude Opus 5.5, unreviewed): one test puts a
             fake of its own first that kills the gate ringing it, by that
             gate's pid once its command line is checked, and the test
-            then kills the fake by its own pid in case.
+            then kills the fake by its own pid in case. P3 fix round 1c:
+            one test sets an inbox to write and search only, and back.
 @deps       python3 stdlib (argparse, contextlib, fcntl, io, json, os,
             pathlib, shlex, shutil, signal, stat, subprocess, sys,
             unittest, unittest.mock); tests/_root.py; load_tc, ring_argv,
@@ -164,6 +167,19 @@ BRANCH_MODE = 0o2750
 OWNED_FILE_MODE = 0o640
 # Owner may read, write and run a wrapper a test writes. Nobody else needs to.
 OWN_WRAPPER_MODE = 0o700
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (5). The keys the
+# gate's health --json gives a far key, written here rather than read from
+# tc: the ones it gave at 616b9db, less mail_problem and shared_problem.
+GATE_HEALTH_TOP_KEYS = {"time", "machine", "sessions", "listeners", "watchers", "mail", "shared_group"}
+GATE_HEALTH_MACHINE_KEYS = {"load1", "cores", "mem_avail_pct", "gpus"}
+GATE_HEALTH_SESSION_KEYS = {"claude", "codex"}
+GATE_HEALTH_MAIL_KEYS = {"unread", "newest_mail_age_s", "status_age_s"}
+# The key the in-process test adds to health_snapshot at every level,
+# which the gate must never print. Made up for the test.
+NEW_HEALTH_KEY = "added_later"
+# An inbox its owner left writable and searchable but not readable: tc
+# health cannot list it, and its mail_problem names the inbox's path.
+UNLISTABLE_MODE = 0o300
 
 
 def filing(root, key, origin):
@@ -210,6 +226,18 @@ def no_programs():
                         raise ProgramStarted(f"the gate called {_name}")
                     stack.enter_context(mock.patch.object(module, name, started))
         yield
+
+
+def health_keys(snap):
+    """The keys of a parsed health snapshot, level by level: (top, machine, sessions, {name: that inbox's keys}).
+
+    @interacts  none.
+    @deps       none.
+    @complexity O(n) over n names under mail.
+    @alloc      the sets and one dict, returned.
+    """
+    return (set(snap), set(snap.get("machine") or {}), set(snap.get("sessions") or {}),
+            {name: set(entry) for name, entry in (snap.get("mail") or {}).items()})
 
 
 def text_stdin(text):
@@ -362,6 +390,39 @@ class GateTest(unittest.TestCase):
         self.assertIsNone(snap["machine"]["gpus"])
         self.assertNotIn(TARGET, out)
         self.assertIn("cards", local)
+
+    # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (5), the audit's DEBT-5 and LOW-2.
+    def test_gated_health_gives_exactly_the_listed_keys_and_never_this_mailboxs_path(self):
+        """Mail for b and c, c's inbox left unlistable: the gate's health --json has exactly the listed keys at every level, and nowhere the mailbox's path; tc health --json run here names that path in c's mail_problem.
+
+        Must reject a gate that hands a far key the snapshot less a few
+        keys: mail_problem and shared_problem carry ROOT's path, and every
+        key health gains later would pass with them.
+
+        @interacts  two sends; c's inbox mode set to UNLISTABLE_MODE and put
+                    back; one gate run, one tc health --json.
+        @deps       gate, health_keys; json, stat.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            root.tc("send", "--from", "a", "--to", "b", "hi")
+            root.tc("send", "--from", "a", "--to", "c", "hi")
+            box = root.path / "mail" / "to-c"
+            mode = stat.S_IMODE(box.stat().st_mode)
+            box.chmod(UNLISTABLE_MODE)
+            try:
+                code, out, err = gate(root, "/x/tc health --json")
+                local = json.loads(root.tc("health", "--json")[1])
+            finally:
+                box.chmod(mode)
+            path = str(root.path)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(health_keys(json.loads(out)),
+                         (GATE_HEALTH_TOP_KEYS, GATE_HEALTH_MACHINE_KEYS, GATE_HEALTH_SESSION_KEYS,
+                          {"b": GATE_HEALTH_MAIL_KEYS, "c": GATE_HEALTH_MAIL_KEYS}))
+        self.assertNotIn(path, out, "the gate's health handed a far key this mailbox's path")
+        self.assertIn(path, local["mail"]["c"]["mail_problem"] or "", "the local health lost c's mail_problem")
 
     def test_a_gated_send_to_a_name_with_an_ssh_card_is_refused_and_ssh_never_runs(self):
         """x's card says ssh: a gated send to x exits 7 with the not-a-local-name words, writes no outbox, and runs no ssh (D18); a plain tc send to x does reach the fake.
@@ -695,6 +756,39 @@ class GateInProcessTest(unittest.TestCase):
         self.assertNotIn("cards", json.loads(health[1]))
         self.assertEqual(sent[0], 0, sent)
         self.assertEqual(landed, ["000001-from-homebox-b.md"])
+
+    # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (5), anything new stays home unless named.
+    def test_a_key_health_gains_later_never_reaches_the_gate(self):
+        """In process, health_snapshot patched to add NEW_HEALTH_KEY at the top, in machine, in sessions and in each inbox's entry: the gate's health --json prints none of them, and exactly the listed keys.
+
+        Must reject a deny list: a key nobody thought to drop reaches the
+        far key.
+
+        @interacts  one send; loads tc; calls cmd_gate once with
+                    health_snapshot wrapped.
+        @deps       load_tc, run_gate, health_keys; json, unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            root.tc("send", "--from", "a", "--to", "b", "hi")
+            tc = load_tc(root)
+            real = tc.health_snapshot
+
+            def grown(*args, **kwargs):
+                snap = real(*args, **kwargs)
+                snap[NEW_HEALTH_KEY] = NEW_HEALTH_KEY
+                for level in (snap["machine"], snap["sessions"], *snap["mail"].values()):
+                    level[NEW_HEALTH_KEY] = NEW_HEALTH_KEY
+                return snap
+
+            with mock.patch.object(tc, "health_snapshot", grown):
+                code, out, err = self.run_gate(tc, "/x/tc health --json")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(NEW_HEALTH_KEY, out, "a key the allow list does not name reached the far key")
+        self.assertEqual(health_keys(json.loads(out)),
+                         (GATE_HEALTH_TOP_KEYS, GATE_HEALTH_MACHINE_KEYS, GATE_HEALTH_SESSION_KEYS,
+                          {"b": GATE_HEALTH_MAIL_KEYS}))
 
     def test_tc_send_and_the_gate_both_call_route_and_deliver(self):
         """In process, route_and_deliver swapped for a recorder: cmd_send and cmd_gate each call it once, the gate with the key as sender, its header note and forward False (D18).
