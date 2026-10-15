@@ -12,7 +12,19 @@
  * glyph and a word, ports differ by shape (ring in, dot out), and a wire
  * carrying a message moves (dash flow toward the reader) and gets an arrow
  * and a text label. With reduced motion the dashes stop but the arrow and
- * label stay.
+ * label stay. Each kind of line differs by weight or dash, and the legend
+ * in the footer names each in words.
+ *
+ * Text size: no font-size here is under 11 px, and
+ * the board is never scaled below 1 (look.js MIN_FIT_SCALE), so no text on
+ * the board is drawn under 11 CSS px. tests/board-layout.test.mjs checks it.
+ *
+ * Page frame: the window is at least the
+ * viewport's height less the page's margins, the board's frame grows to the
+ * board's height and the page scrolls down, never sideways. The legend is
+ * the footer's first row, never over the board. The pill and the footer
+ * wrap onto more lines on a narrow screen; nothing there ends in an
+ * ellipsis.
  *
  * Two looks. Dark (the notebook's, the default) sits on :root. Daylight, a
  * light look from a palette Donald supplied, is [data-theme='daylight'] on
@@ -75,6 +87,13 @@
   --tc-bar-w: 5px;
   --tc-port: 12px;
   --tc-wire-w: 2.5px;
+  /* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
+   * unreviewed. A native line's width, and how much wider than its wire a
+   * dotted or dashed wire's knockout is: one quiet wire's width, so a quiet
+   * wire lying along it is hidden with room to spare and the gaps between
+   * its dots or dashes show the canvas (look.js drawEdge). */
+  --tc-wire-w-native: 1.5px;
+  --tc-wire-w-knockout-pad: var(--tc-wire-w);
   --tc-dash: 7px;
   --tc-gap: 5px;
   --tc-flow-speed: 0.9s;
@@ -135,13 +154,19 @@
   --tc-bar-pressed-words: #1c1c1e;
 }
 
-/* Page backdrop, same radial glow as the notebook. */
+/* Page backdrop, same radial glow as the notebook. The page scrolls down
+ * when the board is taller than the viewport. --tc-page-pad is the margin
+ * round the window: the window's least height is the viewport's
+ * less two of these. It is a size, not a color, so it lives here and not
+ * in a look's token set. */
 .tc-backdrop {
+  --tc-page-pad: 16px;
   min-height: 100vh;
+  min-height: 100dvh;
   margin: 0;
   display: grid;
-  place-items: center;
-  padding: 16px;
+  place-items: start center;
+  padding: var(--tc-page-pad);
   box-sizing: border-box;
   background: var(--tc-backdrop);
   color: var(--tc-text);
@@ -153,9 +178,13 @@
 .tc-mount { width: 100%; min-width: 0; display: flex; justify-content: center; }
 
 /* ---------- window frame ---------- */
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
+ * unreviewed. At least the viewport's height less the page's margins, and
+ * as tall as the board needs past that. */
 .tc-win {
   width: min(1180px, 100%);
-  height: min(724px, calc(100vh - 32px));
+  min-height: calc(100vh - 2 * var(--tc-page-pad));
+  min-height: calc(100dvh - 2 * var(--tc-page-pad));
   background: var(--tc-bg);
   border: 1px solid var(--tc-line);
   border-radius: var(--tc-radius-win);
@@ -165,12 +194,13 @@
   box-shadow: var(--tc-shadow-win);
 }
 .tc-title {
-  height: 42px;
+  min-height: 42px;
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 9px;
-  padding: 0 14px;
+  gap: 4px 9px;
+  padding: 6px 14px;
   background: var(--tc-title-bg);
   border-bottom: 1px solid var(--tc-line);
   color: var(--tc-bar-text);
@@ -181,11 +211,12 @@
 .tc-dot.g { background: #28c840; }
 .tc-fname { white-space: nowrap; font-family: var(--tc-mono); font-size: 12px; font-weight: 600; margin-left: 4px; }
 .tc-sub { font-size: 11px; color: var(--tc-bar-dim); }
+/* The pill's words wrap onto a second line rather than end in an
+ * ellipsis, so no words are lost. */
 .tc-conn {
   margin-left: auto;
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -194,6 +225,7 @@
   color: var(--tc-bar-muted);
 }
 .tc-cdot {
+  flex: none;
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -201,7 +233,6 @@
   box-shadow: 0 0 9px currentColor;
   animation: tc-pulse var(--tc-pulse-speed) ease-in-out infinite;
 }
-.tc-conn > span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .tc-conn[data-state="up"] .tc-cdot { color: var(--tc-conn-up); }
 .tc-conn[data-state="warn"] .tc-cdot { color: var(--tc-conn-warn); }
 .tc-conn[data-state="down"] .tc-cdot { color: var(--tc-conn-down); animation: none; }
@@ -234,27 +265,51 @@
 .tc-look-dot { width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid currentColor; }
 .tc-look-btn[aria-pressed="true"] .tc-look-dot { background: currentColor; }
 
-.tc-body { flex: 1; position: relative; overflow: hidden; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.tc-body { flex: 1 0 auto; position: relative; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * While the feed is stale the line over the board says so in words
+ * (`stale · last answer N s ago`), in a dashed frame, and no wire's
+ * dashes move: nothing looks live that is not (look.js createWindow). */
+.tc-stale {
+  font-family: var(--tc-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--tc-text);
+  border: 1px dashed var(--tc-text);
+  border-radius: 6px;
+  padding: 4px 10px;
+}
+.tc-stale[hidden] { display: none; }
+.tc-win[data-conn="stale"] .tc-wire.flow { animation: none; }
 
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
+ * unreviewed. The footer: the legend on its own first row, then
+ * the counts, each of which wraps to a new line rather than being cut
+ * off, so no words are lost. */
 .tc-foot {
-  height: 30px;
+  min-height: 30px;
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 14px;
-  padding: 0 14px;
+  gap: 2px 14px;
+  padding: 6px 14px;
   background: var(--tc-foot-bg);
   border-top: 1px solid var(--tc-line);
   font-family: var(--tc-mono);
   font-size: 11px;
   color: var(--tc-bar-muted);
-  overflow: hidden;
-  white-space: nowrap;
 }
+.tc-foot > span { min-width: 0; overflow-wrap: anywhere; }
 .tc-foot .tc-sp { flex: 1; }
+.tc-legend { flex: 1 0 100%; }
+/* The window shows the legend for the view it draws (look.js createFit
+ * sets data-view). */
+.tc-win[data-view="outline"] .tc-legend-graph,
+.tc-win:not([data-view="outline"]) .tc-legend-outline { display: none; }
 
 /* ---------- chips and small text ---------- */
-.tc-h { font-family: var(--tc-mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--tc-dim); }
+.tc-h { font-family: var(--tc-mono); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--tc-dim); }
 .tc-chips { display: flex; gap: var(--tc-gap); flex-wrap: wrap; align-items: center; }
 .tc-chip {
   background: var(--tc-panel);
@@ -268,26 +323,98 @@
 .tc-chip[data-hue] { border-color: var(--tc-chip-hue); box-shadow: inset 3px 0 0 var(--tc-chip-hue); }
 
 /* ---------- canvas ---------- */
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14.
+ * Status: unreviewed. The board wraps to the stage's width (look.js
+ * layoutLevels) and keeps its size. The frame fills what the window has
+ * left and grows to the board's height (look.js createFit sets it), so a
+ * tall board makes the page scroll down, never sideways. The frame's edge
+ * is an inset shadow, not a border, so its width is the stage's. */
+.tc-stage { flex: 1 0 auto; min-width: 0; display: flex; flex-direction: column; }
 .tc-canvas {
   position: relative;
-  flex: 1;
+  flex: 1 0 auto;
   min-height: 260px;
   background: var(--tc-inset);
-  border: 1px solid var(--tc-line2);
+  box-shadow: inset 0 0 0 1px var(--tc-line2);
   border-radius: var(--tc-radius);
   overflow: hidden;
 }
 .tc-view { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
-.tc-wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
-.tc-hud {
-  position: absolute;
-  bottom: 6px;
-  left: 8px;
-  font-size: 9px;
-  color: var(--tc-dim);
-  font-family: var(--tc-mono);
-  pointer-events: none;
+/* A phone draws the outline instead of the graph: the window's data-view
+ * says which, and only that one shows. */
+.tc-win[data-view="outline"] .tc-canvas,
+.tc-win:not([data-view="outline"]) .tc-outline { display: none; }
+
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
+ * unreviewed. The list of roots at the top, each name a button
+ * that brings its tree into view, and the heading over each tree, a line
+ * of words over a rule as wide as the tree. Words, not color. */
+.tc-roots { font-family: var(--tc-mono); font-size: 11px; line-height: 2; color: var(--tc-muted); }
+.tc-roots[hidden] { display: none; }
+.tc-root-btn {
+  font: inherit;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--tc-text);
+  background: var(--tc-panel);
+  border: 1px solid var(--tc-line);
+  border-radius: 5px;
+  padding: 1px 9px;
+  cursor: pointer;
 }
+.tc-root-btn:focus-visible { outline: 2px solid var(--tc-text); outline-offset: 1px; }
+.tc-head {
+  position: absolute;
+  font-family: var(--tc-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--tc-text);
+  border-bottom: 1px solid var(--tc-line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  scroll-margin-top: 8px;
+}
+.tc-head[hidden] { display: none; }
+
+/* The outline: one row per session, indented under its
+ * parent (look.js sets the indent) with a rule down the left of each
+ * nested row; each tree headed by its root; then the recent traffic. Rows
+ * sit on the node cards' face, so the words keep their checked contrast. */
+.tc-outline {
+  flex: 1 0 auto;
+  background: var(--tc-panel);
+  border: 1px solid var(--tc-line);
+  border-radius: var(--tc-radius);
+  padding: 8px 10px;
+}
+.tc-group + .tc-group, .tc-traffic { margin-top: 12px; }
+.tc-group-head {
+  font-family: var(--tc-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--tc-text);
+  border-bottom: 1px solid var(--tc-line);
+  padding-bottom: 3px;
+  margin-bottom: 4px;
+  scroll-margin-top: 8px;
+}
+.tc-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 3px 0 3px 8px; scroll-margin-top: 8px; }
+.tc-row-note[hidden], .tc-group-head[hidden] { display: none; }
+.tc-row.nested { border-left: 2px solid var(--tc-line); }
+.tc-row-title { font-size: 12px; font-weight: 600; color: var(--tc-text); }
+.tc-row-role { font-size: 11px; font-weight: 500; white-space: pre; word-spacing: .2em; }
+.tc-row-state { font-family: var(--tc-mono); font-size: 11px; color: var(--tc-muted); }
+.tc-row-note { flex: 1 0 100%; font-size: 11px; color: var(--tc-dim); overflow-wrap: anywhere; }
+/* A native pair's or a cycle root's words, one line each under its row. */
+.tc-row-badge { flex: 1 0 100%; font-size: 11px; color: var(--tc-muted); overflow-wrap: anywhere; word-spacing: .2em; }
+.tc-row[data-state="writing"] .tc-row-state { color: var(--tc-cyan); font-weight: 600; }
+.tc-row[data-state="down"] .tc-row-state { color: var(--tc-red); font-weight: 600; }
+.tc-traffic-line { font-family: var(--tc-mono); font-size: 11px; color: var(--tc-text); padding: 2px 0; overflow-wrap: anywhere; }
+.tc-wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+/* A wire's words are its title, shown on hover: the line itself
+ * takes the pointer; the layer round it does not. */
+.tc-wires path.tc-wire { pointer-events: visibleStroke; }
 
 /* ---------- session node ---------- */
 .tc-node {
@@ -300,9 +427,41 @@
 }
 .tc-node-bar { width: var(--tc-bar-w); flex: none; border-radius: 6px 0 0 6px; background: var(--tc-node-hue, var(--tc-grey)); }
 .tc-node-body { flex: 1; min-width: 0; padding: 4px 9px; display: flex; flex-direction: column; justify-content: center; gap: 1px; }
-.tc-node-title { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tc-node-sub { font-size: 9px; color: var(--tc-dim); font-family: var(--tc-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-node-title { display: flex; min-width: 0; font-size: 12px; font-weight: 600; white-space: nowrap; }
+/* Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
+ * The name may shorten with an ellipsis; the role words after it never do,
+ * so an orchestrator always reads as one by its word. */
+.tc-node-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The role words keep their leading space (`a · orchestrator`): a flex
+ * item would drop it at the start of its own line. This face's space is
+ * narrow, so each is widened a little to read as one at 11 px. */
+.tc-node-role { flex: none; font-size: 11px; font-weight: 500; white-space: pre; word-spacing: .2em; }
+.tc-node-sub { font-size: 11px; color: var(--tc-dim); font-family: var(--tc-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-node-note { font-size: 11px; color: var(--tc-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-node-note[hidden] { display: none; }
 .tc-node-glyph { display: inline-block; width: 1.2em; }
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+ * A badge line under a box's note: a native pair (`native with b · not
+ * observed`) or a reports_to cycle's root (`reports to q · cycle`). Words
+ * in a dashed rule, so it reads as a mark of its own without color; only
+ * the names may shorten, and the spaces round them stay, widened a little
+ * as the role words' are. Its line height and rule make look.js BADGE_H. */
+.tc-node-badges { display: flex; flex-direction: column; min-width: 0; }
+.tc-node-badges[hidden] { display: none; }
+.tc-node-badge {
+  display: flex;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--tc-muted);
+  border: 1px dashed var(--tc-muted);
+  border-radius: 4px;
+  padding: 0 4px;
+  white-space: pre;
+  word-spacing: .2em;
+}
+.tc-node-badge-lead, .tc-node-badge-tail { flex: none; }
+.tc-node-badge-names { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* States: glyph and word always; border weight and style as the second cue. */
 .tc-node[data-state="listening"] .tc-node-sub { color: var(--tc-muted); }
@@ -312,6 +471,14 @@
 .tc-node[data-state="idle"] .tc-node-sub { color: var(--tc-muted); }
 .tc-node[data-state="down"] { border-style: dashed; border-color: var(--tc-red); }
 .tc-node[data-state="down"] .tc-node-sub { color: var(--tc-red); font-weight: 600; }
+/* Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
+ * C5's two new states, told apart by glyph and word first and by border
+ * style second: doorbell a double line, remote a dotted one. Neither takes
+ * a color of its own. */
+.tc-node[data-state="doorbell"] { border-style: double; border-width: 4px; }
+.tc-node[data-state="doorbell"] .tc-node-sub { color: var(--tc-muted); font-weight: 600; }
+.tc-node[data-state="remote"] { border-style: dotted; border-width: 2px; }
+.tc-node[data-state="remote"] .tc-node-sub { color: var(--tc-muted); }
 .tc-node.sel { box-shadow: 0 0 0 2px var(--tc-cyan), var(--tc-shadow-sel); }
 
 /* Ports: shape carries direction. In = hollow ring, out = filled dot. */
@@ -335,10 +502,28 @@
 }
 .tc-wire.flow.back { animation-direction: reverse; }
 .tc-wire.down { stroke: var(--tc-red); stroke-dasharray: 2 5; opacity: .8; }
+/* Model: Claude Opus 5.5 (the BOARD lane agent and the BOARD fixer),
+ * 2026-10-14. Status: unreviewed. The tree's connector is thin and solid,
+ * from a parent's bottom to its child's top, under every wire, with no
+ * words on the board (the legend names it); native is a long dash, its
+ * words in its title and the legend. */
+.tc-wire.kind-tree { stroke: var(--tc-muted); stroke-width: 1.25px; opacity: .8; }
+.tc-wire.kind-native { stroke: var(--tc-muted); stroke-width: var(--tc-wire-w-native); stroke-dasharray: 10 4 2 4; opacity: .8; }
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
+ * unreviewed. The knockout under a dotted or dashed wire: the same run in
+ * the canvas's own face, --tc-wire-w-knockout-pad wider than the wire,
+ * drawn over every solid wire and connector (and, under a dotted wire,
+ * every dashed one), so nothing but the canvas shows in the wire's gaps. */
+.tc-knockout { fill: none; stroke: var(--tc-inset); stroke-width: calc(var(--tc-wire-w) + var(--tc-wire-w-knockout-pad)); }
+.tc-knockout.kind-native { stroke-width: calc(var(--tc-wire-w-native) + var(--tc-wire-w-knockout-pad)); }
 .tc-arrow { fill: var(--tc-cyan); }
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
+ * unreviewed. A label's backing: the canvas's own face, so a label that
+ * must sit over another wire hides that bit of it and reads. */
+.tc-wire-label-back { fill: var(--tc-inset); }
 .tc-wire-label {
   font-family: var(--tc-mono);
-  font-size: 9px;
+  font-size: 11px;
   fill: var(--tc-text);
   paint-order: stroke;
   stroke: var(--tc-inset);
@@ -352,7 +537,11 @@
   .tc-wire.flow, .tc-cdot { animation: none; }
 }
 
+/* On a narrow screen the pill takes a row of its own under the title, so
+ * its words never run into the look switch. */
 @media (max-width: 640px) {
   .tc-sub, .tc-look-word { display: none; }
   .tc-body { padding: 8px; }
+  .tc-conn { order: 1; flex: 1 0 100%; margin-left: 0; }
+  .tc-look { margin-left: auto; }
 }

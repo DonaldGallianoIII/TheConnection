@@ -11,12 +11,22 @@
 <script type="module">
 /**
  * demo.html: a scripted walk through the board look. Fake sessions and fake
- * traffic from demo-script.json, no mailbox reads. It shows what each state
- * and wire looks like. The switch on the title bar flips between the dark
- * look and the Daylight light look. ?theme=daylight or ?theme=dark picks one in
- * the URL (compare.html uses that); otherwise the last pick in this browser,
+ * traffic from demo-script.json, no mailbox reads. The script is in the live
+ * feed's shape (C5), so the demo draws it the way live.html draws the real
+ * mailbox: layoutLevels lays out the two trees, wrapped to the canvas's
+ * width (at the window's 1180 px cap the second sits under the first), and
+ * patchBoard moves one message at a time along its wire. It shows every state and every kind
+ * of line. The page frame is live.html's: the window fills the viewport's
+ * height, the page scrolls, and the legend is the footer's first row; the
+ * roots list at the top brings each tree into view, and a phone draws the
+ * outline instead of the graph. The switch on the title bar flips between the dark look and the
+ * Daylight light look. ?theme=daylight or ?theme=dark picks one in the URL
+ * (compare.html uses that); otherwise the last pick in this browser,
  * otherwise dark. ?gray=1 draws the page in grayscale, the colorblind check:
- * every state must still read.
+ * every state and every role must still read.
+ *
+ * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14, rewritten for
+ * D7's shapes over the look kit's first demo. Status: unreviewed.
  *
  * @interacts  reads ?theme and ?gray from the URL; reads and writes the
  *             last look in localStorage (per browser only, and the page
@@ -24,14 +34,20 @@
  *             on <html>; rewrites ?theme in place on a pick; builds the
  *             board under #app with look.js; one interval timer, one
  *             ResizeObserver and two click listeners, the first two released
- *             on pagehide, the listeners with their buttons
+ *             on pagehide and made again on a pageshow from the
+ *             back/forward cache, the listeners with their buttons; one
+ *             click listener per root in the roots list, with its button
  * @deps       look.js, theme.css, demo-script.json
- * @complexity O(1) per step; the script has s steps (7 in the shipped file)
- * @alloc      one board, built once; steps only flip classes and text
+ * @complexity one step: O(n log n + l), plus look.js routeAround's search
+ *             per routed pair, in patchBoard over n = 8 nodes and
+ *             l = 12 links; the script has s steps (9 in the shipped file)
+ * @alloc      one board, built on the first step; later steps patch its
+ *             nodes and wires in place, so none is rebuilt, though each step
+ *             builds one full view that replaces the last (board.view)
  */
 import {
-  createWindow, createCanvas, createNode, drawWire, setFooter, createLookSwitch,
-  pickLook, applyLook, HUES, CONFIG,
+  createWindow, createCanvas, createRoots, setFooter, createLookSwitch, pickLook, applyLook,
+  createBoard, createKit, createFit, pillText, rootsList, hueFor, HUES, LEGEND_WORDS,
 } from './look.js';
 
 const FIT_PADDING = 24;
@@ -46,9 +62,11 @@ applyLook(document, look);
 if (query.get('gray') === '1') document.documentElement.style.filter = 'grayscale(1)';
 
 const demo = await (await fetch('demo-script.json')).json();
+// The same pill live.html shows: listeners by pid, and the box's own word for down.
+const pill = pillText(demo);
 const app = document.getElementById('app');
 const win = createWindow(document, app, { file: demo.window.file, sub: demo.window.sub });
-win.setConn(demo.window.conn, demo.window.connState);
+win.setConn(pill.text, pill.state);
 const lookSwitch = createLookSwitch(document, win.title, {
   look,
   onPick(next) {
@@ -67,56 +85,64 @@ const h = document.createElement('span');
 h.className = 'tc-h';
 h.textContent = 'sessions';
 chips.append(h);
-for (const s of demo.sessions) {
+for (const n of demo.nodes) {
   const c = document.createElement('span');
   c.className = 'tc-chip';
   c.dataset.hue = '';
-  c.style.setProperty('--tc-chip-hue', HUES[s.hue]);
-  c.textContent = s.id;
+  c.style.setProperty('--tc-chip-hue', HUES[hueFor(n.id)]);
+  c.textContent = n.id;
   chips.append(c);
 }
 win.body.append(chips);
 
-const canvas = createCanvas(document, win.body, demo.hud);
-const nodes = {};
-for (const s of demo.sessions) nodes[s.id] = createNode(document, canvas, { ...s, hue: HUES[s.hue] });
-const wires = {};
-for (const [f, t] of demo.links) wires[`${f}>${t}`] = drawWire(document, canvas, nodes[f], nodes[t]);
-for (const [f, t] of demo.downLinks) wires[`${f}>${t}`].setDown(true);
-setFooter(document, win.foot, demo.footer.map((t) => (t === null ? { spacer: true } : { text: t })));
+// The roots, at the top: each name brings its tree into view.
+const roots = createRoots(document, win.body, (id) => fit.jump(id));
+roots.set(rootsList(demo));
+const canvas = createCanvas(document, win.body);
+const board = createBoard(createKit(document, canvas));
+// The legend is the footer's first row, never over the board; theme.css
+// shows the one for the view drawn.
+setFooter(document, win.foot, [
+  { legend: 'graph', text: `${demo.legend} · ${LEGEND_WORDS.graph}` },
+  { legend: 'outline', text: `${demo.legend} · ${LEGEND_WORDS.outline}` },
+  ...demo.footer.map((t) => (t === null ? { spacer: true } : { text: t })),
+  { text: `${demo.nodes.length} sessions · ${pill.listening} listening` },
+]);
 
-// Fit the board inside the canvas at any width (renderer only).
-const extent = demo.sessions.reduce((m, s) => ({
-  w: Math.max(m.w, s.pos.x + CONFIG.NODE_W), h: Math.max(m.h, s.pos.y + CONFIG.NODE_H),
-}), { w: 0, h: 0 });
-const fit = () => {
-  const r = canvas.root.getBoundingClientRect();
-  const k = Math.min(1, (r.width - FIT_PADDING) / extent.w, (r.height - FIT_PADDING) / extent.h);
-  const x = Math.max(0, (r.width - extent.w * k) / 2);
-  const y = Math.max(0, (r.height - extent.h * k) / 2);
-  canvas.view.style.transform = `translate(${x}px, ${y}px) scale(${k})`;
-};
-const ro = new ResizeObserver(fit);
-ro.observe(canvas.root);
+// Lay the board out to the canvas's width (renderer only): it wraps, keeps
+// its size, the frame grows to its height and the page scrolls (look.js createFit).
+const fit = createFit(canvas, board, { padding: FIT_PADDING, Observer: ResizeObserver, mark: win.root });
+
+// One step's feed: the fixed nodes and links, plus the step's message as a
+// wire with age 0. Its sender reads writing, listener or not, as in the live
+// feed: D15 puts writing first, so a busy session shows its activity.
+const feedFor = (s) => ({
+  nodes: demo.nodes.map((n) => (n.id === s.from ? { ...n, state: 'writing' } : n)),
+  links: demo.links,
+  wires: [{ from: s.from, to: s.to, seq: s.seq, age_s: 0 }],
+});
 
 let step = 0;
-let last = null;
 const tick = () => {
-  if (last) {
-    last.wire.setFlow(false);
-    const prev = demo.sessions.find((s) => s.id === last.writer);
-    nodes[last.writer].setState(prev.state, prev.detail);
-  }
-  const s = demo.script[step % demo.script.length];
-  const wire = wires[`${s.wire[0]}>${s.wire[1]}`];
-  wire.setFlow(true, s.text, s.back);
-  nodes[s.writer].setState('writing');
-  last = { wire, writer: s.writer };
+  fit.draw(feedFor(demo.script[step % demo.script.length]));
   step += 1;
 };
 tick();
-const timer = setInterval(tick, demo.stepMs);
-addEventListener('pagehide', () => { clearInterval(timer); ro.disconnect(); });
+// Start on load, and again when the back/forward cache restores the page,
+// so a restored demo moves instead of showing a frozen frame.
+let timer = null;
+const start = () => {
+  fit.start();
+  if (timer === null) timer = setInterval(tick, demo.stepMs);
+};
+const stop = () => {
+  clearInterval(timer);
+  timer = null;
+  fit.stop();
+};
+start();
+addEventListener('pagehide', stop);
+addEventListener('pageshow', (event) => { if (event.persisted) start(); });
 </script>
 </body>
 </html>
