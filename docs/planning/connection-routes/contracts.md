@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D21) the same day, and D22 to D27 on
+        wave 2 rulings (D17 to D21) the same day, and D22 to D28 on
         2026-10-15.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
@@ -358,14 +358,16 @@ For a separate Linux user per account on one machine.
 - **Nobody can swap ROOT** (D21, D23). Init makes a missing ROOT `0755`
   and refuses a ROOT that its group or anyone may write. It then walks
   every folder from ROOT up to `/` and refuses, with words naming the
-  folder, one owned by anyone but root, the user running init, or the
-  owner of an existing `.shared` (the user D21 already trusts with the
-  group), or writable by its group or anyone without the sticky bit:
-  ssh's own test for `authorized_keys` paths. Any of those would let a
-  member rename ROOT and put their own `.shared` in its place. Before
-  the first init there is no `.shared`, so only root and the user
-  running it pass; afterwards a member's same-group rerun reaches D21's
-  own checks.
+  folder, one owned by anyone but root or the user running init, or
+  writable by its group or anyone without the sticky bit: ssh's own test
+  for `authorized_keys` paths. Any of those would let a member rename
+  ROOT and put their own `.shared` in its place. The owner of `.shared`
+  gets no extra trust: whoever makes a folder can make the `.shared` in
+  it, so that trust would certify itself (a member who made ROOT first
+  would pass the init user's own first init). A member's rerun on the
+  init user's ROOT is refused with words that name that user as the one
+  who ran init and accuse no one, and a member fixes their own entries
+  by hand, with the `chgrp` and `chmod` lines tc prints (D21, D23).
 - **A held lock costs a failed send, never a hang** (D20, D23). `mail/.seq`
   and the inbox locks are group-writable, so a member can hold one. tc
   waits at most `LOCK_WAIT_SECONDS` per command for them, then exits 10
@@ -476,11 +478,17 @@ of `tc health` is not on the board's path.
   cannot be used: tc opens it at the listener's start. After a server
   restart nothing is `down`, `woken` or `working` until it has been seen
   listening again; the doc block says so.
-- **A listener that mail woke is not down** (D24). `tc wait` exits when
-  mail lands and a session re-arms only after its turn, so a name seen
-  listening within `DOWN_WINDOW_S`, not listening now, whose inbox got a
-  message no older than `POLL_SECONDS` before it was last seen listening,
-  was woken. It is:
+- **A listener that mail woke is not down** (D24, D28). `tc wait` exits
+  when mail lands and a session re-arms only after its turn, so a name
+  seen listening within `DOWN_WINDOW_S`, not listening now, whose inbox
+  got a message no older than `POLL_SECONDS` before it was last seen
+  listening and no later than `POLL_SECONDS` after the first poll that
+  found no listener, was woken. Mail that lands after the board has seen
+  the listener gone is not a wake (D28): a killed listener stays `down`
+  whatever mail reaches it later. The board keeps that first poll's time
+  in memory beside `last_listening_at` and clears it on the next
+  sighting. Where the board cannot list the inbox, it cannot tell, and
+  the name reads `down` with the words `inbox unreadable`. It is:
   - `working` when there is evidence it is alive after the wake: the
     waking message has moved to `read/`, or its status file or a message
     it sent is newer than when it was last seen listening. Working fades
@@ -491,8 +499,12 @@ of `tc health` is not on the board's path.
   - `woken` (`woken · not read`) when `WOKEN_GRACE_S` has passed with no
     such evidence: the doorbell rang and nobody answered. A warning, with
     its own glyph and word, never color alone, and never `down`.
-  - The legend says the one case it cannot see: a session that crashes
-    after reading its mail looks `working` until the window ends.
+  - The legend says the cases it cannot see: a session that crashes
+    after reading its mail looks `working` until the window ends; and
+    with no board page open, the board cannot tell when a listener went,
+    so it gives mail the benefit of the doubt. A planned follow-up, once
+    SHARED merges, has `tc wait` write its exit reason into its lock file
+    so the board reads it from disk (D28).
 - `idle`: a card or inbox, no listener, not codex or ssh, not down,
   woken or working.
 - `unread` is a count, or `null` when tc could not see into the inbox
