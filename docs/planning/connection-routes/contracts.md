@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D21) the same day, and D22 to D29 on
+        wave 2 rulings (D17 to D21) the same day, and D22 to D32 on
         2026-10-15.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
@@ -255,10 +255,13 @@ subprocess.run(argv, input=body, text=True, capture_output=True,
 - `SSH_CONNECT_SECONDS = 10`, `SSH_SEND_SECONDS = 30`,
   `SSH_CONNECT_FAILED = 255` (ssh's own exit for a connection failure).
 - The body goes on stdin, never on the command line.
-- **Every ssh send leaves a record** (D25). The outbox copies `mail/`'s
-  layout: `outbox/to-<to>/NNNNNN-from-<sender>.md`, with `sent/` and
-  `refused/` under each `to-<to>/`, so it parses exactly like an inbox
-  and a name holding `-` never reads two ways. `deliver_ssh` first
+- **Every ssh send leaves a record** (D25, D32). The outbox has one
+  branch per Linux user, then copies `mail/`'s layout:
+  `outbox/<user>/to-<to>/NNNNNN-from-<sender>.md`, with `sent/` and
+  `refused/` under each `to-<to>/`, so a branch parses exactly like an
+  inbox and a name holding `-` never reads two ways. `<user>` is the
+  login of the Linux user who ran `tc send`; on a private mailbox it is
+  that one user. `deliver_ssh` first
   publishes the message there (same seq counter, same header as a
   message, the same no-replace publish as local mail), then sends it,
   then moves it to `sent/` on exit 0. A crash between the send and the
@@ -456,11 +459,14 @@ For a separate Linux user per account on one machine.
      everyone's tc uses.
   The two-user cases are Donald's human QA (`qa/human/route-shared.md`),
   including a member trying to rewrite `.shared` and being refused.
-- **The outbox is per sender** (D22). `outbox/` is sticky like the other
-  shared folders, so a member cannot move another member's queued file,
-  and a file sent with the wrong user's key would arrive labeled with
-  that key's name. Each member's `tc flush` sends only their own files
-  (C3).
+- **The outbox is per sender** (D22, D32). `outbox/` is sticky like the
+  other shared folders, and each member's queue lives in a branch that
+  member made and owns, `outbox/<user>/` and every folder under it, so
+  no member owns a folder holding another member's mail: sticky stops
+  everyone but a folder's owner, and the owner of every folder a queued
+  file sits in is its sender. A file sent with the wrong user's key
+  would arrive labeled with that key's name, so each member's `tc flush`
+  sends only their own branch (C3).
 - `tc health` says `mailbox shared with group <g>` or `mailbox private`.
 
 ## C5. The board feed
