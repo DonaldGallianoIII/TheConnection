@@ -495,6 +495,10 @@ of `tc health` is not on the board's path.
     after reading its mail looks `working` until the window ends.
 - `idle`: a card or inbox, no listener, not codex or ssh, not down,
   woken or working.
+- `unread` is a count, or `null` when tc could not see into the inbox
+  (a shared mailbox's inbox another user left unreadable); then
+  `unread_problem` holds tc's reason, and the page says `unread unknown`
+  in words, never a blank or a zero. `last_mail_age_s` is never below 0.
 - **When more than one holds** (D15, D24), the first in this order wins:
   `writing`, `down`, `woken`, `working`, `listening`, `doorbell`,
   `remote`, `idle`. Writing

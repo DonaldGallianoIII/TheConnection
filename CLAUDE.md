@@ -38,12 +38,14 @@ and a README a stranger can follow. The plan's index is
 - Python 3, standard library only. `tc` is one file.
 - Linux and WSL2 only. It uses `flock`, `RLIMIT_AS` and `/proc`. macOS and
   Windows are out of scope.
-- The board look kit (`board/`) is plain ES modules and CSS, no libraries,
-  tested with `node --test`.
-- No installs and no network of its own. The plan's one server is the
-  board's (`board/serve.py`, task B2, contract C6): bound to 127.0.0.1
-  only, its feed behind a token made at start. It is not built yet. SSH is
-  the only way off the machine, and only through the planned `ssh` route.
+- The board (`board/`) is plain ES modules and CSS, no libraries, tested
+  with `node --test` and a headless browser check. `board/serve.py`
+  serves it and its live feed.
+- No installs and no network of its own. The one server is the board's
+  (`board/serve.py`, contract C6): bound to 127.0.0.1 only, its feed
+  behind a token made at start. The page asks no other host (D26). SSH
+  is the only way off the machine, and only through the planned `ssh`
+  route.
 
 ### Architecture
 
@@ -123,9 +125,10 @@ and DOCS come after it.
 ```
 tc                                 the whole tool (python3, stdlib only)
 JOIN.md                            what you point a new session at
-board/                             look kit for a visual session board; demo.html shows every state
+board/                             the live board: serve.py (127.0.0.1, token), live.html, look.js, theme.css; demo.html shows every state
 tests/test_*.py                    unittest suites (mailbox, names, cards, router, codex route, usage, health, ...)
-tests/*.test.mjs                   node --test suites for the board look
+tests/*.test.mjs                   node --test suites for the board
+tests/board-browser-check.mjs      headless check of the live board (needs a Playwright install)
 tests/_root.py                     shared harness: throwaway TC_ROOT, proven listener, fake ssh and codex
 qa/human/                          step-by-step scripts a person runs
 docs/known-bugs/                   INDEX.md plus one detail file per entry. See ~/Conventions/code/KNOWN-BUGS.md.
@@ -147,7 +150,9 @@ Lane worktrees live at `~/TheConnection-lanes/<lane>`, one branch per lane.
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py'   # every Python test
 python3 -m unittest tests.test_root -v                  # one suite, by module
-node --test tests/*.test.mjs                            # the board look tests
+node --test tests/*.test.mjs                            # the board tests
+python3 board/serve.py                                  # the live board; open the printed URL
+NODE_PATH=<playwright>/node_modules node tests/board-browser-check.mjs   # headless board check
 python3 ~/Conventions/tools/check_voice.py FILE.md      # dashes, machine register
 python3 ~/Conventions/tools/check_american.py FILE.md   # American spelling
 ```
@@ -286,6 +291,16 @@ Commands.
 playthrough for every deterministic loop (`00-index.md` section 10); the
 human scripts in `qa/human/` cover the rest.
 
+*Deviation:* JavaScript naming in `board/look.js`. Its `CONFIG` keys are
+SCREAMING_SNAKE_CASE (the owner's first look kit, `349f36f`, began that
+way, and every key and importer since follows it), a helper it does not
+export is private without an underscore, and boolean locals may be plain
+adjectives (`flow`, `down`). The conventions ask for PascalCase keys, an
+underscore on private helpers and an is, has or can prefix. Accepted
+from the P4 phase review rather than renamed: no JavaScript file here
+follows those three rules, and the rename would churn a file contract C6
+pins.
+
 *Deviation:* uppercase lane ids in file names. Handoff and pause files
 take the plan's lane ids as they are (`handoffs/GROUND.md`,
 `pauses/GROUND-1.md`), against the lowercase-with-hyphens rule. Accepted,
@@ -299,7 +314,7 @@ names.
 The tool runs today on one machine: send, read, peek, wait (with
 `--keepalive`), status, log, health and watch; join, card and cards for
 address cards; a router in send with the `local` and `codex` routes;
-plus the board look kit.
+plus the live board (`python3 board/serve.py`).
 `tests/test_mailbox.py` (CORE, K1 to K8) tests send, read, peek, wait,
 log, status and the counter, each test proven by a hand mutation of
 `tc`.

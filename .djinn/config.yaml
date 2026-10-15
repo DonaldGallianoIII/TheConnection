@@ -53,8 +53,9 @@ project_notes: |
   of one. Listeners are proven live only by their pid in /proc/locks.
   The waking mechanism is outside tc: Claude Code's background Bash wakes
   a session when `tc wait` exits.
-  The board (board/) is a look kit of plain ES modules with no innerHTML,
-  and meaning never rides on color alone (the owner is colorblind).
+  The board (board/) is plain ES modules with no innerHTML, served with
+  its live feed by board/serve.py on 127.0.0.1 behind a token; meaning
+  never rides on color alone (the owner is colorblind).
   The plan in docs/planning/connection-routes/ adds address cards, a
   router, ssh and codex routes, a shared mailbox and a live board server
   on 127.0.0.1. Tests run under their own TC_ROOT and never touch a live
