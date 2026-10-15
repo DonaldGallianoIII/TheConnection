@@ -207,7 +207,7 @@ STATIC_FILES = {
     "compare.html": "text/html; charset=utf-8",
 }
 FEED_TYPE = "application/json; charset=utf-8"
-# Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+# Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
 # The longest one request may take, start to end: reading its request line
 # and headers and writing the answer. The page's requests take milliseconds.
 # A socket timeout alone restarts on every byte, so a client that trickles
@@ -233,7 +233,7 @@ DEFAULT_ROUTE = "local"
 ROUTE_CODEX = "codex"
 ROUTE_SSH = "ssh"
 KIND_CLAUDE = "claude"
-# Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+# Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
 # The account C1 writes when neither --account nor CLAUDE_CONFIG_DIR names
 # one. Two cards on it share no known account, so they get no native link
 # (D15): the link would claim a shared account that no card knows.
@@ -630,7 +630,7 @@ class Board:
         self.last_listening_at = {}
         self.nested_cards = set()
 
-    # Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+    # Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
     def note_nested(self, file_name):
         """Write one stderr line the first time a card file nests past the recursion limit.
 
@@ -785,7 +785,7 @@ class Board:
         }
 
 
-# Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+# Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
 class DeadlineSocket(io.RawIOBase):
     """A request's socket, read and written against one deadline for the whole request.
 
@@ -894,7 +894,7 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
     sys_version = ""
     timeout = REQUEST_DEADLINE_S
 
-    # Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+    # Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
     def setup(self):
         """Read and write this request through one DeadlineSocket: REQUEST_DEADLINE_S in all.
 
@@ -1082,7 +1082,7 @@ class BoardServer(http.server.ThreadingHTTPServer):
         self.feed_lock = threading.Lock()
         self.slots = threading.BoundedSemaphore(max_connections)
 
-    # Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+    # Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
     def process_request(self, request, client_address):
         """Start the request's thread when a slot is free; with none free, close it at once.
 

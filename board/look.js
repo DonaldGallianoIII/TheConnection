@@ -57,9 +57,9 @@
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-// Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
-// a2, for Donald (MEDIUM-1): no text on the board is drawn under this many
-// CSS px at the scale it is shown, on a desktop or a phone.
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+// No text on the board is drawn under this many CSS px at the scale it is
+// shown, on a desktop or a phone, so every word reads without zooming.
 const MIN_TEXT_PX = 11;
 // The smallest font-size theme.css gives text inside the board (the state
 // line, the note and the wire labels). tests/board-layout.test.mjs reads
@@ -79,7 +79,7 @@ export const CONFIG = Object.freeze({
   // Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status:
   // unreviewed. Wider and taller than the look kit's 132 x 48, so a title
   // holds "name · orchestrator · inferred" and a third line holds the status.
-  // 64 tall (round 1): three lines of 11 px or more inside a 4 px double border.
+  // 64 tall: three lines of 11 px or more inside a 4 px double border.
   NODE_W: 208,
   NODE_H: 64,
   // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
@@ -103,17 +103,17 @@ export const CONFIG = Object.freeze({
   // label clear of both rows); between two wrapped rows of one parent's
   // children (room for one wire label); between two root trees side by side
   // (wider than a column gap, so two trees read as two); and around the board.
-  // Root trees one under another are LAYOUT_ROW_GAP apart. Round 1 added the
-  // wrap gap and the indent: on a phone, where a row holds one box, children
-  // sit LAYOUT_INDENT right of their parent so the levels still read.
+  // Root trees one under another are LAYOUT_ROW_GAP apart. Where a row
+  // holds one box (a phone), children sit LAYOUT_INDENT right of their
+  // parent so the levels still read.
   LAYOUT_COL_GAP: 28,
   LAYOUT_ROW_GAP: 56,
   LAYOUT_WRAP_GAP: 40,
   LAYOUT_ROOT_GAP: 72,
   LAYOUT_INDENT: 32,
   LAYOUT_MARGIN: 24,
-  // Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
-  // Item 5: each root's tree starts with a heading naming its root, as wide
+  // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
+  // Each root's tree starts with a heading naming its root, as wide
   // as the tree: HEAD_H tall (an 11 px line and its rule), then HEAD_GAP
   // before the root's box (room for the root's in port ring, which stands
   // PORT_SIZE / 2 over the box).
@@ -154,7 +154,7 @@ export const CONFIG = Object.freeze({
   // of it, costs this many times its length, so a wire between trees takes
   // the gaps between them and crosses a connector rather than shadowing it.
   ROUTE_ALONG_COST: 4,
-  // Labels (round 2, item 3). A label's box is LABEL_CHAR_W px per
+  // Labels. A label's box is LABEL_CHAR_W px per
   // character (an 11 px mono glyph is about 6.6 px wide; rounded up so the
   // box never undercuts the drawn words) plus LABEL_PAD each side, and
   // LABEL_H tall (11 px words and their halo). A label sits beside its
@@ -171,11 +171,11 @@ export const CONFIG = Object.freeze({
   LABEL_GAP: 2,
   // hueFor's string hash step: a small odd prime spreads short names.
   HUE_HASH_STEP: 31,
-  // Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+  // Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
   // fitTransform never shrinks a board below this: the scale at which the
   // board's smallest text is MIN_TEXT_PX. With both at 11 it is 1, so the
   // board never shrinks; layoutLevels wraps it to the width instead, its
-  // frame grows to its height and the page scrolls down (round 2).
+  // frame grows to its height and the page scrolls down.
   MIN_TEXT_PX,
   BOARD_TEXT_MIN_PX,
   MIN_FIT_SCALE: MIN_TEXT_PX / BOARD_TEXT_MIN_PX,
@@ -355,9 +355,9 @@ export function createWindow(doc, parent, { file, sub }) {
 /**
  * Footer cells. Each item is { text }, { spacer: true }, or { legend, text }:
  * a legend is a row of its own, the first line of the footer, never over
- * the board (round 2, item 4). Replaces what was there. Cells wrap to a new
- * line on a narrow screen instead of cutting words off (round 2, item 6).
- * Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+ * the board. Replaces what was there. Cells wrap to a new line on a
+ * narrow screen instead of cutting words off.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @complexity O(k) for k items  @alloc k spans
  */
 export function setFooter(doc, foot, items) {
@@ -371,13 +371,13 @@ export function setFooter(doc, foot, items) {
 /**
  * Canvas: a stage holding the frame the board draws in, which holds the
  * view (a wire layer in SVG and a node layer), and the outline a phone
- * draws instead (a2's direction; theme.css shows one of the two by the
+ * draws instead (theme.css shows one of the two by the
  * window's data-view). The frame grows to the
- * board's laid out height and the page scrolls, never sideways (round 2,
- * item 1); nothing sits over it (the legend is in the footer, item 4).
+ * board's laid out height and the page scrolls, never sideways; nothing
+ * sits over it (the legend is in the footer).
  * createFit watches the stage, which keeps the width the board may use.
  * The wire layer ends with a group for the wires' labels, so every label
- * is drawn over every wire (round 2).
+ * is drawn over every wire.
  * @interacts  appends to parent
  * @complexity O(1)  @alloc one canvas subtree with an arrow marker def
  * @returns {{ root, frame, view, wires, labels, outline }}
@@ -405,12 +405,12 @@ export function createCanvas(doc, parent) {
 }
 
 /**
- * The list of roots at the top of the page (round 2, item 5):
+ * The list of roots at the top of the page:
  * `2 orchestrators: a, z · 2 peers: p1, p2`, each name a button that calls
  * onJump(name), which brings that tree into view. set(groups) takes
  * rootsList's groups and rebuilds the list only when they change; with no
  * roots it is hidden.
- * Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @interacts  appends a nav to parent; one click listener per button,
  *             released with its button when the list is rebuilt
  * @complexity O(r) per change over r roots  @alloc one nav; one button per root
@@ -636,9 +636,9 @@ export const LEGEND_WORDS = Object.freeze({
 });
 
 /**
- * Words in an edge's title (round 2): a connector whose parent the feed
+ * Words in an edge's title: a connector whose parent the feed
  * inferred from mail says so, and a quiet mail wire names its pair.
- * Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  */
 export const TREE_WORDS = Object.freeze({
   inferred: 'inferred from mail',
@@ -648,7 +648,7 @@ export const TREE_WORDS = Object.freeze({
 /**
  * Words on a node's third line. A down node's status was written while it
  * listened, so it reads as the last thing it said, never as its state now.
- * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  */
 export const NOTE_WORDS = Object.freeze({
   lastStatus: 'last status:',
@@ -657,7 +657,7 @@ export const NOTE_WORDS = Object.freeze({
 /**
  * An empty map keyed by session name, with no prototype, so a name such as
  * __proto__ or constructor (both legal under C0) is an own key like any
- * other. Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14.
+ * other. Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14.
  * Status: unreviewed.
  * @complexity O(1)  @alloc one object
  */
@@ -695,7 +695,7 @@ export function hueFor(id) {
 /**
  * Pack blocks into rows left to right: a block starts a new row when it
  * would take the row past `limit`. Infinity never wraps.
- * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @complexity O(b) over b blocks  @alloc one row object per row, returned
  * @returns {{ items: {id, w, h}[], w, h }[]}
  */
@@ -721,7 +721,7 @@ function packRows(blocks, limit, gap) {
  * parent's plus one (D15, pause BOARD-3); every other node is a root, so a
  * cycle's root is one like any other. Roots and children are in name order.
  * layoutLevels places this tree; outlineView lists it.
- * Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14, from
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14, from
  * layoutLevels' own first walk. Status: unreviewed.
  * @interacts  none; pure
  * @complexity O(n log n) over n nodes, for the sort by name
@@ -944,7 +944,7 @@ export function layoutLevels(feed, width = Infinity) {
  * The width layoutLevels may use on a canvas `canvasWidth` CSS px wide: the
  * most the board may span at the smallest scale MIN_FIT_SCALE allows, so at
  * the scale fitTransform then picks it never runs past the canvas.
- * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @complexity O(1)  @alloc none
  */
 export function layoutWidth(canvasWidth) {
@@ -1288,7 +1288,7 @@ function spotsAlong(points, step) {
 }
 
 /**
- * Where each labeled edge's words go (round 2, item 3): a box beside a spot
+ * Where each labeled edge's words go: a box beside a spot
  * along its run, just over a level piece or just right of an upright one
  * (LABEL_GAP clear of the wire), the middle of the run first, then moving
  * out along the wire; then the other side; then a step further out each
@@ -1370,7 +1370,7 @@ function upperFirst(p, q, pos) {
  * box shows (STATES.down). Listeners are counted by listener_pid (a pid tc
  * read from /proc/locks), never by state: under D15 a listener that just
  * sent reads writing and is still listening.
- * Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.
+ * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @interacts  none; pure
  * @complexity O(n) over n feed nodes  @alloc one object
  * @returns {{ text, state, listening }}  state: 'up' | 'warn', for createWindow's setConn
@@ -1387,7 +1387,7 @@ export function pillText(feed) {
 /**
  * A node's third line: a reports_to that names no node, else its status. A
  * down node's status is stale, so it reads `last status: ...` and never
- * passes for the node's state now (round 1, LOW-20).
+ * passes for the node's state now.
  * @complexity O(1)  @alloc one string
  */
 function noteFor(n, known) {
@@ -1396,8 +1396,8 @@ function noteFor(n, known) {
   return n.state === 'down' ? `${NOTE_WORDS.lastStatus} ${n.status}` : n.status;
 }
 
-// ---------- roots, headings and the outline (round 2, item 5, and a2's phone view) ----------
-// Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status: unreviewed.
+// ---------- roots, headings and the phone's outline ----------
+// Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
 
 /** Words for the outline and the roots list. Every one is a word, never a color. */
 export const OUTLINE_WORDS = Object.freeze({
@@ -1439,7 +1439,7 @@ function counted(n, word) {
 
 /**
  * The roots of a feed's tree, grouped by role for the list at the top of
- * the page (round 2, item 5): `2 orchestrators: a, z · 2 peers: p1, p2`.
+ * the page: `2 orchestrators: a, z · 2 peers: p1, p2`.
  * Orchestrators first, then peers, then workers, then any other role.
  * @interacts  none; pure
  * @complexity O(n log n) over n nodes, for treeOf  @alloc the returned groups
@@ -1940,7 +1940,7 @@ export function createKit(doc, canvas) {
  * `padding` to spare, centered, never enlarged and never under MIN_FIT_SCALE
  * (so no text drops under MIN_TEXT_PX). createFit passes the board's own
  * height plus `padding` as the height, since the frame grows to the board
- * (round 2), so only the width can call for a smaller scale; a board laid
+ * so only the width can call for a smaller scale; a board laid
  * out at layoutWidth(width) never runs past the width.
  * @complexity O(1)  @alloc one object
  * @returns {{ x, y, k }}
@@ -2040,7 +2040,7 @@ export function createFit(canvas, board, { padding, Observer, mark }) {
 
 /**
  * The pill's words when the feed is not answering, each a plain statement;
- * none of them says live. Model: Claude Opus 5.5 (the BOARD fixer, round 1),
+ * none of them says live. Model: Claude Opus 5.5 (the BOARD fixer),
  * 2026-10-14. Status: unreviewed.
  */
 export const CONN_WORDS = Object.freeze({

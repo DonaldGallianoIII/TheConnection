@@ -1,9 +1,10 @@
 # Handoff: BOARD (P4)
 
-Model:  Claude Opus 5.5 (the BOARD lane agent); fix rounds 1 and 2 by
+Model:  Claude Opus 5.5 (the BOARD lane agent); fix rounds 1 to 3 by
         Claude Opus 5.5 (the BOARD fixer), from
-        audits/2026-10-14-1811-full/fixes/round-1.md and round-2.md, and
-        a2's direction for the owner in round 2
+        audits/2026-10-14-1811-full/fixes/round-1.md and round-2.md, a2's
+        direction for the owner in round 2, and
+        audits/2026-10-14-2047-custom/fixes/round-3.md
 Status: unreviewed
 Date:   2026-10-14
 Branch: Claude-Development-TheConnection-BOARD, from
@@ -32,11 +33,17 @@ Where:  ~/TheConnection-lanes/board
 | Fix round 2 (b) | `880a304` | Route every wire round the boxes, and keep labels off boxes, wires and each other |
 | Fix round 2 (c) | `bd23031` | Head each tree with its root, list the roots at the top, and draw an outline on a phone |
 | Fix round 2 (d) | `6785fe0` | Add the board's browser check, and bring both QA scripts up to round 2 |
-| Fix round 2 (e) | the commit that brings this file up to date | Describe fix round 2 in the BOARD handoff |
+| Fix round 2 (e) | `53b2f28` | Describe fix round 2 in the BOARD handoff |
+| Fix round 3 (a) | `4cf941d` | Draw native pairs in words again, keep tree wires off their connectors, give each wrapping parent its own gutter |
+| Fix round 3 (b) | `0937669` | Keep the space in titles, head no tree of one, name the quiet wire, add view hysteresis, say stale over the board, patch the outline in place |
+| Fix round 3 (c) | `c6c7609` | Build the feed from the parts it needs so it never waits on nvidia-smi, make the card-read comment true, escape a nested card's name |
+| Fix round 3 (d) | `253ddf1` | Make the browser check use tc join where it can, mask every line, stop its children on any exit, and check native words and the dotted wire |
+| Fix round 3 (e) | the commit that brings this file up to date | Describe the board as it is in the handoff, and drop audit ids and round numbers from shipped comments |
 
-No amend, reset or rebase. Nothing pushed or merged. `tc`,
-`tests/_root.py` and `board/serve.py` were not edited in round 2 (`tc` and
-`tests/_root.py` in no round).
+No amend, reset or rebase. Nothing pushed or merged. `tc` and
+`tests/_root.py` were edited in no round. `board/serve.py` was not edited
+in round 2. Round 3 edited one file outside its work set,
+`tests/test_board_leak.py`, as Fix round 3 says.
 
 ## What was built
 
@@ -61,12 +68,18 @@ as writing. Card and status files go through `read_regular` (O_NONBLOCK,
 O_NOFOLLOW, regular files only), a card nested past the recursion limit is
 skipped and named once on stderr, and one bad `to-*` entry skips only
 itself. `last_listening_at` lives on the Board and is pruned past
-`DOWN_WINDOW_S` on every call. 21 tests: the main feed test, the status
-line, writing then idle, every D7 shape in phases.md B1 with a check that
-each parent is the one the walk used, a node below a cycle, links from
-every message, the reports_to and native links; round 1 added the D15
-state order, the inversion in both name orders, account `unknown`, the
-future mtime, and four hostile-mailbox tests.
+`DOWN_WINDOW_S` on every call. Since fix round 3 the feed's snapshot is
+`Board.snapshot()`: `tc.now_iso()`, `machine_now()` (tc's load and memory
+numbers without its GPU query), `tc.listeners("wait")` and
+`tc.mailbox_summary()`, never `tc.health_snapshot()`, so a poll never
+waits on nvidia-smi, scans no process list and reads each card once; a
+nested card's file name is printed escaped. 23 tests: the main feed test,
+the status line, writing then idle, every D7 shape in phases.md B1 with a
+check that each parent is the one the walk used, a node below a cycle,
+links from every message, the reports_to and native links; round 1 added
+the D15 state order, the inversion in both name orders, account
+`unknown`, the future mtime, and four hostile-mailbox tests; round 3 added
+no GPU query in a feed and the escaped card name.
 
 **B2, the server in `board/serve.py`, and `tests/test_board_server.py`.**
 `python3 board/serve.py [--port 8780]` binds 127.0.0.1, makes a token with
@@ -86,28 +99,44 @@ this tree has no `start(argv=...)` yet (a P0 fixer adds it on its own
 branch), so no test starts `serve.py` as a child.
 
 **B3, `board/look.js`, `board/theme.css`, `tests/board-patch.test.mjs`,
-`tests/board-layout.test.mjs`.** A pure layer: `layoutLevels(feed, width)`
-(roots in name order, levels top to bottom, no overlap; since round 1 each
-parent's children wrap into rows that fit the width, and on a phone, where
-a row holds one box, they indent under their parent), `boardView(feed,
-width)` (what to draw), `diffBoard(prev, next)` (what changed by id). `patchBoard(board, feed)` applies the diff through a kit:
-`createKit(doc, canvas)` for the DOM, a fake in the tests, so no DOM
-library is needed. Two states: `doorbell` (◎, double border) and `remote`
-(⇄, `remote · not checked`, dotted border). Every title carries its role
-word, and `· inferred` exactly when `role_source` says so; the role words
-never shorten. Nodes are 208 by 64 (were 132 by 48) to hold that and a
-status line. A fresh wire flows toward its reader with `from → to · #seq`;
-`reports to` hints run from a child's top to its parent's bottom with
-their words; `native · not observed` lines carry theirs, and on a pair that
-also has mail they ride on the wire as a second label line under it
-(`labelPoints`). No `innerHTML`. Since round 1 (a2's item for Donald): no
-font-size in theme.css is under 11 px and `MIN_FIT_SCALE` is
-`MIN_TEXT_PX / BOARD_TEXT_MIN_PX`, 1, so the board is never shrunk;
-`createFit` lays it out at the canvas width from the ResizeObserver entry,
-and the canvas scrolls down, never sideways. Every map keyed by session
-name has no prototype, so `__proto__` lays out like any other name. A down
-node's status reads `last status: ...`; the pill names down nodes `no
-listener`, as their boxes do.
+`tests/board-layout.test.mjs`.** As the board is now, after fix round 3. A
+pure layer: `layoutLevels(feed, width)` (roots in name order, levels top
+to bottom, no overlap; each parent's children wrap into rows that fit the
+width, and where a row holds one box they indent under their parent; a
+block whose children wrap starts them `LAYOUT_LANE` in and runs its
+connectors down that lane, so no two parents share a gutter),
+`boardView(feed, width)` (what to draw), `diffBoard(prev, next)` (what
+changed by id). `patchBoard(board, feed, width)` applies the diff through
+a kit: `createKit(doc, canvas)` for the DOM, a fake in the tests, so no
+DOM library is needed. Two states: `doorbell` (◎, double border) and
+`remote` (⇄, `remote · not checked`, dotted border). Every title carries
+its role word (`a · orchestrator`, with its spaces), and `· inferred`
+exactly when `role_source` says so; the role words never shorten. Nodes
+are 208 by 64 (were 132 by 48) to hold that and a status line, and 16 px
+taller (`BADGE_H`) per badge line. The tree draws its own thin connector
+from a parent's out port (bottom middle) to each child's in port (top
+middle), with no words on the board; its words (`b reports to a`, `d
+under b · inferred from mail`) are its hover title, and a feed's
+reports_to links draw nothing of their own. A parent and child's mail
+wire, or native line, runs `TREE_WIRE_OFFSET` (8 px) beside that
+connector, never on it, so the connector never fills a dotted or dashed
+wire's gaps; every other pair is routed side to side round the boxes. A
+fresh wire flows toward its reader with `from → to · #seq` beside it,
+never on it; a quiet one is a thicker solid line with no words. Both boxes
+of a native pair carry a dashed badge in words, `native with <the other> ·
+not observed`, with mail or without and never on account `unknown`; a
+native pair with no mail is joined by a long dash as well, with no words
+on the line. A reports_to cycle's root carries `reports to <name> ·
+cycle`, and a reports_to that names no node is its node's note. No
+`innerHTML`. No font-size in theme.css is under 11 px and `MIN_FIT_SCALE`
+is `MIN_TEXT_PX / BOARD_TEXT_MIN_PX`, 1, so the board is never shrunk;
+`createFit` lays it out at the stage's width from the ResizeObserver
+entry, the frame grows to the board's height and the page scrolls down,
+never sideways. Under `OUTLINE_BELOW_PX` (560) of stage width it draws the
+outline instead, and the graph again only from `GRAPH_FROM_PX` (584). Every
+map keyed by session name has no prototype, so `__proto__` lays out like
+any other name. A down node's status reads `last status: ...`; the pill
+names down nodes `no listener`, as their boxes do.
 
 **B4, `board/live.html` and `qa/human/board-live.md`.** The page reads the
 token from the fragment and draws each answer with `patchBoard`. Since
@@ -116,7 +145,9 @@ time, the next `POLL_MS` (3000) after the last settles, so an older answer
 can never land after a newer one; a request still out after
 `FETCH_TIMEOUT_MS` (2500) is aborted, and a late or failed answer turns the
 pill to `stale · last answer N s ago · <why>` or `no answer · <why>`, never
-`live`. It counts listeners by `listener_pid`. It has the look switch,
+`live`; since round 3, once a board is drawn, a line over it reads `stale ·
+last answer N s ago` and every flowing wire stops until the next good
+answer. It counts listeners by `listener_pid`. It has the look switch,
 `?theme` and `?gray=1`, and says in the pill when the token is missing or
 refused. On `pagehide` it stops the poller and the ResizeObserver; on a
 `pageshow` from the back/forward cache it starts both again. **The human
@@ -199,6 +230,67 @@ views come from the same feed.
 `tests/board-browser-check.mjs` measures all of this in a real browser;
 see Hand runs.
 
+## Fix round 3: what the second review found
+
+The review of rounds 1 and 2 (`audits/2026-10-14-2047-custom`, FIX THEN
+SHIP) found three places where a non-color cue or a readable tree was
+lost, and LOWs. a2 had approved the look for the owner (the tree on a
+desktop, the outline on a phone); round 3 kept it.
+
+1. **Native pairs say so in words again** (MEDIUM-1; look.js `badgesOf`,
+   `createNode`'s badges, theme.css `.tc-node-badge`, `.tc-row-badge`).
+   Round 2 had left `native · not observed` in a hover title only, and
+   nowhere on a pair that also mails or on a phone. Both boxes of a native
+   pair now carry `native with <the other> · not observed` in a dashed
+   badge, with mail or without, and the outline puts the same words under
+   each row. Never on account `unknown` (D15): the page draws neither
+   badge nor line there. A box is `BADGE_H` taller per badge, and the
+   layout, ports and routing use its real height.
+2. **A tree wire never lies on its connector** (MEDIUM-2; look.js
+   `offsetRun`, `routeTreeWire`). A parent and child's mail wire, or native
+   line, runs `TREE_WIRE_OFFSET` (8 px) beside the connector, on the side
+   the connector turns toward first, so a down worker's dotted wire keeps
+   its gaps. Wires between other pairs keep off these wires as they keep
+   off connectors.
+3. **Each wrapping parent has its own gutter** (MEDIUM-3; look.js
+   `layoutLevels`). A block whose children wrap starts them `LAYOUT_LANE`
+   in and runs its connectors down that lane, so a relay and its sub-relay
+   never share a trunk.
+4. **The rest**: titles keep their spaces (`a · orchestrator`); the phone
+   outline draws no heading over a tree of one; the legend names the quiet
+   wire (`thick line: mail, none in the last 10 s`) and says the thin line
+   is `reports to, or inferred from mail`; a cycle's root shows its
+   reports_to on a badge; the graph and outline switch has two
+   breakpoints; a stale feed puts `stale · last answer N s ago` over the
+   board and stops the moving wires; the outline is brought up to date in
+   place; the feed never waits on nvidia-smi (serve.py `Board.snapshot`);
+   the card-read comment and @complexity hold against the merged tc; a
+   nested card's name is printed escaped; the browser check uses `tc join`
+   where it can, masks every line, stops its children on SIGTERM, SIGINT
+   and any throw, starts serve.py under a time limit, checks the native
+   words and the dotted wire, and has a `--self-test`; the QA scripts and
+   this file name no path from the owner's other projects; shipped
+   comments carry no audit ids, round numbers or a2.
+
+**Out of the work set.** `tests/test_board_leak.py` was not in round 3's
+work set. Its prune test swapped `tc.health_snapshot` for a stand-in,
+which item 12 (the feed built from parts) makes a no-op, so the test
+failed (`'n999' not found in {}`). It now swaps `Board.snapshot`, and its
+doc lines about the snapshot's child process are made true. No assertion
+changed. For the architect to accept or send back.
+
+**Known limits.**
+- Two children on one side of a parent share the parent's end of their
+  wires, as their connectors share theirs; there a dashed wire over a quiet
+  one reads solid. In the browser check the down worker `d` has no sibling
+  on its side (`c` is left of `b`, `d` right). A lane per child does not
+  fit the 56 px gap under a parent with many children.
+- Every parent and child pair with mail now draws two lines, the thin
+  connector and the mail wire beside it. The tree's shape is as approved.
+- Dev C5 says the feed is built from `health_snapshot()`; it is now built
+  from the parts of it the feed reads. For the architect, with the C5
+  lines synthesis LOW-20 lists.
+
 ## What was not built
 
 - `node --test` drives no browser. Since round 2,
@@ -246,10 +338,8 @@ see Hand runs.
 9. **Hand-written cards** in the tests and QA scripts use C1's fields;
    CARDS' code is not in this tree.
 10. **The leak run's PATH** holds a fake `nvidia-smi` that prints one GPU
-    line, so tc still starts a child every call but 1,000 calls take
-    seconds. The other board tests call tc's health snapshot as it is,
-    which runs the real `nvidia-smi` (a query) on this machine, as
-    `tests/test_health.py` already does.
+    line. Since round 3 feed() never runs it (Board.snapshot takes no GPU
+    reading); one direct `tc.machine_stats()` call proves it is there.
 11. **`qa/human/board-look.md`** now serves the demo with `serve.py` on
     8780, since C6 says 8765 is taken on the owner's machine.
 12. **Round 2: the tree's connector belongs to the child's node view**, not
@@ -370,6 +460,29 @@ fifteen were run again at `6785fe0` with the lines below.
 | outline | same | the outline drawn on every call | `an unchanged outline was drawn again` |
 | 5 | same | a jump in the outline goes to the graph | diff: the `['outline', 'z']` entry missing |
 
+Fix round 3, each applied by hand, run, seen red, and restored byte for
+byte (a scratch helper compared the file's sha256 before and after):
+
+| Item | Test | Mutation | Red line |
+|---|---|---|---|
+| 1 | `both boxes and both outline rows of a native pair say ...`, `a mailbox wire and a native line on one pair ...` | no native badge on a pair that also mails | `a pair that mails lost its native badges`; `the graph's badges` |
+| 1 | browser check | the same | `FAIL  each native pair says native with the other, not observed (p1, p2, e2, e3): p1 shows [], not ["native with p2 · not observed"]; ...` |
+| 2 | `a parent's mail runs beside its connector ...` | routeTreeWire returns routeTree's run | `mixed at 1152 px: mailbox:a>b lies on its connector at {"x":506,"y":[116,144]}` |
+| 2 | browser check | the same | `FAIL  the down worker's wire (mailbox:b>d) is dotted and no other stroke lies on it: class "tc-wire kind-mailbox flow down", dasharray 2px, 5px; the longest stretch under another stroke is 167 px (tree:d)` |
+| 3 | `every connector trunk serves one parent: ...` | no lane for a wrapping block | `at 1152 px: the connector to x (under a) and to b5 (under b) share {"x":24,"y":[264,376]}` |
+| 5 | `the outline lists every session once, ...` | a heading over every tree | `the one-session tree p1 is headed "p1 · peer · inferred"` |
+| 8 | `a reports_to cycle's root says whom it reports to, ...` | no cycle badge | `the cycle's root hides its reports_to` |
+| 9 | `the switch between graph and outline has two breakpoints, ...` and the createFit outline test | one breakpoint | `a scrollbar coming and going flipped the view`; `560 px flipped the outline back to the graph` |
+| 10 | `once a board is drawn, a late or refused answer says stale ...` | no onStale on a failure | `a late answer did not say stale over the board` |
+| 11 | `the outline is brought up to date in place: ...` | a new row element on every draw | `an age tick made new elements or moved old ones` |
+| 12 | `test_a_feed_runs_no_gpu_query` | feed() from `tc.health_snapshot()` | `AssertionError: True is not false : feed() ran nvidia-smi` |
+| 14 | `test_a_nested_card_is_named_escaped_on_stderr` | the name printed raw | `AssertionError: '\x1b' unexpectedly found in "serve.py: skipped cards/deep\x1b[2J.json: nested past Python's recursion limit" : ...` |
+| 17 | browser check `--self-test` | the catch prints `err.message` unmasked | `FAIL  no token printed: an unmasked token= is in its output` |
+| 17 | same | masked() without the g flag | `FAIL  no token printed: an unmasked token= is in its output` |
+| 18 | same | no SIGTERM or SIGINT handler | `FAIL  serve.py started and is gone: serve.py pid N is still alive` |
+| 18 | same | a throwing browser close skips the stop loop | `FAIL  serve.py started and is gone: serve.py pid N is still alive` |
+| 18 | same | serve.py started with no alarm | `FAIL  serve.py ended at its own limit: serve.py pid N outlived its 4 s limit` |
+
 The browser check, seen red under hand mutations of the page (theme.css
 or look.js, each restored byte for byte):
 
@@ -400,6 +513,20 @@ keep-every-feed mutations were applied again: each red with the line
 shown.
 
 ## Hand runs
+
+Fix round 3: `NODE_PATH=<a Playwright install>/node_modules node
+tests/board-browser-check.mjs`, Playwright 1.63, Chromium 153, at
+`253ddf1`: cards by hand (this tree's tc has no join), five listeners
+proven, `d` made down through the feed, `result: PASS` at 1280 x 900
+(graph, 7 labels, 23 wires and connectors, 4 headings) and 390 x 844
+(outline), each server and listener stopped by its own pid. The
+screenshots were looked at in color and in grayscale. `node
+tests/board-browser-check.mjs --self-test`: `self-test: PASS` (five runs
+against the fake Playwright), nothing left running. The same check, on a
+scratch copy of this round's board and check beside the dev branch's `tc`
+at `1bede2c`: `cards: written by tc join`, `result: PASS`; its cards carry
+no session id or pid. `demo.html` was screenshot at 1280 and 390 by a
+scratch driver (no console errors; badges on `b` and `docs`).
 
 Fix round 2: `NODE_PATH=<a Playwright install>/node_modules node
 tests/board-browser-check.mjs`, Playwright 1.63, Chromium 153, on the
@@ -450,6 +577,12 @@ masked in all output.
   the script.
 
 ## Verify commands and their output
+
+Fix round 3, run in `~/TheConnection-lanes/board` before its last commit:
+`node --test tests/*.test.mjs` 50 pass, 0 fail (43 plus 4 layout and 3
+patch tests); `python3 -m unittest discover -s tests -p 'test_*.py'` 57
+OK (55 plus 2 feed tests). `check_voice.py` and `check_american.py` were
+clean on `qa/human/board-live.md`, `qa/human/board-look.md` and this file.
 
 Fix round 2, run in `~/TheConnection-lanes/board` at `6785fe0`:
 `node --test tests/*.test.mjs` 43 pass, 0 fail (36 plus 3 routing and
@@ -525,9 +658,17 @@ and this file.
   draws the outline, with no wires.
 - **The demo at the window's 1180 px cap** draws `z`'s tree under `a`'s,
   now seen in a screenshot, with `z`'s heading and the roots list.
-- Anything with CARDS' `tc`: these tests ran against this tree's `tc`.
-  The cross-lane fix follows CARDS' description of its router; it was not
-  run against CARDS' branch.
+- Anything with CARDS' `tc`, but one run: the unit suites ran against
+  this tree's `tc`. The browser check ran once beside the dev branch's
+  `tc` (`1bede2c`) on a scratch copy, `tc join` path included, and passed.
+- Round 3 in a real browser beyond the check: the stale line and the
+  stopped wires (node test and CSS rule only; QA step 22 looks at them),
+  the outline patched in place (a fake document in the node test; no
+  selection or screen reader was tried), and the two breakpoints with a
+  real classic scrollbar (fake observer only).
+- A badge's names in another font or with many partners: the names part
+  shortens with an ellipsis and the whole text is the badge's title; the
+  check measured only `p1`, `p2`, `e2` and `e3`.
 - A real `codex` or `ssh` node: only hand-written cards.
 - The server under a second local user, or reached through a real DNS
   rebinding page; the Host check is tested with a forged header.

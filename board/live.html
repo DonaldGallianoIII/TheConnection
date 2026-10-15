@@ -24,9 +24,9 @@
  * from the back/forward cache starts polling again on pageshow. It only
  * reads; nothing on the page writes to the mailbox. The window is at least
  * the viewport's height, the board's frame grows to the board and the page
- * scrolls down; the legend is the footer's first row (round 2). A list of
+ * scrolls down; the legend is the footer's first row. A list of
  * the roots at the top brings each tree into view, and each tree starts
- * with a heading naming its root (item 5). Under look.js OUTLINE_BELOW_PX
+ * with a heading naming its root. Under look.js OUTLINE_BELOW_PX
  * of width (a phone) the page draws the outline instead of the graph: one
  * indented row per session and the recent traffic, no wires. ?theme=dark or ?theme=daylight picks a
  * look, the switch flips it, and ?gray=1 draws the page in grayscale, the
@@ -98,7 +98,7 @@ const lookSwitch = createLookSwitch(document, win.title, {
     history.replaceState(null, '', `?${query}${location.hash}`);
   },
 });
-// The roots, at the top: each name brings its tree into view (round 2, item 5).
+// The roots, at the top: each name brings its tree into view.
 const roots = createRoots(document, win.body, (id) => fit.jump(id));
 const canvas = createCanvas(document, win.body);
 const board = createBoard(createKit(document, canvas));

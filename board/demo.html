@@ -95,7 +95,7 @@ for (const n of demo.nodes) {
 }
 win.body.append(chips);
 
-// The roots, at the top: each name brings its tree into view (round 2, item 5).
+// The roots, at the top: each name brings its tree into view.
 const roots = createRoots(document, win.body, (id) => fit.jump(id));
 roots.set(rootsList(demo));
 const canvas = createCanvas(document, win.body);

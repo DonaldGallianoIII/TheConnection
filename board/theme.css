@@ -15,11 +15,11 @@
  * label stay. Each kind of line differs by weight or dash, and the legend
  * in the footer names each in words.
  *
- * Text size (round 1, a2's MEDIUM-1): no font-size here is under 11 px, and
+ * Text size: no font-size here is under 11 px, and
  * the board is never scaled below 1 (look.js MIN_FIT_SCALE), so no text on
  * the board is drawn under 11 CSS px. tests/board-layout.test.mjs checks it.
  *
- * Page frame (round 2, items 1, 4 and 6): the window is at least the
+ * Page frame: the window is at least the
  * viewport's height less the page's margins, the board's frame grows to the
  * board's height and the page scrolls down, never sideways. The legend is
  * the footer's first row, never over the board. The pill and the footer
@@ -149,7 +149,7 @@
 
 /* Page backdrop, same radial glow as the notebook. The page scrolls down
  * when the board is taller than the viewport. --tc-page-pad is the margin
- * round the window (round 2): the window's least height is the viewport's
+ * round the window: the window's least height is the viewport's
  * less two of these. It is a size, not a color, so it lives here and not
  * in a look's token set. */
 .tc-backdrop {
@@ -171,9 +171,9 @@
 .tc-mount { width: 100%; min-width: 0; display: flex; justify-content: center; }
 
 /* ---------- window frame ---------- */
-/* Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status:
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
  * unreviewed. At least the viewport's height less the page's margins, and
- * as tall as the board needs past that (item 1). */
+ * as tall as the board needs past that. */
 .tc-win {
   width: min(1180px, 100%);
   min-height: calc(100vh - 2 * var(--tc-page-pad));
@@ -204,8 +204,8 @@
 .tc-dot.g { background: #28c840; }
 .tc-fname { white-space: nowrap; font-family: var(--tc-mono); font-size: 12px; font-weight: 600; margin-left: 4px; }
 .tc-sub { font-size: 11px; color: var(--tc-bar-dim); }
-/* The pill's words wrap onto a second line rather than end in an ellipsis
- * (round 2, item 6). */
+/* The pill's words wrap onto a second line rather than end in an
+ * ellipsis, so no words are lost. */
 .tc-conn {
   margin-left: auto;
   min-width: 0;
@@ -275,10 +275,10 @@
 .tc-stale[hidden] { display: none; }
 .tc-win[data-conn="stale"] .tc-wire.flow { animation: none; }
 
-/* Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status:
- * unreviewed. The footer: the legend on its own first row (item 4), then
- * the counts, each of which wraps to a new line rather than being cut off
- * (item 6). */
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
+ * unreviewed. The footer: the legend on its own first row, then
+ * the counts, each of which wraps to a new line rather than being cut
+ * off, so no words are lost. */
 .tc-foot {
   min-height: 30px;
   flex: none;
@@ -316,7 +316,7 @@
 .tc-chip[data-hue] { border-color: var(--tc-chip-hue); box-shadow: inset 3px 0 0 var(--tc-chip-hue); }
 
 /* ---------- canvas ---------- */
-/* Model: Claude Opus 5.5 (the BOARD fixer, rounds 1 and 2), 2026-10-14.
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14.
  * Status: unreviewed. The board wraps to the stage's width (look.js
  * layoutLevels) and keeps its size. The frame fills what the window has
  * left and grows to the board's height (look.js createFit sets it), so a
@@ -333,12 +333,13 @@
   overflow: hidden;
 }
 .tc-view { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
-/* a2's direction: a phone draws the outline instead of the graph. */
+/* A phone draws the outline instead of the graph: the window's data-view
+ * says which, and only that one shows. */
 .tc-win[data-view="outline"] .tc-canvas,
 .tc-win:not([data-view="outline"]) .tc-outline { display: none; }
 
-/* Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status:
- * unreviewed. Item 5: the list of roots at the top, each name a button
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
+ * unreviewed. The list of roots at the top, each name a button
  * that brings its tree into view, and the heading over each tree, a line
  * of words over a rule as wide as the tree. Words, not color. */
 .tc-roots { font-family: var(--tc-mono); font-size: 11px; line-height: 2; color: var(--tc-muted); }
@@ -369,7 +370,7 @@
 }
 .tc-head[hidden] { display: none; }
 
-/* The outline (a2's direction): one row per session, indented under its
+/* The outline: one row per session, indented under its
  * parent (look.js sets the indent) with a rule down the left of each
  * nested row; each tree headed by its root; then the recent traffic. Rows
  * sit on the node cards' face, so the words keep their checked contrast. */
@@ -404,7 +405,7 @@
 .tc-row[data-state="down"] .tc-row-state { color: var(--tc-red); font-weight: 600; }
 .tc-traffic-line { font-family: var(--tc-mono); font-size: 11px; color: var(--tc-text); padding: 2px 0; overflow-wrap: anywhere; }
 .tc-wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
-/* A wire's words are its title, shown on hover (round 2): the line itself
+/* A wire's words are its title, shown on hover: the line itself
  * takes the pointer; the layer round it does not. */
 .tc-wires path.tc-wire { pointer-events: visibleStroke; }
 
@@ -494,7 +495,7 @@
 }
 .tc-wire.flow.back { animation-direction: reverse; }
 .tc-wire.down { stroke: var(--tc-red); stroke-dasharray: 2 5; opacity: .8; }
-/* Model: Claude Opus 5.5 (the BOARD lane agent; round 2 by the BOARD fixer),
+/* Model: Claude Opus 5.5 (the BOARD lane agent and the BOARD fixer),
  * 2026-10-14. Status: unreviewed. The tree's connector is thin and solid,
  * from a parent's bottom to its child's top, under every wire, with no
  * words on the board (the legend names it); native is a long dash, its
@@ -502,7 +503,7 @@
 .tc-wire.kind-tree { stroke: var(--tc-muted); stroke-width: 1.25px; opacity: .8; }
 .tc-wire.kind-native { stroke: var(--tc-muted); stroke-width: 1.5px; stroke-dasharray: 10 4 2 4; opacity: .8; }
 .tc-arrow { fill: var(--tc-cyan); }
-/* Model: Claude Opus 5.5 (the BOARD fixer, round 2), 2026-10-14. Status:
+/* Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status:
  * unreviewed. A label's backing: the canvas's own face, so a label that
  * must sit over another wire hides that bit of it and reads. */
 .tc-wire-label-back { fill: var(--tc-inset); }
@@ -523,7 +524,7 @@
 }
 
 /* On a narrow screen the pill takes a row of its own under the title, so
- * its words never run into the look switch (round 2, item 6). */
+ * its words never run into the look switch. */
 @media (max-width: 640px) {
   .tc-sub, .tc-look-word { display: none; }
   .tc-body { padding: 8px; }
