@@ -24,13 +24,17 @@ it watched is reachable.
             lock (outbox/<login>/.send-<key>.lock) themselves and read
             /proc/locks to see a child blocked on it. Some make folders,
             a link or a file by hand in outbox/ and rename them (SSH fix
-            round 1, Claude Opus 5.5, unreviewed: D32's branches). Two
+            round 1, Claude Opus 5.5, unreviewed: D32's branches). Four
             tests write a loopback wrapper `ssh` in the root's temp
             folder that runs the fake and then this branch's own `tc
             gate` under a second TC_ROOT there, as a far machine would;
             one writes mail/.seq by hand, one plants a file in the far
-            mailbox. One test's wrapper prints past tc's output cap on
-            stdout after the fake. Six tests load tc as a module
+            mailbox; one (P3 fix round 1c, Claude Opus 5.5, unreviewed:
+            D36 (4)) starts that far gate through FAILING_GATE_BOOT,
+            which makes each create of a .tmp there fail with a passing
+            errno and runs tc in the same process. One test's wrapper
+            prints past tc's output cap on stdout after the fake. Six
+            tests load tc as a module
             (TC_ROOT set to the harness root first, put back after) and
             work in process, under the root only: one calls
             route_and_deliver with PATH set for that call to a wrapper
@@ -45,9 +49,9 @@ it watched is reachable.
             shares the mailbox with the user's own primary group (tc init
             --shared), reads modes and groups, and asks POSIX's rules what
             another member may do there.
-@deps       python3 stdlib (argparse, contextlib, fcntl, hashlib, io, json,
-            os, pathlib, pwd, random, re, shlex, stat, sys, unittest,
-            unittest.mock); tests/_root.py; load_tc, wait_until_blocked
+@deps       python3 stdlib (argparse, contextlib, errno, fcntl, hashlib,
+            io, json, os, pathlib, pwd, random, re, shlex, stat, sys,
+            unittest, unittest.mock); tests/_root.py; load_tc, wait_until_blocked
             and FINISH_CEILING_SECONDS from test_codex_route.py;
             UmaskTestCase, owner_patched_lstat and primary_group from
             test_shared.py; ../tc.
@@ -62,6 +66,7 @@ it watched is reachable.
 
 import argparse
 import contextlib
+import errno
 import fcntl
 import hashlib
 import io
@@ -185,6 +190,28 @@ SHORT_LOCK_WAIT_SECONDS = 0.5
 HOLD_PAST_LOCK_WAIT_SECONDS = 1.5
 # Owner may read, write and run the slow wrapper. Nobody else needs to.
 OWN_WRAPPER_MODE = 0o700
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), the audit's
+# LOW-4. The write failures that pass (tc's PASSING_WRITE_ERRNOS, written
+# here by name), and the far gate's start-up that makes every create of a
+# .tmp fail with one: argv is the errno's name, tc's path, then tc's own
+# arguments. It runs tc as __main__ in the same process, so no other
+# program starts.
+PASSING_ERRNO_NAMES = ("ENOSPC", "EDQUOT", "EIO")
+FAILING_GATE_BOOT = """import errno, os, runpy, sys
+failing = getattr(errno, sys.argv[1])
+real_open = os.open
+def open_failing(path, flags, *args, **kwargs):
+    if str(path).endswith(".tmp") and flags & os.O_CREAT:
+        raise OSError(failing, os.strerror(failing), str(path))
+    return real_open(path, flags, *args, **kwargs)
+os.open = open_failing
+sys.argv = sys.argv[2:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+# A far gate's busy words for a write that passes (tc's PASSING_WORDS,
+# written here); {what} names the step and its path, {why} the error.
+PASSING_WORDS = ("tc send: {what} ({why}); nothing sent. A full disk, a quota or an I/O error passes, so this is busy, "
+                 "not a refusal: try again later")
 
 
 def write_card(root, name, card):
@@ -365,30 +392,43 @@ def may_make_in(folder, uid, gids):
     return may(folder, uid, gids, MAY_WRITE) and may(folder, uid, gids, MAY_SEARCH)
 
 
-def far_gate_ssh(root, folder, far, key=FAR_KEY):
+def far_gate_ssh(root, folder, far, key=FAR_KEY, fail_errno=None):
     """A loopback `ssh`: it runs the harness's fake at `folder` (the record, and its exit code: a non-zero one ends the call there), then hands the same stdin and the remote command, its last argument, to a real `tc gate --as <key>` under the far mailbox `far`, as sshd does with a forced command. The env for a call that should find it.
 
     No real ssh runs (rule 5): the fake records every call and is asserted
     called. The far side is this branch's own tc, under a TC_ROOT of its
     own in the temp folder, so a test sees what a far gate answers.
 
-    @interacts  writes far-ssh-*/ssh (mode 0700) in the root's temp
-                folder; each call keeps its stdin in a file beside it.
-    @deps       shlex, os, sys; _root.TC; OWN_WRAPPER_MODE.
+    P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4). `fail_errno`,
+    an errno name (ENOSPC, say), runs that far gate through
+    FAILING_GATE_BOOT, which makes every create of a .tmp fail with it:
+    a far machine whose disk is full, or its quota reached, or its disk
+    failing.
+
+    @interacts  writes far-ssh-*/ssh (mode 0700), and with `fail_errno`
+                far-ssh-*/boot.py, in the root's temp folder; each call
+                keeps its stdin in a file beside it.
+    @deps       shlex, os, sys; _root.TC; OWN_WRAPPER_MODE,
+                FAILING_GATE_BOOT.
     @complexity O(1).
     @alloc      one folder, removed with the temp folder.
     """
     home = root.base / f"far-ssh-{len(list(root.base.glob('far-ssh-*')))}"
     home.mkdir()
     feed = shlex.quote(str(home / "stdin")) + ".$$"
+    run = f"{shlex.quote(sys.executable)} {shlex.quote(str(_root.TC))}"
+    if fail_errno is not None:
+        boot = home / "boot.py"
+        boot.write_text(FAILING_GATE_BOOT)
+        run = (f"{shlex.quote(sys.executable)} {shlex.quote(str(boot))} {shlex.quote(fail_errno)} "
+               f"{shlex.quote(str(_root.TC))}")
     wrapper = home / "ssh"
     wrapper.write_text("#!/bin/sh\n"
                        f"cat > {feed}\n"
                        f'{shlex.quote(str(folder / "ssh"))} "$@" < {feed} || exit $?\n'
                        "for last; do :; done\n"
                        f'SSH_ORIGINAL_COMMAND="$last" TC_ROOT={shlex.quote(str(far))} exec '
-                       f"{shlex.quote(sys.executable)} {shlex.quote(str(_root.TC))} gate --as {shlex.quote(key)} "
-                       f"< {feed}\n")
+                       f"{run} gate --as {shlex.quote(key)} < {feed}\n")
     wrapper.chmod(OWN_WRAPPER_MODE)
     return {"PATH": f"{home}{os.pathsep}{root.env['PATH']}"}
 
@@ -1212,6 +1252,49 @@ class FarAnswerTest(unittest.TestCase):
         self.assertIn(f"{TARGET} said: origin ", err)
         self.assertIn("could not be filed", err)
         self.assertNotIn("Traceback", err)
+
+    # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), the audit's LOW-4.
+    def test_a_far_gate_that_cannot_write_for_a_reason_that_passes_answers_10_and_the_message_stays_queued(self):
+        """Through the loopback fake's real far gate, every create of a .tmp there failing with each of PASSING_ERRNO_NAMES: the far gate answers 10 with its busy words and leaves no .tmp, no message and no filing; this side exits 4, keeps the message waiting, nothing in sent/ or refused/, with a note beside it whose first line is its words' summary.
+
+        Must reject a far write failure that passes answered with exit 1,
+        which this side files in refused/ for good, and one that leaves a
+        .tmp behind.
+
+        @interacts  per errno: writes the loopback wrapper and its failing
+                    start-up; one tc card, one send.
+        @deps       far_gate_ssh, assert_called, outbox, queue; errno, os.
+        @complexity O(1): three cases.
+        @alloc      one TcRoot per case and the far mailbox in its temp
+                    folder.
+        """
+        for name in PASSING_ERRNO_NAMES:
+            with self.subTest(errno=name):
+                with _root.TcRoot() as root:
+                    folder, calls = root.fake_bin("ssh", 0)
+                    far = root.base / "far"
+                    far.mkdir()
+                    env = far_gate_ssh(root, folder, far, fail_errno=name)
+                    root.tc("card", "b", "--ssh", TARGET)
+                    code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi", env=env)
+                    assert_called(self, folder, calls)
+                    path = queue(root, "b") / "000001-from-a.md"
+                    note = path.with_name(path.name + ".stderr")
+                    note_lines = note.read_text().splitlines() if note.exists() else []
+                    kept = (outbox(root, "b"), outbox(root, "b", "sent") + outbox(root, "b", "refused"))
+                    far_box = far / "mail" / "to-b"
+                    left = sorted(p.name for p in far_box.rglob("*") if p.is_file())
+                    far_filed = sorted(p.name for p in (far / "mail").rglob("*")
+                                       if ".origins" in p.parts and p.is_file())
+                far_words = PASSING_WORDS.format(what=f"could not write {far_box / f'000001-from-{FAR_KEY}.tmp'}",
+                                                 why=os.strerror(getattr(errno, name)))
+                reason = f"the far tc was busy, exit {EXIT_BUSY}: {far_words}"
+                self.assertEqual((code, out, err), (EXIT_QUEUED, "", KEPT_WORDS.format(target=TARGET, reason=reason,
+                                                                                     path=path)))
+                self.assertEqual(kept, (["000001-from-a.md"], []), "a far 10 was not kept waiting")
+                self.assertEqual(note_lines[:1], [f"could not reach {TARGET} ({reason})"],
+                                 "the note beside the waiting file does not hold this try's words")
+                self.assertEqual((left, far_filed), ([], []), "the far gate left a file behind")
 
 
 class BranchTest(unittest.TestCase):

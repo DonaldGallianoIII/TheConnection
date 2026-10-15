@@ -9,13 +9,26 @@ Tests for `tc health` and `tc watch` against a throwaway TC_ROOT.
             makes two card files, two inboxes and a lock file in one of
             them by hand, with ESC in them (the lock in its inbox since
             P3 fix round 1b, Claude Opus 5.5, unreviewed: D35).
-@deps       python3 stdlib (json, os, pathlib, subprocess, sys, tempfile,
-            time, unittest); tests/_root.py for HealthCardsTest
+            StuckOutboxTest (P3 fix round 1c, Claude Opus 5.5,
+            unreviewed: D36 (4)) runs tc through tests/_root.py with a
+            fake `ssh` that records its argv (asserted called), dates
+            three outbox files by hand, and loads tc as a module (TC_ROOT
+            set to the harness root first, put back after) with
+            wall_clock and gpu_stats replaced, so no program runs.
+@deps       python3 stdlib (argparse, contextlib, io, json, os, pathlib,
+            subprocess, sys, tempfile, time, unittest, unittest.mock);
+            tests/_root.py for HealthCardsTest and StuckOutboxTest;
+            load_tc from test_codex_route.py; FAKE_CONNECT_STDERR,
+            SSH_CONNECT_FAILED, TARGET, assert_called, login and queue
+            from test_ssh_route.py
 @complexity O(1) per test; the slowest waits a few poll intervals (about 5 s)
 @alloc      one tempdir per test, removed in tearDown; every child process
             is killed in tearDown
 """
 
+import argparse
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -24,6 +37,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 TC = pathlib.Path(__file__).resolve().parent.parent / "tc"
 # CARDS R5 (Claude Opus 5.5, unreviewed): the harness, for HealthCardsTest.
@@ -34,6 +48,8 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import _root  # noqa: E402  (needs the path line above)
+from test_codex_route import load_tc  # noqa: E402
+from test_ssh_route import FAKE_CONNECT_STDERR, SSH_CONNECT_FAILED, TARGET, assert_called, login, queue  # noqa: E402
 
 SETTLE_TIMEOUT = 10
 SETTLE_STEP = 0.2
@@ -43,6 +59,14 @@ QUIET = ["--load-ratio", "100000", "--mem-min-pct", "0", "--gpu-max-c", "100000"
 # acts on, and how tc health must print it.
 ESC = "\x1b"
 ESC_SHOWN = "\\x1b"
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4). How long an
+# outbox message waits before tc health lists it (tc's
+# OUTBOX_STALE_SECONDS, a day, written here); an hour, for a file dated
+# either side of it; and the time the replaced clock reads, any fixed
+# moment well after the epoch.
+STALE_SECONDS = 86400
+HOUR_SECONDS = 3600
+CLOCK = 2000000000
 
 
 class HealthTest(unittest.TestCase):
@@ -206,6 +230,64 @@ class HealthCardsTest(unittest.TestCase):
         for shown in (f"{ESC_SHOWN}q (?, account ?, route ?)", f"b (claude, account {ESC_SHOWN}[2J, route local)",
                       f"{ESC_SHOWN}x: 0 unread", f"stopped: {ESC_SHOWN}y"):
             self.assertIn(shown, out)
+
+
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), the audit's LOW-4.
+class StuckOutboxTest(unittest.TestCase):
+    """A queue that stays stuck is shown, not hidden: tc health lists every outbox message waiting longer than a day, retried or not.
+
+    @interacts  runs tc through tests/_root.py; loads tc in process
+                (TC_ROOT set to the harness root first, put back after)
+                with wall_clock and gpu_stats replaced; sets three files'
+                times by hand.
+    @deps       _root.TcRoot, load_tc.
+    @complexity O(1): three sends, one in-process snapshot and print.
+    @alloc      one TcRoot and one module.
+    """
+
+    def test_a_message_waiting_past_a_day_is_listed_with_its_note_and_a_younger_one_is_not(self):
+        """Three ssh messages for b: #1 tried and kept (its note names the connection's reason), #2 queued behind it and never tried, both dated past a day by the replaced clock, #3 an hour short of it: health lists #1 with its note's first line and #2 with none, never #3, in --json and in words.
+
+        Must reject a stuck queue health never shows (a far box that stays
+        broken hides behind retries), a file listed only once retried, and
+        a younger file listed.
+
+        @interacts  one tc card, three sends, one fake; os.utime on three
+                    files; loads tc and calls health_snapshot and
+                    cmd_health in process.
+        @deps       load_tc, queue, assert_called, login; argparse,
+                    contextlib, io, os, unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("ssh", SSH_CONNECT_FAILED, stderr=FAKE_CONNECT_STDERR)
+            root.tc("card", "b", "--ssh", TARGET)
+            for body in ("one", "two", "three"):
+                root.tc("send", "--from", "a", "--to", "b", body)
+            assert_called(self, folder, calls)
+            box = queue(root, "b")
+            ages = {"000001-from-a.md": STALE_SECONDS + HOUR_SECONDS, "000002-from-a.md": STALE_SECONDS + 1,
+                    "000003-from-a.md": STALE_SECONDS - HOUR_SECONDS}
+            for name, age in ages.items():
+                os.utime(box / name, (CLOCK - age, CLOCK - age))
+            tc = load_tc(root)
+            with mock.patch.object(tc, "wall_clock", lambda: CLOCK), mock.patch.object(tc, "gpu_stats", lambda: None):
+                stuck = tc.health_snapshot(gpu=False)["stuck_outbox"]
+                with contextlib.redirect_stdout(io.StringIO()) as printed:
+                    tc.cmd_health(argparse.Namespace(json=False))
+            text = printed.getvalue()
+        note = f"could not reach {TARGET} ({FAKE_CONNECT_STDERR.strip()})"
+        self.assertEqual(stuck, [
+            {"member": login(), "to": "b", "path": str(box / "000001-from-a.md"),
+             "age_s": STALE_SECONDS + HOUR_SECONDS, "note": note},
+            {"member": login(), "to": "b", "path": str(box / "000002-from-a.md"), "age_s": STALE_SECONDS + 1,
+             "note": None}])
+        self.assertIn(f"\nstuck      {box / '000001-from-a.md'}: {login()}'s mail to b, waiting 1d; "
+                      f"last failed try: {note}\n", text)
+        self.assertIn(f"\nstuck      {box / '000002-from-a.md'}: {login()}'s mail to b, waiting 1d; "
+                      f"no failed try noted beside it\n", text)
+        self.assertNotIn("000003-from-a.md", text, "a message younger than a day was listed")
 
 
 if __name__ == "__main__":

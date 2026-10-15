@@ -42,14 +42,21 @@ that the fake is reachable.
             fake of its own first that kills the gate ringing it, by that
             gate's pid once its command line is checked, and the test
             then kills the fake by its own pid in case. P3 fix round 1c:
-            one test sets an inbox to write and search only, and back.
-@deps       python3 stdlib (argparse, contextlib, fcntl, io, json, os,
-            pathlib, shlex, shutil, signal, stat, subprocess, sys,
-            unittest, unittest.mock); tests/_root.py; load_tc, ring_argv,
-            THREAD, own_fake and kill_own_fake from test_codex_route.py;
-            files_under from test_router.py;
-            UmaskTestCase, owner_patched_fstat and primary_group from
-            test_shared.py; login from test_ssh_route.py; ../tc.
+            one test sets an inbox to write and search only, and back;
+            one in-process test patches os.open, os.link and tc's `open`
+            so a message's .tmp fails to be made, written or linked
+            (failing_write); SharedOriginsTest moves mail/.origins and a
+            member's folder in it aside by hand, and runs a second
+            member's gate in process with branch_user patched.
+@deps       python3 stdlib (argparse, builtins, contextlib, errno, fcntl,
+            io, json, os, pathlib, shlex, shutil, signal, stat,
+            subprocess, sys, unittest, unittest.mock); tests/_root.py;
+            load_tc, ring_argv, THREAD, own_fake, kill_own_fake and
+            FINISH_CEILING_SECONDS from test_codex_route.py; files_under
+            from test_router.py; UmaskTestCase, owner_patched_fstat and
+            primary_group from test_shared.py; login, OTHER_MEMBER,
+            PASSING_ERRNO_NAMES, PASSING_WORDS, seen_as, may_make_in and
+            may_move_or_remove from test_ssh_route.py; ../tc.
 @complexity O(1) per test: one to fifteen tc runs, each under a second.
             The busy test waits out tc's own lock bound (3 s), and the
             size test pipes 1 MiB.
@@ -58,7 +65,9 @@ that the fake is reachable.
 """
 
 import argparse
+import builtins
 import contextlib
+import errno
 import fcntl
 import io
 import json
@@ -84,7 +93,8 @@ from test_codex_route import (FINISH_CEILING_SECONDS, THREAD, kill_own_fake, loa
                               ring_argv)
 from test_router import files_under  # noqa: E402
 from test_shared import UmaskTestCase, owner_patched_fstat, primary_group  # noqa: E402
-from test_ssh_route import OTHER_MEMBER, login, may_make_in, may_move_or_remove, seen_as  # noqa: E402
+from test_ssh_route import (OTHER_MEMBER, PASSING_ERRNO_NAMES, PASSING_WORDS, login, may_make_in,  # noqa: E402
+                            may_move_or_remove, seen_as)
 
 KEY = "homebox-b"
 TARGET = "u@h"
@@ -255,6 +265,92 @@ def health_keys(snap):
     """
     return (set(snap), set(snap.get("machine") or {}), set(snap.get("sessions") or {}),
             {name: set(entry) for name, entry in (snap.get("mail") or {}).items()})
+
+
+class FailingWrite:
+    """A text file whose write raises OSError(`number`), standing in for one tc opened to write: a full disk, a quota or a failing disk at the write.
+
+    @interacts  closes the real file it wraps when its `with` ends.
+    @deps       os.
+    @complexity O(1).
+    @alloc      none past the wrapped file.
+    """
+
+    def __init__(self, real, number):
+        """Wrap the open file `real`; every write raises `number`.
+
+        @interacts  none.
+        @deps       none.
+        @complexity O(1).
+        @alloc      none.
+        """
+        self.real, self.number = real, number
+
+    def __enter__(self):
+        """This wrapper, for the `with`.
+
+        @interacts  none.
+        @deps       none.
+        @complexity O(1).
+        @alloc      none.
+        """
+        return self
+
+    def __exit__(self, *exc):
+        """Close the wrapped file; let any exception through.
+
+        @interacts  closes one file.
+        @deps       none.
+        @complexity O(1).
+        @alloc      none.
+        """
+        self.real.close()
+        return False
+
+    def write(self, text):
+        """Raise OSError(number), as a write to a full disk does.
+
+        @interacts  none.
+        @deps       os.
+        @complexity O(1).
+        @alloc      the error, raised.
+        """
+        raise OSError(self.number, os.strerror(self.number))
+
+
+@contextlib.contextmanager
+def failing_write(tc, stage, number):
+    """While entered, the message .tmp tc makes fails at `stage` with OSError(`number`): "make" its os.open, "write" its write (tc's open of a descriptor to write returns a FailingWrite), "link" its os.link.
+
+    P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), the audit's
+    LOW-4 and LOW-11. One Linux user cannot fill a disk on purpose, so the
+    three calls a publish makes are stood in for.
+
+    @interacts  patches os.open, os.link and tc's module name `open` while
+                entered.
+    @deps       FailingWrite; builtins, os, unittest.mock.
+    @complexity O(1) per call.
+    @alloc      the patches, undone on exit.
+    """
+    real_open, real_link = os.open, os.link
+
+    def opened(path, flags, *args, **kwargs):
+        if stage == "make" and str(path).endswith(".tmp") and flags & os.O_CREAT:
+            raise OSError(number, os.strerror(number))
+        return real_open(path, flags, *args, **kwargs)
+
+    def linked(src, dst, *args, **kwargs):
+        if stage == "link" and str(src).endswith(".tmp"):
+            raise OSError(number, os.strerror(number))
+        return real_link(src, dst, *args, **kwargs)
+
+    def text_open(file, mode="r", *args, **kwargs):
+        made = builtins.open(file, mode, *args, **kwargs)
+        return FailingWrite(made, number) if stage == "write" and isinstance(file, int) and "w" in mode else made
+
+    with mock.patch.object(os, "open", opened), mock.patch.object(os, "link", linked), \
+            mock.patch.object(tc, "open", text_open, create=True):
+        yield
 
 
 def text_stdin(text):
@@ -788,6 +884,49 @@ class GateInProcessTest(unittest.TestCase):
         self.assertNotIn("cards", json.loads(health[1]))
         self.assertEqual(sent[0], 0, sent)
         self.assertEqual(landed, ["000001-from-homebox-b.md"])
+
+    # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), the audit's LOW-4 and LOW-11.
+    def test_a_write_that_fails_for_a_reason_that_passes_is_busy_at_the_gate_and_leaves_nothing(self):
+        """In process, the message's .tmp failing to be made, written or linked with each errno PASSING_ERRNO_NAMES names: the gate exits 10 with the busy words, and leaves no .tmp, no message and no filing; tc send in process, the same failure, exits 1 and leaves nothing (row 10 names only the gate for this).
+
+        Must reject a gate that answers such a failure with exit 1 (the
+        near side would file the message in refused/ for good) and a write
+        that fails after its create and leaves its .tmp (the audit's
+        LOW-11).
+
+        @interacts  per errno and stage: loads tc; calls cmd_gate and
+                    cmd_send once each under failing_write; lists the
+                    inbox.
+        @deps       load_tc, run_gate, failing_write, filing; argparse,
+                    contextlib, errno, io, os.
+        @complexity O(1): nine cases.
+        @alloc      one TcRoot and one module per case.
+        """
+        for name in PASSING_ERRNO_NAMES:
+            number = getattr(errno, name)
+            for stage in ("make", "write", "link"):
+                with self.subTest(errno=name, stage=stage):
+                    with _root.TcRoot() as root:
+                        tc = load_tc(root)
+                        with failing_write(tc, stage, number):
+                            gated = self.run_gate(tc, f"/x/tc send --from a --to b --origin {ORIGIN}")
+                            sent = 0
+                            with contextlib.redirect_stdout(io.StringIO()), \
+                                    contextlib.redirect_stderr(io.StringIO()):
+                                try:
+                                    tc.cmd_send(argparse.Namespace(sender="a", to="b", message="hi", origin=None))
+                                except SystemExit as stop:
+                                    sent = stop.code
+                        box = root.path / "mail" / "to-b"
+                        left = sorted(p.name for p in box.rglob("*") if p.is_file())
+                        filed = filing(root, KEY, ORIGIN).exists()
+                    what = (f"could not publish {box / f'000001-from-{KEY}.md'}" if stage == "link"
+                            else f"could not write {box / f'000001-from-{KEY}.tmp'}")
+                    self.assertEqual(gated, (EXIT_BUSY, "", PASSING_WORDS.format(what=what, why=os.strerror(number))
+                                             + "\n"))
+                    self.assertEqual(sent, EXIT_REFUSED, "tc send's own write failure is no longer a refusal")
+                    self.assertEqual(left, [], "a write that failed left a file in the inbox")
+                    self.assertFalse(filed, "a delivery that never landed filed its origin")
 
     # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (5), anything new stays home unless named.
     def test_a_key_health_gains_later_never_reaches_the_gate(self):
