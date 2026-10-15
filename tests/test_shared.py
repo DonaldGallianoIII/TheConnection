@@ -176,7 +176,16 @@ the owner's human QA (D4, qa/human/route-shared.md).
             test chmods a status file and links it from outside TC_ROOT.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl, grp,
             importlib, io, json, os, pathlib, pwd, re, stat, subprocess,
-            sys, time, unittest, unittest.mock); tests/_root.py.
+            sys, time, unittest, unittest.mock); tests/_root.py. Imported
+            by others (P3 fix round 1c, Claude Opus 5.5, unreviewed: the
+            audit's LOW-28, option A): test_ssh_route.py UmaskTestCase,
+            owner_patched_lstat and primary_group; test_gate.py
+            UmaskTestCase, owner_patched_fstat and primary_group;
+            test_wake_files.py UmaskTestCase, contents, load_tc,
+            owner_patched_fstat, owner_patched_lstat, primary_group and
+            tree; test_inbox_pinned.py UmaskTestCase, as_member, load_tc
+            and primary_group; test_codex_route.py owner_patched_lstat and
+            owner_patched_fstat.
 @complexity O(1) per test: a handful of tc runs over a root of a few dozen
             entries, once per group tested (one or two); the round 8
             swap test O(p) over p points, kinds and moments of a swap
@@ -1213,7 +1222,6 @@ class NoPlantedLinksTest(UmaskTestCase):
                 self.assertTrue(creating[0] & os.O_EXCL, f"{path.name}: O_CREAT without O_EXCL")
 
 
-
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19 and the audit's MEDIUM-5 and LOW-9.
 class RegularFilesOnlyTest(UmaskTestCase):
     """D19: messages only from regular files, a FIFO at a lock's name refused, and no listener, count or status age taken through a link.
@@ -1433,7 +1441,6 @@ class RegularFilesOnlyTest(UmaskTestCase):
         mail = json.loads(out)["mail"]
         self.assertIsNotNone(mail["a"]["status_age_s"], "a real status file lost its age")
         self.assertIsNone(mail["b"]["status_age_s"], "tc health dated a status file through a link")
-
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20.
@@ -1798,7 +1805,6 @@ class NobodyTouchesAnotherMembersMailTest(UmaskTestCase):
         self.assertIn("from a", out.getvalue())
         self.assertNotIn("no unread mail", again.getvalue(),
                          "a read that could move nothing said there is no unread mail")
-
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19 (init makes the

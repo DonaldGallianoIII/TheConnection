@@ -130,7 +130,8 @@ class FeedLeakTest(unittest.TestCase):
         """1,000 feed() calls on one Board: VmRSS grows less than 2,048 kB, no fd left open.
 
         The mailbox holds three sent messages, WORKERS more pairs written by
-        hand in tc's layout (a .tmp renamed here; tc's send links, mail/.seq raised once after), a codex card, a status line and one proven
+        hand in tc's layout (a .tmp renamed here; tc's send links, mail/.seq
+        raised once after), a codex card, a status line and one proven
         listener, so every branch of feed() runs each call. Must reject a
         Board that keeps what it builds: keeping each feed grew RSS about
         42 MB by hand.

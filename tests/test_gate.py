@@ -203,6 +203,12 @@ ORIGINS_NOT_MADE_WORDS = ("origin {origin} was not filed: {top} is not there, an
 # gives it). Made up for the test, past what tc reads.
 ORIGINS_ASIDE = ".origins-before-1c"
 BRANCH_ASIDE = ".squatted-{name}-1"
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): the audit's LOW-12. A
+# locale whose encoding is ASCII: C, with Python's UTF-8 mode and its C
+# locale coercion turned off, so open() without an encoding writes ASCII.
+ASCII_LOCALE = {"LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"}
+# A body past ASCII, two and three UTF-8 bytes a character.
+NOT_ASCII_BODY = "café ✓"
 # The member model's users (tests/test_ssh_route.py's may_*): the init
 # user is the running user; ann and ben, two other members, take the next
 # two ids, so each owns what the model says it owns.
@@ -787,6 +793,30 @@ class GateTest(unittest.TestCase):
             self.assertEqual((proc.returncode, out, err), (EXIT_REFUSED, "", NOT_UTF8_WORDS))
             self.assertEqual(after, [], f"a body that is not UTF-8 wrote {after}")
 
+    # P3 fix round 1c (Claude Opus 5.5, unreviewed): the audit's LOW-12.
+    def test_a_message_is_written_as_utf8_whatever_the_locale(self):
+        """Under ASCII_LOCALE, a gated send and a tc send, each with NOT_ASCII_BODY on stdin, exit 0, and each message file's bytes end with the body's UTF-8.
+
+        Must reject a message written in the locale's encoding: under
+        ASCII it fails at the first character past ASCII, a traceback
+        after a number is taken, and under another locale it writes bytes
+        tc's strict UTF-8 reader then refuses.
+
+        @interacts  one gate run and one send, each with the locale set
+                    for the call; reads the two message files' bytes.
+        @deps       gate; _root.TcRoot.tc.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            gated = gate(root, "/x/tc send --from a --to b", NOT_ASCII_BODY, env=ASCII_LOCALE)
+            sent = root.tc("send", "--from", "a", "--to", "b", stdin=NOT_ASCII_BODY, env=ASCII_LOCALE)
+            raw = {p.name: p.read_bytes() for p in (root.path / "mail" / "to-b").glob("*.md")}
+        self.assertEqual((gated[0], sent[0]), (0, 0), (gated, sent))
+        self.assertEqual(sorted(raw), [f"000001-from-{KEY}.md", "000002-from-a.md"])
+        for name, data in raw.items():
+            self.assertTrue(data.endswith(f"\n\n{NOT_ASCII_BODY}\n".encode("utf-8")), f"{name}: {data!r}")
+
     def test_tc_send_with_origin_delivers_once_and_a_bad_id_is_a_usage_error(self):
         """A far key with no forced command runs tc send itself: `--origin` delivers once, the repeat says already delivered; a bad id exits 9 and writes nothing.
 
@@ -1011,7 +1041,6 @@ class GateInProcessTest(unittest.TestCase):
         self.assertEqual(landed, ["000001-from-homebox-b.md"], "a planted filing dropped the message")
         self.assertIn(f"origin {ORIGIN} could not be filed", err)
         self.assertEqual(kept, "planted\n")
-
 
     def test_another_members_renamed_filing_never_drops_this_keys_message(self):
         """In process: the id of the next message, as a filing this user owns, put where another member could put it: flat in mail/.origins/ (whose owner may rename this user's filings in it), and in a mail/.origins/<login>/<key>/ another member made first (os.fstat patched so mail/.origins/<login>/ reads as theirs). The gated send delivers, with a warning naming that member's folder; nothing is dropped.

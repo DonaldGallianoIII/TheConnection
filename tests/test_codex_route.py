@@ -60,8 +60,11 @@ rewrites it as `clear`, so the D14 and D16 tests read its state
             FINISH_CEILING_SECONDS, load_tc and wait_until_blocked;
             test_flush.py FINISH_CEILING_SECONDS, LOCK_POLL_SECONDS and
             load_tc; test_gate.py FINISH_CEILING_SECONDS, THREAD,
-            load_tc and ring_argv (SSH fix round 1, Claude Opus 5.5,
-            unreviewed: the audit's LOW-27).
+            kill_own_fake, load_tc, own_fake and ring_argv (SSH fix round
+            1, Claude Opus 5.5, unreviewed: the audit's LOW-27; P3 fix
+            round 1c, Claude Opus 5.5, unreviewed: the audit's LOW-28,
+            kill_own_fake and own_fake added); test_health.py load_tc
+            (round 1c).
 @complexity O(1) per test: two to five tc runs and as many fake calls,
             each under a second. A blocked-child check polls /proc/locks
             at most BLOCK_CEILING_SECONDS / LOCK_POLL_SECONDS = 100 times, each

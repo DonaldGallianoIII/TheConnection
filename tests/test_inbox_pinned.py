@@ -469,7 +469,7 @@ class InboxPinnedTest(UmaskTestCase):
             self.assertLessEqual(abs(mine["newest_mail_age_s"] - REAL_AGE_SECONDS), AGE_SLACK_SECONDS,
                                  f"the newest mail's age is not the real inbox's: {mine}")
         elif row.target == "branch":
-            self.assertIn(f"1 waiting for {SSH_TARGET} belong to other members", ran.out,
+            self.assertIn(f"1 waiting for {SSH_TARGET} from other members", ran.out,  # P3 fix round 1c: LOW-16
                           "flush's count is not the real branch's")
             self.assertEqual((ran.code, ran.err), (0, ""))
             self.assertEqual(files_in(real / f"to-{FAR_NAME}"), [QUEUED_NAME])

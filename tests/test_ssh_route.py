@@ -54,10 +54,19 @@ it watched is reachable.
             another member may do there.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, hashlib,
             io, json, os, pathlib, pwd, random, re, shlex, stat, sys,
-            unittest, unittest.mock); tests/_root.py; load_tc, wait_until_blocked
-            and FINISH_CEILING_SECONDS from test_codex_route.py;
-            UmaskTestCase, owner_patched_lstat and primary_group from
-            test_shared.py; ../tc.
+            threading, unittest, unittest.mock); tests/_root.py; load_tc,
+            wait_until_blocked and FINISH_CEILING_SECONDS from
+            test_codex_route.py; UmaskTestCase, owner_patched_lstat and
+            primary_group from test_shared.py; ../tc. Imported by others
+            (P3 fix round 1c, Claude Opus 5.5, unreviewed: the audit's
+            LOW-28, option A): test_flush.py FAKE_BUSY_STDERR,
+            FAKE_CONNECT_STDERR, OTHER_MEMBER, OTHER_TARGET,
+            OWN_WRAPPER_MODE, QUEUED_WORDS, SHORT_LOCK_WAIT_SECONDS,
+            SSH_CONNECT_FAILED, TARGET, assert_called, login, outbox, queue
+            and send_lock_path; test_gate.py login, OTHER_MEMBER,
+            PASSING_ERRNO_NAMES, PASSING_WORDS, seen_as, may_make_in and
+            may_move_or_remove; test_health.py FAKE_CONNECT_STDERR,
+            SSH_CONNECT_FAILED, TARGET, assert_called, login and queue.
 @complexity O(1) per test: one to five tc runs and as many fake calls,
             each under a second. One test waits out tc's own lock bound
             (LOCK_WAIT_SECONDS, 3 s), and the timeout test
@@ -113,6 +122,10 @@ SSH_CONNECT_FAILED = 255
 # C3's words, written here.
 SENT_WORDS = "sent over ssh to {target}"
 KEPT_WORDS = "could not reach {target} ({reason}); kept in outbox: {path}. Run: tc flush\n"
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): the audit's LOW-15. A far
+# 10 reached the far tc, which answered busy: it is said so, never as a
+# target this side could not reach.
+BUSY_KEPT_WORDS = "{target} was busy ({reason}); kept in outbox: {path}. Run: tc flush\n"
 QUEUED_WORDS = "{target} has {n} waiting in the outbox; queued behind them. Run: tc flush\n"
 NOT_TRIED_WORDS = ("{target} was not tried: another tc is sending to it right now (a send or a tc flush); "
                    "kept in outbox: {path}. Run: tc flush\n")
@@ -605,19 +618,21 @@ class SshRouteTest(unittest.TestCase):
         self.assertEqual(len(seen), 1)
 
     def test_a_connection_failure_or_a_far_10_keeps_the_message_and_exits_4(self):
-        """Fake ssh exiting 255, or 10 (D23): exit 4, one file waiting in outbox/to-b/, nothing in sent/ or refused/, stderr names tc flush.
+        """Fake ssh exiting 255, or 10 (D23): exit 4, one file waiting in outbox/to-b/, nothing in sent/ or refused/, stderr names tc flush; a 255 `could not reach` the target, a far 10 says the target `was busy` (P3 fix round 1c, Claude Opus 5.5, unreviewed: the audit's LOW-15).
 
         Must reject a far 10 filed as a refusal: it was busy and wrote
-        nothing, so it must be tried again.
+        nothing, so it must be tried again. Must reject a far 10 reported
+        as `could not reach`: the far tc was reached and answered, and
+        the words would point a person at the network.
 
         @interacts  per case: one tc card, one send, one fake call.
         @deps       assert_called, outbox.
         @complexity O(1): two cases.
         @alloc      one TcRoot per case.
         """
-        cases = [(SSH_CONNECT_FAILED, FAKE_CONNECT_STDERR, FAKE_CONNECT_STDERR.strip()),
-                 (EXIT_BUSY, FAKE_BUSY_STDERR, f"the far tc was busy, exit {EXIT_BUSY}: {FAKE_BUSY_STDERR.strip()}")]
-        for exit_code, stderr, reason in cases:
+        cases = [(SSH_CONNECT_FAILED, FAKE_CONNECT_STDERR, KEPT_WORDS, FAKE_CONNECT_STDERR.strip()),
+                 (EXIT_BUSY, FAKE_BUSY_STDERR, BUSY_KEPT_WORDS, f"exit {EXIT_BUSY}: {FAKE_BUSY_STDERR.strip()}")]
+        for exit_code, stderr, words, reason in cases:
             with self.subTest(exit_code=exit_code):
                 with _root.TcRoot() as root:
                     folder, calls = root.fake_bin("ssh", exit_code, stderr=stderr)
@@ -629,7 +644,7 @@ class SshRouteTest(unittest.TestCase):
                     filed = outbox(root, "b", "sent") + outbox(root, "b", "refused")
                 self.assertEqual(code, EXIT_QUEUED, err)
                 self.assertEqual(out, "")
-                self.assertEqual(err, KEPT_WORDS.format(target=TARGET, reason=reason, path=path))
+                self.assertEqual(err, words.format(target=TARGET, reason=reason, path=path))
                 self.assertEqual(len(seen), 1)
                 self.assertEqual(waiting, ["000001-from-a.md"])
                 self.assertEqual(filed, [])
@@ -1085,8 +1100,9 @@ class RoundTripTest(unittest.TestCase):
         self.assertEqual(waiting, ([], []), "a message still waits in an outbox")
 
 
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 3 and 4.
 class OriginIdTest(unittest.TestCase):
-    """SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 3 and 4. Each origin id carries a random part of its own, drawn once and read back by every retry, and the ssh run outlasts a far gate's worst case.
+    """Each origin id carries a random part of its own, drawn once and read back by every retry, and the ssh run outlasts a far gate's worst case.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, load_tc, far_gate_ssh.
@@ -1187,8 +1203,9 @@ class OriginIdTest(unittest.TestCase):
         self.assertGreater(tc.SSH_SEND_SECONDS, far_worst)
 
 
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 7 and 8 and the audit's MEDIUM-2, MEDIUM-4 and LOW-4.
 class FarAnswerTest(unittest.TestCase):
-    """SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 7 and 8 and the audit's MEDIUM-2, MEDIUM-4 and LOW-4. What the far side says reaches the sender bounded and filtered, its warnings on a delivery included, and a far code tc does not know exits 11.
+    """What the far side says reaches the sender bounded and filtered, its warnings on a delivery included, and a far code tc does not know exits 11.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, far_gate_ssh.
@@ -1357,17 +1374,18 @@ class FarAnswerTest(unittest.TestCase):
                                        if ".origins" in p.parts and p.is_file())
                 far_words = PASSING_WORDS.format(what=f"could not write {far_box / f'000001-from-{FAR_KEY}.tmp'}",
                                                  why=os.strerror(getattr(errno, name)))
-                reason = f"the far tc was busy, exit {EXIT_BUSY}: {far_words}"
-                self.assertEqual((code, out, err), (EXIT_QUEUED, "", KEPT_WORDS.format(target=TARGET, reason=reason,
-                                                                                     path=path)))
+                reason = f"exit {EXIT_BUSY}: {far_words}"
+                self.assertEqual((code, out, err), (EXIT_QUEUED, "", BUSY_KEPT_WORDS.format(target=TARGET,
+                                                                                          reason=reason, path=path)))
                 self.assertEqual(kept, (["000001-from-a.md"], []), "a far 10 was not kept waiting")
-                self.assertEqual(note_lines[:1], [f"could not reach {TARGET} ({reason})"],
+                self.assertEqual(note_lines[:1], [f"{TARGET} was busy ({reason})"],
                                  "the note beside the waiting file does not hold this try's words")
                 self.assertEqual((left, far_filed), ([], []), "the far gate left a file behind")
 
 
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and D33 part 1.
 class BranchTest(unittest.TestCase):
-    """SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and D33 part 1. This user's outbox branch, outbox/<login>/, is refused when it is not this user's own real folder, with words naming its owner and the one command that clears it, and tc health lists it.
+    """This user's outbox branch, outbox/<login>/, is refused when it is not this user's own real folder, with words naming its owner and the one command that clears it, and tc health lists it.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, load_tc, owner_patched_lstat.

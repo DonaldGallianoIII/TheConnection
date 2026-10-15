@@ -176,7 +176,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             and its .md kept (rounds 4 and 5), so the inbox empties; a
             file still in the inbox after its rename (a hard link a
             member made at the target first, which turns the rename into
-            nothing) is named as not moved, never as read (round 5). One command waits at most LOCK_WAIT_SECONDS in all
+            nothing) is named as not moved, never as read (round 5).
+            One command waits at most LOCK_WAIT_SECONDS in all
             for the flocks on mail/.seq and its inbox lock (one deadline,
             a one-shot SIGALRM timer), and then refuses, exit 10 (busy,
             D23), naming each holder /proc/locks shows, its user and
@@ -422,8 +423,9 @@ NEW_FILE_MODE = 0o666
 # Phase fix round 1 (Claude Opus 5.5, unreviewed): D16, the ring marker's
 # states and the backoff after a ring that timed out.
 # The first line of mail/.ring-pending-<name> says why a ring is owed, or
-# that none is (RING_CLEAR, below). Only RING_TIMED_OUT holds later rings back. codex's own words go on the second
-# line, so nothing codex prints can pass for a state.
+# that none is (RING_CLEAR, below). Only RING_TIMED_OUT holds later rings
+# back. codex's own words go on the second line, so nothing codex prints
+# can pass for a state.
 RING_JOINED = "joined with unread mail"
 RING_RINGING = "ringing"
 RING_FAILED = "failed"
@@ -2681,6 +2683,10 @@ def cmd_init(args):
         os.close(root_fd)
 
 
+# ---------- mailbox: the pinned inbox, locks, the publish, origin ids, send, read, peek, wait, status, log ----------
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): the audit's LOW-17. The
+# core mailbox code had sat under the shared mailbox divider above.
+
 # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, every inbox act goes
 # through one pinned handle (the audit's HIGH-1, audits/2026-10-15-1409-full;
 # known bug no-follow-open-guards-only-the-last-name). A member who owns an
@@ -3231,7 +3237,8 @@ def next_seq(deadline=None):
     @alloc      one open file, closed on return.
     """
     make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
-    with open(open_by_name(SEQ_FILE, os.O_RDWR | os.O_APPEND), "a+") as f:  # SHARED D17 (Claude Opus 5.5, unreviewed)
+    # SHARED D17 (Claude Opus 5.5, unreviewed); P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-12, UTF-8 named.
+    with open(open_by_name(SEQ_FILE, os.O_RDWR | os.O_APPEND), "a+", encoding="utf-8") as f:
         if not flock_within(f, fcntl.LOCK_EX, deadline):  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20
             refuse(busy_words(SEQ_FILE, f), EXIT_BUSY)  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), the holder named
         f.seek(0)
@@ -3309,8 +3316,10 @@ def write_new_file(path, text, mode=NEW_FILE_MODE, dir_fd=None):
     through. Raises OSError (FileExistsError for a planted link or file);
     the caller refuses with words, but for a message's .tmp, where
     deliver_local takes FileExistsError as a taken number and tries the
-    next (SHARED fix round 5, Claude Opus 5.5, unreviewed). The umask applies to `mode`, and the
-    text is encoded as Path.write_text would. SHARED fix round 1 (Claude
+    next (SHARED fix round 5, Claude Opus 5.5, unreviewed). The umask
+    applies to `mode`, and the text is encoded as UTF-8 whatever the
+    locale (P3 fix round 1c, Claude Opus 5.5, unreviewed: the audit's
+    LOW-12), as read_regular_file decodes it. SHARED fix round 1 (Claude
     Opus 5.5, unreviewed): a message or card under a shared mailbox passes
     SHARED_OWNED_FILE_MODE (D20 item 2); the umask cannot add bits to it.
     SHARED D21 (Claude Opus 5.5, unreviewed): .shared passes
@@ -3341,7 +3350,7 @@ def write_new_file(path, text, mode=NEW_FILE_MODE, dir_fd=None):
     fd = os.open(path, NEW_FILE_FLAGS, mode, dir_fd=dir_fd)
     made = os.fstat(fd)
     try:
-        with open(fd, "w") as f:
+        with open(fd, "w", encoding="utf-8") as f:  # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-12
             f.write(text)
     except BaseException:
         with contextlib.suppress(OSError):  # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-11
@@ -4498,8 +4507,8 @@ def cmd_status(args):
 
     @interacts  checks the name first when one is given (C0, exit 6,
                 nothing written); reads ROOT/.shared and makes status/
-                (make_folder); writes status/<name>.md whole
-                (open_by_name), or reads every status file
+                (make_folder); writes status/<name>.md whole, as UTF-8
+                (open_by_name; P3 fix round 1c), or reads every status file
                 (read_regular_file); prints to stdout, and to stderr for a
                 file it will not show.
     @deps       require_names, make_folder, open_by_name,
@@ -4529,7 +4538,8 @@ def cmd_status(args):
     # SHARED D17 (Claude Opus 5.5, unreviewed): a link at status/<name>.md is refused.
     # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 2, made 0640 when shared.
     mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
-    with open(open_by_name(STATUS / f"{args.name}.md", os.O_WRONLY | os.O_TRUNC, mode), "w") as f:
+    # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-12, written as UTF-8, as read_regular_file reads it.
+    with open(open_by_name(STATUS / f"{args.name}.md", os.O_WRONLY | os.O_TRUNC, mode), "w", encoding="utf-8") as f:
         f.write(f"## {args.name} status, {now_iso()}\n\n{args.text}\n")
     print(f"status posted for {args.name}")
 
@@ -5269,8 +5279,9 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on
     That refusal is Delivery exit 10 (EXIT_BUSY), not 1: each try moved
     mail/.seq on, so the next send starts past the taken names, and the
     ssh route keeps a far 10 queued where a 1 would file it as refused
-    (C3). One code path, private or shared. A link that fails for any other reason refuses
-    the send with words, never a traceback, and leaves no .tmp. SHARED fix
+    (C3). One code path, private or shared. A link that fails for any
+    other reason refuses the send with words, never a traceback, and
+    leaves no .tmp. SHARED fix
     round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-3. On a
     filesystem without hard links (os.link fails with one of
     NO_HARD_LINK_ERRNOS) the words say so: tc needs them so a message
@@ -5613,7 +5624,8 @@ def write_ring_marker(name, state, detail):
 
     @interacts  opens mail/.ring-pending-<name> (making it when missing),
                 waits at most LOCK_WAIT_SECONDS for its flock, then
-                truncates and writes it.
+                truncates and writes it, as UTF-8 (P3 fix round 1c, Claude
+                Opus 5.5, unreviewed: the audit's LOW-12).
     @deps       open_regular, flock_within, now_iso; fcntl, os; MAIL,
                 LOCK_HELD_WORDS.
     @complexity O(d) over d characters of `detail`, plus at most
@@ -5627,7 +5639,7 @@ def write_ring_marker(name, state, detail):
     except (OSError, ValueError) as err:
         return err.strerror if isinstance(err, OSError) and err.strerror else str(err)
     try:
-        with open(fd, "w") as f:
+        with open(fd, "w", encoding="utf-8") as f:  # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-12
             if not flock_within(f, fcntl.LOCK_EX):  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20
                 return LOCK_HELD_WORDS.format(what=marker)
             f.truncate(0)
@@ -6826,7 +6838,10 @@ def ssh_run(where, sender, to, origin, text):
     SSH_SEND_SECONDS, ssh killed by a signal, or ssh that would not start
     is SSH_KEPT, with why; any other exit is the far side's answer,
     SSH_REFUSED (file_outcome passes 1, 6, 7 and 8 through and turns any
-    other into exit 11, D33 part 7).
+    other into exit 11, D33 part 7). P3 fix round 1c (Claude Opus 5.5,
+    unreviewed): the audit's LOW-15. A far 10's why is `exit 10: <the far
+    stderr's first line>`, and file_outcome and flush say the target was
+    busy, never that it could not be reached: it was reached, and answered.
 
     SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-4.
     The run goes through ssh_capture, which keeps at most
@@ -6862,10 +6877,9 @@ def ssh_run(where, sender, to, origin, text):
     if code == SSH_CONNECT_FAILED:
         return SshOutcome(SSH_KEPT, code, done.out, done.err,
                           printable(first) if first else f"ssh exited {SSH_CONNECT_FAILED}", done.cut)
-    if code == EXIT_BUSY:
+    if code == EXIT_BUSY:  # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-15, file_outcome says busy
         return SshOutcome(SSH_KEPT, code, done.out, done.err,
-                          f"the far tc was busy, exit {EXIT_BUSY}" + (f": {printable(first)}" if first else ""),
-                          done.cut)
+                          f"exit {EXIT_BUSY}" + (f": {printable(first)}" if first else ""), done.cut)
     if code < 0:
         return SshOutcome(SSH_KEPT, code, done.out, done.err, f"ssh was killed by signal {-code}", done.cut)
     return SshOutcome(SSH_REFUSED, code, done.out, done.err, None, done.cut)
@@ -6987,6 +7001,24 @@ def carry_note(path, filed):
     return None
 
 
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): the audit's LOW-15.
+def kept_summary(target, outcome):
+    """What a kept ssh try says first, in words: `<target> was busy (<why>)` for a far 10, which reached the far tc and was answered, else `could not reach <target> (<why>)`.
+
+    file_outcome opens its words and the note with it, and tc flush's
+    stop line says busy the same way, so nothing points a person at the
+    network for a far side that answered busy.
+
+    @interacts  none; string work only.
+    @deps       EXIT_BUSY.
+    @complexity O(r) over r characters of the why.
+    @alloc      one string, returned.
+    """
+    if outcome.code == EXIT_BUSY:
+        return f"{target} was busy ({outcome.reason})"
+    return f"could not reach {target} ({outcome.reason})"
+
+
 def file_outcome(path, where, outcome):
     """File the outbox message at `path` by the far side's answer `outcome`: (exit, words, warnings), C3's.
 
@@ -6996,7 +7028,10 @@ def file_outcome(path, where, outcome):
     failed) stays waiting, with a warning: the next tc flush sends it
     again and the far side answers already delivered (D25). SSH_KEPT:
     left where it is; exit 4, words `could not reach <target> (<reason>);
-    kept in outbox: <path>. Run: tc flush`. SSH_REFUSED: into refused/,
+    kept in outbox: <path>. Run: tc flush`, or for a far 10 `<target> was
+    busy (exit 10: <its words>); kept in outbox: ...` (kept_summary; P3
+    fix round 1c, Claude Opus 5.5, unreviewed: the audit's LOW-15).
+    SSH_REFUSED: into refused/,
     with the far exit code and stderr in a note beside it
     (REFUSAL_NOTE_SUFFIX); exit the far code, words the far stderr and
     then where the message went; nothing retries it. What the far side
@@ -7028,7 +7063,7 @@ def file_outcome(path, where, outcome):
                 refused (write_note); moves the note beside a filed
                 message with it (carry_note).
     @deps       file_away, write_note, carry_note, note_path,
-                printable_lines; EXIT_QUEUED, EXIT_FAR_UNKNOWN,
+                kept_summary, printable_lines; EXIT_QUEUED, EXIT_FAR_UNKNOWN,
                 FAR_ANSWER_CODES, OUTBOX_SENT, OUTBOX_REFUSED,
                 SSH_OUTPUT_MAX_BYTES, SSH_SENT, SSH_KEPT.
     @complexity O(s) over s characters the far side printed, at most
@@ -7041,7 +7076,7 @@ def file_outcome(path, where, outcome):
            f"{' and '.join(outcome.cut)}, and dropped the rest"] if outcome.cut else []
     said = printable_lines(outcome.err.strip())
     if outcome.kind == SSH_KEPT:
-        summary = f"could not reach {where.target} ({outcome.reason})"
+        summary = kept_summary(where.target, outcome)  # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-15
         warnings = list(cut)
         stderr = ["what ssh printed on stderr, through tc's printable filter:", *said.splitlines()] if said else []
         try:  # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), this try's words beside the waiting file
@@ -7063,7 +7098,7 @@ def file_outcome(path, where, outcome):
         return (0, words, warnings + ([moved] if moved else []))
     lead = f"{said}\n" if said else ""
     code = outcome.code if outcome.code in FAR_ANSWER_CODES else EXIT_FAR_UNKNOWN
-    how =(f"refused by {where.target} (exit {code})" if code == outcome.code else
+    how = (f"refused by {where.target} (exit {code})" if code == outcome.code else
            f"refused by {where.target} with far exit {outcome.code}, a code tc does not know (exit {code})")
     try:
         filed = file_away(path, OUTBOX_REFUSED)
@@ -7270,15 +7305,6 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
     return Delivery(code, words, warnings + filed)
 
 
-# One function per route; a card's route picks one. A route not here
-# answers "route <route> is not built yet" (C2). Each lane adds its own line.
-ROUTES = {
-    "local": deliver_local,
-    "codex": deliver_codex,
-    "ssh": deliver_ssh,  # SSH S1 (Claude Opus 5.5, unreviewed): C3
-}
-
-
 # SSH S2 (Claude Opus 5.5, unreviewed): tc flush (C3, D22, D23).
 def outbox_message(path):
     """The origin id and the text an outbox message sends: (id, body), the id that ends its header line and what follows that line and the blank line after it. Raises OSError or ValueError, with words.
@@ -7380,7 +7406,7 @@ def cmd_flush(args):
                 outbox_files, other_branches, queue_route, owned_by_me,
                 send_lock, outbox_message, outbox_text, ssh_run,
                 file_outcome, printable, user_name, refuse; os, sys;
-                SSH_SENT, SSH_KEPT, EXIT_QUEUED, EXIT_REFUSED.
+                SSH_SENT, SSH_KEPT, EXIT_QUEUED, EXIT_REFUSED, EXIT_BUSY.
     @complexity O(w x (q + w log w) + c + W log W) plus one ssh run of at
                 most SSH_SEND_SECONDS per file (SSH fix round 1, the
                 audit's LOW-12): w of this user's files waiting in this
@@ -7462,7 +7488,9 @@ def cmd_flush(args):
                 for warning in warnings:
                     print(f"tc flush: {lead}: {warning}", file=sys.stderr)
                 if outcome.kind == SSH_KEPT:
-                    stopped = f"{target} could not be reached ({outcome.reason}); it waits behind {lead}"
+                    why = (f"{target} was busy" if outcome.code == EXIT_BUSY  # P3 fix round 1c: LOW-15, a far 10 is busy
+                           else f"{target} could not be reached")
+                    stopped = f"{why} ({outcome.reason}); it waits behind {lead}"
                     break
             # SSH fix round 1 (Claude Opus 5.5, unreviewed): LOW-13, counted before the lock is let go
             left += [(f, stopped) for f in outbox_files(branch)[0]
@@ -7474,8 +7502,8 @@ def cmd_flush(args):
     for f in theirs:
         target = route(f.to).target or "a name with no ssh card"
         owners.setdefault(target, []).append(user_name(f.st.st_uid))
-    for target, names in owners.items():
-        print(f"{len(names)} waiting for {target} belong to other members ({', '.join(sorted(set(names)))}); "
+    for target, names in owners.items():  # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-16, reads for 1 and many
+        print(f"{len(names)} waiting for {target} from other members ({', '.join(sorted(set(names)))}); "
               f"each member sends their own with tc flush", flush=True)
     selection = "in the outbox" if args.to is None else f"for {printable(args.to)}"  # SSH fix round 1 (Claude Opus 5.5, unreviewed): LOW-14
     if not mine and not theirs:
@@ -7485,6 +7513,20 @@ def cmd_flush(args):
         print(f"nothing of yours waiting {selection}", flush=True)
     if left:
         sys.exit(EXIT_QUEUED)
+
+
+# ---------- router: the ROUTES table (C2), after every route ----------
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): the audit's LOW-19. The
+# table names every route function, so it comes after the last of them;
+# it sat inside the ssh route's section.
+
+# One function per route; a card's route picks one. A route not here
+# answers "route <route> is not built yet" (C2). Each lane adds its own line.
+ROUTES = {
+    "local": deliver_local,
+    "codex": deliver_codex,
+    "ssh": deliver_ssh,  # SSH S1 (Claude Opus 5.5, unreviewed): C3
+}
 
 
 # ---------- gate: the forced command for inbound ssh (C3, D16, D18, D25) ----------
@@ -8326,7 +8368,9 @@ def cmd_health(args):
 
     SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 1. One
     `squatted` line per branch that is not its member's own, naming what
-    is there and the one command the user who ran init runs.
+    is there and the one command the user who ran init runs, in a
+    sentence of its own after a period (P3 fix round 1c, Claude Opus 5.5,
+    unreviewed: the audit's LOW-14, option A).
 
     P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3). One `held`
     line per wait, watch or inbox lock held by someone other than its
@@ -8373,7 +8417,8 @@ def cmd_health(args):
         rows.append(f"{printable(name)}: " + ", ".join(bits))  # Phase fix round 1 (Claude Opus 5.5, unreviewed)
     print("mail       " + ("\n           ".join(rows) if rows else "empty"))
     for squat in snap["squatted"]:  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 part 1
-        print(f"squatted   {printable(squat['path'])}: {printable(squat['why'])}; {printable(squat['fix'])}")
+        # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-14 (option A), the fix starts its own sentence.
+        print(f"squatted   {printable(squat['path'])}: {printable(squat['why'])}. {printable(squat['fix'])}")
     for stuck in snap["stuck_outbox"]:  # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4)
         last = f"last failed try: {stuck['note']}" if stuck["note"] is not None else "no failed try noted beside it"
         print(f"stuck      {printable(stuck['path'])}: {printable(stuck['member'])}'s mail to "
@@ -8594,8 +8639,9 @@ def main():
 
     # SHARED H1 (Claude Opus 5.5, unreviewed): tc init --shared --group <g> (C4).
     ini = sub.add_parser("init", help="share this mailbox with a group of Linux users (one per account)")
-    ini.add_argument("--shared", action="store_true", required=True,
-                     help="share it: group-writable files, setgid folders, ROOT/.shared")
+    ini.add_argument("--shared", action="store_true", required=True,  # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-13
+                     help="share it: setgid folders in the group, mail, card and status files at 0640 (the group "
+                          "reads, only the owner writes), ROOT/.shared")
     ini.add_argument("--group", required=True, help="a group every user of the mailbox is in")
     ini.set_defaults(fn=cmd_init)
 

@@ -87,8 +87,8 @@ NOTE_SUFFIX = ".stderr"
 FAKE_BAD_NAME_STDERR = "tc: bad name\n"
 # What flush says, written here rather than read from tc.
 NOTHING_WORDS = "nothing waiting in the outbox\n"
-OTHERS_WORDS = ("{k} waiting for {target} belong to other members ({names}); each member sends their own "
-                "with tc flush")
+OTHERS_WORDS = ("{k} waiting for {target} from other members ({names}); each member sends their own "
+                "with tc flush")  # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-16, the plural
 NOT_SSH_WORDS = ("tc flush: left {path}: {to}'s card no longer says ssh (it says route local); it is never sent "
                  "another way. To send it over ssh, write the card again with tc card {to} --ssh <target>, then "
                  "run tc flush\n")
@@ -261,7 +261,7 @@ class FlushTest(unittest.TestCase):
         self.assertIn(f"refused by {TARGET} (exit {EXIT_BAD_NAME})", err)
 
     def test_a_far_10_stops_the_target_like_255(self):
-        """Three waiting, fake exiting 10 (D23): #1 tried once and kept, #2 and #3 never tried, all three waiting, exit 4.
+        """Three waiting, fake exiting 10 (D23): #1 tried once and kept, #2 and #3 never tried, all three waiting, exit 4; the lines say the target was busy, never that it could not be reached (P3 fix round 1c, Claude Opus 5.5, unreviewed: the audit's LOW-15).
 
         @interacts  queue_three; one flush.
         @deps       queue_three, assert_called, origins, outbox.
@@ -279,7 +279,9 @@ class FlushTest(unittest.TestCase):
         self.assertEqual(tried, [1])
         self.assertEqual(filed, [])
         self.assertEqual(waiting, ["000001-from-a.md", "000002-from-a.md", "000003-from-a.md"])
-        self.assertIn(f"the far tc was busy, exit {EXIT_BUSY}", err)
+        self.assertIn(f"{TARGET} was busy (exit {EXIT_BUSY}: {FAKE_BUSY_STDERR.strip()})", err)
+        self.assertNotIn("could not reach", err, "a far 10 was reported as a target this side could not reach")
+        self.assertNotIn("could not be reached", err, "a far 10 was reported as a target this side could not reach")
 
     def test_only_this_users_own_files_are_sent_and_the_others_are_counted(self):
         """D22, D32: with #1 moved into another member's branch (outbox/ben-member/to-b/), flush sends only #2 and says 1 waiting for u@h belongs to other members, named by the file's owner; #1 stays; exit 0.
@@ -681,8 +683,7 @@ class NoteTest(unittest.TestCase):
                 said = FAKE_CONNECT_STDERR.strip()
                 self.assertEqual((sent[0], busy[0]), (EXIT_QUEUED, EXIT_QUEUED), (sent, busy))
                 self.assertEqual(after_send.splitlines()[:1], [f"could not reach {TARGET} ({said})"])
-                self.assertEqual(after_busy.splitlines()[:1],
-                                 [f"could not reach {TARGET} (the far tc was busy, exit {EXIT_BUSY}: {said})"],
+                self.assertEqual(after_busy.splitlines()[:1], [f"{TARGET} was busy (exit {EXIT_BUSY}: {said})"],
                                  "the note was not replaced by the later try's words")
                 self.assertEqual(where, ["000001-from-a.md"], filed)
                 self.assertFalse(left, "the note stayed beside the queue once its file was filed")

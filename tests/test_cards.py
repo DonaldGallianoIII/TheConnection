@@ -311,7 +311,6 @@ class CardsTest(unittest.TestCase):
         self.assertEqual(out, "card written: x (other, account unknown, route ssh to u@h)\n")
         # SSH S1 (Claude Opus 5.5, unreviewed): ssh is in ROUTES, so no not-built note.
         self.assertEqual(err, "")
-        self.assertNotIn(NOT_BUILT_NOTE.format(name="x"), err)
         self.assertEqual(code2, 0, f"tc card y exited {code2}: {err2}")
         self.assertEqual(card2["ssh"], {"target": "h", "tc": "/opt/tc/tc"})
         self.assertEqual(err2, "")
