@@ -25,13 +25,14 @@ renamed, mail/.seq raised), and the feed reads only their names.
             to kill them by their own pids. Loads board/serve.py as a
             module; each Board loads tc with TC_ROOT set to the test's root.
             Writes cards, status lines and message files in that root only.
-@deps       python3 stdlib (contextlib, fcntl, importlib, io, json, os,
-            pathlib, shlex, sys, threading, time, unittest, unittest.mock);
-            tests/_root.py; board/serve.py; ../tc.
+@deps       python3 stdlib (contextlib, fcntl, importlib, io, itertools,
+            json, os, pathlib, random, shlex, sys, threading, time,
+            unittest, unittest.mock); tests/_root.py; board/serve.py; ../tc.
 @complexity O(1) per test: at most 52 message files, 9 names, two
             listeners, and a few feed() calls, each O(n + m + e) in serve.py
             plus Board.snapshot's parts of tc's health (milliseconds, no
-            GPU query). The D15 state test swaps the snapshot for a
+            GPU query). The inference property test runs PROPERTY_CASES
+            seeded cases through serve.hierarchy with no disk. The D15 state test swaps the snapshot for a
             stand-in, so it starts no listener and no child. The GPU test
             puts a fake nvidia-smi on PATH and runs it once, through
             tc.machine_stats. The hostile mailbox tests make a FIFO, a
@@ -45,9 +46,11 @@ import contextlib
 import fcntl
 import importlib.util
 import io
+import itertools
 import json
 import os
 import pathlib
+import random
 import shlex
 import sys
 import threading
@@ -105,6 +108,27 @@ FAKE_EXE_MODE = 0o755
 # A card file name with an escape sequence in it (ESC [ 2 J clears a
 # terminal), legal on Linux, illegal under C0.
 ESCAPE_CARD_NAME = "deep\x1b[2J.json"
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+# The seeded property test over the feed's roles and levels: a fixed seed,
+# so a failure replays; a few hundred cases, so it runs in well under a
+# second with no disk. Names are single letters, so the order-reversing
+# rename (a and z swap) is a plain lookup.
+PROPERTY_SEED = 20261015
+PROPERTY_CASES = 600
+NAME_POOL = "abcdefghijklmnopqrstuvwxyz"
+PROPERTY_NAMES_MIN = 3
+PROPERTY_NAMES_MAX = 8
+# Most names carry a card, and most cards report to a name made before
+# them, so the declared graph has no cycle and mail has chains to close.
+CARD_CHANCE = 0.9
+REPORTS_CHANCE = 0.8
+# Up to this many messages per name, so most names have two partners or more.
+MAIL_PER_NAME = 2
+# A sender that is no node: rule 1 counts it as a partner all the same.
+OUTSIDER = "outsider-1"
+# The property cannot pass by never building the shape it guards: at least
+# this many cases must have an inferred edge on a cycle to take out.
+CYCLES_BROKEN_MIN = 20
 
 
 def load_serve():
@@ -766,6 +790,39 @@ class ShapesTest(unittest.TestCase):
                     "x": ("worker", "inferred", 2, "b"),
                 })
 
+    # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+    def test_inference_never_closes_a_cycle_through_declared_edges(self):
+        """top has a card and no parent, middle reports to top, bottom to middle; bottom mails both.
+
+        top's one partner is bottom, whose card names middle, so rule 2's
+        one-hop guard lets top be inferred under bottom, and that edge
+        closes bottom, middle, top. It is taken out: top is the root,
+        middle under it, bottom under middle, all declared, with no cycle
+        badge (a level 0 node whose reports_to names a node) and no
+        `orchestrator · inferred` on bottom. Run under all six orders of
+        three names, so the order the names sort in never decides the
+        drawing. Must reject the cycle break that cuts the first name's
+        edge, declared or not, and roles read from the uncut edge.
+
+        @interacts  six shape roots.
+        @deps       shape, assertNodes, itertools.
+        @complexity O(1): six roots of three names.
+        @alloc      six feeds.
+        """
+        for top, middle, bottom in itertools.permutations(("alpha", "mid", "zed")):
+            with self.subTest(top=top, middle=middle, bottom=bottom):
+                feed = self.shape(cards=[(top, None), (middle, top), (bottom, middle)],
+                                  talks=[(bottom, middle), (top, bottom)])
+                self.assertNodes(feed, {
+                    top: ("orchestrator", "declared", 0, None),
+                    middle: ("orchestrator", "declared", 1, top),
+                    bottom: ("worker", "declared", 2, middle),
+                })
+                ids = {node["id"] for node in feed["nodes"]}
+                badged = [node["id"] for node in feed["nodes"] if node["level"] == 0
+                          and node["reports_to"] in ids and node["reports_to"] != node["id"]]
+                self.assertEqual(badged, [], "a root names a parent node: the page draws a cycle no card makes")
+
     def test_two_orchestrators_share_a_worker(self):
         """b reports to a by card, and x also mails b: b once, at level 1 under a.
 
@@ -850,6 +907,93 @@ class ShapesTest(unittest.TestCase):
         self.assertEqual([link for link in links if link["kind"] == "native"],
                          [{"from": "m", "to": "n", "kind": "native"}])
 
+
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+class InferencePropertyTest(unittest.TestCase):
+    """serve.hierarchy over seeded random cards and mail: the cards always win.
+
+    @interacts  none: the pure rule functions, no disk.
+    @deps       serve.hierarchy, serve.parents_of, random.
+    @complexity O(PROPERTY_CASES * n) over at most PROPERTY_NAMES_MAX names.
+    @alloc      one case's dicts at a time.
+    """
+
+    def case(self, rng):
+        """One random case: (names, cards, partners).
+
+        Cards report only to a name earlier in a shuffled order, so the
+        declared graph has no cycle. Mail runs between random names, and
+        sometimes from OUTSIDER, a partner that is no node.
+
+        @interacts  draws from `rng`.
+        @deps       random.
+        @complexity O(n) over n names.
+        @alloc      three small dicts and sets, returned.
+        """
+        names = rng.sample(NAME_POOL, rng.randint(PROPERTY_NAMES_MIN, PROPERTY_NAMES_MAX))
+        cards = {}
+        for i, name in enumerate(names):
+            if rng.random() < CARD_CHANCE:
+                above = rng.choice(names[:i]) if i and rng.random() < REPORTS_CHANCE else None
+                cards[name] = {"kind": "claude", "account": "work", "route": "local", "reports_to": above}
+        partners = {}
+        for _ in range(rng.randint(0, MAIL_PER_NAME * len(names))):
+            sender, to = rng.choice(names + [OUTSIDER]), rng.choice(names)
+            if sender != to:
+                partners.setdefault(sender, set()).add(to)
+                partners.setdefault(to, set()).add(sender)
+        return set(names), cards, partners
+
+    def test_declared_edges_survive_any_mail_and_any_name_order(self):
+        """Over PROPERTY_CASES seeded cases: every card's edge is drawn, no root claims a parent node, roles match the drawing, and reversing the names' order changes nothing.
+
+        Must reject the cycle break that cuts a declared edge chosen by
+        name order, and roles read from an edge the drawing does not use:
+        both fail on the cases where an inferred edge closes a cycle, and
+        at least CYCLES_BROKEN_MIN cases build that shape.
+
+        @interacts  none.
+        @deps       case, serve.hierarchy, serve.parents_of.
+        @complexity O(PROPERTY_CASES * n).
+        @alloc      one case at a time.
+        """
+        rng = random.Random(PROPERTY_SEED)
+        flip = {c: NAME_POOL[-1 - i] for i, c in enumerate(NAME_POOL)}
+        flip[OUTSIDER] = OUTSIDER
+        broken = 0
+        for number in range(PROPERTY_CASES):
+            names, cards, partners = self.case(rng)
+            where = f"case {number} of seed {PROPERTY_SEED}: cards {cards}, partners {partners}"
+            parents, roles, levels = serve.hierarchy(names, cards, partners)
+            if parents != serve.parents_of(names, cards, partners):
+                broken += 1
+            for name, card in cards.items():
+                above = card["reports_to"]
+                if above in names:
+                    self.assertEqual(parents.get(name), (above, serve.DECLARED), where)
+                    self.assertEqual(levels[name], levels[above] + 1, f"{name} is not drawn under {above}: {where}")
+            for name in names:
+                drawn = [x for x in names if x in parents and parents[x][0] == name and levels[x] == levels[name] + 1]
+                if levels[name] > 0:
+                    self.assertEqual(levels[name], levels[parents[name][0]] + 1, where)
+                else:
+                    above = cards.get(name, {}).get("reports_to")
+                    self.assertFalse(above in names and above != name,
+                                     f"root {name} reports to node {above}: a badge would name a cycle: {where}")
+                self.assertEqual(roles[name][0] == serve.ORCHESTRATOR, bool(drawn),
+                                 f"{name} reads {roles[name]} with {drawn} drawn under it: {where}")
+            back = {flip[n]: n for n in names}
+            fparents, froles, flevels = serve.hierarchy(
+                {flip[n] for n in names},
+                {flip[n]: {**c, "reports_to": flip.get(c["reports_to"])} for n, c in cards.items()},
+                {flip[n]: {flip[m] for m in ms} for n, ms in partners.items()})
+            self.assertEqual({back[n]: (back[p], s) for n, (p, s) in fparents.items()}, parents,
+                             f"the names' order changed the parents: {where}")
+            self.assertEqual({back[n]: r for n, r in froles.items()}, roles, f"the names' order changed a role: {where}")
+            self.assertEqual({back[n]: lv for n, lv in flevels.items()}, levels,
+                             f"the names' order changed a level: {where}")
+        self.assertGreaterEqual(broken, CYCLES_BROKEN_MIN,
+                                f"only {broken} cases had an inferred edge on a cycle, so the property proves little")
 
 
 # Model: Claude Opus 5.5 (the BOARD fixer, round 1), 2026-10-14. Status: unreviewed.

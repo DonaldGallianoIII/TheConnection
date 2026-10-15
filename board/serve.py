@@ -71,9 +71,14 @@ it names a node, else inferred as the one partner of a node with exactly
 one partner when that partner has HUB_MIN_PARTNERS or more, unless that
 partner's card declares this node as its own parent (D15: inference never
 inverts a declared edge). A reports_to that names no node, or the node
-itself, gives no parent and stops inference. Nodes the walk from the roots cannot reach hang on a reports_to
-cycle; the cycle member whose name sorts first becomes a root (assumption
-in the BOARD handoff: a node below a cycle is not on it, so it stays below).
+itself, gives no parent and stops inference. An inferred edge that closes
+a cycle, through any chain of declared ones, is taken out with every other
+inferred edge on that cycle (drop_inferred_cycles), before roles and
+levels are read, so the drawing never depends on the order the names sort
+in. Nodes the walk from the roots cannot reach then hang on a cycle made
+only of reports_to cards; the cycle member whose name sorts first becomes
+a root (assumption in the BOARD handoff: a node below a cycle is not on
+it, so it stays below).
 
 Known limit (C5 rule 6): with no hints at all, a top relay whose only
 partner is a lower relay is drawn as that relay's `worker`, marked
@@ -519,6 +524,63 @@ def parents_of(names, cards, partners):
     return found
 
 
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+def drop_inferred_cycles(parents):
+    """`parents` with every inferred edge that sits on a cycle taken out.
+
+    Rule 2's D15 guard looks one hop only, so an inferred parent can close
+    a loop through a chain of declared ones: zed inferred under alpha,
+    while alpha reports to mid and mid to zed by card. A cycle that holds an
+    inferred edge loses every inferred edge on it, so the cards decide the
+    shape whatever order the names sort in, and no badge names a cycle no
+    card makes. A cycle made only of declared edges is left whole:
+    levels_of breaks it at the name that sorts first. Each node has at most
+    one parent, so cycles never share a node, and taking edges out makes
+    no new one: one pass is enough.
+
+    @interacts  none; pure.
+    @deps       none.
+    @complexity O(n) over n nodes with a parent: each is walked once.
+    @alloc      the returned dict, one entry per edge kept; one walk list
+                and two sets, freed on return.
+    """
+    done, cycles = set(), []
+    for start in sorted(parents):
+        path, on_path = [], set()
+        at = start
+        while at in parents and at not in done and at not in on_path:
+            on_path.add(at)
+            path.append(at)
+            at = parents[at][0]
+        if at in on_path:
+            cycles.append(path[path.index(at):])
+        done.update(path)
+    kept = dict(parents)
+    for cycle in cycles:
+        if any(parents[name][1] == INFERRED for name in cycle):
+            for name in cycle:
+                if parents[name][1] == INFERRED:
+                    del kept[name]
+    return kept
+
+
+# Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
+def hierarchy(names, cards, partners):
+    """C5 rules 2 to 5 in one call: (parents, roles, levels).
+
+    parents is parents_of's map less every inferred edge on a cycle
+    (drop_inferred_cycles), and roles_of and levels_of both read that one
+    map, so an edge taken out leaves no role behind it.
+
+    @interacts  none; pure.
+    @deps       parents_of, drop_inferred_cycles, roles_of, levels_of.
+    @complexity O(n + e) over n names and e parent edges.
+    @alloc      the three returned dicts and their helpers' working sets.
+    """
+    parents = drop_inferred_cycles(parents_of(names, cards, partners))
+    return parents, roles_of(names, parents), levels_of(names, parents)
+
+
 def roles_of(names, parents):
     """C5 rules 3 and 4: {name: (role, role_source)}.
 
@@ -685,7 +747,7 @@ class Board:
         @interacts  see the module block; updates last_listening_at and,
                     through note_nested, nested_cards.
         @deps       snapshot, read_cards, scan_messages, status_preview,
-                    file_age, parents_of, roles_of, levels_of, note_nested.
+                    file_age, hierarchy, note_nested.
         @complexity O(k + m log W + n + c^2) per poll; the module block
                     names each term.
         @alloc      the per-poll objects the module block lists, and the
@@ -721,9 +783,7 @@ class Board:
             if pair not in newest_pair or msg.seq > newest_pair[pair].seq:
                 newest_pair[pair] = msg
 
-        parents = parents_of(names, cards, partners)
-        roles = roles_of(names, parents)
-        levels = levels_of(names, parents)
+        parents, roles, levels = hierarchy(names, cards, partners)
 
         nodes = []
         for name in sorted(names):
