@@ -2606,11 +2606,11 @@ def open_inbox(mail_fd, name, shared=None, make_inbox=False, make_read=False):
 
 
 def refuse_bad_inbox(inbox, name):
-    """Refuse (exit 1, check_inbox's words) what check_inbox refused, judged on the open folders of `inbox`, the Inbox of `name`: a link or not a folder at the inbox's name or its read/'s (D17); a read/ there that could not be opened or looked at; and, when shared, an inbox or read/ whose owner is not its card's owner (D20 item 4). Else nothing.
+    """Refuse (exit 1, check_inbox's words) what check_inbox refused, judged on the open folders of `inbox`, the Inbox of `name`: an inbox lstat cannot reach; a link or not a folder at the inbox's name or its read/'s (D17); a read/ there that could not be opened or looked at; and, when shared, an inbox or read/ whose owner is not its card's owner (D20 item 4). Else nothing.
 
-    An inbox that is there and could not be opened is not refused here:
-    its `box.problem` says why, and the caller words it for its own act
-    (inbox_messages for a listing, deliver_local for a send).
+    An inbox that is there, a folder, and could not be opened is not
+    refused here: its `box.problem` says why, and the caller words it for
+    its own act (inbox_messages for a listing, deliver_local for a send).
 
     @interacts  lstats cards/<name>.json when shared and the inbox is
                 there; reads the user database for the words; on a
@@ -2620,6 +2620,9 @@ def refuse_bad_inbox(inbox, name):
     @alloc      the words, on a refusal.
     """
     read_path = inbox.path / "read"
+    if inbox.box.problem is not None and inbox.box.found is None:  # lstat could not reach the inbox at all
+        refuse(f"tc: could not look at {inbox.path} ({inbox.box.why}); nothing was read or written there.",
+               EXIT_REFUSED)
     for path, folder in ((inbox.path, inbox.box), (read_path, inbox.read)):
         if folder.found is not None and stat.S_ISLNK(folder.found.st_mode):
             refuse(f"tc: {path} is a symlink, not a real folder; tc never follows it, so nothing "
