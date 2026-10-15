@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D21) the same day, and D22 to D33 on
+        wave 2 rulings (D17 to D21) the same day, and D22 to D34 on
         2026-10-15.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
@@ -417,6 +417,17 @@ For a separate Linux user per account on one machine.
     the owner of ROOT or a folder above it (D21, D23, D29).
   - Every other command still reaches ROOT by its path; only init pins
     it.
+- **Whom tc protects** (D34). The init user is trusted like the
+  mailbox's administrator. tc protects members from each other, not from
+  the init user: the owner of a folder can remove or rename anything in
+  it, sticky bit or not, so whoever owns `mail/` and `outbox/` can make
+  any member's unread or queued mail disappear, or move a member's
+  folder and put a link in its place, and no pinning inside tc can stop
+  that. Only init's own walk is hardened against the init user (D29,
+  D31), because it changes modes and groups. For a mailbox where nobody
+  should be trusted that far, the top folders would have to belong to
+  root, set up once with sudo; that is a possible later option, with no
+  task now.
 - **A held lock costs a failed send, never a hang** (D20, D23). `mail/.seq`
   and the inbox locks are group-writable, so a member can hold one. tc
   waits at most `LOCK_WAIT_SECONDS` per command for them, then exits 10
