@@ -59,10 +59,15 @@ that the fake is reachable.
             codexes (asserted called), links and files made by hand, a
             .shared written by hand, os.lstat and os.fstat patched for one
             inbox, and deliver_once swapped for one that raises; it reads
-            the user database for one stand-in owner's login.
+            the user database for one stand-in owner's login. P3 fix round
+            3 (Claude Opus 5.5, unreviewed): three more FarKeyReadsTest
+            tests (the audit's MEDIUM-1) run tc waits that end at once,
+            one over mailbox names that hold the running login, and two
+            call the gate in process with grp.getgrnam patched so the
+            mailbox's group also lists made-up members.
 @deps       python3 stdlib (argparse, builtins, contextlib, errno, fcntl,
-            io, json, os, pathlib, pwd, re, shlex, shutil, signal, stat,
-            subprocess, sys, unittest, unittest.mock); tests/_root.py;
+            grp, io, json, os, pathlib, pwd, re, shlex, shutil, signal,
+            stat, subprocess, sys, unittest, unittest.mock); tests/_root.py;
             load_tc, ring_argv, THREAD, own_fake, kill_own_fake and
             FINISH_CEILING_SECONDS from test_codex_route.py; files_under
             from test_router.py; UmaskTestCase, owner_patched_fstat,
@@ -82,6 +87,7 @@ import builtins
 import contextlib
 import errno
 import fcntl
+import grp
 import io
 import json
 import os
@@ -254,6 +260,22 @@ PID_PATTERN = re.compile(r"\bpid [0-9]+")
 BROKEN_SHARED_TEXT = "one group\nand another\n"
 # How long the health case's listener waits: far past the case.
 LISTEN_SECONDS = 30
+# P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, the
+# scrub never changes a mailbox name. The tools that follow the running
+# login in two mailbox names (<login>-claude, <login>-codex), so the login
+# is a dash part of each and no mailbox is called just <login>; and a
+# mailbox name's shape (C0, tc's NAME_PATTERN, written here), so a login
+# that makes no valid name skips that test.
+NAME_TOOLS = ("claude", "codex")
+C0_NAME = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,63}")
+# Two members' made-up logins, stood in as members of the mailbox's group,
+# and the tail both their mailbox names end in (<login>-x).
+STAND_IN_MEMBERS = ("ann", "ben")
+MEMBER_NAME_TAIL = "-x"
+# A tc wait that ends at once (exit 2, the timeout), run to leave a name's
+# inbox and wait lock, so health lists that name under listeners too.
+AT_ONCE = "0"
+EXIT_TIMEOUT = 2
 
 
 def filing(root, key, origin):
@@ -1394,17 +1416,42 @@ class FarKeyReadsTest(UmaskTestCase):
     `pid N` and every pid the case knows (a holder's, a listener's, this
     process's for an in-process gate).
 
+    P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1.
+    Three tests show the scrub never changes a mailbox name: mailbox
+    names that hold the running login, two members' names that end
+    alike, and members named like health's fixed keys, the members stood
+    in by grp.getgrnam patched (members_stood_in).
+
     @interacts  see the module block: per case a tc init, joins, cards,
                 fakes, a lock holder or a listener as the case needs, and
-                one or two gate runs, as a command or in process.
+                one or two gate runs, as a command or in process; round
+                3's tests, tc waits that end at once and grp.getgrnam
+                patched for an in-process gate.
     @deps       gate, gate_in_process, failing_write, hold, load_tc,
-                owner_patched_fstat, primary_group, login; _root.TcRoot;
-                errno, json, os, re, unittest.mock.
+                owner_patched_fstat, primary_group, login, health_keys;
+                _root.TcRoot; errno, grp, json, os, re, unittest.mock.
     @complexity O(c) over c = 19 cases, each a few tc runs; the busy case
                 waits out tc's lock bound (3 s), and the size case pipes
-                1 MiB.
+                1 MiB. Round 3's tests: O(1) each, two to five tc runs per
+                root.
     @alloc      one TcRoot per case, and its children, removed with it.
     """
+
+    def members_stood_in(self, logins):
+        """grp.getgrnam patched, for a `with` block, so every group it gives also lists `logins` as members: how one user stands in for the members far_logins finds in a shared mailbox's group (P3 fix round 3, Claude Opus 5.5, unreviewed).
+
+        @interacts  none until entered; then patches grp.getgrnam in this
+                    process, put back on exit.
+        @deps       grp, unittest.mock.
+        @complexity O(1) per call.
+        @alloc      the patcher, returned; one group entry per call.
+        """
+        real = grp.getgrnam
+
+        def getgrnam(name):
+            entry = real(name)
+            return grp.struct_group((entry.gr_name, entry.gr_passwd, entry.gr_gid, [*entry.gr_mem, *logins]))
+        return mock.patch.object(grp, "getgrnam", getgrnam)
 
     def share(self, root):
         """Share `root` with the running user's primary group and join b as the running user.
@@ -1741,6 +1788,106 @@ class FarKeyReadsTest(UmaskTestCase):
                 self.assertIsNone(PID_PATTERN.search(said), "the gate named a pid")
                 for pid in pids:
                     self.assertIsNone(re.search(rf"\b{pid}\b", said), f"the gate printed pid {pid}")
+
+    # P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, the scrub never changes a mailbox name.
+    def test_a_login_that_is_a_dash_part_of_two_mailbox_names_leaves_both_names_whole(self):
+        """The gate runs as a login that is a dash part of two mailbox names, <login>-claude and <login>-codex, and no mailbox is called <login>: a send to <login>-codex delivers, its words name it whole, and the gate's health keys hold both names whole.
+
+        The audit's MEDIUM-1 (bugs-reviewer): the scrub replaced the login
+        wherever a dash touched it, so the far key read `sent #1 to
+        another member-codex: mail/to-another member-codex/...` and health
+        keys of the same shape. Must reject a scrub that changes a
+        mailbox name.
+
+        @interacts  per read: one TcRoot, two tc waits that end at once
+                    (each name's inbox and wait lock), one gate run.
+        @deps       gate, login; _root.TcRoot.tc; json, os; NAME_TOOLS,
+                    C0_NAME, AT_ONCE, EXIT_TIMEOUT, KEY.
+        @complexity O(1): two roots, three tc runs each.
+        @alloc      one TcRoot per read.
+        """
+        names = sorted(f"{login()}-{tool}" for tool in NAME_TOOLS)
+        if not all(C0_NAME.fullmatch(name) for name in names):
+            self.skipTest("the running login makes no valid mailbox name")
+        codex = f"{login()}-codex"
+        with self.subTest(read="the words"), _root.TcRoot() as root:
+            for name in names:
+                self.assertEqual(root.tc("wait", name, "--timeout", AT_ONCE)[0], EXIT_TIMEOUT)
+            got = gate(root, f"/x/tc send --from a --to {codex}", "hi")
+            self.assertEqual(got, (0, f"sent #1 to {codex}: mail/to-{codex}/000001-from-{KEY}.md\n", ""),
+                             "the gate's words changed a mailbox name")
+            self.assertTrue(os.path.exists(root.path / "mail" / f"to-{codex}" / f"000001-from-{KEY}.md"),
+                            "the message did not land")
+        with self.subTest(read="the health keys"), _root.TcRoot() as root:
+            for name in names:
+                self.assertEqual(root.tc("wait", name, "--timeout", AT_ONCE)[0], EXIT_TIMEOUT)
+            code, out, err = gate(root, "/x/tc health --json")
+            self.assertEqual(code, 0, err)
+            snap = json.loads(out)
+            self.assertEqual((sorted(snap["mail"]), sorted(snap["listeners"])), (names, names),
+                             "the gate's health changed a mailbox name")
+
+    def test_two_members_whose_mailbox_names_end_alike_keep_both_health_keys(self):
+        """Shared: members ann and ben, stood in as members of the mailbox's group, with mailboxes ann-x and ben-x: the gate's health lists both names whole under mail and listeners, never one folded into the other.
+
+        The audit's MEDIUM-1: both keys came out `another member-x`, and a
+        JSON reader kept only the last. Must reject health scrubbed as
+        text.
+
+        @interacts  one TcRoot: tc init --shared, two joins and two tc
+                    waits that end at once; loads tc; one gate call in
+                    process with grp.getgrnam patched.
+        @deps       members_stood_in, gate_in_process, load_tc,
+                    primary_group; _root.TcRoot.tc; json;
+                    STAND_IN_MEMBERS, MEMBER_NAME_TAIL, AT_ONCE,
+                    EXIT_TIMEOUT.
+        @complexity O(1): five tc runs and one gate in process.
+        @alloc      one TcRoot and one module.
+        """
+        _, group, _ = primary_group()
+        names = sorted(f"{member}{MEMBER_NAME_TAIL}" for member in STAND_IN_MEMBERS)
+        with self.subTest(members=STAND_IN_MEMBERS), _root.TcRoot() as root:
+            self.assertEqual(root.tc("init", "--shared", "--group", group)[0], 0)
+            for name in names:
+                self.assertEqual(root.tc("join", name)[0], 0)
+                self.assertEqual(root.tc("wait", name, "--timeout", AT_ONCE)[0], EXIT_TIMEOUT)
+            tc = load_tc(root)
+            with self.members_stood_in(STAND_IN_MEMBERS):
+                code, out, err = gate_in_process(tc, "/x/tc health --json")
+            self.assertEqual(code, 0, err)
+            snap = json.loads(out)
+            self.assertEqual((sorted(snap["mail"]), sorted(snap["listeners"])), (names, names),
+                             "two members' mailbox names folded into one key")
+
+    def test_a_login_named_like_a_fixed_health_key_leaves_that_key_whole(self):
+        """Shared, b joined: with members stood in whose logins are named like every fixed key the gate's health gives (time, machine, sessions, claude, codex, mail, unread and the rest), the health keeps every key at every level: the top, machine, sessions and b's mail entry.
+
+        Integration-reviewer's shape of the audit's MEDIUM-1: a member
+        whose login is codex or claude turned `"sessions": {"codex": 1}`
+        into `"another member": 1`. Must reject a login that rewrites a
+        key.
+
+        @interacts  one TcRoot: tc init --shared and one join (share);
+                    loads tc; one gate call in process with grp.getgrnam
+                    patched.
+        @deps       share, members_stood_in, gate_in_process, load_tc,
+                    health_keys; json; GATE_HEALTH_TOP_KEYS,
+                    GATE_HEALTH_MACHINE_KEYS, GATE_HEALTH_SESSION_KEYS,
+                    GATE_HEALTH_MAIL_KEYS.
+        @complexity O(1): two tc runs and one gate in process.
+        @alloc      one TcRoot and one module.
+        """
+        logins = sorted(GATE_HEALTH_TOP_KEYS | GATE_HEALTH_MACHINE_KEYS | GATE_HEALTH_SESSION_KEYS
+                        | GATE_HEALTH_MAIL_KEYS)
+        with self.subTest(members=logins), _root.TcRoot() as root:
+            self.share(root)
+            tc = load_tc(root)
+            with self.members_stood_in(logins):
+                code, out, err = gate_in_process(tc, "/x/tc health --json")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(health_keys(json.loads(out)), (GATE_HEALTH_TOP_KEYS, GATE_HEALTH_MACHINE_KEYS,
+                                                            GATE_HEALTH_SESSION_KEYS, {"b": GATE_HEALTH_MAIL_KEYS}),
+                             "a login named like a fixed key rewrote it")
 
 
 if __name__ == "__main__":

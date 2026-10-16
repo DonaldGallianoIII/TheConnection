@@ -60,8 +60,11 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             listeners and watchers say `another process` for a pid. To do
             that it lists mail/, cards/, outbox/ and mail/.origins/ and
             reads the user and group databases for the logins to leave
-            out (far_logins). P3 fix round 1c (Claude Opus 5.5,
-            unreviewed): D36 (4).
+            out (far_logins). P3 fix round 3 (Claude Opus 5.5,
+            unreviewed: the audit's MEDIUM-1): a mailbox name, here or
+            one the far key sent, is never changed (far_names), and the
+            health is scrubbed as data, its keys as they are (far_data).
+            P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4).
             A gate that cannot write a message for a reason that passes
             (no space, a quota, an I/O error) answers busy, exit 10, with
             nothing left behind, so the near side keeps it queued (P3 fix
@@ -942,7 +945,12 @@ FAR_PID_PATTERN = re.compile(r"\bpid [0-9]+\b")
 FAR_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![\w.~/-])/[^\s'\"`,;:()]+")
 # What may not touch a login on either side for it to be replaced: a
 # letter, a digit or an underscore. A dot, a dash or a slash may, so a
-# login inside outbox/<user>/ or .squatted-<user>-1 is replaced too.
+# login inside outbox/<user>/ or .squatted-<user>-1 is replaced too. P3
+# fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1. A
+# mailbox name stands whole by the same edge (mail/to-<name>/,
+# .box-<name>.lock, cards/<name>.json), and far_words holds every whole
+# name aside while it replaces logins, so a login that is a dash or dot
+# part of a name (<login>-codex) is never replaced inside it.
 FAR_LOGIN_EDGE = "[A-Za-z0-9_]"
 # Where D25's origin ids are filed once their message lands:
 # mail/ORIGINS_NAME/<user>/<key-name>/<id>, one empty file each (its
@@ -7894,8 +7902,29 @@ def far_logins(keep):
             and not (os.path.lexists(MAIL / f"to-{login}") or os.path.lexists(CARDS / f"{login}.json"))}
 
 
-def far_words(text, logins):
-    """`text` as a far key may read it (D37 (1)): every path inside the mailbox relative to it, the mailbox's own folder FAR_ROOT_WORDS, any other absolute path FAR_PATH_WORDS, `pid N` FAR_PROCESS_WORDS, and each of `logins` (far_logins) FAR_MEMBER_WORDS.
+# P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, the scrub never changes a mailbox name.
+def far_names(keep):
+    """The names the gate's words may hold that far_words never changes: every mailbox name here (each to-<name> in mail/, each <name>.json in cards/) and `keep`, the names the far key sent (its --as, and the --from and --to of its command). A set.
+
+    @interacts  lists mail/ and cards/. Writes nothing.
+    @deps       os; MAIL, CARDS.
+    @complexity O(e) over e entries in mail/ and cards/ (a few per name).
+    @alloc      the two listings, freed on return; one set of names,
+                returned.
+    """
+    names = {name for name in keep if name}
+    for top, lead, tail in ((MAIL, "to-", ""), (CARDS, "", ".json")):
+        try:
+            entries = os.listdir(top)
+        except OSError:
+            continue
+        names.update(entry[len(lead):len(entry) - len(tail)] for entry in entries
+                     if entry.startswith(lead) and entry.endswith(tail) and len(entry) > len(lead) + len(tail))
+    return names
+
+
+def far_words(text, logins, names=()):
+    """`text` as a far key may read it (D37 (1)): every path inside the mailbox relative to it, the mailbox's own folder FAR_ROOT_WORDS, any other absolute path FAR_PATH_WORDS, `pid N` FAR_PROCESS_WORDS, and each of `logins` (far_logins) FAR_MEMBER_WORDS, never inside one of `names` (far_names).
 
     Done in that order, so a login inside a path is gone with the path,
     or replaced inside a relative one (outbox/<user>/). A login is
@@ -7903,21 +7932,62 @@ def far_words(text, logins):
     (FAR_LOGIN_EDGE); one that is also a word tc uses (a member named
     `mail`, say) makes the words read oddly, never names the user.
 
+    P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1,
+    option B. Before the logins are replaced, each of `names` that stands
+    whole (by the same edge, longest first) is held aside: the text is
+    split around those names, logins are replaced only in the pieces
+    between them, and the names go back as they were. So `sent #1 to
+    alex-codex: mail/to-alex-codex/...` stays whole on a gate run as
+    `alex`, which is still replaced wherever it stands outside a name.
+    What is left (the audit's LOW-1): a login spelled exactly like one of
+    `names` reads as that name where it stands, and the far key sent it
+    (or, for a mailbox name here, reads it in health anyway).
+
     @interacts  none; string work only.
     @deps       re, os; ROOT, FAR_ROOT_WORDS, FAR_PATH_WORDS,
                 FAR_PROCESS_WORDS, FAR_MEMBER_WORDS, FAR_PID_PATTERN,
                 FAR_ABSOLUTE_PATH_PATTERN, FAR_LOGIN_EDGE.
-    @complexity O(t x (l + 4)) over t characters and l logins (a few).
-    @alloc      a few copies of the text, the last returned.
+    @complexity O(t x (l + n + 4)) over t characters, l logins (a few)
+                and n names held whole (a few dozen).
+    @alloc      a few copies of the text, and its pieces between the
+                names, the joined text returned.
     """
     root = str(ROOT)
     if root != os.sep:
         text = text.replace(root + os.sep, "").replace(root, FAR_ROOT_WORDS)
     text = FAR_ABSOLUTE_PATH_PATTERN.sub(FAR_PATH_WORDS, text)
     text = FAR_PID_PATTERN.sub(FAR_PROCESS_WORDS, text)
-    for login in sorted(logins, key=len, reverse=True):
-        text = re.sub(rf"(?<!{FAR_LOGIN_EDGE}){re.escape(login)}(?!{FAR_LOGIN_EDGE})", FAR_MEMBER_WORDS, text)
-    return text
+    whole = "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True))
+    pieces = re.split(rf"(?<!{FAR_LOGIN_EDGE})({whole})(?!{FAR_LOGIN_EDGE})", text) if whole else [text]
+    for at in range(0, len(pieces), 2):  # the names are at the odd places, held aside as they are
+        for login in sorted(logins, key=len, reverse=True):
+            pieces[at] = re.sub(rf"(?<!{FAR_LOGIN_EDGE}){re.escape(login)}(?!{FAR_LOGIN_EDGE})", FAR_MEMBER_WORDS,
+                                pieces[at])
+    return "".join(pieces)
+
+
+# P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, the gate's health scrubbed as data.
+def far_data(value, logins, names):
+    """`value`, the gate's health as gate_health kept it, as a far key may read it: every key as it is (tc's fixed keys and mailbox names), every string value through far_words, lists item by item, anything else as it is.
+
+    A pid is already FAR_PROCESS_WORDS or None (gate_health,
+    GATE_HEALTH_PROCESS). So no login, even one named like a fixed key
+    (`claude`, `codex`), rewrites a key, and two members' `<login>-x`
+    names never fold into one.
+
+    @interacts  none; dict work only.
+    @deps       far_words.
+    @complexity O(v) over v values kept (a few dozen), each string's
+                far_words.
+    @alloc      one new dict or list per level, returned.
+    """
+    if isinstance(value, dict):
+        return {key: far_data(entry, logins, names) for key, entry in value.items()}
+    if isinstance(value, list):
+        return [far_data(entry, logins, names) for entry in value]
+    if isinstance(value, str):
+        return far_words(value, logins, names)
+    return value
 
 
 def far_key_reads(work, keep=()):
@@ -7929,24 +7999,34 @@ def far_key_reads(work, keep=()):
     other exception is printed as a traceback, through far_words like
     the rest (tc's own path and the mailbox's leave with it), and exits
     1, the code Python gives one. `keep` are the names the far key sent
-    (far_logins). What `work` writes past sys.stdout and sys.stderr
-    (the codex ring's output, which ring_codex captures) is not here.
+    (far_logins, far_names). What `work` writes past sys.stdout and
+    sys.stderr (the codex ring's output, which ring_codex captures) is
+    not here.
+
+    P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1.
+    The words keep every mailbox name here and every name the far key
+    sent whole (far_names, far_words). A value `work` returns (the gate's
+    health, as gate_health kept it) is printed after stdout's words as
+    JSON, scrubbed as data (far_data): its keys as they are, its string
+    values through far_words. So the health is never scrubbed as text.
 
     @interacts  runs `work` with this process's sys.stdout and sys.stderr
-                swapped for buffers; then far_logins' reads; writes the
-                buffers' text to stdout and stderr; may exit.
-    @deps       far_logins, far_words; contextlib, io, sys, traceback;
-                EXIT_REFUSED.
-    @complexity O(w) over w characters printed, plus `work`'s own and
-                far_logins'.
-    @alloc      two buffers of what `work` printed, freed on return.
+                swapped for buffers; then far_logins' and far_names'
+                reads; writes the buffers' text to stdout and stderr, and
+                a returned value to stdout as JSON; may exit.
+    @deps       far_logins, far_names, far_words, far_data; contextlib,
+                io, json, sys, traceback; EXIT_REFUSED.
+    @complexity O(w) over w characters printed, plus `work`'s own,
+                far_logins', far_names' and far_data's.
+    @alloc      two buffers of what `work` printed and the value it
+                returned, freed on return.
     """
     out, err = io.StringIO(), io.StringIO()
-    code = 0
+    code, data = 0, None
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
-                work()
+                data = work()
             except SystemExit as stop:
                 if isinstance(stop.code, str):
                     print(stop.code, file=sys.stderr)
@@ -7957,9 +8037,11 @@ def far_key_reads(work, keep=()):
                 traceback.print_exc()
                 code = EXIT_REFUSED
     finally:
-        logins = far_logins(set(keep))
-        sys.stdout.write(far_words(out.getvalue(), logins))
-        sys.stderr.write(far_words(err.getvalue(), logins))
+        logins, names = far_logins(set(keep)), far_names(keep)
+        sys.stdout.write(far_words(out.getvalue(), logins, names))
+        if data is not None:
+            print(json.dumps(far_data(data, logins, names), indent=2))
+        sys.stderr.write(far_words(err.getvalue(), logins, names))
     if code:
         sys.exit(code)
 
@@ -8003,6 +8085,9 @@ def cmd_gate(args):
     no pid (`another member`, `another process`); health's listeners and
     watchers give `another process` for a pid (GATE_HEALTH_KEYS). main()
     runs the gate's .shared check the same way, since it comes first.
+    P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1.
+    No mailbox name is changed, here or one the far key sent (far_names),
+    and the health is scrubbed as data, its keys as they are (far_data).
 
     @interacts  reads SSH_ORIGINAL_COMMAND (gate_command); then, inside
                 far_key_reads (its reads, its writes, its exit),
@@ -8013,9 +8098,9 @@ def cmd_gate(args):
                 routes it reaches, local and codex; an inbox lock or
                 mail/.seq held past LOCK_WAIT_SECONDS exits 10, row 10,
                 nothing written); for health, reads /proc and mail/
-                (health_snapshot) and prints only what GATE_HEALTH_KEYS
-                names (gate_health); prints; on a refusal one line to
-                stderr and exit 7.
+                (health_snapshot) and gives far_key_reads only what
+                GATE_HEALTH_KEYS names (gate_health) to print; prints; on
+                a refusal one line to stderr and exit 7.
     @deps       gate_command, far_key_reads, gate_answer; os.
     @complexity O(c + b) over c characters of the far command and b bytes
                 of body, plus the route's own work; or health_snapshot's,
@@ -8031,23 +8116,23 @@ def cmd_gate(args):
 
 
 def gate_answer(args, command):
-    """cmd_gate's work for the parsed far `command` (a GateCommand, or None for anything else), as cmd_gate's block says; far_key_reads around it holds back and scrubs every word it prints (P3 fix round 2, Claude Opus 5.5, unreviewed: D37 (1)).
+    """cmd_gate's work for the parsed far `command` (a GateCommand, or None for anything else), as cmd_gate's block says; far_key_reads around it holds back and scrubs every word it prints (P3 fix round 2, Claude Opus 5.5, unreviewed: D37 (1)). For health it prints nothing and returns what gate_health kept, which far_key_reads prints as JSON, scrubbed as data (P3 fix round 3, Claude Opus 5.5, unreviewed: the audit's MEDIUM-1); else None.
 
     @interacts  see cmd_gate.
     @deps       require_names, read_body, refuse, deliver_once,
-                print_delivery, health_snapshot, gate_health; json;
+                print_delivery, health_snapshot, gate_health;
                 GATE_REFUSED_WORDS, GATE_HEADER_NOTE, EXIT_GATE_REFUSED,
                 EXIT_REFUSED.
     @complexity see cmd_gate.
-    @alloc      see cmd_gate.
+    @alloc      see cmd_gate; for health, the kept snapshot, returned.
     """
     require_names(args.as_name)
     if command is None:
         refuse(GATE_REFUSED_WORDS, EXIT_GATE_REFUSED)
     if command.shape == "health":
         # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (5), only the keys GATE_HEALTH_KEYS names.
-        print(json.dumps(gate_health(health_snapshot(cards=False, gpu=False, branches=False)), indent=2))
-        return
+        # P3 fix round 3 (Claude Opus 5.5, unreviewed): MEDIUM-1, returned for far_key_reads to print as data.
+        return gate_health(health_snapshot(cards=False, gpu=False, branches=False))
     body = read_body(None)
     if not body.strip():
         refuse("tc gate: empty message; nothing written", EXIT_REFUSED)
