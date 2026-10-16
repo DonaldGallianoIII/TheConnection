@@ -26,13 +26,18 @@ docs/planning/connection-routes/handoffs/F1.md.
             FIFO could block (released by opening the FIFO for writing).
             Starts tc watch children through the harness (killed by
             their pids in teardown) and reads /proc/locks to prove each
-            holds its lock. Writes nothing outside the root's temp
-            folder.
+            holds its lock. Runs tc health and the gate's health in
+            process with tc's wall_clock and gpu_stats replaced and
+            SSH_ORIGINAL_COMMAND set. Loads board/serve.py and runs
+            Board.feed() on a clock the test sets, over listeners it
+            kills by their pids; writes one record by hand (a .tmp
+            renamed over it) and moves one aside. Writes nothing outside
+            the root's temp folder.
 @deps       python3 stdlib (argparse, collections, contextlib, datetime,
-            io, json, os, pathlib, signal, stat, subprocess, sys,
-            threading, time, unittest, unittest.mock);
+            importlib, io, json, os, pathlib, signal, stat, subprocess,
+            sys, threading, time, unittest, unittest.mock);
             tests/_root.py; UmaskTestCase, load_tc and owner_patched_fstat
-            from test_shared.py; ../tc.
+            from test_shared.py; ../tc; ../board/serve.py.
 @complexity O(1) per test: a handful of tc runs per root, one root per
             subtest; the killed-listener test reads /proc/locks until the
             lock goes, at most LOCK_GONE_SECONDS; each watch subtest runs
@@ -45,6 +50,7 @@ import argparse
 import collections
 import contextlib
 import datetime
+import importlib.util
 import io
 import json
 import os
@@ -153,6 +159,21 @@ LATER_WORDS = "2m ago"
 EXITS_KEY = "wait_exits"
 GATE_HEALTH = "/x/tc health --json"
 GATE_KEY = "farkey"
+# Item 5, the board (C5): five listeners, each gone one way, made-up
+# names: woken by mail, killed by its pid, timed out on its own, killed
+# with its record then moved aside (no record: today's rules), and killed
+# after its record was put back to a `mail` an hour old (a stale record,
+# from a wait before the one the board saw). Where a record is moved
+# aside to; the stale record's age; the board's down window (serve.py's
+# DOWN_WINDOW_S, written here); and the five names' states while all
+# listen.
+WOKEN, KILLED, TIMED, BARE, STALE = "woken", "killed", "timed", "bare", "stale"
+FIVE = (WOKEN, KILLED, TIMED, BARE, STALE)
+RECORD_ASIDE = ".wait.exit.aside"
+STALE_AGE_SECONDS = 3600
+DOWN_WINDOW_S = 600
+ALL_LISTENING = dict.fromkeys(FIVE, "listening")
+SERVE_PATH = HERE.parent / "board" / "serve.py"
 # What a file outside the mailbox holds, that a link at a record's name
 # (or its .tmp's) leads to.
 OUTSIDE_TEXT = "outside the mailbox: tc must never write or read this\n"
@@ -755,6 +776,122 @@ class HealthTest(UmaskTestCase):
             gated = parsed(out) or {}
             self.assertEqual((code, mine.get(EXITS_KEY) == exits, EXITS_KEY in gated), (0, True, False),
                              f"the gate's keys: {sorted(gated)}; {err}")
+
+
+# F1 (Claude Opus 5.5, unreviewed): item 5.
+def load_serve():
+    """Load board/serve.py as a module, as the board tests do.
+
+    @interacts  executes serve.py's top level (constants and definitions).
+    @deps       importlib; SERVE_PATH.
+    @complexity O(1).
+    @alloc      one module object, returned.
+    """
+    spec = importlib.util.spec_from_file_location("board_serve_wait_exit", SERVE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+serve = load_serve()
+
+
+def states(feed):
+    """{name: state} for each of FIVE in one board feed; None for a name it lacks.
+
+    @interacts  none.
+    @deps       FIVE.
+    @complexity O(n) over n nodes.
+    @alloc      one dict, returned.
+    """
+    nodes = {node["id"]: node["state"] for node in feed["nodes"]}
+    return {name: nodes.get(name) for name in FIVE}
+
+
+def stale_line():
+    """A `mail` record line dated STALE_AGE_SECONDS ago, in a message header's form.
+
+    @interacts  reads the clock and the local time zone.
+    @deps       datetime, time; MAIL, STALE_AGE_SECONDS.
+    @complexity O(1).
+    @alloc      one string, returned.
+    """
+    at = datetime.datetime.fromtimestamp(time.time() - STALE_AGE_SECONDS).astimezone()
+    return f"{MAIL} {at.isoformat(timespec='seconds')}\n"
+
+
+def stop_five(root, board=None):
+    """Start FIVE proven listeners (TIMED's ends on its own after SHORT_WAIT_SECONDS), wait for each record, put STALE's back to a stale `mail`, let `board` (when given) see all five listening, then: WOKEN mailed, KILLED, BARE and STALE killed by their pids, TIMED left to time out; once every lock is gone, BARE's record is moved aside. (records all made, the send's exit, every lock gone, the board's states while all listened or None).
+
+    @interacts  starts five listeners through the harness; one send;
+                SIGKILL to three of them by their pids; reads /proc/locks;
+                writes STALE's record by hand (a .tmp renamed over it) and
+                renames BARE's aside; one feed of `board`.
+    @deps       _root.TcRoot.listener, _root.TcRoot.tc, record_made,
+                lock_gone, stale_line, states; contextlib, os, signal.
+    @complexity O(1): five listeners, up to WAKE_CEILING_SECONDS for the
+                locks to go.
+    @alloc      the listeners, killed and reaped before return.
+    """
+    boxes = {name: root.path / "mail" / f"to-{name}" for name in FIVE}
+    with contextlib.ExitStack() as stack:
+        pids = {name: stack.enter_context(root.listener(name, SHORT_WAIT_SECONDS if name == TIMED else LISTENER_SECONDS))
+                for name in FIVE}
+        made = all([record_made(boxes[name]) for name in FIVE])
+        tmp = boxes[STALE] / RECORD_TMP
+        tmp.write_text(stale_line())
+        os.rename(tmp, boxes[STALE] / RECORD)
+        seen = states(board.feed()) if board is not None else None
+        sent = root.tc("send", "--from", SENDER, "--to", WOKEN, "task")[0]
+        for name in (KILLED, BARE, STALE):
+            os.kill(pids[name], signal.SIGKILL)
+        gone = all([lock_gone(boxes[name] / WAIT_LOCK, pids[name], WAKE_CEILING_SECONDS) for name in FIVE])
+    os.rename(boxes[BARE] / RECORD, boxes[BARE] / RECORD_ASIDE)
+    return made, sent, gone, seen
+
+
+class BoardTest(UmaskTestCase):
+    """Item 5: the board reads a lock gone with its wait exit record (C5), never down for a listener that left on purpose, down for one killed, after a restart too, and today's rules with no record.
+
+    @interacts  see the module block; loads board/serve.py and runs
+                Board.feed() on a clock the test sets (the real time, then
+                past the down window).
+    @deps       _root.TcRoot, UmaskTestCase, serve, stop_five, states.
+    @complexity O(1) per subtest: five listeners and two or three feeds.
+    @alloc      one TcRoot and one Board per subtest.
+    """
+
+    def test_a_listener_that_left_on_purpose_is_never_down_and_a_killed_one_is_down_after_a_restart_too(self):
+        """Five listeners the board saw, then: woken by mail reads working (the woken rules), killed reads down, timed out reads idle (never down: its record says timeout), no record reads down (today's rule), and a stale mail record reads down (it is older than the board's sighting). Past DOWN_WINDOW_S: killed still reads down (its record says listening), the rest idle. A fresh Board (a restart) over the same five: killed reads down, woken (record mail) and timed (timeout) read idle, never down; no record and the stale one read idle, as a restart always has.
+
+        Must reject a board that ignores the record (timed out reads
+        down; killed fades to idle past the window and after a restart),
+        that reads no record as a kill (bare reads down after a restart),
+        that takes a record older than its sighting (stale reads idle),
+        and that keeps the restart rule for a `listening` record.
+
+        @interacts  per subtest: stop_five; feeds of one Board, or of a
+                    fresh one after.
+        @deps       stop_five, states, serve.Board; time.
+        @complexity O(1) per subtest.
+        @alloc      one TcRoot and one Board per subtest.
+        """
+        after = {WOKEN: "working", KILLED: "down", TIMED: "idle", BARE: "down", STALE: "down"}
+        past = {WOKEN: "idle", KILLED: "down", TIMED: "idle", BARE: "idle", STALE: "idle"}
+        restarted = {WOKEN: "idle", KILLED: "down", TIMED: "idle", BARE: "idle", STALE: "idle"}
+        with self.subTest(board="live, then past the window"), _root.TcRoot() as root:
+            clock = {"now": time.time()}
+            board = serve.Board(root=root.path, clock=lambda: clock["now"])
+            made, sent, gone, seen = stop_five(root, board)
+            clock["now"] = time.time()
+            first = states(board.feed())
+            clock["now"] += DOWN_WINDOW_S + 1
+            later = states(board.feed())
+            self.assertEqual((made, sent, gone, seen, first, later), (True, 0, True, ALL_LISTENING, after, past))
+        with self.subTest(board="restarted"), _root.TcRoot() as root:
+            made, sent, gone, _ = stop_five(root)
+            fresh = states(serve.Board(root=root.path, clock=time.time).feed())
+            self.assertEqual((made, sent, gone, fresh), (True, 0, True, restarted))
 
 
 if __name__ == "__main__":
