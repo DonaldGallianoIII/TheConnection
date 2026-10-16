@@ -63,8 +63,8 @@ second-user walk is qa/human/route-shared.md.
             load_tc, owner_patched_lstat, owner_patched_fstat,
             primary_group and tree from test_shared.py; ../tc. Imported
             by test_inbox_pinned.py: hold, holder_patched_stat and
-            HOLDER_UID_STEP (P3 fix round 2, Claude Opus 5.5,
-            unreviewed).
+            HOLDER_UID_STEP; and by test_gate.py: hold (P3 fix round 2,
+            Claude Opus 5.5, unreviewed).
 @complexity O(1) per test: a handful of tc runs and at most four children
             per root, each wait or watch run under a second or two; the
             private pin test waits out one of tc's polls (POLL_SECONDS),

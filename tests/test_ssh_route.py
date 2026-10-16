@@ -1116,8 +1116,9 @@ class RoundTripTest(unittest.TestCase):
             near_box = near.path / "mail" / f"to-{FAR_KEY}"
             came_back = {p.name: p.read_text() for p in near_box.glob("*.md")}
             waiting = (outbox(near, ROUND_TRIP_FAR), outbox(far, FAR_KEY))
+        # P3 fix round 2 (Claude Opus 5.5, unreviewed): D37 (1), the far gate names its path relative to its mailbox.
         self.assertEqual(sent, (0, f"{SENT_WORDS.format(target=TARGET)}: sent #1 to {ROUND_TRIP_FAR}: "
-                                   f"{far_box / f'000001-from-{FAR_KEY}.md'}\n", ""))
+                                   f"{far_box.relative_to(far.path) / f'000001-from-{FAR_KEY}.md'}\n", ""))
         self.assertEqual(list(landed), [f"000001-from-{FAR_KEY}.md"], "the far inbox does not hold the message")
         far_header, _, far_body = landed[f"000001-from-{FAR_KEY}.md"].partition("\n\n")
         self.assertTrue(far_header.startswith(f"# #1 from {FAR_KEY} to {ROUND_TRIP_FAR}, "), far_header)
@@ -1404,8 +1405,9 @@ class FarAnswerTest(unittest.TestCase):
                     left = sorted(p.name for p in far_box.rglob("*") if p.is_file())
                     far_filed = sorted(p.name for p in (far / "mail").rglob("*")
                                        if ".origins" in p.parts and p.is_file())
-                far_words = PASSING_WORDS.format(what=f"could not write {far_box / f'000001-from-{FAR_KEY}.tmp'}",
-                                                 why=os.strerror(getattr(errno, name)))
+                far_words = PASSING_WORDS.format(  # P3 fix round 2: D37 (1), relative to the far mailbox
+                    what=f"could not write {far_box.relative_to(far) / f'000001-from-{FAR_KEY}.tmp'}",
+                    why=os.strerror(getattr(errno, name)))
                 reason = f"exit {EXIT_BUSY}: {far_words}"
                 self.assertEqual((code, out, err), (EXIT_QUEUED, "", BUSY_KEPT_WORDS.format(target=TARGET,
                                                                                           reason=reason, path=path)))
@@ -1444,8 +1446,8 @@ class FarAnswerTest(unittest.TestCase):
                     left = sorted(p.name for p in (far / "mail").rglob("*.md"))
                     far_filed = sorted(p.name for p in (far / "mail").rglob("*")
                                        if ".origins" in p.parts and p.is_file())
-                    what = (f"could not write {far / 'mail' / '.seq'}" if stage == "seq"
-                            else f"could not make {far / 'mail' / '.box-b.lock'}")
+                    what = ("could not write mail/.seq" if stage == "seq"  # relative to the far mailbox: D37 (1)
+                            else "could not make mail/.box-b.lock")
                     far_words = PASSING_WORDS.format(what=what, why=os.strerror(getattr(errno, name)))
                     self.assertEqual((code, out, err), (EXIT_QUEUED, "", BUSY_KEPT_WORDS.format(
                         target=TARGET, reason=f"exit {EXIT_BUSY}: {far_words}", path=path)))

@@ -580,7 +580,9 @@ class InboxPinnedTest(UmaskTestCase):
         if row.label in ("tc send", "the far gate's send"):
             sender = SENDER if row.label == "tc send" else FAR_KEY
             name = f"000002-from-{sender}.md"
-            self.assertEqual((ran.code, ran.out, ran.err), (0, f"sent #2 to {OWNER}: {box / name}\n", ""))
+            # P3 fix round 2 (Claude Opus 5.5, unreviewed): D37 (1), the gate names the path relative to the mailbox.
+            shown = box.relative_to(root.path) if row.label == "the far gate's send" else box
+            self.assertEqual((ran.code, ran.out, ran.err), (0, f"sent #2 to {OWNER}: {shown / name}\n", ""))
             self.assertEqual(files_in(real), ["000001-from-ben.md", name], "the message did not land in the real inbox")
             self.assertIn(SENT_TEXT, (real / name).read_text())
         elif row.label == "tc peek":

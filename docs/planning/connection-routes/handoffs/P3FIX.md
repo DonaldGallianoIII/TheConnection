@@ -1218,3 +1218,114 @@ As the brief says, not in this round:
   row could not go red.
 
 No pause was written.
+
+## Item 8: what a far key reads carries nothing of this machine (D37 (1))
+
+Added to the brief after dispatch: D37 part 1, on the dev branch at
+`3e9d18c`, C3's bullet "What a far key reads carries nothing of this
+machine". Commit (f), the one that adds this part.
+
+### What was built
+
+- One place: `far_key_reads(work, keep)` (tc) runs the gate's work with
+  sys.stdout and sys.stderr caught, turns a SystemExit into its code and
+  any other exception into a traceback and exit 1, and prints both
+  streams through `far_words`. `cmd_gate` parses the far command and
+  runs `gate_answer` (the old body) inside it; `main()` runs the gate's
+  `set_shared_umask` inside it too, since a .shared tc cannot read is
+  refused before cmd_gate, with words naming the mailbox's path.
+- `far_words(text, logins)`: every path inside the mailbox relative to
+  it, the mailbox's own folder `the mailbox`, any other absolute path `a
+  path on this machine` (a codex error, a traceback's file), `pid N`
+  `another process`, and each login `another member`, in that order.
+- `far_logins(keep)`: the logins the words could name: the gate's user,
+  the superuser, the owners of ROOT, .shared, mail/ and outbox/, of
+  every entry directly in mail/, cards/, outbox/ and mail/.origins/, and
+  on a shared mailbox the group's members; less the names the far key
+  sent (its --as, the --from and --to of its command) and any login that
+  is a mailbox name here (an inbox or a card), which the far key reads in
+  health anyway.
+- Health: GATE_HEALTH_KEYS marks listeners and watchers with
+  GATE_HEALTH_PROCESS, and `gate_health` gives `another process` for a
+  pid and null for none. The keys are the same.
+
+### Test
+
+tests/test_gate.py, FarKeyReadsTest,
+`test_nothing_the_gate_prints_names_a_path_a_login_or_a_pid_of_this_machine`:
+19 subtests, one per gate path that prints, each in its own root:
+delivered, already delivered, refused, an empty message, a message too
+large, no forward, a linked inbox, an inbox not its card owner's (in
+process, os.lstat and os.fstat patched), busy with its holder (a child
+holds the inbox lock), the origins warning, a filing that failed, a ring
+that failed (the fake codex's words name a path), the last-ring record
+not written (a file at this user's branch name), a marker refused, a
+passing write failure (in process), a retry's ring skipped, a .shared tc
+cannot read (through main), health with a proven listener, and a
+traceback (in process, its words naming the mailbox and the login). Each
+asserts its exit and words that show the path ran (relative paths,
+`another member (another process)` for a holder, `"b": "another
+process"` in health), then that nothing the far side reads holds the
+root's temp folder, the running login (and, where the machine has one,
+the stand-in owner's), `pid N`, or a pid the case knows.
+
+### Mutations
+
+| Mutation | Applied as | Red, by subtest | Red line |
+|---|---|---|---|
+| the scrub skipped for stderr | far_key_reads writes stderr as caught | 12 of 19: a linked inbox, an inbox not its card owner's, busy with its holder, the origins warning, a filing that failed, a ring that failed, the last-ring record not written, a marker refused, a passing write failure, a retry's ring skipped, a .shared tc cannot read, a traceback | `self.assertIn(shown, said, "the case did not reach the gate path it names, or its words changed")`; for a ring that failed, `self.assertNotIn(str(root.base), said, "the gate named a path on this machine")` |
+| the scrub skipped for health's pids | gate_health returns a pid as it is | health | the same assertIn (`"b": "another process"` absent) |
+
+### Tests whose words changed with item 8
+
+A far key now reads paths relative to the mailbox and no login, so
+these expect that: tests/test_gate.py (the delivered send, another key's
+filing, another member's renamed filing, the write failure that passes
+and round 2's two new tests, SharedOriginsTest's no-origins and two
+members tests: ORIGINS_NOT_MADE_WORDS with `mail/.origins`, `another
+member` for the init user, and for a group named like the running login);
+tests/test_ssh_route.py (the round trip's far line, both far 10 tests);
+tests/test_inbox_pinned.py (row (b)'s line).
+
+### Behavior changes, said plainly
+
+1. Every word a far key reads from the gate gives paths relative to the
+   far mailbox (`sent #1 to b: mail/to-b/000001-from-homebox-b.md`), and
+   `another member` or `another process` where a login or a pid was.
+   The near side prints what the far side printed, so a sender sees
+   these words.
+2. A fault inside the gate prints a traceback with its paths and logins
+   replaced, exit 1 as before.
+3. The gate's health gives `another process` where it gave a listener's
+   or a watcher's pid.
+
+### Known limits, said in far_logins' and far_words' docs
+
+- A member whose login is also their mailbox name is not replaced (a
+  far key reads that name in health anyway).
+- A login that is also a word tc uses (a member named `mail`, say) makes
+  the words read oddly; it never names the user.
+- A login of a user outside the group who owns nothing directly in the
+  four folders (only an entry deeper down, or a holder by an ACL) is not
+  replaced; nor is a user who holds a lock while owning nothing (root is
+  always replaced).
+
+### Not in the work set, for the architect
+
+- qa/human/route-ssh.md still expects the far side's absolute paths: step
+  9's `sent #1 to far-b: /home/qa/tc-qa/mail/to-far-b/000001-from-home-a.md`
+  is now `mail/to-far-b/000001-from-home-a.md`, and step 17's holder words
+  now read `another member (another process)`. It was outside this
+  round's work set.
+- README and JOIN (the DOCS lane) do not show far words yet.
+
+### Verified
+
+- (e), `e39cfba`: 337 run, OK; node 66 pass (both on a copy of that
+  tree).
+- (f): the counts are in the report to the architect and in (f)'s
+  commit message.
+- A hand run under a scratch TC_ROOT: a gated send with a file at
+  mail/.origins prints `sent #1 to b: mail/to-b/000001-from-homebox-b.md`
+  and its warning with `mail/.origins`; a plain tc send there still
+  prints its absolute path.
