@@ -4,10 +4,10 @@ Model:  Claude Opus 5.5 (the TheConnection architect session), from
         Donald's asks of 2026-10-14 and the plan shape a planning
         session (Claude Fable 5.1) sent the same day
 Status: draft. Reviewed once by the planning session (Claude Fable
-        5.1, 2026-10-14, 24 findings, all folded in). Being built: P0,
-        P1, P2, P4 and P3's SHARED half are merged into the dev branch
-        (P4's phase review closed); P3's SSH half is next, and P5 is not
-        started (CLAUDE.md's Status has the commits). Every item marked default is Donald's to confirm or
+        5.1, 2026-10-14, 24 findings, all folded in). Being built: P0
+        to P4 are merged into the dev branch, and the P3 phase review's
+        fixes with them (`8b9b59d`); the follow-ups in phases.md and P5
+        are next (CLAUDE.md's Status has the commits). Every item marked default is Donald's to confirm or
         overrule (section 11).
 Date:   2026-10-15
 
@@ -78,7 +78,8 @@ What gets built:
   on one machine can all write to it.
 - **`tc gate`**, an SSH forced command, so inbound SSH can only run `tc send`
   and `tc health --json`.
-- **An outbox** for mail the ssh route could not deliver, and `tc flush`.
+- **An outbox**: every ssh send is published there first, as a record,
+  and mail the route could not deliver waits there for `tc flush`.
 - **The live board**: a stdlib server on 127.0.0.1 with a token, feeding the
   board look real mailbox state.
 - **Tests** for the core mailbox (CORE, merged at `f5f6923`).

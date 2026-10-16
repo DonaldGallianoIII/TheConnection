@@ -51,7 +51,8 @@ the rules, and knows the two known bugs.
   `[sys.executable, TC, *args]` with that root, stdin from `/dev/null` unless
   given, returns `(exit, stdout, stderr)`. `listener(name, timeout)` starts
   `tc wait` in the background, polls `/proc/locks` until the pid holds
-  `mail/.wait-<name>.lock` (ceiling 5 s, never a bare sleep), yields the pid,
+  `mail/.wait-<name>.lock` (ceiling 5 s, never a bare sleep; since D35 the
+  lock is `mail/to-<name>/.wait.lock`, and the harness follows it), yields the pid,
   and kills that pid in teardown. `fake_bin(name, exit_code)` writes a fake
   `codex` or `ssh` to a temp folder that records its argv and stdin to a
   file and exits with `exit_code`, and returns the folder to put first on
@@ -312,7 +313,10 @@ mailbox (human QA, D4); modes are right by test.
   lands there. D19: init makes the four top folders; a planted link in an
   inbox pointing at a file outside the mailbox is never printed by
   `peek`, `read` or `log`, and stays in place; a FIFO at
-  `mail/.wait-x.lock` is refused within 2 s instead of hanging.
+  `mail/.wait-x.lock` is refused within 2 s instead of hanging. (Since
+  D35, at `8b9b59d`, the wait and watch locks live in the owner's inbox,
+  and a link or FIFO planted at their names there is moved aside with
+  words, not refused; the other files keep this rule.)
   D20 (one user can prove modes and checks): after `tc join x` under
   shared mode, `mail/to-x/` and `read/` are owned by the joiner with
   mode `3770`; a message, a card and a status file are `0640`; a send to
@@ -440,6 +444,33 @@ refuses without the token; it binds nowhere but 127.0.0.1.
   orchestrator reads as one by its word.
 
 ---
+
+## FOLLOW-UPS (after the P3 fix, `8b9b59d`)
+
+Model: Claude Opus 5.5 (the TheConnection architect session), 2026-10-16.
+Status: drafts; each runs only after a2 approves it for Donald.
+
+### F1. The wait exit record (D28, D37 part 2)
+
+`tc wait` writes why it exited (mail, timeout, killed is the record's
+absence) into a record beside its lock in the owner's inbox: written by
+the owner, group-readable (`0640`), reached through the pinned inbox
+handle, never followed. `tc health`, `tc watch` and the board read it as
+that member's words, never as proof of a live listener; the held lock
+stays the only proof (rule 6). With it, `tc watch --names` stops calling
+a listener that mail woke `LISTENER DOWN` (known bug
+`liveness-gap-by-design-read-as-down`), and the board can tell a woken
+listener from a killed one after a restart. Must reject: a record read
+as a listener; a record another member wrote or planted believed; a
+record followed through a link.
+
+### F2. The switch-over cleanup
+
+Once every live session has re-armed under the P3 fix's tc, remove the
+private-only read of the old lock place (`mail/.wait-<name>.lock`) and
+its two tests together, in one commit. Add the one test the fix round
+left out: the gate's health scrubs its string values (today the shared
+group's name), so a mutation that skips that scrub turns it red.
 
 ## DOCS (P5, wave 3, after every other lane merges)
 

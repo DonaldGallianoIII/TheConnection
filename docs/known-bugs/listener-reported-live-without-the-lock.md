@@ -4,8 +4,9 @@ Model:  Claude Opus 5.5 (the GROUND lane agent), 2026-10-14
 Status: unreviewed
 
 **What:** a session reports "listening" for a mailbox name, and no process
-holds that name's wait lock (`mail/.wait-<name>.lock`). The report is a
-sentence about a listener, not a check of one.
+holds that name's wait lock (`mail/to-<name>/.wait.lock` since D35; before
+it, `mail/.wait-<name>.lock`). The report is a sentence about a listener,
+not a check of one.
 
 **How it showed:** on 2026-10-14 a Codex worker reported "listening" about
 a listener it had started as a background job (`cmd &`). Its host had
@@ -23,7 +24,9 @@ mail sits until someone types into that session by hand.
 Claude Code's background Bash, with a timeout. Codex gets the `codex queue`
 doorbell (contract C2, decision D3), not a listener. Say "listening" only
 with the pid that `tc health` names for that name. Every child a test
-starts is killed in teardown by its own pid.
+starts is killed in teardown by its own pid. The pid must also belong to
+the name's owner: a lock another user can hold fools this very check (see
+`per-owner-file-open-to-the-group`, the P3 phase review's HIGH-2).
 
 **The check that catches it:** `tc health --json` reads `/proc/locks`. Its
 `listeners` map must give the claimed pid for that name. `null` there means

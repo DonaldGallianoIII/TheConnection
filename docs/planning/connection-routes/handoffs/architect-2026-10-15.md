@@ -6,6 +6,16 @@ Date:   2026-10-15
 For:    whoever picks the architect's work back up, a new session or this
         one after a restart. Read CLAUDE.md first, then this.
 
+## Update, 2026-10-16
+
+The relay said yes in the morning. P3FIX merged into dev at `8b9b59d`
+(07:05), with the heads-up mailed first. Two listened before the merge
+and the same two after, none twice; 342 Python and 66 Node pass on the
+merged checkout. The architect's lines after it (CLAUDE.md, the
+contracts, known-bugs, phases' follow-ups F1 and F2) are on dev. Items 1
+and 2 under "Next" are done; F1 (the D28 record) is next, after the
+relay approves it.
+
 ## Where the plan stands
 
 The connection routes plan (`docs/planning/connection-routes/00-index.md`)

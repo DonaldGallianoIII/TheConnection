@@ -50,7 +50,8 @@ and its count goes up.
 | [`plain-object-keyed-by-outside-names`](plain-object-keyed-by-outside-names.md) | MEDIUM | 1 | A session named `__proto__` vanished from the board and turned every position after it into NaN, because the layout keyed plain objects by name. |
 | [`liveness-gap-by-design-read-as-down`](liveness-gap-by-design-read-as-down.md) | MEDIUM | 1 | A session woken by mail read "no listener" for its whole turn, because the board called any lock lost within 600 s down. |
 | [`path-search-rerun-per-pair-on-every-poll`](path-search-rerun-per-pair-on-every-poll.md) | MEDIUM | 1 | The board re-ran its A* router for every routed pair on every 3 s poll with nothing cached, so shared-account boards stall (estimated, not measured). |
-| [`no-follow-open-guards-only-the-last-name`](no-follow-open-guards-only-the-last-name.md) | HIGH | 3 | A member's own init changed that member's files outside the mailbox, through a folder swapped above the name a no-follow open guarded. |
+| [`no-follow-open-guards-only-the-last-name`](no-follow-open-guards-only-the-last-name.md) | HIGH | 4 | A folder above a no-follow name was swapped after one lstat: a member's own init changed that member's files outside the mailbox, and a member's swapped inbox sent another member's message outside it. |
+| [`per-owner-file-open-to-the-group`](per-owner-file-open-to-the-group.md) | HIGH | 1 | On a shared mailbox any member could flock another's 0664 wait lock or rewrite a Codex member's ring marker, so the owner's listener never started while health named the holder, and the doorbell went quiet. |
 | [`outside-text-clipped-by-overflow-hidden`](outside-text-clipped-by-overflow-hidden.md) | MEDIUM | 1 | A long session name had no break point in the phone outline, so it ran off the row and its role words were clipped away. |
 
 ## The shared catalog

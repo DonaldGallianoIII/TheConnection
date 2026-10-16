@@ -48,9 +48,11 @@ project_notes: |
   user. tc is a single Python 3 stdlib script. State is files under ROOT
   (TC_ROOT, default next to the script): mail/to-<name>/NNNNNN-from-X.md
   unread, mail/to-<name>/read/ read, mail/.seq the counter under flock,
-  mail/.wait-<name>.lock held by a live `tc wait`, status/<name>.md.
-  A message is written to a .tmp and renamed, so a reader never sees half
-  of one. Listeners are proven live only by their pid in /proc/locks.
+  mail/to-<name>/.wait.lock (0600, the owner's) held by a live `tc wait`,
+  status/<name>.md.
+  A message is written to a .tmp, hard-linked to its name and the .tmp
+  removed, so a reader never sees half of one and no message replaces
+  another. Every inbox act works inside one pinned folder (D35). Listeners are proven live only by their pid in /proc/locks.
   The waking mechanism is outside tc: Claude Code's background Bash wakes
   a session when `tc wait` exits.
   The board (board/) is plain ES modules with no innerHTML, served with
