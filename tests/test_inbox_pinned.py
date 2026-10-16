@@ -28,6 +28,11 @@ queued message's name (P3 fix round 2, REC-4).
 
 Known gap: the family list is hardcoded. A command added later that
 touches an inbox or a branch is not covered until someone adds its row.
+P3 fix round 2 (Claude Opus 5.5, unreviewed: test-strategist REC-15):
+that gap is now a red test. EveryInboxActHasARowTest reads tc with
+Python's ast and fails for any function that calls pinned_inbox,
+open_inbox or pin_folder and is neither covered by a row (COVERED) nor
+exempt with a reason (EXEMPT).
 
 One Linux user plays every part. The mailbox is shared with the user's
 primary group by tc init under the harness's own TC_ROOT, and ROOT and its
@@ -92,8 +97,9 @@ inbox (moved aside, still pinned) holds after the act.
             for held_by_others' row patches os.stat so each holder's
             /proc/<pid> reads as another member's; for the stuck row,
             writes a note beside the real queued message and replaces
-            tc's wall_clock.
-@deps       python3 stdlib (argparse, collections, contextlib,
+            tc's wall_clock. EveryInboxActHasARowTest reads ../tc's text
+            and parses it; it runs nothing.
+@deps       python3 stdlib (argparse, ast, collections, contextlib,
             importlib, io, json, os, pathlib, resource, stat, sys, time,
             unittest, unittest.mock); tests/_root.py; UmaskTestCase, as_member,
             load_tc and primary_group from test_shared.py; hold,
@@ -109,6 +115,7 @@ inbox (moved aside, still pinned) holds after the act.
 """
 
 import argparse
+import ast
 import collections
 import contextlib
 import importlib.util
@@ -415,6 +422,42 @@ ROWS = (
     Row("k", "tc health's stuck_outbox over another member's branch", "branch", False, False, LOOKS, {}, None,
         late=STALE_SHIFT_SECONDS),
 )
+# P3 fix round 2 (Claude Opus 5.5, unreviewed): test-strategist REC-15
+# (synthesis REC-17), the family list's known gap made a red test. The
+# calls that pin an inbox or a branch; every function in tc that makes one
+# of them, by the rows of ROWS whose act reaches it; and every other such
+# function, with why no row needs to swap under it. A function added to
+# tc that pins a folder, and is in neither, fails
+# test_every_inbox_act_in_tc_has_a_row_or_a_named_exemption until someone
+# gives it a row or a reason.
+PIN_CALLS = ("pinned_inbox", "open_inbox", "pin_folder")
+COVERED = {
+    "deliver_local": ("tc send", "the far gate's send"),
+    "cmd_peek": ("tc peek",),
+    "cmd_read": ("tc read",),
+    "unread": ("tc wait's poll",),
+    "cmd_log": ("tc log",),
+    "mailbox_summary": ("tc health --json", "the gate's health --json"),
+    "listeners": ("tc health's listeners",),
+    "held_by_others": ("tc health's held_by_others",),
+    "other_branches": ("tc flush's count of other members' branches",),
+    "outbox_files": ("tc flush's count of other members' branches",
+                     "tc health's stuck_outbox over another member's branch"),
+    "unread_count": ("tc card", "a codex tc join", "a codex send's ring decision"),
+    "ring_doorbell": ("a codex send's ring decision",),
+    "stuck_outbox": ("tc health's stuck_outbox over another member's branch",),
+}
+EXEMPT = {
+    "pin_folder": "the pin itself: one folder opened by its name in an open folder, never through a link",
+    "open_inbox": "a pin helper: an inbox and its read/, each through pin_folder; every row reaches it",
+    "pinned_inbox": "a pin helper: mail/ opened by its path (the init user's, D34), then open_inbox",
+    "inbox_made": ("a private mailbox's send making the inbox it then pins by name in mail/'s descriptor; on a "
+                   "shared mailbox, where another member could swap an inbox, it makes and opens nothing (D20)"),
+    "hold_wake_lock": ("only the inbox's owner runs it on a shared mailbox (D36 (2)), so the only member who could "
+                       "swap the inbox is the one running it; WakeFilesAreTheirOwnersTest covers its lock"),
+    "deliver_ssh": ("the sender's own outbox branch, 2750, which no other member can write in (D32, D33); only "
+                    "the sender or the init user can swap a level of it (D34, DEBT-1)"),
+}
 
 
 class InboxPinnedTest(UmaskTestCase):
@@ -679,6 +722,66 @@ class InboxPinnedTest(UmaskTestCase):
                     self.assertNotIn(PLANTED_TEXT, shown, "tc printed a planted file from the far end")
                     self.assertNotIn(PLANTED_SENDER, shown, "tc named a planted file from the far end")
                     self.check(row, root, ran, real, calls, held)
+
+
+# P3 fix round 2 (Claude Opus 5.5, unreviewed): test-strategist REC-15 (synthesis REC-17).
+def pinning_functions(source):
+    """Each top-level function in the Python `source` that calls one of PIN_CALLS by name, anywhere in its body (a function nested in it counts as its own): {name: sorted calls}.
+
+    @interacts  none; parses text.
+    @deps       ast; PIN_CALLS.
+    @complexity O(s) over s nodes of the parsed source (tc: tens of
+                thousands).
+    @alloc      the parsed tree while it walks; one dict, returned.
+    """
+    found = {}
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            calls = {call.func.id for call in ast.walk(node)
+                     if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in PIN_CALLS}
+            if calls:
+                found[node.name] = sorted(calls)
+    return found
+
+
+class EveryInboxActHasARowTest(unittest.TestCase):
+    """The class proof's family list, kept whole: every function in tc that pins an inbox or a branch has a row of ROWS, or a named exemption.
+
+    @interacts  reads ../tc's text.
+    @deps       pinning_functions, _root.TC; ROWS, COVERED, EXEMPT.
+    @complexity O(s) over s nodes of tc's parsed source.
+    @alloc      tc's text and parsed tree while it runs.
+    """
+
+    def test_every_inbox_act_in_tc_has_a_row_or_a_named_exemption(self):
+        """Every function tc defines that calls pinned_inbox, open_inbox or pin_folder is in COVERED, by rows ROWS holds, or in EXEMPT, with a reason; neither names a function that no longer pins.
+
+        Must reject a new command, or a new step of an old one, that
+        opens an inbox or a branch and has no row: that is how listeners,
+        held_by_others and stuck_outbox stood outside the class proof
+        until round 2 (test-strategist's mutations A and S).
+
+        @interacts  reads ../tc's text.
+        @deps       pinning_functions, _root.TC; ROWS, COVERED, EXEMPT.
+        @complexity O(s) over s nodes of tc's parsed source.
+        @alloc      tc's text and parsed tree while it runs.
+        """
+        found = pinning_functions(_root.TC.read_text(encoding="utf-8"))
+        labels = {row.label for row in ROWS}
+        with self.subTest(check="every pinning function is covered or exempt"):
+            self.assertEqual(sorted(set(found) - set(COVERED) - set(EXEMPT)), [],
+                             "these functions pin an inbox or a branch and have no class-proof row and no exemption")
+        with self.subTest(check="every entry still pins"):
+            self.assertEqual(sorted((set(COVERED) | set(EXEMPT)) - set(found)), [],
+                             "these entries name a function that no longer pins an inbox or a branch")
+        with self.subTest(check="covered and exempt are apart"):
+            self.assertEqual(sorted(set(COVERED) & set(EXEMPT)), [], "a function is both covered and exempt")
+        with self.subTest(check="every covering row is a row"):
+            self.assertEqual(sorted({label for rows in COVERED.values() for label in rows} - labels), [],
+                             "COVERED names a row ROWS does not hold")
+        with self.subTest(check="every exemption says why"):
+            self.assertEqual(sorted(name for name, why in EXEMPT.items() if not why.strip()), [],
+                             "an exemption gives no reason")
 
 
 if __name__ == "__main__":
