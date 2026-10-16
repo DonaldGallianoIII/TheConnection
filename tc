@@ -238,8 +238,12 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             takes it only from a regular file with one name, the inbox
             owner's, of at most WAIT_EXIT_MAX_BYTES, holding a word and a
             time, never through a link and never blocking; it is never
-            proof of life, and listeners still reads only locks.
-@deps      python3 stdlib (argparse, collections, contextlib, errno, fcntl,
+            proof of life, and listeners still reads only locks. `watch
+            --names` reads it for each tracked name whose lock is gone,
+            and alerts LISTENER DOWN only when it still says
+            `listening`, is missing, or is older than the watch's last
+            sighting of that lock.
+@deps     python3 stdlib (argparse, collections, contextlib, errno, fcntl,
             grp, hashlib, io, json, pathlib, pwd, re, resource, secrets,
             selectors, shlex, shutil, signal, stat, subprocess, time,
             traceback, datetime, os, sys); Linux only
@@ -289,7 +293,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             log n): /proc/locks, then one inbox open and one lstat per
             name for its lock (listeners; P3 fix round 1b, Claude Opus
             5.5, unreviewed: D35), plus one nvidia-smi run where it
-            exists; it reads no cards. O(p) once per
+            exists, plus one inbox open and one short read per tracked
+            name whose lock is gone (wait_exits, F1); it reads no cards. O(p) once per
             heartbeat. join O(1), or O(u) for a codex card's unread count;
             card O(u) for its unread count; cards O(c). init O(f + d) over f
             folders and files under the shared folders (hundreds to
@@ -1102,10 +1107,14 @@ WAIT_EXIT_LEFT_WORDS = (WAIT_EXIT_MAIL, WAIT_EXIT_TIMEOUT)
 # (an offset with seconds adds three) and a newline. 64 bounds a hand-made
 # file and never cuts a real one; anything longer is no record.
 WAIT_EXIT_MAX_BYTES = 64
-# The record's time is cut to the second (now_iso), so a record written
-# in the same second as the last sighting of its lock reads as written
-# after it: a reader compares it against that sighting less this step.
-WAIT_EXIT_TIME_STEP_SECONDS = 1
+# How far before the last sighting of its lock a `mail` or `timeout`
+# record may be dated and still count as that wait's own exit
+# (left_on_purpose). The record's time is cut to the second (now_iso), and
+# the exit word is written while the lock is still held, a moment before it
+# goes, so a reader may see the lock held just after the exit was written:
+# one second for the cut, and one more for that moment, which takes
+# milliseconds. An older record is from an earlier wait.
+WAIT_EXIT_TIME_STEP_SECONDS = 2
 # How many times a write makes its .tmp: a second try only after the first
 # found this user's own .tmp left by a wait killed between its create and
 # its rename, which it removes first.
@@ -8804,12 +8813,14 @@ def wait_exits(names):
 
 
 def left_on_purpose(record, seen=None):
-    """True when the wait exit record `record` says its wait left on purpose (C5): its word is `mail` or `timeout`, and it was written no earlier than the second its lock was last seen held at `seen` (seconds since the epoch). `seen` None (the lock never seen this run: a board restarted, say) takes any date.
+    """True when the wait exit record `record` says its wait left on purpose (C5): its word is `mail` or `timeout`, and it is dated less than WAIT_EXIT_TIME_STEP_SECONDS before `seen`, when its lock was last seen held (seconds since the epoch). `seen` None (the lock never seen this run: a board restarted, say) takes any date.
 
-    An older `mail` or `timeout` is from a wait before the one last seen
-    (whose own `listening` could not be written), so it says nothing of
-    that one: False, as for no record. tc watch and the board decide with
-    this; neither takes the record as a listener.
+    The step covers the record's time cut to the second and the moment
+    between the exit's write and the lock's release, so a wait's own exit
+    always counts. An older `mail` or `timeout` is from a wait before the
+    one last seen (whose own `listening` could not be written), so it says
+    nothing of that one: False, as for no record. tc watch and the board
+    decide with this; neither takes the record as a listener.
 
     @interacts  none.
     @deps       WAIT_EXIT_LEFT_WORDS, WAIT_EXIT_TIME_STEP_SECONDS.
@@ -9283,25 +9294,43 @@ def cmd_watch(args):
     missing, as a wait makes them. The lock file is closed on every way
     out (exit 0, 3, 5, a refusal, an exception).
 
+    F1 (Claude Opus 5.5, unreviewed): `--names` alerts `LISTENER DOWN:
+    <name>` only for a tracked name whose lock went while its wait exit
+    record still says `listening`, or that has no record (as before F1),
+    or whose `mail` or `timeout` is from an earlier wait than the one this
+    watch last saw (left_on_purpose against that sighting's time, taken
+    just before each listing). A tracked wait that mail woke, or that
+    timed out, left on purpose and is not down (known bug
+    liveness-gap-by-design-read-as-down). Which names are alive still
+    comes from the locks alone (listeners); the record only says why a
+    lock that is gone went.
+
     @interacts  checks the name first (C0, exit 6, nothing written); caps
                 its own address space; reads ROOT/.shared once
                 (mailbox_share); takes the lock (hold_wake_lock, as tc
                 wait's) and holds its flock until it exits; reads /proc
                 and each name's wait lock every poll (see machine_stats,
-                listeners) and runs nvidia-smi; prints a HEARTBEAT or ALERT
-                line.
+                listeners) and runs nvidia-smi; reads the clock
+                (wall_clock) before each listing and, for each tracked name
+                whose lock is gone, its exit record (wait_exits; F1);
+                prints a HEARTBEAT or ALERT line.
     @deps       require_names, mailbox_share, hold_wake_lock,
-                machine_stats, listeners, session_counts, _breaches;
-                resource, sys, time.
-    @complexity O(k + n log n) per poll: k lines in /proc/locks and n
+                machine_stats, listeners, wait_exits, left_on_purpose,
+                wall_clock, session_counts, _breaches; resource, sys,
+                time.
+    @complexity O(k + n log n + g) per poll: k lines in /proc/locks and n
                 entries in mail/ (listeners: one folder open and one lstat
                 per inbox), plus /proc/meminfo and one nvidia-smi run where
-                it exists (machine_stats); no cards and no .shared read per
+                it exists (machine_stats), plus one inbox open and one
+                short read for each of the g tracked names whose lock is
+                gone (wait_exits; F1); no cards and no .shared read per
                 poll. O(p) once per heartbeat over p processes
                 (session_counts). One poll every args.poll seconds until
                 the heartbeat.
     @alloc      one open lock file for its lifetime, closed on every way
-                out; the peaks, a few floats.
+                out; the peaks, a few floats; one float per tracked name
+                alive at the start, the time this watch last saw its lock
+                held (F1).
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     resource.setrlimit(resource.RLIMIT_AS, (WAIT_MEMORY_CAP_BYTES, WAIT_MEMORY_CAP_BYTES))
@@ -9309,7 +9338,9 @@ def cmd_watch(args):
     shared = share is not None
     with hold_wake_lock(args.name, "watch", share):  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35, D36; closed on every way out
         tracked = [n for n in (args.names.split(",") if args.names else []) if n]
+        stamp = wall_clock()  # F1 (Claude Opus 5.5, unreviewed): taken before the listing, so no exit is older
         alive_at_start = {n for n, pid in listeners("wait", shared).items() if n in tracked and pid}
+        seen = dict.fromkeys(alive_at_start, stamp)  # F1: when this watch last saw each tracked lock held
         peak_load, low_mem, peak_gpu, strikes = 0.0, 100.0, None, 0
         deadline = time.monotonic() + args.heartbeat
         while True:
@@ -9321,8 +9352,12 @@ def cmd_watch(args):
             for g in m["gpus"] or []:
                 peak_gpu = g["temp_c"] if peak_gpu is None else max(peak_gpu, g["temp_c"])
             problems = _breaches(m, args, strikes)
+            stamp = wall_clock()  # F1 (Claude Opus 5.5, unreviewed): before the listing, as at the start
             now_alive = {n for n, pid in listeners("wait", shared).items() if pid}
-            problems += [f"LISTENER DOWN: {n}" for n in sorted(alive_at_start - now_alive)]
+            seen.update(dict.fromkeys(alive_at_start & now_alive, stamp))
+            gone = sorted(alive_at_start - now_alive)
+            exits = wait_exits(gone)  # F1: the record says why each lock that is gone went; never a listener
+            problems += [f"LISTENER DOWN: {n}" for n in gone if not left_on_purpose(exits.get(n), seen[n])]
             if problems:
                 print(f"ALERT {now_iso()}: " + "; ".join(problems))
                 print(f"  now: load {m['load1']} / {m['cores']}, mem free {m['mem_avail_pct']}%, {_gpu_text(m['gpus'])}")

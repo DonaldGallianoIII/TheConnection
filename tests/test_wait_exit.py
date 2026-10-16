@@ -24,14 +24,19 @@ docs/planning/connection-routes/handoffs/F1.md.
             wait_exits and left_on_purpose in process, with os.fstat
             patched for one case and one call run in a thread that a
             FIFO could block (released by opening the FIFO for writing).
-            Writes nothing outside the root's temp folder.
+            Starts tc watch children through the harness (killed by
+            their pids in teardown) and reads /proc/locks to prove each
+            holds its lock. Writes nothing outside the root's temp
+            folder.
 @deps       python3 stdlib (collections, datetime, os, pathlib, signal,
-            stat, sys, threading, time, unittest, unittest.mock);
+            stat, subprocess, sys, threading, time, unittest,
+            unittest.mock);
             tests/_root.py; UmaskTestCase, load_tc and owner_patched_fstat
             from test_shared.py; ../tc.
 @complexity O(1) per test: a handful of tc runs per root, one root per
             subtest; the killed-listener test reads /proc/locks until the
-            lock goes, at most LOCK_GONE_SECONDS.
+            lock goes, at most LOCK_GONE_SECONDS; each watch subtest runs
+            up to its watch's heartbeat (about 8 to 14 s).
 @alloc      one TcRoot per subtest, removed when its context exits, with
             every child it started.
 """
@@ -42,6 +47,7 @@ import os
 import pathlib
 import signal
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -69,6 +75,10 @@ RECORD_MODE = 0o640
 LISTENING, MAIL, TIMEOUT = "listening", "mail", "timeout"
 # The most of a record the reader takes (tc's WAIT_EXIT_MAX_BYTES).
 RECORD_MAX_BYTES = 64
+# How far before a lock's last sighting a mail or timeout record may be
+# dated and still be that wait's own exit (tc's
+# WAIT_EXIT_TIME_STEP_SECONDS).
+RECORD_TIME_STEP_SECONDS = 2
 # Exit codes (contracts.md): a wait's mail and its timeout.
 EXIT_MAIL = 0
 EXIT_TIMEOUT = 2
@@ -106,6 +116,26 @@ MALFORMED = (("an unknown word", "dead 2026-10-16T12:00:00-05:00\n"),
              ("two lines", "mail 2026-10-16T12:00:00-05:00\nmail\n"),
              ("no newline", "mail 2026-10-16T12:00:00-05:00"),
              ("a time with no offset", "mail 2026-10-16T12:00:00\n"))
+# Item 3, tc watch --names: the session the watch wakes, made up; its lock
+# (tc's WAKE_LOCK_NAME for a watch) and the wait's; a watch's alert exit
+# (contracts.md); thresholds no real machine reaches, so a watch only ever
+# alerts for a listener; a poll a second; a heartbeat past a woken wait's
+# exit (at most TC_POLL_SECONDS after the send) with a few of the watch's
+# polls to spare; and how long a killed listener's alert may take.
+WATCHER = "w"
+WATCH_LOCK = ".watch.lock"
+WAIT_LOCK = ".wait.lock"
+EXIT_ALERT = 5
+QUIET = ["--load-ratio", "100000", "--mem-min-pct", "0", "--gpu-max-c", "100000"]
+WATCH_POLL = "1"
+SPARE_POLLS_SECONDS = 4
+WATCH_HEARTBEAT_SECONDS = WAKE_CEILING_SECONDS + SPARE_POLLS_SECONDS
+ALERT_CEILING_SECONDS = 10
+# A listener that times out on its own, soon, but long after the watch
+# has taken its first look (a watch lists the locks the moment it holds
+# its own), and the heartbeat of the watch over it.
+SHORT_WAIT_SECONDS = 4
+SHORT_HEARTBEAT_SECONDS = SHORT_WAIT_SECONDS + SPARE_POLLS_SECONDS
 # What a file outside the mailbox holds, that a link at a record's name
 # (or its .tmp's) leads to.
 OUTSIDE_TEXT = "outside the mailbox: tc must never write or read this\n"
@@ -173,20 +203,78 @@ def record_made(box):
     return os.path.lexists(box / RECORD)
 
 
-def lock_gone(lock, pid):
-    """True once /proc/locks no longer shows `pid` holding `lock`, within LOCK_GONE_SECONDS.
+def lock_gone(lock, pid, ceiling=LOCK_GONE_SECONDS):
+    """True once /proc/locks no longer shows `pid` holding `lock`, within `ceiling` seconds.
 
     @interacts  reads /proc/locks (the harness's flock_holders).
-    @deps       _root.flock_holders; time.
-    @complexity at most LOCK_GONE_SECONDS / LOCK_POLL_SECONDS reads.
+    @deps       _root.flock_holders; time; LOCK_GONE_SECONDS,
+                LOCK_POLL_SECONDS.
+    @complexity at most ceiling / LOCK_POLL_SECONDS reads.
     @alloc      none past each read.
     """
-    end = time.monotonic() + LOCK_GONE_SECONDS
+    end = time.monotonic() + ceiling
     while time.monotonic() < end:
         if pid not in _root.flock_holders(lock):
             return True
         time.sleep(LOCK_POLL_SECONDS)
     return pid not in _root.flock_holders(lock)
+
+
+def holds(lock, proc):
+    """True once /proc/locks shows `proc` holding `lock`, within LOCK_GONE_SECONDS; False if it exits or the time runs out first.
+
+    @interacts  reads /proc/locks (the harness's flock_holders).
+    @deps       _root.flock_holders; time; LOCK_GONE_SECONDS,
+                LOCK_POLL_SECONDS.
+    @complexity at most LOCK_GONE_SECONDS / LOCK_POLL_SECONDS reads.
+    @alloc      none past each read.
+    """
+    end = time.monotonic() + LOCK_GONE_SECONDS
+    while time.monotonic() < end:
+        if proc.pid in _root.flock_holders(lock):
+            return True
+        if proc.poll() is not None:
+            return False
+        time.sleep(LOCK_POLL_SECONDS)
+    return False
+
+
+def finish(proc, ceiling):
+    """(exit code, stdout, stderr) of `proc` once it ends, within `ceiling` seconds. Past it the child is killed by its own pid and the code is None, so a test fails on its assertion, never on a timeout.
+
+    @interacts  waits for one child; may send it SIGKILL (Popen.kill, its
+                own pid only).
+    @deps       subprocess.
+    @complexity O(1), plus at most `ceiling` seconds.
+    @alloc      the child's output, returned.
+    """
+    try:
+        out, err = proc.communicate(timeout=ceiling)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        return None, out, err
+    return proc.returncode, out, err
+
+
+def start_watch(root, heartbeat):
+    """Start `tc watch w --names b` under `root` with QUIET thresholds, a poll a second and `heartbeat`; return (its Popen, whether it held its lock and b still held its own once it did).
+
+    The second part is how a test knows the watch took its first look
+    while b listened: the watch lists the locks the moment it holds its
+    own, and b's lock is checked after that.
+
+    @interacts  starts one tc watch through the harness (killed by its
+                pid in teardown); reads /proc/locks.
+    @deps       _root.TcRoot.start, _root.flock_holders, holds; WATCHER,
+                NAME, WATCH_POLL, QUIET, WATCH_LOCK, WAIT_LOCK.
+    @complexity O(1), plus holds'.
+    @alloc      one Popen, registered with the root.
+    """
+    watch = root.start("watch", WATCHER, "--names", NAME, "--heartbeat", str(heartbeat), "--poll", WATCH_POLL, *QUIET)
+    held = holds(root.path / "mail" / f"to-{WATCHER}" / WATCH_LOCK, watch)
+    listening = bool(_root.flock_holders(root.path / "mail" / f"to-{NAME}" / WAIT_LOCK))
+    return watch, held and listening
 
 
 def release_fifo(path):
@@ -439,21 +527,24 @@ class ReaderTest(UmaskTestCase):
                 self.assertEqual((len(line.encode()) <= RECORD_MAX_BYTES, tc.wait_exits([NAME])), (True, {}))
 
     def test_left_on_purpose_takes_mail_or_timeout_written_since_the_lock_was_last_seen(self):
-        """left_on_purpose: mail or timeout written in or after the second the lock was last seen is True, and with no sighting (None) any date is; listening, no record, and a mail or timeout written a second or more before the sighting are False.
+        """left_on_purpose: mail or timeout dated after the lock was last seen, in its second, or in the second before (a wait writes its exit a moment before its lock goes, and the time is cut to the second) is True, and with no sighting (None) any date is; listening, no record, and a mail or timeout dated RECORD_TIME_STEP_SECONDS or more before the sighting are False.
 
         Must reject a stale mail record (from a wait before the one last
         seen, whose own listening could not be written) taken as that
-        wait's purposeful exit, and listening taken as one.
+        wait's purposeful exit, and listening taken as one; and a wait's
+        own exit, written just before a second turned and seen held just
+        after, refused (tc watch would call a woken listener down).
 
         @interacts  per case: loads tc; calls left_on_purpose in process.
-        @deps       load_tc; GOOD_AT.
-        @complexity O(1): seven cases.
+        @deps       load_tc; GOOD_AT, RECORD_TIME_STEP_SECONDS.
+        @complexity O(1): eight cases.
         @alloc      one TcRoot and one module per case.
         """
         cases = (("mail, written after the sighting", MAIL, GOOD_AT - 1, True),
                  ("timeout, written in the sighting's second", TIMEOUT, GOOD_AT + 0.7, True),
+                 ("mail, written just before the second the lock was seen in", MAIL, GOOD_AT + 1.5, True),
                  ("mail, never seen", MAIL, None, True),
-                 ("mail, written a second before the sighting", MAIL, GOOD_AT + 1, False),
+                 ("mail, dated the step before the sighting", MAIL, GOOD_AT + RECORD_TIME_STEP_SECONDS, False),
                  ("listening", LISTENING, GOOD_AT - 1, False),
                  ("listening, never seen", LISTENING, None, False),
                  ("no record", None, None, False))
@@ -462,6 +553,71 @@ class ReaderTest(UmaskTestCase):
                 tc = load_tc(root)
                 record = None if word is None else tc.WaitExit(word, GOOD_AT)
                 self.assertEqual(tc.left_on_purpose(record, seen), expected)
+
+
+# F1 (Claude Opus 5.5, unreviewed): item 3.
+class WatchTest(UmaskTestCase):
+    """Item 3: tc watch --names alerts LISTENER DOWN only for a tracked wait whose lock went while its record still says listening.
+
+    @interacts  see the module block; starts tc watch children through
+                the harness, each killed by its pid in teardown if still
+                running.
+    @deps       _root.TcRoot, UmaskTestCase, start_watch, record_made,
+                lock_gone, seen_record.
+    @complexity O(1) per subtest, each up to its watch's heartbeat.
+    @alloc      one TcRoot per subtest.
+    """
+
+    def test_a_watch_never_calls_a_wait_that_mail_woke_or_that_timed_out_down_and_alerts_once_for_one_killed(self):
+        """b listens and w watches it: b woken by mail (its record says mail), and b timing out on its own (timeout), each leave w to heartbeat, exit 0, with no LISTENER DOWN; b killed by its pid (its record still says listening) makes w alert once, exit 5, within ALERT_CEILING_SECONDS.
+
+        The known bug liveness-gap-by-design-read-as-down's second
+        instance: before F1, w compared only the locks held at its start
+        with the locks held now, so every wake read as a lost listener.
+        Must reject a watch that ignores the record (the woken and timed
+        out cases alert) and one that trusts any record (the killed case,
+        the control, would not alert).
+
+        @interacts  per subtest: one proven listener; one tc watch; a send
+                    or a kill; reads /proc/locks and the record.
+        @deps       _root.TcRoot.listener, _root.TcRoot.tc, start_watch,
+                    finish, record_made, lock_gone, seen_record; os,
+                    signal, time.
+        @complexity O(1) per subtest: up to WATCH_HEARTBEAT_SECONDS,
+                    SHORT_HEARTBEAT_SECONDS and ALERT_CEILING_SECONDS.
+        @alloc      one TcRoot per subtest.
+        """
+        with self.subTest(tracked="woken by mail"), _root.TcRoot() as root:
+            box = root.path / "mail" / f"to-{NAME}"
+            with root.listener(NAME, LISTENER_SECONDS) as pid:
+                record_made(box)
+                watch, looked = start_watch(root, WATCH_HEARTBEAT_SECONDS)
+                sent = root.tc("send", "--from", SENDER, "--to", NAME, "task")
+                gone = lock_gone(box / WAIT_LOCK, pid, WAKE_CEILING_SECONDS)
+                code, out, err = finish(watch, WATCH_HEARTBEAT_SECONDS + ALERT_CEILING_SECONDS)
+            word = seen_record(box, time.time()).word
+            self.assertEqual((looked, sent[0], gone, word, code, "LISTENER DOWN" in out),
+                             (True, 0, True, MAIL, 0, False), f"w said: {out!r} {err!r}")
+        with self.subTest(tracked="timed out"), _root.TcRoot() as root:
+            box = root.path / "mail" / f"to-{NAME}"
+            with root.listener(NAME, SHORT_WAIT_SECONDS) as pid:
+                record_made(box)
+                watch, looked = start_watch(root, SHORT_HEARTBEAT_SECONDS)
+                gone = lock_gone(box / WAIT_LOCK, pid, SHORT_HEARTBEAT_SECONDS)
+                code, out, err = finish(watch, SHORT_HEARTBEAT_SECONDS + ALERT_CEILING_SECONDS)
+            word = seen_record(box, time.time()).word
+            self.assertEqual((looked, gone, word, code, "LISTENER DOWN" in out),
+                             (True, True, TIMEOUT, 0, False), f"w said: {out!r} {err!r}")
+        with self.subTest(tracked="killed by its pid"), _root.TcRoot() as root:
+            box = root.path / "mail" / f"to-{NAME}"
+            with root.listener(NAME, LISTENER_SECONDS) as pid:
+                record_made(box)
+                watch, looked = start_watch(root, LISTENER_SECONDS)
+                os.kill(pid, signal.SIGKILL)
+                code, out, err = finish(watch, ALERT_CEILING_SECONDS)
+            word = seen_record(box, time.time()).word
+            self.assertEqual((looked, word, code, out.count(f"LISTENER DOWN: {NAME}")),
+                             (True, LISTENING, EXIT_ALERT, 1), f"w said: {out!r} {err!r}")
 
 
 if __name__ == "__main__":
