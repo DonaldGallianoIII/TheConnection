@@ -47,12 +47,20 @@ second-user walk is qa/human/route-shared.md.
             call a member while the command runs, and wall_clock replaced
             (never a RING_BACKOFF_SECONDS sleep); it makes a link, a FIFO
             and a hard link by hand, and a fake codex first on PATH, its
-            calls asserted. Writes nothing outside the root's temp folder.
+            calls asserted. P3 fix round 2 (Claude Opus 5.5, unreviewed:
+            test-strategist REC-1, REC-2, REC-3 and REC-6): two children
+            hold one inbox lock shared (HOLD_SHARED_SCRIPT), one child
+            holds a lock outside mail/ that a link at the old place leads
+            to, and tc's process_uid is made to see no process, as
+            hidepid does. Writes nothing outside the root's temp folder.
 @deps       python3 stdlib (argparse, contextlib, fcntl, gc, io, json, os,
             pathlib, pwd, stat, subprocess, sys, time, unittest,
             unittest.mock, warnings); tests/_root.py; UmaskTestCase,
             load_tc, owner_patched_lstat, owner_patched_fstat,
-            primary_group and tree from test_shared.py; ../tc.
+            primary_group and tree from test_shared.py; ../tc. Imported
+            by test_inbox_pinned.py: hold, holder_patched_stat and
+            HOLDER_UID_STEP (P3 fix round 2, Claude Opus 5.5,
+            unreviewed).
 @complexity O(1) per test: a handful of tc runs and at most four children
             per root, each wait or watch run under a second or two; the
             private pin test waits out one of tc's polls (POLL_SECONDS),
@@ -141,6 +149,15 @@ fcntl.flock(f, fcntl.LOCK_EX)
 print("held", flush=True)
 time.sleep(float(sys.argv[2]))
 """
+# P3 fix round 2 (Claude Opus 5.5, unreviewed): test-strategist REC-3.
+# HOLD_SCRIPT's twin that holds the flock shared, as local senders do,
+# so two children can hold one inbox lock at once.
+HOLD_SHARED_SCRIPT = """import fcntl, sys, time
+f = open(sys.argv[1], "a")
+fcntl.flock(f, fcntl.LOCK_SH)
+print("held", flush=True)
+time.sleep(float(sys.argv[2]))
+"""
 HELD_LINE = "held\n"
 # Far past any test here; the child is killed long before.
 HOLD_SECONDS = 60
@@ -178,6 +195,14 @@ HOLDER_UID_STEP = 2
 HELD_LINE_WORDS = "held       {path}: {name}'s {lock} lock, held by {user} (pid {pid}), not by its owner {owner}"
 GATE_HEALTH = "/x/tc health --json"
 GATE_KEY = "farkey"
+# P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-3. The busy words for
+# a lock with several holders: each named as HOLDER_WORDS, joined in
+# /proc/locks order, and every holder's user asked, by name order.
+MANY_HELD_BY_WORDS = ("tc: another process is holding {what}'s lock: {holders}; try again. If it stays held, ask "
+                      "{ask} to let it go{init}.\n")
+HOLDER_WORDS = "{user} (pid {pid})"
+ASK_JOIN_WORDS = " or "
+HOLDERS_JOIN_WORDS = ", "
 # P3 fix round 1b (Claude Opus 5.5, unreviewed): item 6, the class proof.
 # A one-shot child, a member who is not the name's owner: it acts on the
 # file named by its first argument, as its second says, and prints what
@@ -274,8 +299,8 @@ def run_in_process(call):
     return code, out.getvalue(), err.getvalue()
 
 
-def hold(root, path):
-    """Start HOLD_SCRIPT on `path` and return its Popen once it holds the flock (its HELD_LINE read).
+def hold(root, path, script=HOLD_SCRIPT):
+    """Start HOLD_SCRIPT (or `script`, HOLD_SHARED_SCRIPT) on `path` and return its Popen once it holds the flock (its HELD_LINE read).
 
     @interacts  starts one child through the harness (killed by its pid in
                 teardown); reads one line of its stdout.
@@ -283,11 +308,32 @@ def hold(root, path):
     @complexity O(1).
     @alloc      one Popen, registered with the root.
     """
-    proc = root.start(argv=[sys.executable, "-c", HOLD_SCRIPT, str(path), str(HOLD_SECONDS)])
+    proc = root.start(argv=[sys.executable, "-c", script, str(path), str(HOLD_SECONDS)])
     line = proc.stdout.readline()
     if line != HELD_LINE:
         raise AssertionError(f"the holder of {path} never said it held it: {line!r}")
     return proc
+
+
+# P3 fix round 2 (Claude Opus 5.5, unreviewed): test-strategist REC-3.
+def holders_in_order(path):
+    """The pids holding an flock on `path` now, in /proc/locks order, which is the order tc's busy words name them in; a waiter's line ("->") is never a holder.
+
+    @interacts  stats `path`; reads /proc/locks. Writes nothing.
+    @deps       os, pathlib; _root.LOCKS_KIND_COLUMN, LOCKS_PID_COLUMN,
+                LOCKS_FILE_COLUMN.
+    @complexity O(k) over k lines in /proc/locks (tens).
+    @alloc      one list of pids, returned.
+    """
+    st = os.stat(path)
+    key = f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}"
+    found = []
+    for line in pathlib.Path("/proc/locks").read_text().splitlines():
+        cols = line.split()
+        if (len(cols) > _root.LOCKS_FILE_COLUMN and cols[_root.LOCKS_KIND_COLUMN] == "FLOCK"
+                and cols[_root.LOCKS_FILE_COLUMN] == key):
+            found.append(int(cols[_root.LOCKS_PID_COLUMN]))
+    return found
 
 
 def proven(path, proc):
@@ -469,11 +515,12 @@ def watch_args(name, heartbeat, mem_min_pct=QUIET_ARGS["mem_min_pct"]):
 
 
 class WakeLockPlaceTest(UmaskTestCase):
-    """D35 (1): each lock in its owner's own inbox at 0600, anything else at its name moved aside, and the switch-over's two halves.
+    """D35 (1): each lock in its owner's own inbox at 0600, anything else at its name moved aside, the switch-over's two halves, and (P3 fix round 2) a plant another member holds is never the owner's listener.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, listen, hold,
-                proven, health.
+                proven, health, member, identity, members_patched,
+                load_tc.
     @complexity O(1) per test.
     @alloc      one TcRoot per case.
     """
@@ -558,17 +605,20 @@ class WakeLockPlaceTest(UmaskTestCase):
                     self.assertEqual(after, TARGET_TEXT, "the link's target changed")
 
     def test_on_a_private_mailbox_a_listener_from_before_still_counts_until_it_rearms(self):
-        """The switch-over, private: with mail/.wait-x.lock and .watch-x.lock held by listeners from before round 1b, tc health names their pids, a new tc wait x and tc watch x exit 3 with today's words and make no inbox; once they go, a new wait runs and health names none; a link or a FIFO at the old place stops nothing.
+        """The switch-over, private: with mail/.wait-x.lock and .watch-x.lock held by listeners from before round 1b, tc health names their pids, a new tc wait x and tc watch x exit 3 with today's words and make no inbox; once they go, a new wait runs and health names none; a FIFO at the old place stops nothing, and nor does a link there to a lock a live child holds, which health names for nobody.
 
         Must reject a new listener that ignores the old place (two
         listeners for one name while the dev branch's sessions re-arm),
         and a listeners() that drops the old holder (health and the board
         would say nobody listens while one does). The second half is in
-        test_on_a_shared_mailbox_the_old_place_is_never_read.
+        test_on_a_shared_mailbox_the_old_place_is_never_read. P3 fix round
+        2 (Claude Opus 5.5, unreviewed): test-strategist REC-6. Must
+        reject an old-place check that follows a link: the link leads to
+        a lock someone holds, and the new wait would stop with exit 3.
 
-        @interacts  two children holding the old locks, killed by their
-                    own pids; health, waits and watches; one FIFO and one
-                    link made by hand.
+        @interacts  three children holding the old locks and the link's
+                    target, killed by their own pids; health, waits and
+                    watches; one FIFO and one link made by hand.
         @deps       hold, health, listen; _root.TcRoot.tc; os.
         @complexity O(1).
         @alloc      one TcRoot.
@@ -586,9 +636,13 @@ class WakeLockPlaceTest(UmaskTestCase):
             later = listen(root, "wait", "x")
             after = health(root)
             os.mkfifo(mail / OLD_LOCK_NAME.format(kind="wait", name="y"))
-            (mail / OLD_LOCK_NAME.format(kind="wait", name="z")).symlink_to(mail / OLD_LOCK_NAME.format(kind="wait",
-                                                                                                        name="x"))
+            # P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-6, the link leads to a lock a live child holds.
+            elsewhere = root.base / "held-elsewhere.lock"
+            target_holder = hold(root, elsewhere)
+            (mail / OLD_LOCK_NAME.format(kind="wait", name="z")).symlink_to(elsewhere)
             fifo, link = listen(root, "wait", "y"), listen(root, "wait", "z")
+            linked = health(root)
+            still_held = target_holder.pid in _root.flock_holders(elsewhere)
         self.assertEqual((seen["listeners"].get("x"), seen["watchers"].get("x")),
                          (holders["wait"].pid, holders["watch"].pid), "health lost a listener from before round 1b")
         for kind in KINDS:
@@ -596,7 +650,9 @@ class WakeLockPlaceTest(UmaskTestCase):
         self.assertFalse(made, "a listener stopped by the old place made an inbox")
         self.assertEqual(later[0], EXIT_TIMEOUT, later)
         self.assertIsNone(after["listeners"].get("x"), after["listeners"])
+        self.assertTrue(still_held, "the link's target was not held while the waits ran, so the case proves nothing")
         self.assertEqual((fifo[0], link[0]), (EXIT_TIMEOUT, EXIT_TIMEOUT), (fifo, link))
+        self.assertIsNone(linked["listeners"].get("z"), f"health named the link's holder for z: {linked['listeners']}")
 
     def test_on_a_shared_mailbox_the_old_place_is_never_read(self):
         """The switch-over, shared: with mail/.wait-ann.lock held by another process, tc health never names it for ann, and ann's own tc wait is not stopped: it holds mail/to-ann/.wait.lock, and health names its pid.
@@ -625,6 +681,50 @@ class WakeLockPlaceTest(UmaskTestCase):
         self.assertNotEqual(before["listeners"].get(OWNER), holder.pid, "a shared mailbox read the old place")
         self.assertTrue(held, f"ann's own tc wait (pid {waiting.pid}) never held its lock in her inbox")
         self.assertEqual(during["listeners"].get(OWNER), waiting.pid)
+
+    # P3 fix round 2 (Claude Opus 5.5, unreviewed): test-strategist REC-2, the P3 review's HIGH-2 by name.
+    def test_a_lock_another_member_planted_and_holds_is_never_the_owners_listener_even_when_proc_hides_its_holder(self):
+        """Shared, ann joined, ann not listening: a member plants mail/to-ann/.wait.lock (group-writable inbox) and holds it, and /proc hides the member's process (process_uid None, as hidepid does): tc.listeners("wait") and tc health's listeners name no pid for ann and never the member's.
+
+        HIGH-2's own symptom: a member plants and holds `.wait.lock` in
+        another member's inbox, and health names the member's pid as the
+        owner's listener, so the owner's relay believes a session listens
+        that never started. Must reject a listeners() that counts a lock
+        file the inbox's owner does not own: under hidepid, that owner
+        check is all that stands between the plant and a false
+        `listening`, since the holder check cannot see the holder.
+
+        @interacts  an init and a join; one member child that plants and
+                    holds the lock, killed by its own pid; loads tc and
+                    calls listeners and health_snapshot in process with
+                    os.lstat, os.fstat and os.stat patched
+                    (members_patched), process_uid made to see nothing and
+                    gpu_stats replaced.
+        @deps       member, identity, members_patched, load_tc,
+                    primary_group; _root.TcRoot.tc; unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        _, group, _ = primary_group()
+        with _root.TcRoot() as root:
+            self.assertEqual(root.tc("init", "--shared", "--group", group)[0], 0)
+            self.assertEqual(root.tc("join", OWNER, env={"CLAUDECODE": "1"})[0], 0)
+            lock = root.path / "mail" / f"to-{OWNER}" / LOCK_NAME.format(kind="wait")
+            planter, said = member(root, lock, "hold")
+            tc = load_tc(root)
+            with members_patched(root.path, {identity(lock)}, {planter.pid}), \
+                    mock.patch.object(tc, "process_uid", lambda pid: None), \
+                    mock.patch.object(tc, "gpu_stats", lambda: None):
+                seen = tc.listeners("wait")
+                snap = tc.health_snapshot(gpu=False)
+            holders = _root.flock_holders(lock)
+            self.assertEqual(said, MEMBER_HELD, "the member could not plant and hold the lock")
+            self.assertIn(planter.pid, holders, "the member's plant was not held while health looked")
+            for source, listening in (("listeners", seen), ("tc health", snap["listeners"])):
+                with self.subTest(read_by=source):
+                    self.assertIsNone(listening.get(OWNER), f"{source} named a listener for {OWNER} from a lock "
+                                                            f"another member planted: {listening}")
+                    self.assertNotIn(planter.pid, listening.values(), f"{source} named the member's pid")
 
 
 class OnlyTheOwnerListensTest(UmaskTestCase):
@@ -729,11 +829,14 @@ class HolderNamedTest(UmaskTestCase):
 
     The extended held-lock test (test_shared.py, NoLostMailNoHangTest,
     the audit's REC-4) checks the words for each command that waits; this
-    class checks the words' two forms and the health line.
+    class checks the words' two forms and the health line, and since P3
+    fix round 2 (Claude Opus 5.5, unreviewed) the words and the line for
+    a lock with two holders and for the owner's own holder.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, load_tc, hold,
-                holder_patched_stat, run_in_process, login.
+                holders_in_order, holder_patched_stat, run_in_process,
+                login.
     @complexity O(1) per test.
     @alloc      one TcRoot per case.
     """
@@ -778,13 +881,18 @@ class HolderNamedTest(UmaskTestCase):
         self.assertEqual(let_go, (EXIT_BUSY, "", LET_GO_WORDS.format(what="b", seconds=LOCK_WAIT_SECONDS)))
 
     def test_health_lists_a_lock_held_by_someone_not_its_names_owner_and_the_gate_never_does(self):
-        """Shared, ann joined: one child holds ann's inbox lock and another a file it planted at her watch lock's name, each reported as another member's: tc health --json lists both under held_by_others and tc health prints a held line for each; the gate's health --json has no such key; on a private mailbox the same holds list nothing.
+        """Shared, ann joined: one child holds ann's inbox lock and another a file it planted at her watch lock's name, each reported as another member's: tc health --json lists both under held_by_others, tc health prints a held line for each, and health's watchers name no pid for ann; the gate's health --json has no such key; on a private mailbox the same holds list nothing.
 
         Must reject a health that names nobody for a lock a stranger
         holds (the stuck member learns of it only from a failed command),
         a gate that hands that line to a far key (round 1c's allow list
         comes later; until then the gate's projection drops it), and a
-        private mailbox that ever reports one (one user).
+        private mailbox that ever reports one (one user). P3 fix round 2
+        (Claude Opus 5.5, unreviewed): test-strategist REC-1. Must reject
+        a listeners() that names any holder of an owner's lock: the only
+        holder of ann's watch lock is another member's process, and
+        health would call it ann's watcher (the P3 review's HIGH-2, "tc
+        health reported the holder as listening").
 
         @interacts  per mailbox: an init and a join when shared, a send,
                     two children holding locks; loads tc and runs
@@ -819,17 +927,68 @@ class HolderNamedTest(UmaskTestCase):
                     text = run_in_process(lambda: tc.cmd_health(argparse.Namespace(json=False)))
                     gate = run_in_process(lambda: tc.cmd_gate(argparse.Namespace(as_name=GATE_KEY)))
                 got[shared] = (snap["held_by_others"], text, json.loads(gate[1]), [p.pid for p in holders],
-                               box_lock, planted)
-        private, _, _, _, _, _ = got[False]
+                               box_lock, planted, snap["watchers"])
+        private, _, _, _, _, _, _ = got[False]
         self.assertEqual(private, [], "a private mailbox reported a lock held by someone else")
-        held, text, gated, (box_pid, watch_pid), box_lock, planted = got[True]
+        held, text, gated, (box_pid, watch_pid), box_lock, planted, watchers = got[True]
         mine = login(os.geteuid())
         want = [{"name": OWNER, "lock": "watch", "path": str(planted), "pid": watch_pid, "user": other, "owner": mine},
                 {"name": OWNER, "lock": "inbox", "path": str(box_lock), "pid": box_pid, "user": other, "owner": mine}]
         self.assertEqual(held, want)
+        # P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-1, the holder is never ann's watcher.
+        self.assertIsNone(watchers.get(OWNER), f"health named another member's holder as ann's watcher: {watchers}")
         for entry in want:
             self.assertIn(HELD_LINE_WORDS.format(**entry) + "\n", text[1])
         self.assertNotIn("held_by_others", gated, "the gate's health handed a far key who holds which lock")
+
+    # P3 fix round 2 (Claude Opus 5.5, unreviewed): test-strategist REC-3, D35 (3)'s "names the holder".
+    def test_health_never_lists_the_owners_own_holder_and_names_every_holder_of_a_shared_lock(self):
+        """Shared, ann joined, a send to ann: ann's own process holds her wait lock, and two children hold her inbox lock shared, one reported as another member's: held_by_others lists exactly that one, and ann's tc read exits 10 with words naming both holders, each by user and pid, and asking both users and the init user.
+
+        Must reject a held_by_others that lists the owner's own holder as
+        someone else's (ann's own listener reported as a stranger's), and
+        a holder map that keeps one holder per file: a lock held shared
+        has several, and the busy words and the held line would drop all
+        but one.
+
+        @interacts  an init, a join, a send; three children holding locks,
+                    killed by their own pids; loads tc and calls
+                    held_by_others and cmd_read in process with os.stat
+                    reporting one child's /proc/<pid> as another member's;
+                    reads /proc/locks.
+        @deps       hold, holders_in_order, holder_patched_stat,
+                    primary_group, load_tc, run_in_process, login;
+                    _root.TcRoot.tc; argparse, unittest.mock.
+        @complexity O(1): one LOCK_WAIT_SECONDS of waiting.
+        @alloc      one TcRoot and one module.
+        """
+        _, group, _ = primary_group()
+        mine, other = login(os.geteuid()), login(os.geteuid() + HOLDER_UID_STEP)
+        with _root.TcRoot() as root:
+            self.assertEqual(root.tc("init", "--shared", "--group", group)[0], 0)
+            self.assertEqual(root.tc("join", OWNER, env={"CLAUDECODE": "1"})[0], 0)
+            self.assertEqual(root.tc("send", "--from", "ben", "--to", OWNER, "hi")[0], 0)
+            wait_lock = root.path / "mail" / f"to-{OWNER}" / LOCK_NAME.format(kind="wait")
+            box_lock = root.path / "mail" / f".box-{OWNER}.lock"
+            own = hold(root, wait_lock)
+            sharers = [hold(root, box_lock, HOLD_SHARED_SCRIPT) for _ in range(2)]
+            stranger = sharers[-1].pid
+            tc = load_tc(root)
+            with mock.patch.object(os, "stat", holder_patched_stat([stranger], os.geteuid() + HOLDER_UID_STEP)):
+                held = tc.held_by_others(True)
+                ran = run_in_process(lambda: tc.cmd_read(argparse.Namespace(name=OWNER)))
+            order = holders_in_order(box_lock)
+            users = {pid: other if pid == stranger else mine for pid in order}
+            words = MANY_HELD_BY_WORDS.format(
+                what=OWNER, holders=HOLDERS_JOIN_WORDS.join(HOLDER_WORDS.format(user=users[pid], pid=pid)
+                                                            for pid in order),
+                ask=ASK_JOIN_WORDS.join(sorted(set(users.values()))), init=ASK_INIT_WORDS.format(init=mine))
+            self.assertIn(own.pid, _root.flock_holders(wait_lock), "ann's own holder let go before health looked")
+            self.assertEqual(sorted(order), sorted(p.pid for p in sharers), "the two sharers did not both hold it")
+            self.assertEqual(held, [{"name": OWNER, "lock": "inbox", "path": str(box_lock), "pid": stranger,
+                                     "user": other, "owner": mine}],
+                             "held_by_others did not list exactly the other member's holder")
+            self.assertEqual(ran, (EXIT_BUSY, "", words), "the busy words did not name every holder")
 
 
 class LockFileClosedTest(UmaskTestCase):

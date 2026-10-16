@@ -66,6 +66,7 @@ it watched is reachable.
             and send_lock_path; test_gate.py login, OTHER_MEMBER,
             PASSING_ERRNO_NAMES, PASSING_WORDS, seen_as, may_make_in and
             may_move_or_remove; test_health.py FAKE_CONNECT_STDERR,
+            OTHER_MEMBER (P3 fix round 2, Claude Opus 5.5, unreviewed),
             SSH_CONNECT_FAILED, TARGET, assert_called, login and queue.
 @complexity O(1) per test: one to five tc runs and as many fake calls,
             each under a second. One test waits out tc's own lock bound

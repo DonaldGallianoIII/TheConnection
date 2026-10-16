@@ -12,14 +12,19 @@ Status: unreviewed
 
 The audit's HIGH-1 and REC-1 (audits/2026-10-15-1409-full: test-strategist
 REC-1, breaker REC-1), and known bug no-follow-open-guards-only-the-last-
-name on the live paths. One row per family, two for (g) and three for (i):
+name on the live paths. One row per family, four for (g) and three for (i):
 (a) tc send (deliver_local, publish_message); (b) the far gate (cmd_gate
 through route_and_deliver, forward False); (c) tc peek; (d) tc read; (e)
 tc wait's poll (unread); (f) tc log; (g) tc health --json and the gate's
-health --json (mailbox_summary); (h) tc flush's count over other members'
-branches (other_branches, outbox_files); (i) unread_count and its callers:
-tc card, a codex tc join, and a codex send's ring decision; (j) the
-board's own scan (board/serve.py, scan_messages).
+health --json (mailbox_summary), and, since P3 fix round 2 (Claude Opus
+5.5, unreviewed: test-strategist REC-4), tc health's listeners and its
+held_by_others, each over an inbox whose far end holds wait and watch
+locks a child holds; (h) tc flush's count over other members' branches
+(other_branches, outbox_files); (i) unread_count and its callers: tc card,
+a codex tc join, and a codex send's ring decision; (j) the board's own
+scan (board/serve.py, scan_messages); (k) tc health's stuck_outbox over
+another member's branch, whose far end holds a note of its own beside the
+queued message's name (P3 fix round 2, REC-4).
 
 Known gap: the family list is hardcoded. A command added later that
 touches an inbox or a branch is not covered until someone adds its row.
@@ -47,7 +52,10 @@ opens the inbox to take the wait lock in it (D35 (1)); its row lets that
 one look pass (Row.skip) and swaps after the poll's own pin, the act
 under test. The two health rows let two pass the same way: listeners
 opens the inbox first, once for its wait lock and once for its watch
-lock, and mailbox_summary's pin, the act under test, comes third.
+lock, and mailbox_summary's pin, the act under test, comes third. P3 fix
+round 2 (Claude Opus 5.5, unreviewed): listeners' row swaps after the
+first of those, and held_by_others' row lets three pass, since its own
+pin comes after mailbox_summary's.
 
 Each subtest asserts, in this order: the swap happened; the far end's
 tree is unchanged (names, kinds, sizes, modify and change times); nothing
@@ -77,17 +85,27 @@ inbox (moved aside, still pinned) holds after the act.
             after. Writes nothing outside the root's temp folder. (P3 fix
             round 1b, Claude Opus 5.5, unreviewed: tc wait closes its lock
             file on every way out now, so the garbage collection with
-            ResourceWarning ignored that round 1a needed is gone.)
+            ResourceWarning ignored that round 1a needed is gone.) P3 fix
+            round 2 (Claude Opus 5.5, unreviewed): for the two lock rows,
+            starts one child per planted lock (test_wake_files.hold), each
+            holding its flock until the harness kills it by its pid, and
+            for held_by_others' row patches os.stat so each holder's
+            /proc/<pid> reads as another member's; for the stuck row,
+            writes a note beside the real queued message and replaces
+            tc's wall_clock.
 @deps       python3 stdlib (argparse, collections, contextlib,
             importlib, io, json, os, pathlib, resource, stat, sys, time,
             unittest, unittest.mock); tests/_root.py; UmaskTestCase, as_member,
-            load_tc and primary_group from test_shared.py; ../tc;
-            ../board/serve.py.
-@complexity O(r x k) subtests over r = 13 rows and k = 2 kinds of swap,
-            each a fresh root with four to seven tc runs of setup and one
-            command in process over a mailbox of a dozen entries.
+            load_tc and primary_group from test_shared.py; hold,
+            holder_patched_stat and HOLDER_UID_STEP from
+            test_wake_files.py; ../tc; ../board/serve.py.
+@complexity O(r x k) subtests over r = 16 rows and k = 2 kinds of swap,
+            each a fresh root with four to seven tc runs of setup, up to
+            four lock holders, and one command in process over a mailbox
+            of a dozen entries.
 @alloc      one TcRoot, one tc module and two small trees outside the root
-            per subtest, all removed with the root.
+            per subtest, all removed with the root; up to four children
+            per subtest, killed with it.
 """
 
 import argparse
@@ -113,6 +131,7 @@ if str(HERE) not in sys.path:
 
 import _root  # noqa: E402  (needs the path line above)
 from test_shared import UmaskTestCase, as_member, load_tc, primary_group  # noqa: E402
+from test_wake_files import HOLDER_UID_STEP, hold, holder_patched_stat  # noqa: E402
 
 SERVE_PATH = HERE.parent / "board" / "serve.py"
 # The member who owns the inbox and makes the swap, and the member who
@@ -181,12 +200,30 @@ Ran = collections.namedtuple("Ran", "code out err value")
 # listeners opens an inbox before mailbox_summary does: once for the wait
 # lock in it and once for the watch lock (D35 (1)).
 LISTENER_LOOKS = 2
+# P3 fix round 2 (Claude Opus 5.5, unreviewed): test-strategist REC-4. The
+# watch lock's name beside WAIT_LOCK; how many of health's looks at an
+# inbox come before held_by_others' own (listeners twice, mailbox_summary
+# once); the first line of the note beside the real queued message, and
+# the note's ending (tc's REFUSAL_NOTE_SUFFIX, written here); and how far
+# past now the stuck row's replaced clock stands: a day and an hour
+# (tc's OUTBOX_STALE_SECONDS plus an hour), so the real queued message has
+# waited past the bound.
+WATCH_LOCK = ".watch.lock"
+HELD_BY_OTHERS_LOOKS = LISTENER_LOOKS + 1
+REAL_NOTE = "real note: the last failed try's words"
+NOTE_SUFFIX = ".stderr"
+STALE_SHIFT_SECONDS = 86400 + 3600
 # One row: its family, its label, whether it swaps an inbox or a branch,
 # whether ann joins as codex, whether ann's message is read in setup, the
 # os calls its swap waits on, what it patches for its call, and how many
 # looks at the folder it lets pass before the one it swaps after (P3 fix
 # round 1b, Claude Opus 5.5, unreviewed: tc wait's lock pin comes first).
-Row = collections.namedtuple("Row", "family label target codex read_first looks environ stdin skip", defaults=(0,))
+# P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-4. The lock names its
+# far ends hold, each held by a child; whose process those children read
+# as ("owner", ann's, or "member", another member's); and how many seconds
+# past now tc's wall_clock reads (the stuck row).
+Row = collections.namedtuple("Row", "family label target codex read_first looks environ stdin skip locks holder late",
+                             defaults=(0, (), "owner", 0))
 # Real os.lstat, bound once here, so the patches in place while a swap
 # runs never color what the far end looks like.
 REAL_LSTAT = os.lstat
@@ -365,11 +402,18 @@ ROWS = (
     Row("g", "tc health --json", "inbox", False, False, LOOKS, {}, None, skip=LISTENER_LOOKS),
     Row("g", "the gate's health --json", "inbox", False, False, LOOKS,
         {"SSH_ORIGINAL_COMMAND": f"{FAR_TC} health --json"}, "", skip=LISTENER_LOOKS),
+    # P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-4, health's own looks at an inbox.
+    Row("g", "tc health's listeners", "inbox", False, False, LOOKS, {}, None, locks=(WAIT_LOCK,)),
+    Row("g", "tc health's held_by_others", "inbox", False, False, LOOKS, {}, None, skip=HELD_BY_OTHERS_LOOKS,
+        locks=(WAIT_LOCK, WATCH_LOCK), holder="member"),
     Row("h", "tc flush's count of other members' branches", "branch", False, False, LOOKS, {}, None),
     Row("i", "tc card", "inbox", False, False, LOOKS, {}, None),
     Row("i", "a codex tc join", "inbox", False, False, OPENS, {"CODEX_THREAD_ID": THREAD}, None),
     Row("i", "a codex send's ring decision", "inbox", True, True, LOOKS, {}, None),
     Row("j", "the board's scan", "inbox", False, False, LOOKS, {}, None),
+    # P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-4, health's look into another member's branch.
+    Row("k", "tc health's stuck_outbox over another member's branch", "branch", False, False, LOOKS, {}, None,
+        late=STALE_SHIFT_SECONDS),
 )
 
 
@@ -385,11 +429,12 @@ class InboxPinnedTest(UmaskTestCase):
     """
 
     def build(self, root, row, group):
-        """The shared mailbox for one subtest: init, the two members joined, ben's message to ann (read in setup when the row says), every real message dated REAL_AGE_SECONDS ago; for the branch row, another member's branch with one queued message and far-b's ssh card. (the folder to swap, the codex fake's calls or None).
+        """The shared mailbox for one subtest: init, the two members joined, ben's message to ann (read in setup when the row says), every real message dated REAL_AGE_SECONDS ago; for the branch rows, another member's branch with one queued message and far-b's ssh card, and for the stuck row (P3 fix round 2) a note beside that message. (the folder to swap, the codex fake's calls or None).
 
         @interacts  six or seven tc runs; for a codex row, a fake codex
                     first on the root's PATH; makes the branch by hand for
-                    the branch row; sets file times.
+                    the branch rows, and the note for the stuck row; sets
+                    file times.
         @deps       _root.TcRoot.tc, fake_bin; os, time.
         @complexity O(1).
         @alloc      the mailbox's files, removed with the root.
@@ -416,6 +461,8 @@ class InboxPinnedTest(UmaskTestCase):
             queue.mkdir(parents=True)
             (queue / QUEUED_NAME).write_text(f"# #5 from {OTHER_MEMBER} to {FAR_NAME}\n\nqueued\n")
             os.utime(queue / QUEUED_NAME, (stamp, stamp))
+            if row.late:  # P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-4, the note a failed try left
+                (queue / f"{QUEUED_NAME}{NOTE_SUFFIX}").write_text(f"{REAL_NOTE}\nwhat ssh said\n")
             return root.path / "outbox" / OTHER_MEMBER, calls
         return root.path / "mail" / f"to-{OWNER}", calls
 
@@ -438,6 +485,10 @@ class InboxPinnedTest(UmaskTestCase):
             "tc log": lambda: tc.cmd_log(argparse.Namespace(last=0)),
             "tc health --json": lambda: tc.cmd_health(argparse.Namespace(json=True)),
             "the gate's health --json": lambda: tc.cmd_gate(argparse.Namespace(as_name=FAR_KEY)),
+            "tc health's listeners": lambda: tc.cmd_health(argparse.Namespace(json=True)),
+            "tc health's held_by_others": lambda: tc.cmd_health(argparse.Namespace(json=True)),
+            "tc health's stuck_outbox over another member's branch":
+                lambda: tc.cmd_health(argparse.Namespace(json=True)),
             "tc flush's count of other members' branches": lambda: tc.cmd_flush(argparse.Namespace(to=None)),
             "tc card": lambda: tc.cmd_card(argparse.Namespace(name=OWNER, ssh=SSH_TARGET, remote_tc=REMOTE_TC,
                                                               account=None, reports_to=None, force=False)),
@@ -449,8 +500,8 @@ class InboxPinnedTest(UmaskTestCase):
         }
         return commands[row.label]
 
-    def check(self, row, root, ran, real, calls):
-        """The row's own assertions, after the common ones: counts and ages equal the real inbox's (or branch's), and the real one, at `real`, holds what the act should have put there.
+    def check(self, row, root, ran, real, calls, held=()):
+        """The row's own assertions, after the common ones: counts and ages equal the real inbox's (or branch's), and the real one, at `real`, holds what the act should have put there. `held` holds the pids of the children holding the far ends' locks (P3 fix round 2).
 
         @interacts  reads files under the root; reads the fake codex's
                     record for the codex row.
@@ -459,6 +510,30 @@ class InboxPinnedTest(UmaskTestCase):
         @alloc      the text read, freed on return.
         """
         box = root.path / "mail" / f"to-{OWNER}"
+        # P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-4. The real inbox holds no wait or watch lock, and
+        # the real branch's message waits past the bound with its own note: nothing at the far end counts.
+        if row.label == "tc health's listeners":
+            self.assertEqual((ran.code, ran.err), (0, ""))
+            listening = json.loads(ran.out)["listeners"]
+            self.assertIsNone(listening.get(OWNER), f"health named a listener for {OWNER} from a lock outside her "
+                                                    f"inbox: {listening}")
+            self.assertFalse(set(held) & set(listening.values()), f"health named a far end's holder: {listening}")
+            return
+        if row.label == "tc health's held_by_others":
+            self.assertEqual((ran.code, ran.err), (0, ""))
+            self.assertEqual(json.loads(ran.out)["held_by_others"], [],
+                             "health listed a lock held at the far end, outside the inbox it opened")
+            return
+        if row.family == "k":
+            self.assertEqual((ran.code, ran.err), (0, ""))
+            stuck = json.loads(ran.out)["stuck_outbox"]
+            queued = root.path / "outbox" / OTHER_MEMBER / f"to-{FAR_NAME}" / QUEUED_NAME
+            self.assertEqual([(entry["member"], entry["to"], entry["path"], entry["note"]) for entry in stuck],
+                             [(OTHER_MEMBER, FAR_NAME, str(queued), REAL_NOTE)],
+                             "health's stuck line is not the real branch's message and note")
+            self.assertLessEqual(abs(stuck[0]["age_s"] - REAL_AGE_SECONDS - row.late), AGE_SLACK_SECONDS,
+                                 f"the stuck message's age is not the real one's: {stuck}")
+            return
         if row.label in ("tc send", "the far gate's send"):
             sender = SENDER if row.label == "tc send" else FAR_KEY
             name = f"000002-from-{sender}.md"
@@ -536,18 +611,24 @@ class InboxPinnedTest(UmaskTestCase):
         swap, and the far end changes, a planted file is printed, or a
         count or an age is the far end's. Each family's mutation (the path
         put back in place of the pinned descriptor) is recorded with the
-        lines it turned red in handoffs/P3FIX.md.
+        lines it turned red in handoffs/P3FIX.md. P3 fix round 2 (Claude
+        Opus 5.5, unreviewed): REC-4. tc health's listeners and
+        held_by_others must name no holder of a lock at the far end, and
+        its stuck line must carry the real branch's note, never the far
+        end's.
 
-        @interacts  per subtest: build's setup, plant's two trees, one
-                    command in process (see the module block); lstats the
-                    far end before and after.
+        @interacts  per subtest: build's setup, plant's two trees (with the
+                    row's locks, each held by a child), one command in
+                    process (see the module block); lstats the far end
+                    before and after.
         @deps       build, act, check, primary_group, as_member, load_tc,
                     swap_after_first_look, run_in_process, snapshot,
-                    plant, text_stdin; contextlib, os, resource, sys,
-                    unittest.mock; ROWS, LINK, REAL_FOLDER, ASIDE_PREFIX,
-                    INBOX_PLANT, BRANCH_PLANT, PLANTED_AGE_SECONDS,
-                    PLANTED_TEXT, PLANTED_SENDER.
-        @complexity O(r x k): r = 13 rows, k = 2 kinds.
+                    plant, text_stdin, hold, holder_patched_stat;
+                    contextlib, os, resource, sys, time, unittest.mock;
+                    ROWS, LINK, REAL_FOLDER, ASIDE_PREFIX, INBOX_PLANT,
+                    BRANCH_PLANT, PLANTED_AGE_SECONDS, PLANTED_TEXT,
+                    PLANTED_SENDER, NOTE_SUFFIX, HOLDER_UID_STEP.
+        @complexity O(r x k): r = 16 rows, k = 2 kinds.
         @alloc      one TcRoot per subtest.
         """
         _, group, _ = primary_group()
@@ -556,9 +637,14 @@ class InboxPinnedTest(UmaskTestCase):
                 with self.subTest(family=row.family, run=row.label, kind=kind), _root.TcRoot() as root:
                     target, calls = self.build(root, row, group)
                     layout = BRANCH_PLANT if row.target == "branch" else INBOX_PLANT
+                    # P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-4, the far ends' locks and note.
+                    layout += tuple((name, "") for name in row.locks)
+                    if row.late:
+                        layout += ((f"to-{FAR_NAME}/{QUEUED_NAME}{NOTE_SUFFIX}", PLANTED_TEXT),)
                     outside, other = root.base / "outside", root.base / "other"
                     plant(outside, layout, PLANTED_AGE_SECONDS)
                     plant(other, layout, PLANTED_AGE_SECONDS)
+                    held = [hold(root, top / name).pid for top in (outside, other) for name in row.locks]
                     real = target.with_name(ASIDE_PREFIX + target.name)
                     far = {"before": snapshot(outside) if kind == LINK else None}
 
@@ -578,6 +664,11 @@ class InboxPinnedTest(UmaskTestCase):
                             stack.enter_context(mock.patch.object(sys, "stdin", text_stdin(row.stdin)))
                         stack.enter_context(mock.patch.object(resource, "setrlimit", lambda *args: None))
                         stack.enter_context(mock.patch.object(tc, "gpu_stats", lambda: None))
+                        if row.holder == "member":  # P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-4
+                            stack.enter_context(mock.patch.object(os, "stat", holder_patched_stat(
+                                held, os.geteuid() + HOLDER_UID_STEP)))
+                        if row.late:
+                            stack.enter_context(mock.patch.object(tc, "wall_clock", lambda: time.time() + row.late))
                         made = stack.enter_context(swap_after_first_look(target, swap, row.looks, row.skip))
                         ran = run_in_process(self.act(tc, root, row))
                     far_end = outside if kind == LINK else target
@@ -587,7 +678,7 @@ class InboxPinnedTest(UmaskTestCase):
                                      "a change reached the far end of the swap, outside the folder tc opened")
                     self.assertNotIn(PLANTED_TEXT, shown, "tc printed a planted file from the far end")
                     self.assertNotIn(PLANTED_SENDER, shown, "tc named a planted file from the far end")
-                    self.check(row, root, ran, real, calls)
+                    self.check(row, root, ran, real, calls, held)
 
 
 if __name__ == "__main__":

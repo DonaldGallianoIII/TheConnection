@@ -14,13 +14,17 @@ Tests for `tc health` and `tc watch` against a throwaway TC_ROOT.
             fake `ssh` that records its argv (asserted called), dates
             three outbox files by hand, and loads tc as a module (TC_ROOT
             set to the harness root first, put back after) with
-            wall_clock and gpu_stats replaced, so no program runs.
+            wall_clock and gpu_stats replaced, so no program runs. P3 fix
+            round 2 (Claude Opus 5.5, unreviewed): one of its tests makes
+            another member's branch, a message in it, and a FIFO or a
+            symlink (to a file in the root's temp folder) at its note by
+            hand, and runs tc health with a ceiling on its time.
 @deps       python3 stdlib (argparse, contextlib, io, json, os, pathlib,
             subprocess, sys, tempfile, time, unittest, unittest.mock);
             tests/_root.py for HealthCardsTest and StuckOutboxTest;
             load_tc from test_codex_route.py; FAKE_CONNECT_STDERR,
-            SSH_CONNECT_FAILED, TARGET, assert_called, login and queue
-            from test_ssh_route.py
+            OTHER_MEMBER, SSH_CONNECT_FAILED, TARGET, assert_called, login
+            and queue from test_ssh_route.py
 @complexity O(1) per test; the slowest waits a few poll intervals (about 5 s)
 @alloc      one tempdir per test, removed in tearDown; every child process
             is killed in tearDown
@@ -49,7 +53,8 @@ if str(HERE) not in sys.path:
 
 import _root  # noqa: E402  (needs the path line above)
 from test_codex_route import load_tc  # noqa: E402
-from test_ssh_route import FAKE_CONNECT_STDERR, SSH_CONNECT_FAILED, TARGET, assert_called, login, queue  # noqa: E402
+from test_ssh_route import (FAKE_CONNECT_STDERR, OTHER_MEMBER, SSH_CONNECT_FAILED, TARGET, assert_called,  # noqa: E402
+                            login, queue)
 
 SETTLE_TIMEOUT = 10
 SETTLE_STEP = 0.2
@@ -67,6 +72,19 @@ ESC_SHOWN = "\\x1b"
 STALE_SECONDS = 86400
 HOUR_SECONDS = 3600
 CLOCK = 2000000000
+# P3 fix round 2 (Claude Opus 5.5, unreviewed): test-strategist REC-5. How
+# old the other member's waiting message is, two days, by its real mtime
+# (a subprocess's clock is the real one); how long one tc health may take
+# before it counts as hung on a planted note; how far its age may stray
+# from the two days in the time the run takes; the other member's
+# message, by name; the note's ending (tc's REFUSAL_NOTE_SUFFIX); and the
+# text of a file outside the mailbox a planted link at the note leads to.
+TWO_DAYS_SECONDS = 2 * STALE_SECONDS
+HEALTH_CEILING_SECONDS = 10
+AGE_SLACK_SECONDS = 30
+OTHERS_MESSAGE = "000003-from-{member}.md"
+NOTE_SUFFIX = ".stderr"
+OUTSIDE_NOTE_TEXT = "outside the mailbox: tc health must never read this"
 
 
 class HealthTest(unittest.TestCase):
@@ -288,6 +306,52 @@ class StuckOutboxTest(unittest.TestCase):
         self.assertIn(f"\nstuck      {box / '000002-from-a.md'}: {login()}'s mail to b, waiting 1d; "
                       f"no failed try noted beside it\n", text)
         self.assertNotIn("000003-from-a.md", text, "a message younger than a day was listed")
+
+    # P3 fix round 2 (Claude Opus 5.5, unreviewed): test-strategist REC-5, D36 (4)'s case.
+    def test_another_members_stuck_mail_is_listed_and_a_fifo_or_link_at_its_note_never_blocks_or_leads_health(self):
+        """Another member's branch, made by hand, holds a message for b dated two days ago, its note a FIFO, then a symlink to a file outside the mailbox: tc health --json returns within HEALTH_CEILING_SECONDS, lists the message with that member, b, its path and no note, and prints nothing of the link's target.
+
+        The case D36 (4) exists for: a far box that stays broken is shown
+        to every member, not only the sender. The note sits in the other
+        member's own branch, which that member controls. Must reject a
+        stuck_outbox that lists only this user's own branch, a note opened
+        without O_NONBLOCK (a FIFO there hangs every other member's tc
+        health), and a note followed through a link.
+
+        @interacts  per case: makes outbox/<member>/to-b/ and one message
+                    by hand, sets its times, makes a FIFO or a link (and
+                    its target in the temp folder) at its note's name; one
+                    tc health --json.
+        @deps       _root.TcRoot.tc; OTHER_MEMBER from test_ssh_route.py;
+                    json, os, subprocess, time.
+        @complexity O(1): two cases.
+        @alloc      one TcRoot per case.
+        """
+        for planted in ("a FIFO", "a symlink"):
+            with self.subTest(note=planted), _root.TcRoot() as root:
+                queued = root.path / "outbox" / OTHER_MEMBER / "to-b" / OTHERS_MESSAGE.format(member=OTHER_MEMBER)
+                queued.parent.mkdir(parents=True)
+                queued.write_text(f"# #3 from {OTHER_MEMBER} to b\n\nwaiting\n")
+                stamp = time.time() - TWO_DAYS_SECONDS
+                os.utime(queued, (stamp, stamp))
+                note = queued.with_name(queued.name + NOTE_SUFFIX)
+                if planted == "a FIFO":
+                    os.mkfifo(note)
+                else:
+                    outside = root.base / "outside-note"
+                    outside.write_text(OUTSIDE_NOTE_TEXT + "\n")
+                    note.symlink_to(outside)
+                try:
+                    code, out, err = root.tc("health", "--json", timeout=HEALTH_CEILING_SECONDS)
+                except subprocess.TimeoutExpired:
+                    self.fail(f"tc health hung on {planted} at another member's note")
+                self.assertEqual(code, 0, err)
+                stuck = json.loads(out)["stuck_outbox"]
+                self.assertEqual([(entry["member"], entry["to"], entry["path"], entry["note"]) for entry in stuck],
+                                 [(OTHER_MEMBER, "b", str(queued), None)],
+                                 "health did not list the other member's stuck mail, or read its planted note")
+                self.assertLessEqual(abs(stuck[0]["age_s"] - TWO_DAYS_SECONDS), AGE_SLACK_SECONDS, stuck)
+                self.assertNotIn(OUTSIDE_NOTE_TEXT, out, "health read the file a planted link at the note leads to")
 
 
 if __name__ == "__main__":
