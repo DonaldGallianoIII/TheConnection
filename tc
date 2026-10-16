@@ -14,6 +14,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   mail/.seq                                message counter (flock guarded)
   mail/to-<name>/.wait.lock                held by `tc wait <name>` while it runs; its owner's alone, 0600 (D35)
   mail/to-<name>/.watch.lock               held by `tc watch <name>` while it runs; its owner's alone, 0600 (D35)
+  mail/to-<name>/.wait.exit                `tc wait <name>`'s exit record, one line: listening, mail or timeout,
+                                           and a time; its owner's, 0640, replaced whole via .wait.exit.tmp (F1)
   mail/to-<name>/.wait.lock.planted-<k>    what someone else had put at a lock's name, moved aside by the owner's tc
   mail/.wait-<name>.lock, .watch-<name>.lock  the locks' place before D35, read only on a private mailbox, and only
                                            until every listener started before has re-armed (the switch-over)
@@ -226,8 +228,18 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             inbox lock held by a process whose user is not the name's
             owner (shared only; the gate's health leaves it out); each
             ring marker write waits as long for the marker's
-            flock, and then says so.
-@deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
+            flock, and then says so. F1 (Claude Opus 5.5, unreviewed):
+            the wait exit record (C5, D28). `wait` writes
+            mail/to-<name>/.wait.exit by name in the folder its lock is
+            in, `listening` once it holds the lock and `mail` or
+            `timeout` before it lets go on exit 0 or 2, a .tmp renamed
+            over it, never followed; one line to stderr when it cannot,
+            and its exit code is unchanged. One reader (read_wait_exit)
+            takes it only from a regular file with one name, the inbox
+            owner's, of at most WAIT_EXIT_MAX_BYTES, holding a word and a
+            time, never through a link and never blocking; it is never
+            proof of life, and listeners still reads only locks.
+@deps      python3 stdlib (argparse, collections, contextlib, errno, fcntl,
             grp, hashlib, io, json, pathlib, pwd, re, resource, secrets,
             selectors, shlex, shutil, signal, stat, subprocess, time,
             traceback, datetime, os, sys); Linux only
@@ -258,7 +270,8 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             u unread messages among them, single digits in practice,
             sorted (P3 fix round 1a, Claude Opus 5.5, unreviewed: the
             audit's LOW-9, and three folder opens per command or poll,
-            D35); read adds two lstats per message
+            D35); a wait adds two exit record writes in all, O(1) each,
+            never one per poll (F1); read adds two lstats per message
             (before and after its move), and one per by-hand name already
             taken (plus a name-limit lookup and two owner lstats per
             by-hand move). log O(n log n + T + t log t): n inboxes, T
@@ -327,7 +340,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             when the process exits or is killed. One wait or watch lock
             per name that ever listened, kept in its inbox, and one
             .planted-<k> file per entry moved aside from a lock's name,
-            kept.
+            kept. F1 (Claude Opus 5.5, unreviewed): one exit record per
+            name that ever waited, kept in its inbox and replaced whole on
+            each write; its .tmp lives only between a create and a rename
+            (one left by a killed wait is removed by the next).
 @rng        SSH S1 and SSH fix round 1 (Claude Opus 5.5, unreviewed):
             os.urandom(ORIGIN_TOKEN_BYTES) once per mailbox, for its
             origin token (origin_token, D25); secrets.token_hex
@@ -1057,6 +1073,46 @@ NO_INBOX_LISTEN_WORDS = ("tc {kind}: {name} has a card but no inbox on this shar
 RANG_RECORD_NAME = ".rang-{to}"
 # Its mode: its sender's alone, as the send lock's.
 RANG_RECORD_MODE = 0o600
+# F1 (Claude Opus 5.5, unreviewed): the wait exit record (C5, D28, D37
+# part 2). One line beside the wait lock, in the owner's own inbox: the
+# word below and a time in a message header's form (now_iso). `tc wait`
+# writes `listening` once it holds its lock and `mail` or `timeout` just
+# before it lets go on exit 0 or 2, so a wait killed or crashed leaves
+# `listening`. The record says why a lock that is gone went; it is never
+# proof of life, only the held lock is (CLAUDE.md rule 6). Both names
+# start with a dot and never end in MESSAGE_SUFFIX, so no listing of
+# messages, tc's or the board's, reads either as mail.
+WAIT_EXIT_NAME = ".wait.exit"
+# The record is written whole to this .tmp beside it (write_new_file:
+# O_CREAT | O_EXCL | O_NOFOLLOW) and renamed over it, so a reader never
+# sees half a line and a link at the record's name is replaced, never
+# followed.
+WAIT_EXIT_TMP_NAME = ".wait.exit.tmp"
+# Its mode: the owner writes it; the group reads it, so every member's tc
+# health, tc watch and board can tell how the owner's listener went.
+WAIT_EXIT_MODE = 0o640
+# The three words, and the two that mean the wait left on purpose.
+WAIT_EXIT_LISTENING = "listening"
+WAIT_EXIT_MAIL = "mail"
+WAIT_EXIT_TIMEOUT = "timeout"
+WAIT_EXIT_WORDS = (WAIT_EXIT_LISTENING, WAIT_EXIT_MAIL, WAIT_EXIT_TIMEOUT)
+WAIT_EXIT_LEFT_WORDS = (WAIT_EXIT_MAIL, WAIT_EXIT_TIMEOUT)
+# The most of a record a reader takes. The longest one tc writes is about
+# 40 bytes: `listening`, a space, a time like 2026-10-16T12:00:00-05:00
+# (an offset with seconds adds three) and a newline. 64 bounds a hand-made
+# file and never cuts a real one; anything longer is no record.
+WAIT_EXIT_MAX_BYTES = 64
+# The record's time is cut to the second (now_iso), so a record written
+# in the same second as the last sighting of its lock reads as written
+# after it: a reader compares it against that sighting less this step.
+WAIT_EXIT_TIME_STEP_SECONDS = 1
+# How many times a write makes its .tmp: a second try only after the first
+# found this user's own .tmp left by a wait killed between its create and
+# its rename, which it removes first.
+WAIT_EXIT_TRIES = 2
+# What a reader hands back: the word and the time as seconds since the
+# epoch, on the same scale as wall_clock().
+WaitExit = collections.namedtuple("WaitExit", "word at")
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -3455,7 +3511,9 @@ def write_new_file(path, text, mode=NEW_FILE_MODE, dir_fd=None):
     For every .tmp tc makes before it publishes a file: a card's and
     .shared's, each renamed into place, and a message's, hard-linked to
     the message's name and then removed (never renamed: SHARED fix rounds
-    2 and 3, Claude Opus 5.5, unreviewed).
+    2 and 3, Claude Opus 5.5, unreviewed). F1 (Claude Opus 5.5,
+    unreviewed): the wait exit record's, renamed over the record by name
+    in its open inbox (write_wait_exit).
     NEW_FILE_FLAGS fail on anything already at that name and never follow
     a link, so a link planted at a .tmp name is refused, not written
     through. Raises OSError (FileExistsError for a planted link or file);
@@ -4596,8 +4654,14 @@ def already_listening(name, kind):
     sys.exit(EXIT_ALREADY_LISTENING)
 
 
-def hold_wake_lock(name, kind, share):
+def hold_wake_lock(name, kind, share, keep_inbox=False):
     """Take and hold `name`'s wait or watch lock (`kind`), the one in its owner's own inbox: the open lock file, its flock held. The caller closes it, which lets go. Every refusal and exit 3 comes before anything is held, with nothing left open.
+
+    F1 (Claude Opus 5.5, unreviewed): with `keep_inbox` (tc wait, for its
+    exit record), (lock, inbox) instead: `inbox` a descriptor of the very
+    folder the lock was taken in (a duplicate of the pinned one), which
+    the caller closes. So the record lands beside the lock however the
+    inbox's name is moved later, never in a folder put at that name.
 
     D35 (1): the lock lives in mail/to-<name>/ at WAKE_LOCK_MODE, opened
     by name in the inbox's pinned descriptor (pinned_inbox, which refuses
@@ -4633,7 +4697,8 @@ def hold_wake_lock(name, kind, share):
                 held already, one line to stdout and exit 3
                 (already_listening); its name moved away each time, one
                 line to stderr and exit 1. Closes the folders on every way
-                out.
+                out. With `keep_inbox`, duplicates the inbox's descriptor
+                once the lock is held (F1).
     @deps       refuse_other_listener, old_wake_lock_held, pinned_inbox,
                 open_wake_lock, already_listening, refuse; fcntl, os, sys;
                 WAKE_LOCK_NAME, WAKE_LOCK_TRIES, NO_INBOX_LISTEN_WORDS,
@@ -4642,7 +4707,8 @@ def hold_wake_lock(name, kind, share):
                 tries of one open_wake_lock, one flock try, one fstat and
                 one lstat each.
     @alloc      one open lock file, returned (one at a time while it
-                tries); the inbox's two descriptors until it returns.
+                tries); the inbox's two descriptors until it returns; with
+                `keep_inbox`, one more descriptor, returned (F1).
     """
     shared = share is not None
     if shared:
@@ -4672,11 +4738,82 @@ def hold_wake_lock(name, kind, share):
             except BaseException:
                 lock.close()
                 raise
+            if named and keep_inbox:  # F1 (Claude Opus 5.5, unreviewed): the folder the lock is in, for the exit record
+                try:
+                    return lock, os.dup(inbox.box.fd)
+                except BaseException:
+                    lock.close()
+                    raise
             if named:
                 return lock
             lock.close()  # its name leads elsewhere now: let go, and take the lock that has the name
     refuse(f"tc {kind}: {inbox.path / lock_name} was moved away from its name each time this tc took it "
            f"({WAKE_LOCK_TRIES + 1} times); nothing held", EXIT_REFUSED)
+
+
+# F1 (Claude Opus 5.5, unreviewed): the wait exit record (C5, D28, D37 part 2).
+def write_wait_exit(box_fd, box, word):
+    """Replace the wait exit record in the inbox open at `box_fd` (its path `box`, for the words) with `word` and the time now: None when written, else one line of words for stderr.
+
+    By name in the open inbox, never by a path: the line is written whole
+    to WAIT_EXIT_TMP_NAME (write_new_file: O_CREAT | O_EXCL | O_NOFOLLOW,
+    at WAIT_EXIT_MODE, the umask applied) and renamed over
+    WAIT_EXIT_NAME, so a reader never sees half a line and a link at the
+    record's name is replaced, never followed. A .tmp already there that
+    is this user's own regular file with one name was left by a wait
+    killed between its create and its rename (only the lock's holder
+    writes, so no other of this user's waits is writing it): it is
+    removed and the write tried once more. Anything else there (another
+    user's file, a link, a FIFO, a folder) is never opened or removed,
+    and the write fails. A failed write leaves the record's old line, so
+    a failed `mail` or `timeout` after this wait's own `listening` reads
+    as a wait killed (a false `down`, never a false `listening`: the
+    record is never proof of life). A failure never raises: the caller
+    prints the words, and the wait's exit code and wake stay as they
+    were.
+
+    @interacts  creates, writes and renames one file by name in `box_fd`
+                (write_new_file); on a .tmp already there, lstats it by
+                name and may remove this user's own; on a failed rename,
+                removes its own .tmp; reads the clock (now_iso) and this
+                process's user id. Writes nothing else.
+    @deps       write_new_file, now_iso; contextlib, os, stat;
+                WAIT_EXIT_NAME, WAIT_EXIT_TMP_NAME, WAIT_EXIT_MODE,
+                WAIT_EXIT_TRIES.
+    @complexity O(1): at most WAIT_EXIT_TRIES creates of one short line,
+                one rename.
+    @alloc      the line; one .tmp at a time, renamed into the record or
+                removed; the record, kept and replaced on the next write;
+                the words, on a failure.
+    """
+    record = box / WAIT_EXIT_NAME
+    for tries in range(WAIT_EXIT_TRIES):
+        try:
+            write_new_file(WAIT_EXIT_TMP_NAME, f"{word} {now_iso()}\n", WAIT_EXIT_MODE, dir_fd=box_fd)
+        except FileExistsError:
+            try:
+                st = os.lstat(WAIT_EXIT_TMP_NAME, dir_fd=box_fd)
+            except FileNotFoundError:
+                continue  # gone between the create and the look: try again
+            except OSError as err:
+                return f"tc wait: could not write {record} ({err.strerror}); the wait goes on as before"
+            own = stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.geteuid()
+            if not own or tries + 1 == WAIT_EXIT_TRIES:
+                return (f"tc wait: could not write {record}: something this user's tc did not leave has the name "
+                        f"{box / WAIT_EXIT_TMP_NAME}; the wait goes on as before")
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(WAIT_EXIT_TMP_NAME, dir_fd=box_fd)  # this user's own .tmp, left by a killed wait
+            continue
+        except OSError as err:
+            return f"tc wait: could not write {record} ({err.strerror}); the wait goes on as before"
+        try:
+            os.rename(WAIT_EXIT_TMP_NAME, WAIT_EXIT_NAME, src_dir_fd=box_fd, dst_dir_fd=box_fd)
+        except OSError as err:
+            with contextlib.suppress(OSError):
+                os.unlink(WAIT_EXIT_TMP_NAME, dir_fd=box_fd)  # this call's own .tmp, made just above
+            return f"tc wait: could not write {record} ({err.strerror}); the wait goes on as before"
+        return None
+    return f"tc wait: could not write {record}; the wait goes on as before"
 
 
 def cmd_wait(args):
@@ -4693,6 +4830,18 @@ def cmd_wait(args):
     0, 2, 3, a refusal, an exception): the `with` around the polls closes
     it, and hold_wake_lock closes its own before any exit.
 
+    F1 (Claude Opus 5.5, unreviewed): the wait exit record (C5, D28).
+    Once the lock is held, `listening <time>` is written to
+    mail/to-<name>/.wait.exit, and on exit 0 or 2 `mail <time>` or
+    `timeout <time>` replaces it, each by name in the folder the lock was
+    taken in (hold_wake_lock's kept descriptor; write_wait_exit) and
+    each while the lock is still held, so no reader finds the lock gone
+    and the record still saying `listening` after a wait that left on
+    purpose. A wait killed, crashed, refused (exit 1) or stopped by an
+    exception leaves `listening`. A record that cannot be written is one
+    line to stderr; the exit code and the wake are unchanged. The kept
+    descriptor is closed on every way out with the lock.
+
     @interacts  checks the name first (C0, exit 6, nothing written); caps
                 its own address space; reads ROOT/.shared once
                 (mailbox_share); takes the lock (hold_wake_lock: on a
@@ -4708,22 +4857,41 @@ def cmd_wait(args):
                 read/ it cannot look at, or under a shared mailbox one not
                 its card owner's, refuses (exit 1, refuse_bad_inbox), and
                 so does one it cannot list (exit 1, never a quiet timeout:
-                inbox_messages, SHARED fix round 3); prints one line.
+                inbox_messages, SHARED fix round 3); prints one line. F1:
+                writes the exit record in the lock's folder at the start
+                and on exit 0 or 2 (write_wait_exit), with one line to
+                stderr if a write fails.
     @deps       require_names, mailbox_share, hold_wake_lock, unread,
-                keepalive_seconds; resource, sys, time.
+                keepalive_seconds, write_wait_exit; contextlib, os,
+                resource, sys, time; MAIL, WAIT_EXIT_LISTENING,
+                WAIT_EXIT_MAIL, WAIT_EXIT_TIMEOUT.
     @complexity O(U + u log u) per poll over U names in the inbox and the
                 u of them that are messages (single digits): three folder
                 opens, one lstat for the card when shared, one listing and
                 one stat per message name; no .shared read per poll. One
-                poll every POLL_SECONDS until the timeout.
-    @alloc      one open lock file for its lifetime, closed on every way
-                out, and two descriptors for each poll; flat at about
-                13 MB.
+                poll every POLL_SECONDS until the timeout. F1: two record
+                writes per wait, each O(1), never one per poll.
+    @alloc      one open lock file and one descriptor of its folder for
+                its lifetime, both closed on every way out, and two
+                descriptors for each poll; flat at about 13 MB. F1: the
+                record, one short file per name that ever waited, replaced
+                whole on each write and kept.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     resource.setrlimit(resource.RLIMIT_AS, (WAIT_MEMORY_CAP_BYTES, WAIT_MEMORY_CAP_BYTES))
     share = mailbox_share()  # P3 fix round 1b (Claude Opus 5.5, unreviewed): read once, not per poll
-    with hold_wake_lock(args.name, "wait", share):  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35, D36; closed on every way out
+    # F1 (Claude Opus 5.5, unreviewed): the lock's folder is kept for the exit record, and closed with the lock.
+    lock, box_fd = hold_wake_lock(args.name, "wait", share, keep_inbox=True)
+    box = MAIL / f"to-{args.name}"
+
+    def record(word):
+        said = write_wait_exit(box_fd, box, word)
+        if said is not None:
+            print(said, file=sys.stderr)
+
+    with lock, contextlib.ExitStack() as kept:  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35, D36; closed on every way out
+        kept.callback(os.close, box_fd)
+        record(WAIT_EXIT_LISTENING)  # F1: once the lock is held
         timeout = args.timeout if args.timeout is not None else (
             keepalive_seconds() if args.keepalive else DEFAULT_WAIT_SECONDS)
         shared = share is not None  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): read once, not per poll
@@ -4731,9 +4899,11 @@ def cmd_wait(args):
         while time.monotonic() < deadline:
             msgs = unread(args.name, shared)
             if msgs:
+                record(WAIT_EXIT_MAIL)  # F1: before the lock goes
                 print(f"MAIL: {len(msgs)} unread for {args.name}. Run: tc read {args.name}")
                 return
             time.sleep(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+        record(WAIT_EXIT_TIMEOUT)  # F1: before the lock goes
         if args.keepalive:
             print(f"KEEPALIVE: no mail for {args.name} in {timeout:g}s. This wake refreshed the cache. "
                   f"Re-arm: tc wait {args.name} --keepalive")
@@ -8532,6 +8702,122 @@ def held_by_others(shared):
     finally:
         os.close(mail_fd)
     return found
+
+
+# F1 (Claude Opus 5.5, unreviewed): the wait exit record's one reader (C5,
+# D28, D37 part 2). Never proof of life: only the held lock is (rule 6).
+def read_wait_exit(box_fd, owner):
+    """The wait exit record in the inbox open at `box_fd`, whose owner is user `owner`: a WaitExit (its word and its time as seconds since the epoch), or None for no record. Every reader of the record (tc health, tc watch, the board) comes through here.
+
+    The record counts only when the name WAIT_EXIT_NAME in the open inbox
+    is a regular file with one name (st_nlink 1), owned by `owner`, of at
+    most WAIT_EXIT_MAX_BYTES, holding exactly one line, newline-ended: one
+    of WAIT_EXIT_WORDS, one space, and a time with its offset
+    (datetime.fromisoformat, a message header's form). Anything else is
+    no record: missing, a link (O_NOFOLLOW, never followed), a FIFO or a
+    folder (O_NONBLOCK and fstat, never blocking), another user's file (a
+    member's plant in a shared inbox), a second name, too long, not UTF-8
+    or malformed. It never raises. It never makes a name a listener:
+    listeners() reads only locks, and a `listening` record with no lock
+    held means the wait was killed or crashed.
+
+    @interacts  opens, fstats and reads one file by name in `box_fd`,
+                and closes it. Writes nothing.
+    @deps       datetime, os, stat; WAIT_EXIT_NAME, WAIT_EXIT_MAX_BYTES,
+                WAIT_EXIT_WORDS, WaitExit.
+    @complexity O(1): at most WAIT_EXIT_MAX_BYTES + 1 bytes read.
+    @alloc      the bytes read and one WaitExit, returned; one descriptor,
+                closed before return.
+    """
+    try:
+        fd = os.open(WAIT_EXIT_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=box_fd)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not (stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == owner
+                and st.st_size <= WAIT_EXIT_MAX_BYTES):
+            return None
+        data = os.read(fd, WAIT_EXIT_MAX_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(data) > WAIT_EXIT_MAX_BYTES:
+        return None
+    try:
+        line, newline, rest = data.decode("utf-8").partition("\n")
+    except UnicodeDecodeError:
+        return None
+    word, space, when = line.partition(" ")
+    if not newline or rest or not space or word not in WAIT_EXIT_WORDS:
+        return None
+    try:
+        at = datetime.datetime.fromisoformat(when)
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        return None
+    return WaitExit(word, at.timestamp())
+
+
+def wait_exits(names):
+    """The wait exit record of each of `names` that has one (read_wait_exit): {name: WaitExit}, in name order. A name with no inbox, or none tc can open, or no record, is left out.
+
+    mail/ is opened once by its path (the init user's, D34) and each
+    mail/to-<name>/ by its name in it, never through a link (pin_folder);
+    the record is read by name in the inbox's descriptor, and its owner
+    must be the inbox's (by fstat of that descriptor). So a member who
+    swaps their own inbox after it was opened leads the read nowhere.
+
+    @interacts  opens mail/; opens each named inbox by name and reads its
+                record (read_wait_exit). Writes nothing.
+    @deps       open_mail, pin_folder, unpin, read_wait_exit; os; MAIL.
+    @complexity O(n log n) over the n names given (a few dozen at most,
+                each a stopped listener): one folder open and one short
+                read each, and a sort.
+    @alloc      one dict, returned; one inbox descriptor at a time.
+    """
+    out = {}
+    if not names:
+        return out
+    try:
+        mail_fd = open_mail()
+    except OSError:
+        return out
+    if mail_fd is None:
+        return out
+    try:
+        for name in sorted(set(names)):
+            box = pin_folder(mail_fd, f"to-{name}", MAIL / f"to-{name}")
+            if box.fd is None:
+                continue
+            try:
+                record = read_wait_exit(box.fd, box.st.st_uid)
+            finally:
+                unpin(box)
+            if record is not None:
+                out[name] = record
+    finally:
+        os.close(mail_fd)
+    return out
+
+
+def left_on_purpose(record, seen=None):
+    """True when the wait exit record `record` says its wait left on purpose (C5): its word is `mail` or `timeout`, and it was written no earlier than the second its lock was last seen held at `seen` (seconds since the epoch). `seen` None (the lock never seen this run: a board restarted, say) takes any date.
+
+    An older `mail` or `timeout` is from a wait before the one last seen
+    (whose own `listening` could not be written), so it says nothing of
+    that one: False, as for no record. tc watch and the board decide with
+    this; neither takes the record as a listener.
+
+    @interacts  none.
+    @deps       WAIT_EXIT_LEFT_WORDS, WAIT_EXIT_TIME_STEP_SECONDS.
+    @complexity O(1).
+    @alloc      none.
+    """
+    return (record is not None and record.word in WAIT_EXIT_LEFT_WORDS
+            and (seen is None or record.at > seen - WAIT_EXIT_TIME_STEP_SECONDS))
 
 
 # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), the audit's
