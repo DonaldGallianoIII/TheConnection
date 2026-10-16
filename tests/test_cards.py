@@ -66,7 +66,7 @@ JOIN_READS = {"CODEX_THREAD_ID", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE
 DEFAULT_REMOTE_TC = "~/TheConnection/tc"
 EXIT_REFUSED = 1
 EXIT_BAD_NAME = 6
-BAD_NAME_WORDS =('tc: bad name "{name}": letters, digits, dot, dash, underscore, '
+BAD_NAME_WORDS = ('tc: bad name "{name}": letters, digits, dot, dash, underscore, '
                   '1 to 64, not starting with a dash\n')
 # A planted value that must never reach a card. Made up for the test.
 SECRET = "secret123"

@@ -947,7 +947,8 @@ Brief:  audits/2026-10-15-1851-custom/fixes/round-2.md (in this
 | (c) | `b4c3ce8` | 3, 4 | A retry's inbox lock never refuses; the gate's passing write failure at mail/.seq or the lock is busy |
 | (d) | `940360e` | 5 | Two of the owner's own waits never both hold a lock |
 | (e) | the commit that adds this section | 6, 7 | Three two-user steps; the small LOWs; this handoff |
-| (f) | see "Item 8" below | 8 | D37 (1): what a far key reads carries nothing of this machine |
+| (f) | `67093ef` | 8 | D37 (1): what a far key reads carries nothing of this machine |
+| follow-up | the commit after `67093ef` | 7 | The space (e)'s edit of tests/test_cards.py dropped before BAD_NAME_WORDS' parenthesis, put back |
 
 Every commit's full Python suite ran on a copy of that commit's tree
 (`python3 -m unittest discover -s tests -p 'test_*.py'`): 332 run, OK at
