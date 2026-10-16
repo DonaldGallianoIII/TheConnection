@@ -3,7 +3,13 @@
 Model:  Claude Opus 5.5 (the SSH lane agent), 2026-10-15; the outbox
         paths (D32), the origin id's shape (D33), the far warnings, and
         the step numbers, steps 13, 16 and 18, and the undo changed in fix
-        round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15
+        round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15; the note on
+        an older far tc, `TC_ROOT` in both gate lines (steps 4 and 20),
+        and steps 12 and 15 to 17 brought to P3 fix rounds 1b and 1c by
+        the P3 fixer, Claude Opus 5.5, 2026-10-15; steps 9 and 17
+        brought to D37's far words (`ba15fca`) by the architect session,
+        Claude Opus 5.5, 2026-10-15; this line added in P3 fix round 3
+        by the P3 fixer, Claude Opus 5.5, 2026-10-15
 Status: unreviewed
 
 What this checks: mail crosses to a second machine and back, and a key
@@ -13,7 +19,10 @@ target keeps its mail in order until `tc flush` (C3, D23); a far
 refusal is filed, never retried; a retry of a message already delivered
 is answered `already delivered` (D25); the gate delivers as its own key's
 name, never as the far `--from`, never forwards to a third machine, and
-answers `health --json` without cards (D16, D18).
+answers `health --json` with only the keys it allows, cards and this
+mailbox's paths left out (D16, D18, D36 (5)). Each failed try leaves its
+words beside the waiting file, and they move with it once it is sent
+(D36 (4)).
 
 The tests in `tests/test_ssh_route.py`, `tests/test_flush.py` and
 `tests/test_gate.py` prove all of this against a fake ssh. Only a person
@@ -36,12 +45,14 @@ Before you start:
 
 - Both machines run this branch's `tc`, fix round 1 or later. The far
   one needs `tc gate` and `tc send --origin` with the id's random part
-  (D33): an older far tc answers `--origin` with a usage error (its
-  exit 9), homebox exits 11 (refused by the far side with a code tc does
-  not know), and every message lands in `refused/`. If that happens,
-  update the far tc, move each file from
-  `outbox/you/to-<name>/refused/` back to `outbox/you/to-<name>/` by
-  hand, and run `tc flush`.
+  (D33). An older far tc, one from SSH S1 to S3, has a gate whose origin
+  pattern lacks the random part: it refuses the id with `tc gate:
+  refused`, its exit 7, homebox exits 7 too (`refused by farbox-tc (exit
+  7)`), and every message lands in `refused/`. (A far tc with no `gate`
+  at all answers the forced command with a usage error, its exit 9, and
+  homebox exits 11.) If that happens, update the far tc, move each file
+  from `outbox/you/to-<name>/refused/` back to `outbox/you/to-<name>/`
+  by hand, and run `tc flush`.
 - `qa`'s login shell on farbox is POSIX (sh, bash, dash or zsh). ssh
   hands the remote command to it, and tc quotes for POSIX (C3).
 - farbox runs an ssh server you can reach from homebox. The way back
@@ -71,9 +82,12 @@ Before you start:
    words:
 
    ```
-   command="/home/qa/tc-qa/tc gate --as home-a",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... tc-qa-home-a
+   command="TC_ROOT=/home/qa/tc-qa /home/qa/tc-qa/tc gate --as home-a",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... tc-qa-home-a
    ```
 
+   - `TC_ROOT` is set in the line itself, so the gate works on this
+     scratch mailbox whatever `TC_ROOT` the shell sshd starts inherits;
+     `unset TC_ROOT` in step 2 acts on your own shell only.
    - `~/.ssh` stays 0700 and `authorized_keys` 0600, or sshd ignores
      the file.
    - The path is absolute: sshd runs the line through `qa`'s shell, and
@@ -104,8 +118,9 @@ Before you start:
 
 9. On homebox: `tc send --from home-a --to far-b "hello far"`.
    - It exits 0 and prints `sent over ssh to farbox-tc: sent #1 to
-     far-b: /home/qa/tc-qa/mail/to-far-b/000001-from-home-a.md` (the
-     numbers are farbox's).
+     far-b: mail/to-far-b/000001-from-home-a.md` (the numbers are
+     farbox's). The path is relative to farbox's mailbox: nothing a far
+     key reads names a path, a login or a pid on farbox (D37).
    - `ls ~/tc-qa-home/outbox/you/to-far-b/sent/` lists
      `000001-from-home-a.md`, the record of the send (D25, D32), and
      `ls ~/tc-qa-home/outbox/you/to-far-b/` shows no message waiting.
@@ -129,9 +144,14 @@ Before you start:
     - `ssh -T farbox-tc 'env TC_ROOT=/tmp ~/tc-qa/tc send --from a --to far-b'`
     - `ssh -T farbox-tc '~/tc-qa/tc card x --ssh somewhere'`
 12. On homebox: `ssh -T farbox-tc '~/tc-qa/tc health --json'`.
-    - It prints the health JSON with no `cards` key, and `"gpus": null`
-      (the gate runs no program to ask). On farbox, `tc health --json`
-      run there does have `cards`.
+    - It prints the health JSON with exactly these keys: `time`,
+      `machine` (`load1`, `cores`, `mem_avail_pct`, and `"gpus": null`:
+      the gate runs no program to ask), `sessions`, `listeners`,
+      `watchers`, `mail` (each name's `unread`, `newest_mail_age_s` and
+      `status_age_s`) and `shared_group` (D36 (5)). No `cards`, no
+      `mail_problem` or `shared_problem` (they carry the far mailbox's
+      path), no `squatted`, `held_by_others` or `stuck_outbox`. On
+      farbox, `tc health --json` run there does have `cards`.
 13. The gate never forwards (D18). On farbox: `tc card onward --ssh
     elsewhere`. On homebox: `tc card onward --ssh farbox-tc --remote-tc
     '~/tc-qa/tc'`, then `tc send --from home-a --to onward "go on"`.
@@ -160,11 +180,16 @@ Before you start:
     - The first exits 4: `could not reach farbox-tc-dead (ssh: connect to
       host localhost port 1: Connection refused); kept in outbox:
       .../outbox/you/to-far-c/<n>-from-home-a.md. Run: tc flush`.
+    - Beside it, `cat .../outbox/you/to-far-c/<n>-from-home-a.md.stderr`
+      prints that try's words, its first line `could not reach
+      farbox-tc-dead (ssh: connect to host localhost port 1: Connection
+      refused)` (D36 (4)).
     - The second exits 4 without trying: `farbox-tc-dead has 1 waiting
-      in the outbox; queued behind them. Run: tc flush`.
+      in the outbox; queued behind them. Run: tc flush`. No note sits
+      beside it: no try of it failed.
     - `tc flush` tries the first only, says `could not reach` for it and
       `left ...: farbox-tc-dead could not be reached (...)` for the
-      second, and exits 4.
+      second, and exits 4. The first's note now holds this try's words.
 16. On homebox: `tc card far-c --ssh farbox-tc --remote-tc '~/tc-qa/tc'`
     (far-c now points at the live alias), then `tc flush`.
     - It prints `#<n> to far-c: sent over ssh to farbox-tc: ...` twice,
@@ -173,15 +198,23 @@ Before you start:
       farbox-tc said: new inbox: nobody has joined as far-c`: the far
       tc's warning reaches you (D33). `tc flush` again prints `nothing
       waiting in the outbox`.
+    - `ls .../outbox/you/to-far-c/sent/` lists the first message with
+      its note beside it, `<n>-from-home-a.md.stderr`, moved there with
+      it, and `ls .../outbox/you/to-far-c/` shows no `.stderr` left
+      (D36 (4): a note moves with its file, never removed).
     - On farbox, `tc read far-c` shows `first`, then `second`.
 17. A far tc that is busy is kept, not refused (D23). On farbox, hold
     far-b's inbox lock for 20 s, in the background: `python3 -c 'import
     fcntl, time; f = open("/home/qa/tc-qa/mail/.box-far-b.lock", "a");
     fcntl.flock(f, fcntl.LOCK_EX); time.sleep(20)' &`. At once, on
     homebox: `tc send --from home-a --to far-b "while busy"`.
-    - It exits 4: `could not reach farbox-tc (the far tc was busy, exit
-      10: tc: another process is holding far-b's lock; try again); kept
-      in outbox: ...`.
+    - It exits 4: `farbox-tc was busy (exit 10: tc: another process is
+      holding far-b's lock: another member (another process); try again.
+      If it stays held, ask another member to let it go.); kept in
+      outbox: ...`. It says busy, never `could not reach`: the far tc was
+      reached and answered (P3 fix round 1c). It names no login and no
+      pid on farbox (D37); on farbox itself, the same refusal names the
+      holder's login and pid (D35 (3)).
     - After 20 s, `tc flush` sends it and exits 0.
 
 ## A retry never delivers twice (D25)
@@ -209,8 +242,10 @@ run.
     ~/.ssh/tc_qa_back_ed25519.pub` in place of the last two words:
 
     ```
-    command="/home/you/tc-qa-home/tc gate --as far-b",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... tc-qa-far-b
+    command="TC_ROOT=/home/you/tc-qa-home /home/you/tc-qa-home/tc gate --as far-b",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... tc-qa-far-b
     ```
+
+    `TC_ROOT` is pinned in the line, as in step 4.
 
 21. On farbox, the alias and the card for the way back. A person writes
     this card, on the far machine: the gate refuses `tc card` (C3). Add

@@ -626,7 +626,7 @@ class FeedTest(unittest.TestCase):
                     seen = by_id(board.feed())
                     code, out, err = root.tc("send", "--from", "a", "--to", "b", "task")
                     self.assertEqual(code, 0, f"tc send exited {code}: {err}")
-                    lock = root.path / "mail" / ".wait-b.lock"
+                    lock = root.path / "mail" / "to-b" / ".wait.lock"  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35
                     end = time.monotonic() + WAKE_CEILING_S
                     while pid_b in _root.flock_holders(lock) and time.monotonic() < end:
                         time.sleep(_root.LOCK_POLL_SECONDS)

@@ -24,13 +24,23 @@ it watched is reachable.
             lock (outbox/<login>/.send-<key>.lock) themselves and read
             /proc/locks to see a child blocked on it. Some make folders,
             a link or a file by hand in outbox/ and rename them (SSH fix
-            round 1, Claude Opus 5.5, unreviewed: D32's branches). Two
+            round 1, Claude Opus 5.5, unreviewed: D32's branches). Five
             tests write a loopback wrapper `ssh` in the root's temp
             folder that runs the fake and then this branch's own `tc
             gate` under a second TC_ROOT there, as a far machine would;
             one writes mail/.seq by hand, one plants a file in the far
-            mailbox. One test's wrapper prints past tc's output cap on
-            stdout after the fake. Six tests load tc as a module
+            mailbox; one (P3 fix round 1c, Claude Opus 5.5, unreviewed:
+            the audit's REC-7) opens two harness roots, one per machine,
+            each side's wrapper running the other side's gate under the
+            other root; one (P3 fix round 1c: D36 (4)) starts that far
+            gate through FAILING_GATE_BOOT,
+            which makes each create of a .tmp there fail with a passing
+            errno and runs tc in the same process, and one (P3 fix round
+            2, Claude Opus 5.5, unreviewed: the audit's LOW-3) the same
+            way, with mail/.seq's write or an inbox lock's create failing
+            instead. One test's wrapper
+            prints past tc's output cap on stdout after the fake. Six
+            tests load tc as a module
             (TC_ROOT set to the harness root first, put back after) and
             work in process, under the root only: one calls
             route_and_deliver with PATH set for that call to a wrapper
@@ -45,12 +55,22 @@ it watched is reachable.
             shares the mailbox with the user's own primary group (tc init
             --shared), reads modes and groups, and asks POSIX's rules what
             another member may do there.
-@deps       python3 stdlib (argparse, contextlib, fcntl, hashlib, io, json,
-            os, pathlib, pwd, random, re, shlex, stat, sys, unittest,
-            unittest.mock); tests/_root.py; load_tc, wait_until_blocked
-            and FINISH_CEILING_SECONDS from test_codex_route.py;
-            UmaskTestCase, owner_patched_lstat and primary_group from
-            test_shared.py; ../tc.
+@deps       python3 stdlib (argparse, contextlib, errno, fcntl, hashlib,
+            io, json, os, pathlib, pwd, random, re, shlex, stat, sys,
+            threading, unittest, unittest.mock); tests/_root.py; load_tc,
+            wait_until_blocked and FINISH_CEILING_SECONDS from
+            test_codex_route.py; UmaskTestCase, owner_patched_lstat and
+            primary_group from test_shared.py; ../tc. Imported by others
+            (P3 fix round 1c, Claude Opus 5.5, unreviewed: the audit's
+            LOW-28, option A): test_flush.py FAKE_BUSY_STDERR,
+            FAKE_CONNECT_STDERR, OTHER_MEMBER, OTHER_TARGET,
+            OWN_WRAPPER_MODE, QUEUED_WORDS, SHORT_LOCK_WAIT_SECONDS,
+            SSH_CONNECT_FAILED, TARGET, assert_called, login, outbox, queue
+            and send_lock_path; test_gate.py login, OTHER_MEMBER,
+            PASSING_ERRNO_NAMES, PASSING_WORDS, seen_as, may_make_in and
+            may_move_or_remove; test_health.py FAKE_CONNECT_STDERR,
+            OTHER_MEMBER (P3 fix round 2, Claude Opus 5.5, unreviewed),
+            SSH_CONNECT_FAILED, TARGET, assert_called, login and queue.
 @complexity O(1) per test: one to five tc runs and as many fake calls,
             each under a second. One test waits out tc's own lock bound
             (LOCK_WAIT_SECONDS, 3 s), and the timeout test
@@ -62,6 +82,7 @@ it watched is reachable.
 
 import argparse
 import contextlib
+import errno
 import fcntl
 import hashlib
 import io
@@ -105,6 +126,10 @@ SSH_CONNECT_FAILED = 255
 # C3's words, written here.
 SENT_WORDS = "sent over ssh to {target}"
 KEPT_WORDS = "could not reach {target} ({reason}); kept in outbox: {path}. Run: tc flush\n"
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): the audit's LOW-15. A far
+# 10 reached the far tc, which answered busy: it is said so, never as a
+# target this side could not reach.
+BUSY_KEPT_WORDS = "{target} was busy ({reason}); kept in outbox: {path}. Run: tc flush\n"
 QUEUED_WORDS = "{target} has {n} waiting in the outbox; queued behind them. Run: tc flush\n"
 NOT_TRIED_WORDS = ("{target} was not tried: another tc is sending to it right now (a send or a tc flush); "
                    "kept in outbox: {path}. Run: tc flush\n")
@@ -148,6 +173,12 @@ NONCE_SEED = 25
 FAR_LOCK_WAITS = 3
 # The far mailbox name the loopback fake's gate delivers as (its --as).
 FAR_KEY = "home-a"
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): REC-7. The round trip's
+# far name, which is also its return key's --as, and the target the far
+# side's card for home-a names. Made up for the test; the loopback fake
+# never reads either target.
+ROUND_TRIP_FAR = "far-b"
+RETURN_TARGET = "u@home"
 # The send lock's name: the start of the target's sha256 in hex (tc's
 # SEND_LOCK_KEY_CHARS, written here), in the user's own outbox branch.
 SEND_LOCK_KEY_CHARS = 16
@@ -185,6 +216,55 @@ SHORT_LOCK_WAIT_SECONDS = 0.5
 HOLD_PAST_LOCK_WAIT_SECONDS = 1.5
 # Owner may read, write and run the slow wrapper. Nobody else needs to.
 OWN_WRAPPER_MODE = 0o700
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), the audit's
+# LOW-4. The write failures that pass (tc's PASSING_WRITE_ERRNOS, written
+# here by name), and the far gate's start-up that makes every create of a
+# .tmp fail with one: argv is the errno's name, tc's path, then tc's own
+# arguments. It runs tc as __main__ in the same process, so no other
+# program starts. P3 fix round 2 (Claude Opus 5.5, unreviewed): the
+# audit's LOW-3. The errno's name is followed by a stage: "tmp" (as
+# before), "lock" (an inbox lock's create, mail/.box-<name>.lock, fails)
+# or "seq" (mail/.seq's write fails: tc's open of its descriptor gets a
+# file whose write raises, all else passed through).
+PASSING_ERRNO_NAMES = ("ENOSPC", "EDQUOT", "EIO")
+FAILING_GATE_BOOT = """import builtins, errno, os, runpy, sys
+failing, stage = getattr(errno, sys.argv[1]), sys.argv[2]
+real_open, real_text_open = os.open, builtins.open
+def open_failing(path, flags, *args, **kwargs):
+    name = os.path.basename(str(path))
+    if flags & os.O_CREAT and ((stage == "tmp" and name.endswith(".tmp"))
+                               or (stage == "lock" and name.startswith(".box-") and name.endswith(".lock"))):
+        raise OSError(failing, os.strerror(failing), str(path))
+    return real_open(path, flags, *args, **kwargs)
+class FailingWrites:
+    def __init__(self, real):
+        self.real = real
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        self.real.close()
+        return False
+    def write(self, text):
+        raise OSError(failing, os.strerror(failing))
+def open_text(file, *args, **kwargs):
+    made = real_text_open(file, *args, **kwargs)
+    if stage == "seq" and isinstance(file, int) and os.readlink(f"/proc/self/fd/{file}").endswith("/mail/.seq"):
+        return FailingWrites(made)
+    return made
+os.open, builtins.open = open_failing, open_text
+sys.argv = sys.argv[3:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+# The stages a far failing gate takes (FAILING_GATE_BOOT): a message's .tmp
+# (round 1c), and the two writes a send makes before it (round 2).
+TMP_STAGE = "tmp"
+BEFORE_PUBLISH_STAGES = ("seq", "lock")
+# A far gate's busy words for a write that passes (tc's PASSING_WORDS,
+# written here); {what} names the step and its path, {why} the error.
+PASSING_WORDS = ("tc send: {what} ({why}); nothing sent. A full disk, a quota or an I/O error passes, so this is busy, "
+                 "not a refusal: try again later")
 
 
 def write_card(root, name, card):
@@ -365,30 +445,44 @@ def may_make_in(folder, uid, gids):
     return may(folder, uid, gids, MAY_WRITE) and may(folder, uid, gids, MAY_SEARCH)
 
 
-def far_gate_ssh(root, folder, far, key=FAR_KEY):
+def far_gate_ssh(root, folder, far, key=FAR_KEY, fail_errno=None, fail_stage=TMP_STAGE):
     """A loopback `ssh`: it runs the harness's fake at `folder` (the record, and its exit code: a non-zero one ends the call there), then hands the same stdin and the remote command, its last argument, to a real `tc gate --as <key>` under the far mailbox `far`, as sshd does with a forced command. The env for a call that should find it.
 
     No real ssh runs (rule 5): the fake records every call and is asserted
     called. The far side is this branch's own tc, under a TC_ROOT of its
     own in the temp folder, so a test sees what a far gate answers.
 
-    @interacts  writes far-ssh-*/ssh (mode 0700) in the root's temp
-                folder; each call keeps its stdin in a file beside it.
-    @deps       shlex, os, sys; _root.TC; OWN_WRAPPER_MODE.
+    P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4). `fail_errno`,
+    an errno name (ENOSPC, say), runs that far gate through
+    FAILING_GATE_BOOT, which makes every create of a .tmp fail with it:
+    a far machine whose disk is full, or its quota reached, or its disk
+    failing. P3 fix round 2 (Claude Opus 5.5, unreviewed): `fail_stage`
+    picks what fails instead, "lock" or "seq" (FAILING_GATE_BOOT).
+
+    @interacts  writes far-ssh-*/ssh (mode 0700), and with `fail_errno`
+                far-ssh-*/boot.py, in the root's temp folder; each call
+                keeps its stdin in a file beside it.
+    @deps       shlex, os, sys; _root.TC; OWN_WRAPPER_MODE,
+                FAILING_GATE_BOOT.
     @complexity O(1).
     @alloc      one folder, removed with the temp folder.
     """
     home = root.base / f"far-ssh-{len(list(root.base.glob('far-ssh-*')))}"
     home.mkdir()
     feed = shlex.quote(str(home / "stdin")) + ".$$"
+    run = f"{shlex.quote(sys.executable)} {shlex.quote(str(_root.TC))}"
+    if fail_errno is not None:
+        boot = home / "boot.py"
+        boot.write_text(FAILING_GATE_BOOT)
+        run = (f"{shlex.quote(sys.executable)} {shlex.quote(str(boot))} {shlex.quote(fail_errno)} "
+               f"{shlex.quote(fail_stage)} {shlex.quote(str(_root.TC))}")
     wrapper = home / "ssh"
     wrapper.write_text("#!/bin/sh\n"
                        f"cat > {feed}\n"
                        f'{shlex.quote(str(folder / "ssh"))} "$@" < {feed} || exit $?\n'
                        "for last; do :; done\n"
                        f'SSH_ORIGINAL_COMMAND="$last" TC_ROOT={shlex.quote(str(far))} exec '
-                       f"{shlex.quote(sys.executable)} {shlex.quote(str(_root.TC))} gate --as {shlex.quote(key)} "
-                       f"< {feed}\n")
+                       f"{run} gate --as {shlex.quote(key)} < {feed}\n")
     wrapper.chmod(OWN_WRAPPER_MODE)
     return {"PATH": f"{home}{os.pathsep}{root.env['PATH']}"}
 
@@ -556,19 +650,21 @@ class SshRouteTest(unittest.TestCase):
         self.assertEqual(len(seen), 1)
 
     def test_a_connection_failure_or_a_far_10_keeps_the_message_and_exits_4(self):
-        """Fake ssh exiting 255, or 10 (D23): exit 4, one file waiting in outbox/to-b/, nothing in sent/ or refused/, stderr names tc flush.
+        """Fake ssh exiting 255, or 10 (D23): exit 4, one file waiting in outbox/to-b/, nothing in sent/ or refused/, stderr names tc flush; a 255 `could not reach` the target, a far 10 says the target `was busy` (P3 fix round 1c, Claude Opus 5.5, unreviewed: the audit's LOW-15).
 
         Must reject a far 10 filed as a refusal: it was busy and wrote
-        nothing, so it must be tried again.
+        nothing, so it must be tried again. Must reject a far 10 reported
+        as `could not reach`: the far tc was reached and answered, and
+        the words would point a person at the network.
 
         @interacts  per case: one tc card, one send, one fake call.
         @deps       assert_called, outbox.
         @complexity O(1): two cases.
         @alloc      one TcRoot per case.
         """
-        cases = [(SSH_CONNECT_FAILED, FAKE_CONNECT_STDERR, FAKE_CONNECT_STDERR.strip()),
-                 (EXIT_BUSY, FAKE_BUSY_STDERR, f"the far tc was busy, exit {EXIT_BUSY}: {FAKE_BUSY_STDERR.strip()}")]
-        for exit_code, stderr, reason in cases:
+        cases = [(SSH_CONNECT_FAILED, FAKE_CONNECT_STDERR, KEPT_WORDS, FAKE_CONNECT_STDERR.strip()),
+                 (EXIT_BUSY, FAKE_BUSY_STDERR, BUSY_KEPT_WORDS, f"exit {EXIT_BUSY}: {FAKE_BUSY_STDERR.strip()}")]
+        for exit_code, stderr, words, reason in cases:
             with self.subTest(exit_code=exit_code):
                 with _root.TcRoot() as root:
                     folder, calls = root.fake_bin("ssh", exit_code, stderr=stderr)
@@ -580,7 +676,7 @@ class SshRouteTest(unittest.TestCase):
                     filed = outbox(root, "b", "sent") + outbox(root, "b", "refused")
                 self.assertEqual(code, EXIT_QUEUED, err)
                 self.assertEqual(out, "")
-                self.assertEqual(err, KEPT_WORDS.format(target=TARGET, reason=reason, path=path))
+                self.assertEqual(err, words.format(target=TARGET, reason=reason, path=path))
                 self.assertEqual(len(seen), 1)
                 self.assertEqual(waiting, ["000001-from-a.md"])
                 self.assertEqual(filed, [])
@@ -976,8 +1072,70 @@ class SshRouteTest(unittest.TestCase):
         self.assertEqual(kwargs, {"deadline": 12345.0})
 
 
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): the audit's REC-7, the P3
+# goal's "mail crosses to a second machine and back", in the suite.
+class RoundTripTest(unittest.TestCase):
+    """Two mailboxes, each its own harness root, stand for two machines; each side's `ssh` is the loopback fake (far_gate_ssh), which runs the other side's real `tc gate` under the other root.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, far_gate_ssh.
+    @complexity O(1): two sends, each through one real gate.
+    @alloc      two TcRoots.
+    """
+
+    def test_a_message_crosses_to_a_second_mailbox_and_the_reply_comes_back(self):
+        """home-a sends to far-b through the key home-a: the far inbox holds it as from the key, with the gate's note, by content; far-b, in that same far mailbox, sends back to home-a through its own return key, far-b: the near inbox holds the reply as from far-b, by content. Each fake asserted called; nothing waits in either outbox.
+
+        Must reject a route that only goes one way: a reply's card, gate
+        or key that never lands in the near inbox, or a far landing under
+        the far --from instead of the key.
+
+        @interacts  two TcRoots; per side one tc join, one tc card, one
+                    send through the loopback fake into the other side's
+                    real gate.
+        @deps       far_gate_ssh, assert_called, outbox; _root.TcRoot.
+        @complexity O(1).
+        @alloc      two TcRoots.
+        """
+        there, back = "hello far-b, from home-a", "hello home-a, from far-b"
+        with _root.TcRoot() as near, _root.TcRoot() as far:
+            near.tc("join", FAR_KEY)
+            far.tc("join", ROUND_TRIP_FAR)
+            out_fake, out_calls = near.fake_bin("ssh", 0)
+            near.tc("card", ROUND_TRIP_FAR, "--ssh", TARGET)
+            sent = near.tc("send", "--from", FAR_KEY, "--to", ROUND_TRIP_FAR, there,
+                           env=far_gate_ssh(near, out_fake, far.path, key=FAR_KEY))
+            assert_called(self, out_fake, out_calls)
+            far_box = far.path / "mail" / f"to-{ROUND_TRIP_FAR}"
+            landed = {p.name: p.read_text() for p in far_box.glob("*.md")}
+            back_fake, back_calls = far.fake_bin("ssh", 0)
+            far.tc("card", FAR_KEY, "--ssh", RETURN_TARGET)
+            replied = far.tc("send", "--from", ROUND_TRIP_FAR, "--to", FAR_KEY, back,
+                             env=far_gate_ssh(far, back_fake, near.path, key=ROUND_TRIP_FAR))
+            assert_called(self, back_fake, back_calls)
+            near_box = near.path / "mail" / f"to-{FAR_KEY}"
+            came_back = {p.name: p.read_text() for p in near_box.glob("*.md")}
+            waiting = (outbox(near, ROUND_TRIP_FAR), outbox(far, FAR_KEY))
+        # P3 fix round 2 (Claude Opus 5.5, unreviewed): D37 (1), the far gate names its path relative to its mailbox.
+        self.assertEqual(sent, (0, f"{SENT_WORDS.format(target=TARGET)}: sent #1 to {ROUND_TRIP_FAR}: "
+                                   f"{far_box.relative_to(far.path) / f'000001-from-{FAR_KEY}.md'}\n", ""))
+        self.assertEqual(list(landed), [f"000001-from-{FAR_KEY}.md"], "the far inbox does not hold the message")
+        far_header, _, far_body = landed[f"000001-from-{FAR_KEY}.md"].partition("\n\n")
+        self.assertTrue(far_header.startswith(f"# #1 from {FAR_KEY} to {ROUND_TRIP_FAR}, "), far_header)
+        self.assertTrue(far_header.endswith(f", via ssh gate, key {FAR_KEY}"), far_header)
+        self.assertEqual(far_body, f"{there}\n")
+        self.assertEqual(replied[0], 0, replied)
+        self.assertEqual(list(came_back), [f"000002-from-{ROUND_TRIP_FAR}.md"], "the reply did not come back")
+        near_header, _, near_body = came_back[f"000002-from-{ROUND_TRIP_FAR}.md"].partition("\n\n")
+        self.assertTrue(near_header.startswith(f"# #2 from {ROUND_TRIP_FAR} to {FAR_KEY}, "), near_header)
+        self.assertTrue(near_header.endswith(f", via ssh gate, key {ROUND_TRIP_FAR}"), near_header)
+        self.assertEqual(near_body, f"{back}\n")
+        self.assertEqual(waiting, ([], []), "a message still waits in an outbox")
+
+
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 3 and 4.
 class OriginIdTest(unittest.TestCase):
-    """SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 3 and 4. Each origin id carries a random part of its own, drawn once and read back by every retry, and the ssh run outlasts a far gate's worst case.
+    """Each origin id carries a random part of its own, drawn once and read back by every retry, and the ssh run outlasts a far gate's worst case.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, load_tc, far_gate_ssh.
@@ -1078,8 +1236,9 @@ class OriginIdTest(unittest.TestCase):
         self.assertGreater(tc.SSH_SEND_SECONDS, far_worst)
 
 
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 7 and 8 and the audit's MEDIUM-2, MEDIUM-4 and LOW-4.
 class FarAnswerTest(unittest.TestCase):
-    """SSH fix round 1 (Claude Opus 5.5, unreviewed): D33 parts 7 and 8 and the audit's MEDIUM-2, MEDIUM-4 and LOW-4. What the far side says reaches the sender bounded and filtered, its warnings on a delivery included, and a far code tc does not know exits 11.
+    """What the far side says reaches the sender bounded and filtered, its warnings on a delivery included, and a far code tc does not know exits 11.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, far_gate_ssh.
@@ -1213,9 +1372,92 @@ class FarAnswerTest(unittest.TestCase):
         self.assertIn("could not be filed", err)
         self.assertNotIn("Traceback", err)
 
+    # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), the audit's LOW-4.
+    def test_a_far_gate_that_cannot_write_for_a_reason_that_passes_answers_10_and_the_message_stays_queued(self):
+        """Through the loopback fake's real far gate, every create of a .tmp there failing with each of PASSING_ERRNO_NAMES: the far gate answers 10 with its busy words and leaves no .tmp, no message and no filing; this side exits 4, keeps the message waiting, nothing in sent/ or refused/, with a note beside it whose first line is its words' summary.
 
+        Must reject a far write failure that passes answered with exit 1,
+        which this side files in refused/ for good, and one that leaves a
+        .tmp behind.
+
+        @interacts  per errno: writes the loopback wrapper and its failing
+                    start-up; one tc card, one send.
+        @deps       far_gate_ssh, assert_called, outbox, queue; errno, os.
+        @complexity O(1): three cases.
+        @alloc      one TcRoot per case and the far mailbox in its temp
+                    folder.
+        """
+        for name in PASSING_ERRNO_NAMES:
+            with self.subTest(errno=name):
+                with _root.TcRoot() as root:
+                    folder, calls = root.fake_bin("ssh", 0)
+                    far = root.base / "far"
+                    far.mkdir()
+                    env = far_gate_ssh(root, folder, far, fail_errno=name)
+                    root.tc("card", "b", "--ssh", TARGET)
+                    code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi", env=env)
+                    assert_called(self, folder, calls)
+                    path = queue(root, "b") / "000001-from-a.md"
+                    note = path.with_name(path.name + ".stderr")
+                    note_lines = note.read_text().splitlines() if note.exists() else []
+                    kept = (outbox(root, "b"), outbox(root, "b", "sent") + outbox(root, "b", "refused"))
+                    far_box = far / "mail" / "to-b"
+                    left = sorted(p.name for p in far_box.rglob("*") if p.is_file())
+                    far_filed = sorted(p.name for p in (far / "mail").rglob("*")
+                                       if ".origins" in p.parts and p.is_file())
+                far_words = PASSING_WORDS.format(  # P3 fix round 2: D37 (1), relative to the far mailbox
+                    what=f"could not write {far_box.relative_to(far) / f'000001-from-{FAR_KEY}.tmp'}",
+                    why=os.strerror(getattr(errno, name)))
+                reason = f"exit {EXIT_BUSY}: {far_words}"
+                self.assertEqual((code, out, err), (EXIT_QUEUED, "", BUSY_KEPT_WORDS.format(target=TARGET,
+                                                                                          reason=reason, path=path)))
+                self.assertEqual(kept, (["000001-from-a.md"], []), "a far 10 was not kept waiting")
+                self.assertEqual(note_lines[:1], [f"{TARGET} was busy ({reason})"],
+                                 "the note beside the waiting file does not hold this try's words")
+                self.assertEqual((left, far_filed), ([], []), "the far gate left a file behind")
+
+    # P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-3, option A (test-strategist REC-8's twin).
+    def test_a_far_gate_whose_mail_seq_or_inbox_lock_cannot_be_written_answers_10_and_the_message_stays_queued(self):
+        """Through the loopback fake's real far gate, its mail/.seq's write or its inbox lock's create failing with each of PASSING_ERRNO_NAMES: the far gate answers 10 with its busy words naming that file, lands nothing and files nothing; this side exits 4 and keeps the message waiting, nothing in sent/ or refused/.
+
+        Must reject a far gate that answers either failure with an
+        uncaught OSError, exit 1, which this side files in refused/ for
+        good.
+
+        @interacts  per stage and errno: writes the loopback wrapper and
+                    its failing start-up; one tc card, one send.
+        @deps       far_gate_ssh, assert_called, outbox, queue; errno, os.
+        @complexity O(1): six cases.
+        @alloc      one TcRoot per case and the far mailbox in its temp
+                    folder.
+        """
+        for stage in BEFORE_PUBLISH_STAGES:
+            for name in PASSING_ERRNO_NAMES:
+                with self.subTest(stage=stage, errno=name), _root.TcRoot() as root:
+                    folder, calls = root.fake_bin("ssh", 0)
+                    far = root.base / "far"
+                    far.mkdir()
+                    env = far_gate_ssh(root, folder, far, fail_errno=name, fail_stage=stage)
+                    root.tc("card", "b", "--ssh", TARGET)
+                    code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi", env=env)
+                    assert_called(self, folder, calls)
+                    path = queue(root, "b") / "000001-from-a.md"
+                    kept = (outbox(root, "b"), outbox(root, "b", "sent") + outbox(root, "b", "refused"))
+                    left = sorted(p.name for p in (far / "mail").rglob("*.md"))
+                    far_filed = sorted(p.name for p in (far / "mail").rglob("*")
+                                       if ".origins" in p.parts and p.is_file())
+                    what = ("could not write mail/.seq" if stage == "seq"  # relative to the far mailbox: D37 (1)
+                            else "could not make mail/.box-b.lock")
+                    far_words = PASSING_WORDS.format(what=what, why=os.strerror(getattr(errno, name)))
+                    self.assertEqual((code, out, err), (EXIT_QUEUED, "", BUSY_KEPT_WORDS.format(
+                        target=TARGET, reason=f"exit {EXIT_BUSY}: {far_words}", path=path)))
+                    self.assertEqual(kept, (["000001-from-a.md"], []), "a far 10 was not kept waiting")
+                    self.assertEqual((left, far_filed), ([], []), "the far gate landed or filed something")
+
+
+# SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and D33 part 1.
 class BranchTest(unittest.TestCase):
-    """SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and D33 part 1. This user's outbox branch, outbox/<login>/, is refused when it is not this user's own real folder, with words naming its owner and the one command that clears it, and tc health lists it.
+    """This user's outbox branch, outbox/<login>/, is refused when it is not this user's own real folder, with words naming its owner and the one command that clears it, and tc health lists it.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, load_tc, owner_patched_lstat.
@@ -1370,9 +1612,16 @@ class SharedOutboxTest(UmaskTestCase):
         them. Must reject ann's message in an outbox/to-far-b/ ben made:
         sticky never stops a folder's owner.
 
+        P3 fix round 1a (Claude Opus 5.5, unreviewed): a2's note on this
+        proof. Ann's branch is asserted first, by itself: there, a real
+        folder and hers. So a tc that makes no branch at all (the shared
+        outbox/to-<name>/ back) fails on that assertion, saying what D32
+        wants, never by a FileNotFoundError in seen_as.
+
         @interacts  tc init, one tc card, one send (kept, ssh failing);
-                    makes ben-member's folders by hand; lstats every entry
-                    of ann's branch and the folders above her message.
+                    makes ben-member's folders by hand; lstats ann's
+                    branch, then every entry of it and the folders above
+                    her message.
         @deps       primary_group, assert_called, branch, send_lock_path,
                     seen_as, may, may_move_or_remove, may_make_in; os,
                     stat.
@@ -1393,6 +1642,15 @@ class SharedOutboxTest(UmaskTestCase):
             code, out, err = root.tc("send", "--from", "ann", "--to", "far-b", "from ann")
             assert_called(self, folder, calls)
             queued = [p for p in top.rglob("*-from-ann.md")]
+            # P3 fix round 1a (Claude Opus 5.5, unreviewed): the branch first, so a tc with none fails here.
+            try:
+                st = os.lstat(branch(root))
+                found = ("a symlink" if stat.S_ISLNK(st.st_mode) else "not a folder" if not stat.S_ISDIR(st.st_mode)
+                         else None if st.st_uid == os.geteuid() else f"owned by user {st.st_uid}")
+            except FileNotFoundError:
+                found = "missing"
+            self.assertIsNone(found, f"D32: ann's ssh mail waits in her own branch, {branch(root)}, a real folder "
+                                     f"she owns, where no other member can move anything; it is {found}")
             above = [p for q in queued for p in [q, *q.parents] if top in p.parents]
             mine = [branch(root), *branch(root).rglob("*")]
             moves = sorted({str(p) for p in above + mine

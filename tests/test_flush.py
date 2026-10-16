@@ -32,7 +32,9 @@ it watched is reachable.
             first, put back after) and call cmd_flush or
             route_and_deliver in process, with PATH set for the call:
             two with SEND_LOCK_WAIT_SECONDS patched short, one with
-            send_lock wrapped so a file lands as it lets go.
+            send_lock wrapped so a file lands as it lets go. P3 fix round
+            1c (Claude Opus 5.5, unreviewed): NoteTest reads the note
+            beside a waiting file and where it moves to (D36 (4)).
 @deps       python3 stdlib (argparse, contextlib, fcntl, io, os, pathlib,
             shlex, sys, time, unittest, unittest.mock); tests/_root.py;
             FINISH_CEILING_SECONDS, LOCK_POLL_SECONDS and load_tc from
@@ -75,14 +77,18 @@ from test_ssh_route import (FAKE_BUSY_STDERR, FAKE_CONNECT_STDERR, OTHER_MEMBER,
 # own (SSH fix round 1, Claude Opus 5.5, unreviewed: the audit's LOW-19).
 EXIT_QUEUED = 4
 EXIT_BAD_NAME = 6
+EXIT_GATE_REFUSED = 7
 EXIT_BUSY = 10
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4). The ending of
+# the note beside an outbox message (tc's REFUSAL_NOTE_SUFFIX, written here).
+NOTE_SUFFIX = ".stderr"
 # A far tc's refusal of a bad name (row 6), and what the fake says for it.
 # Made up for the test; not a real far tc's wording.
 FAKE_BAD_NAME_STDERR = "tc: bad name\n"
 # What flush says, written here rather than read from tc.
 NOTHING_WORDS = "nothing waiting in the outbox\n"
-OTHERS_WORDS = ("{k} waiting for {target} belong to other members ({names}); each member sends their own "
-                "with tc flush")
+OTHERS_WORDS = ("{k} waiting for {target} from other members ({names}); each member sends their own "
+                "with tc flush")  # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-16, the plural
 NOT_SSH_WORDS = ("tc flush: left {path}: {to}'s card no longer says ssh (it says route local); it is never sent "
                  "another way. To send it over ssh, write the card again with tc card {to} --ssh <target>, then "
                  "run tc flush\n")
@@ -255,7 +261,7 @@ class FlushTest(unittest.TestCase):
         self.assertIn(f"refused by {TARGET} (exit {EXIT_BAD_NAME})", err)
 
     def test_a_far_10_stops_the_target_like_255(self):
-        """Three waiting, fake exiting 10 (D23): #1 tried once and kept, #2 and #3 never tried, all three waiting, exit 4.
+        """Three waiting, fake exiting 10 (D23): #1 tried once and kept, #2 and #3 never tried, all three waiting, exit 4; the lines say the target was busy, never that it could not be reached (P3 fix round 1c, Claude Opus 5.5, unreviewed: the audit's LOW-15).
 
         @interacts  queue_three; one flush.
         @deps       queue_three, assert_called, origins, outbox.
@@ -273,7 +279,9 @@ class FlushTest(unittest.TestCase):
         self.assertEqual(tried, [1])
         self.assertEqual(filed, [])
         self.assertEqual(waiting, ["000001-from-a.md", "000002-from-a.md", "000003-from-a.md"])
-        self.assertIn(f"the far tc was busy, exit {EXIT_BUSY}", err)
+        self.assertIn(f"{TARGET} was busy (exit {EXIT_BUSY}: {FAKE_BUSY_STDERR.strip()})", err)
+        self.assertNotIn("could not reach", err, "a far 10 was reported as a target this side could not reach")
+        self.assertNotIn("could not be reached", err, "a far 10 was reported as a target this side could not reach")
 
     def test_only_this_users_own_files_are_sent_and_the_others_are_counted(self):
         """D22, D32: with #1 moved into another member's branch (outbox/ben-member/to-b/), flush sends only #2 and says 1 waiting for u@h belongs to other members, named by the file's owner; #1 stays; exit 0.
@@ -631,6 +639,60 @@ class FlushAndSendAtOnceTest(unittest.TestCase):
         self.assertIn("#2 to b: sent over ssh", flushed)
         self.assertEqual(sent, [1, 2], "a message was sent twice, or out of order")
         self.assertEqual(filed, (["000001-from-a.md", "000002-from-a.md"], []))
+
+
+# P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), the audit's LOW-4.
+class NoteTest(unittest.TestCase):
+    """A queue that stays stuck is shown, not hidden: each failed try's words wait in a note beside the waiting file, replaced on each try, and the note moves with the file into sent/ or refused/, never removed.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, _root.TcRoot.fake_bin.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per case.
+    """
+
+    def test_each_failed_try_leaves_its_words_beside_the_file_and_they_move_with_it(self):
+        """A fake exiting 255, then 10, then 0 (or 7): after the send the note's first line names the connection's reason; after the first flush, the far 10; the last flush files the message and the note beside it in sent/ unchanged (in refused/, the refusal's own words in it), and no note is left beside the queue.
+
+        Must reject a failed try that leaves no words, a note kept from an
+        older try, and a note left behind or removed when the file is
+        filed.
+
+        @interacts  per case: one tc card, one send, two flushes, one fake.
+        @deps       queue, assert_called, outbox.
+        @complexity O(1): two cases.
+        @alloc      one TcRoot per case.
+        """
+        for last, folder_name in ((0, "sent"), (EXIT_GATE_REFUSED, "refused")):
+            with self.subTest(filed=folder_name):
+                with _root.TcRoot() as root:
+                    folder, calls = root.fake_bin("ssh", [SSH_CONNECT_FAILED, EXIT_BUSY, last],
+                                                  stderr=FAKE_CONNECT_STDERR)
+                    root.tc("card", "b", "--ssh", TARGET)
+                    note = queue(root, "b") / f"000001-from-a.md{NOTE_SUFFIX}"
+                    sent = root.tc("send", "--from", "a", "--to", "b", "hi")
+                    after_send = note.read_text() if note.exists() else ""
+                    busy = root.tc("flush")
+                    after_busy = note.read_text() if note.exists() else ""
+                    filed = root.tc("flush")
+                    assert_called(self, folder, calls)
+                    moved = queue(root, "b") / folder_name / note.name
+                    moved_text = moved.read_text() if moved.exists() else None
+                    left = note.exists()
+                    where = outbox(root, "b", folder_name)
+                said = FAKE_CONNECT_STDERR.strip()
+                self.assertEqual((sent[0], busy[0]), (EXIT_QUEUED, EXIT_QUEUED), (sent, busy))
+                self.assertEqual(after_send.splitlines()[:1], [f"could not reach {TARGET} ({said})"])
+                self.assertEqual(after_busy.splitlines()[:1], [f"{TARGET} was busy (exit {EXIT_BUSY}: {said})"],
+                                 "the note was not replaced by the later try's words")
+                self.assertEqual(where, ["000001-from-a.md"], filed)
+                self.assertFalse(left, "the note stayed beside the queue once its file was filed")
+                if folder_name == "sent":
+                    self.assertEqual(moved_text, after_busy, "the note did not move into sent/ as it was")
+                else:
+                    self.assertEqual((moved_text or "").splitlines()[:1],
+                                     [f"the far side exited {EXIT_GATE_REFUSED}; its stderr, through tc's printable "
+                                      f"filter:"], "the note in refused/ does not hold the refusal's words")
 
 
 if __name__ == "__main__":

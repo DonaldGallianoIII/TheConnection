@@ -115,14 +115,29 @@ partner is a lower relay is drawn as that relay's `worker`, marked
 
 @interacts  loads ../tc as a module from its source, compiled in memory,
             with TC_ROOT set for the load only, then calls tc.now_iso(), tc.listeners("wait") (reads
-            /proc/locks, globs mail/.wait-*.lock) and tc.mailbox_summary()
-            (globs and stats mail/ and status/ under tc's ROOT); reads the
+            ROOT/.shared and /proc/locks, opens mail/ and each
+            mail/to-<name>/ by name and lstats the .wait.lock in it, its
+            owner's since D35; on a private mailbox, until every listener
+            started before has re-armed, also mail/.wait-*.lock: P3 fix
+            round 1b, Claude Opus 5.5, unreviewed) and tc.mailbox_summary()
+            (opens mail/ once and each mail/to-<name>/ and its read/ by
+            name, lists each in its own descriptor and stats each message
+            name there, never through a link, and lstats each name's
+            status file; P3 fix round 2, Claude Opus 5.5, unreviewed: the
+            audit's LOW-6, true to tc since its round 1a); reads the
             load average and /proc/meminfo itself. Never runs nvidia-smi
             and never scans the process list. Reads cards/*.json and the
-            head of status/<name>.md; lists mail/to-*/ and mail/to-*/read/
-            and stats a few message files, and for a name that stopped
-            listening, its status file, its last sent message and, while
-            its wake window is open, its WAKE_CANDIDATES newest messages.
+            head of status/<name>.md; lists mail/to-*/ and mail/to-*/read/,
+            each opened by its name in the folder above (mail/ once, by
+            its path) and listed in its own descriptor (P3 fix round 1a,
+            Claude Opus 5.5, unreviewed: D35), and stats a few message
+            files by their names in those open folders, never by a path
+            and never through a link, each folder held open until the
+            poll has dated its messages (P3 fix round 1c, Claude Opus
+            5.5, unreviewed: round 1a's MEDIUM), and for a name that
+            stopped listening, its status file (by path, never followed),
+            its last sent message and, while its wake window is open, its
+            WAKE_CANDIDATES newest messages.
             Opens no message body. Writes nothing to the mailbox, and
             reads and writes no bytecode cache of tc's. main() binds one
             TCP socket on 127.0.0.1, prints the URL with the token once to
@@ -135,17 +150,25 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             and read only when fstat says regular, so a FIFO never blocks a
             poll and a symlink never redirects one; mail folders are listed
             the same way, never through a link.
-@deps       python3 stdlib (argparse, collections, errno, fractions, heapq,
-            hmac, http.server, io, json, os, pathlib, re, secrets, signal,
-            stat, sys, threading, time, types, urllib.parse); ../tc; Linux
+@deps       python3 stdlib (argparse, collections, contextlib, errno,
+            fractions, heapq, hmac, http.server, io, json, os, pathlib,
+            re, secrets, signal, stat, sys, threading, time, types,
+            urllib.parse); ../tc; Linux
             (/proc: /proc/locks through tc, the load average and
             /proc/meminfo read here).
-@complexity feed(), per poll: O(k + m (log W + log K) + n + c^2). The
-            snapshot: tc.listeners is O(k + n), k lines in /proc/locks
-            (tens) and n names (single digits to tens);
-            tc.mailbox_summary is O(n + m), since it stats every message
-            file, m of them (about 800 after two weeks of heavy use, and
-            only growing, since read/ is kept). Here: every inbox listed
+@complexity feed(), per poll: O(k + n log n + M + m (log m + log W +
+            log K) + c^2). The
+            snapshot: tc.listeners is O(k + n log n), k lines in
+            /proc/locks (tens) and n names (single digits to tens), one
+            inbox opened and one lock lstat()ed per name (P3 fix round
+            1b, Claude Opus 5.5, unreviewed: D35);
+            tc.mailbox_summary is O(n log n + M + m log m) over the M
+            names listed in every inbox and read/ and the m message files
+            among them (about 800 after two weeks of heavy use, and only
+            growing, since read/ is kept): one listing per folder, one
+            stat per message name and a sort per folder (P3 fix round 2,
+            Claude Opus 5.5, unreviewed: the audit's LOW-6, tc's own
+            @complexity since its round 1a). Here: every inbox listed
             again and each of the m names matched twice (no body read);
             the last WIRE_HISTORY picked in O(m log W), W = 50; W + n + l
             more stats for l linked pairs (at most n^2/2, tens in
@@ -172,8 +195,10 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             name that stopped listening, a heap of at most K Messages
             while its wake window is open and the set of its inbox's file
             names; then the returned dict (n nodes, at most W wires,
-            l + n + c(c-1)/2 links); all freed when the caller drops them.
-            Held across calls: the
+            l + n + c(c-1)/2 links); all freed when the caller drops them;
+            and, for the poll only, one descriptor per inbox and per read/
+            (two per name), closed before feed() returns (P3 fix round
+            1c, Claude Opus 5.5, unreviewed). Held across calls: the
             loaded tc module; last_listening_at, one float per name seen
             listening, pruned past DOWN_WINDOW_S on every feed();
             first_missing_at, one float per name seen listening and not
@@ -189,6 +214,7 @@ partner is a lower relay is drawn as that relay's `worker`, marked
 
 import argparse
 import collections
+import contextlib
 import errno
 import fractions
 import heapq
@@ -241,6 +267,19 @@ WAKE_CANDIDATES = 16
 # error (EACCES, EIO) is a folder the board cannot list (C5: the name reads
 # down, `inbox unreadable`).
 NO_FOLDER_ERRNOS = (errno.ENOENT, errno.ELOOP, errno.ENOTDIR)
+# Model: Claude Opus 5.5 (the P3 fixer, round 1a), 2026-10-15. Status:
+# unreviewed. D35, one pinned handle (the audit's HIGH-1 and its Coverage
+# note on this scan, audits/2026-10-15-1409-full). How the scan opens
+# mail/ itself, by its path: read only, only a folder. A link there is
+# followed, as the scan always did: only the init user can swap mail/
+# (D34).
+MAIL_FLAGS = os.O_RDONLY | os.O_DIRECTORY
+# How it opens each inbox, by its name in mail/'s descriptor, and each
+# read/, by its name in its inbox's: read only, only a folder, never
+# through a link. A member who owns an inbox may swap it for a link after
+# the scan looked; the read/ the scan lists is then still the one in the
+# folder it opened.
+FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # Characters of a status line on a node (C5): one line on a node box. The
 # whole status stays in status/<name>.md.
 STATUS_PREVIEW_CHARS = 80
@@ -363,6 +402,36 @@ LINK_MAILBOX, LINK_REPORTS_TO, LINK_NATIVE = "mailbox", "reports_to", "native"
 
 # One message, from its file name alone; `read` when it lies in read/.
 Message = collections.namedtuple("Message", "seq sender to path read")
+
+
+# Model: Claude Opus 5.5 (the P3 fixer, round 1c), 2026-10-15. Status: unreviewed.
+class MessagePath(str):
+    """A message's path as text that also carries the open folder its name is in (`folder_fd`) and that name (`entry`), so file_age and file_time date the file the scan listed, by its name in that folder, never by the path.
+
+    Round 1a's MEDIUM, from its handoff (D35): an inbox's owner who swaps
+    the inbox after the scan could make the board date a same-named file
+    at the link's target. The text is the path, so a name taken from it
+    (os.path.basename), and anything that prints or compares it, are as
+    before. `folder_fd` is valid only while the scan's `held` stack is
+    open (scan_messages); feed() dates every message inside it.
+
+    @interacts  none; holds a descriptor number, never opens or closes it.
+    @deps       none.
+    @complexity O(p) over p characters of the path, to build.
+    @alloc      the string and two attributes.
+    """
+
+    def __new__(cls, path, folder_fd, entry):
+        """The path `path`, carrying `folder_fd` and `entry`.
+
+        @interacts  none.
+        @deps       none.
+        @complexity O(p) over p characters.
+        @alloc      one string object, returned.
+        """
+        made = super().__new__(cls, path)
+        made.folder_fd, made.entry = folder_fd, entry
+        return made
 
 
 def load_tc(root=None):
@@ -517,15 +586,16 @@ def card_text(card, key):
     return value if isinstance(value, str) and value else None
 
 
-def scan_messages(mail):
+def scan_messages(mail, held):
     """Every message under `mail`, from file names only: ([Message], {names whose inbox could not be listed}).
 
     Looks in each mail/to-<name>/ and its read/. A name that does not match
     MESSAGE_NAME (a .tmp being written, a lock, anything else) is skipped.
-    A to-* entry whose stat fails (a folder the user cannot search, a dead
-    mount) is skipped on its own and its name goes in the second set, and
-    so does a name whose inbox or read/ message_names could not list; the
-    rest of the scan stands. Opens no file.
+    A to-* entry or read/ the board cannot open (a folder the user may not
+    read or search, a dead mount) is skipped on its own and its name goes
+    in the second set, and so does a name whose inbox or read/
+    message_names could not list; the rest of the scan stands. Opens no
+    file, only folders.
 
     Never follows a link, so a link a group member puts in a shared
     mailbox points the board nowhere: a to-* entry or
@@ -537,72 +607,124 @@ def scan_messages(mail):
     stand in for unread mail. Two files with one number and two senders are
     two messages.
 
-    @interacts  lists `mail`, each to-*/ folder and each to-*/read/.
-    @deps       os, re; message_names.
-    @complexity O(b + m) over b inbox folders and m file names in them.
+    Model: Claude Opus 5.5 (the P3 fixer, round 1a), 2026-10-15. Status:
+    unreviewed. D35, one pinned handle per inbox (the audit's HIGH-1 and
+    its Coverage note on this scan). mail/ is opened once, each inbox by
+    its name in mail/'s descriptor and its read/ by its name in the
+    inbox's (open_folder), and each is listed in its own descriptor
+    (message_names), never by a path. So an inbox's owner who swaps it for
+    a link or another folder after the scan opened it leads the scan
+    nowhere: the read/ listed is the one in the folder opened.
+
+    Model: Claude Opus 5.5 (the P3 fixer, round 1c), 2026-10-15. Status:
+    unreviewed. Round 1a's MEDIUM: each inbox and read/ descriptor is
+    kept open in `held` (a contextlib.ExitStack the caller holds open
+    until it has dated every message, as feed() does), and a Message's
+    path is a MessagePath carrying its folder's descriptor and its name.
+    So file_age and file_time date each message by its name in the
+    folder the scan listed, never through a link or a folder swapped in
+    after the scan.
+
+    @interacts  opens and lists `mail`; opens each to-*/ folder by name in
+                it and each to-*/read/ by name in its inbox, lists each,
+                closes mail/'s descriptor and leaves the others to `held`.
+    @deps       os, re; open_folder, message_names; MAIL_FLAGS,
+                INBOX_PREFIX, READ_FOLDER, MESSAGE_NAME, Message,
+                MessagePath.
+    @complexity O(b log b + m) over b inbox folders (sorted) and m file
+                names in them.
     @alloc      one Message per message file, in a dict by recipient,
-                number and sender, returned as a list; one set of names.
+                number and sender, returned as a list; one set of names;
+                mail/'s descriptor, closed before return; one descriptor
+                per inbox and per read/ (two per name, a few dozen names),
+                closed when `held` closes.
     """
     try:
-        with os.scandir(mail) as listing:
-            entries = list(listing)
+        mail_fd = os.open(mail, MAIL_FLAGS)
     except OSError:
         return [], set()
-    boxes, unreadable = [], set()
-    for entry in entries:
-        if not entry.name.startswith(INBOX_PREFIX):
-            continue
+    found, unreadable = {}, set()
+    try:
         try:
-            if entry.is_dir(follow_symlinks=False):
-                boxes.append(entry)
+            entries = sorted(name for name in os.listdir(mail_fd) if name.startswith(INBOX_PREFIX))
         except OSError:
-            unreadable.add(entry.name[len(INBOX_PREFIX):])
-    found = {}
-    for box in boxes:
-        to = box.name[len(INBOX_PREFIX):]
-        if not to:
-            continue
-        for folder, read in ((box.path, False), (os.path.join(box.path, READ_FOLDER), True)):
-            names = message_names(folder)
-            if names is None:
-                unreadable.add(to)
+            return [], set()
+        for entry in entries:
+            to = entry[len(INBOX_PREFIX):]
+            if not to:
                 continue
-            for name in names:
-                match = MESSAGE_NAME.match(name)
-                msg = Message(int(match.group(1)), match.group(2), to, os.path.join(folder, name), read)
-                found.setdefault((to, msg.seq, msg.sender), msg)
+            try:
+                box_fd = open_folder(mail_fd, entry)
+            except OSError:
+                unreadable.add(to)  # a folder this board cannot open (C5: down, `inbox unreadable`)
+                continue
+            if box_fd is None:
+                continue
+            held.callback(os.close, box_fd)  # P3 fix round 1c: open until the caller has dated its messages
+            folders = [(box_fd, os.path.join(mail, entry), False)]
+            try:
+                read_fd = open_folder(box_fd, READ_FOLDER)
+            except OSError:
+                read_fd = None
+                unreadable.add(to)
+            if read_fd is not None:
+                held.callback(os.close, read_fd)
+                folders.append((read_fd, os.path.join(mail, entry, READ_FOLDER), True))
+            for folder_fd, folder, read in folders:
+                names = message_names(folder_fd)
+                if names is None:
+                    unreadable.add(to)
+                    continue
+                for name in names:
+                    match = MESSAGE_NAME.match(name)
+                    msg = Message(int(match.group(1)), match.group(2), to,
+                                  MessagePath(os.path.join(folder, name), folder_fd, name), read)
+                    found.setdefault((to, msg.seq, msg.sender), msg)
+    finally:
+        os.close(mail_fd)
     return list(found.values()), unreadable
 
 
+# Model: Claude Opus 5.5 (the P3 fixer, round 1a), 2026-10-15. Status: unreviewed.
+def open_folder(folder_fd, name):
+    """The descriptor of the folder `name` in the folder open at `folder_fd`, opened by its name and never through a link (FOLDER_FLAGS); None for a link, nothing or not a folder (NO_FOLDER_ERRNOS). Raises OSError for a folder it cannot open: the board cannot tell what it holds.
+
+    @interacts  opens one folder by its name in `folder_fd`.
+    @deps       os; FOLDER_FLAGS, NO_FOLDER_ERRNOS.
+    @complexity O(1).
+    @alloc      one descriptor, returned (the caller closes it), or none.
+    """
+    try:
+        return os.open(name, FOLDER_FLAGS, dir_fd=folder_fd)
+    except OSError as error:
+        if error.errno in NO_FOLDER_ERRNOS:
+            return None
+        raise
+
+
 # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
-def message_names(folder):
-    """The names of the regular files in `folder` that match MESSAGE_NAME: [] for a link or no folder, None for one it cannot list.
+def message_names(folder_fd):
+    """The names of the regular files in the folder open at `folder_fd` that match MESSAGE_NAME; None when it cannot be listed.
 
-    The folder is opened with O_NOFOLLOW and O_DIRECTORY and listed through
-    that descriptor, so a folder that is a link, even one swapped in after
-    the caller looked, is never listed, and an entry counts only when it is
-    a regular file itself, never a link to one. An open that fails with one
-    of NO_FOLDER_ERRNOS is no folder: []. Any other failure, to open or to
-    list (a folder another user left closed to this one), is None: the
-    board cannot tell what the folder holds.
+    Listed through the descriptor, so the folder listed is the one opened
+    (open_folder), never one a link at its name leads to, and an entry
+    counts only when it is a regular file itself, never a link to one. A
+    failure to list (a folder another user left closed to this one) is
+    None: the board cannot tell what the folder holds. P3 fix round 1a
+    (Claude Opus 5.5, unreviewed): D35. It takes the open descriptor, not
+    a path: the caller opens each folder by its name in the one above.
 
-    @interacts  opens, lists and closes one folder.
-    @deps       os, re.
+    @interacts  lists one open folder; never closes it.
+    @deps       os, re; MESSAGE_NAME.
     @complexity O(f) over f entries in the folder.
     @alloc      one list of names, returned.
     """
     try:
-        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    except OSError as error:
-        return [] if error.errno in NO_FOLDER_ERRNOS else None
-    try:
-        with os.scandir(fd) as entries:
+        with os.scandir(folder_fd) as entries:
             return [entry.name for entry in entries
                     if MESSAGE_NAME.match(entry.name) and entry.is_file(follow_symlinks=False)]
     except OSError:
         return None
-    finally:
-        os.close(fd)
 
 
 def status_preview(folder, name):
@@ -629,6 +751,25 @@ def status_preview(folder, name):
     return None
 
 
+# Model: Claude Opus 5.5 (the P3 fixer, round 1c), 2026-10-15. Status: unreviewed.
+def stat_at(path):
+    """The lstat result of `path`, never following a link: for a MessagePath, by its name in the open folder it carries (dir_fd), never by the path. Raises OSError.
+
+    Round 1a's MEDIUM (D35): the board's ages and times of a message come
+    from the folder the scan opened and listed, so an inbox swapped for a
+    link or another folder after the scan dates nothing outside it. Any
+    other path (a status file) is lstat()ed by its path.
+
+    @interacts  lstats one name.
+    @deps       os; MessagePath.
+    @complexity O(1).
+    @alloc      one stat result, returned.
+    """
+    if isinstance(path, MessagePath):
+        return os.stat(path.entry, dir_fd=path.folder_fd, follow_symlinks=False)
+    return os.stat(path, follow_symlinks=False)
+
+
 def file_age(path, now):
     """Whole seconds since `path` was last written, or None if it is gone.
 
@@ -638,13 +779,17 @@ def file_age(path, now):
     message from the future never reads as just sent. Rounding gives half a
     second of grace to a file written in the same instant as `now`.
 
-    @interacts  stats `path`; never opens it.
-    @deps       os.
+    P3 fix round 1c (Claude Opus 5.5, unreviewed): round 1a's MEDIUM. A
+    message is stat'ed by its name in the folder the scan holds open
+    (stat_at), and a link is never followed.
+
+    @interacts  lstats one name (stat_at); never opens it.
+    @deps       stat_at.
     @complexity O(1).
     @alloc      none.
     """
     try:
-        age = round(now - os.stat(path).st_mtime)
+        age = round(now - stat_at(path).st_mtime)
     except OSError:
         return None
     return age if age >= 0 else None
@@ -654,13 +799,17 @@ def file_age(path, now):
 def file_time(path):
     """`path`'s mtime, seconds since the epoch, or None when it is gone. Never follows a link.
 
-    @interacts  lstats `path`; never opens it.
-    @deps       os.
+    P3 fix round 1c (Claude Opus 5.5, unreviewed): round 1a's MEDIUM. A
+    message is stat'ed by its name in the folder the scan holds open
+    (stat_at); a status file by its path.
+
+    @interacts  lstats one name (stat_at); never opens it.
+    @deps       stat_at.
     @complexity O(1).
     @alloc      none.
     """
     try:
-        return os.stat(path, follow_symlinks=False).st_mtime
+        return stat_at(path).st_mtime
     except OSError:
         return None
 
@@ -1037,8 +1186,15 @@ class Board:
                     /proc/meminfo through machine_now.
         @deps       tc.now_iso, tc.listeners, tc.mailbox_summary;
                     machine_now.
-        @complexity O(k + n + m): k lines in /proc/locks, n names, m message
-                    files; twice m when a message moved mid-poll.
+        @complexity O(k + n log n + M + m log m): k lines in /proc/locks, n
+                    names, M names listed in every inbox and read/ and the m
+                    message files among them (tc.listeners and
+                    tc.mailbox_summary, by their own @complexity; P3 fix
+                    round 2, Claude Opus 5.5, unreviewed: the audit's
+                    LOW-6). The mailbox part runs once: this tc never
+                    raises for a message that moved mid-poll, so the
+                    retry never runs (P3 fix round 3, Claude Opus 5.5,
+                    unreviewed: the audit's LOW-7).
         @alloc      one dict, returned.
         """
         try:
@@ -1054,12 +1210,14 @@ class Board:
         @interacts  see the module block; updates last_listening_at,
                     first_missing_at, wakes and, through note_nested,
                     nested_cards.
-        @deps       snapshot, read_cards, scan_messages, status_preview,
-                    file_age, wake_of, after_listening, hierarchy,
-                    note_nested; heapq, os; tc.POLL_SECONDS.
+        @deps       snapshot, read_cards, scan_messages, feed_from (P3 fix
+                    round 1c: status_preview, file_age, wake_of,
+                    after_listening, hierarchy), note_nested; contextlib,
+                    heapq, os; tc.POLL_SECONDS.
         @complexity O(k + m (log W + log K) + n + c^2) per poll; the module
                     block names each term.
-        @alloc      the per-poll objects the module block lists (a Message,
+        @alloc      the scan's two descriptors per name, closed before
+                    return (P3 fix round 1c); the per-poll objects the module block lists (a Message,
                     a sorted pair and a default count dict per message
                     among them, and a heap and an inbox name set per name
                     that stopped listening), and the returned dict;
@@ -1087,9 +1245,28 @@ class Board:
                 self.first_missing_at.setdefault(name, now)
 
         cards = read_cards(self.tc.ROOT / CARDS_FOLDER, self.note_nested)
-        mail = snap["mail"]
+        # P3 fix round 1c (Claude Opus 5.5, unreviewed): round 1a's MEDIUM. The
+        # scan's folders stay open until every message is dated in them.
+        with contextlib.ExitStack() as held:
+            messages, unreadable = scan_messages(self.tc.MAIL, held)
+            return self.feed_from(now, snap, cards, messages, unreadable)
+
+    # Model: Claude Opus 5.5 (the P3 fixer, round 1c), 2026-10-15. Status: unreviewed.
+    def feed_from(self, now, snap, cards, messages, unreadable):
+        """feed()'s object from what it gathered: the time `now`, the snapshot `snap`, the `cards`, and the scan's `messages` and `unreadable` names, whose folders the caller holds open while this dates them (file_age, find_wake, after_listening).
+
+        Split out of feed() in P3 fix round 1c so the scan's held folders
+        close when this returns, on every way out; the body is feed()'s as
+        it was.
+
+        @interacts  see feed(); stats each dated message by its name in
+                    the folder the scan holds (file_age, file_time).
+        @deps       see feed().
+        @complexity see feed().
+        @alloc      see feed().
+        """
+        pids, mail = snap["listeners"], snap["mail"]
         names = set(mail) | set(cards)
-        messages, unreadable = scan_messages(self.tc.MAIL)
 
         # Every stopped name's inbox file names (where its waking mail went
         # is evidence it was read), and, while its wake window is open, its

@@ -41,17 +41,30 @@ rewrites it as `clear`, so the D14 and D16 tests read its state
             backoff; one fake kills the tc send that started it, by that
             send's own pid, once it has checked the pid is that send; one
             test leaves a `tc read` stalled on a stdout pipe it never
-            drains, and the harness kills it by its own pid.
-@deps       python3 stdlib (datetime, fcntl, importlib, json, os, pathlib,
-            shlex, signal, subprocess, sys, tempfile, time, unittest,
-            unittest.mock); tests/_root.py; ../tc. test_router.py and
+            drains, and the harness kills it by its own pid. P3 fix round
+            1b (Claude Opus 5.5, unreviewed): DoorbellRecordTest, C2 item
+            5. One test puts a wrapper fake first that looks at the
+            sender's last-ring record before it runs the harness fake;
+            two load tc and run deliver_codex with wall_clock replaced,
+            one of them per case renaming, linking, dating or chmodding
+            the record or its branch by hand (the mode put back), or
+            patching os.lstat and os.fstat (test_shared.py's owner
+            patches) so the branch reads as another user's.
+@deps       python3 stdlib (contextlib, datetime, fcntl, importlib, json,
+            os, pathlib, pwd, shlex, signal, stat, subprocess, sys,
+            tempfile, time, unittest, unittest.mock); tests/_root.py;
+            owner_patched_lstat and owner_patched_fstat from
+            test_shared.py (DoorbellRecordTest); ../tc. test_router.py and
             test_cards.py import FINISH_CEILING_SECONDS and
             wait_until_blocked from here; test_ssh_route.py imports
             FINISH_CEILING_SECONDS, load_tc and wait_until_blocked;
             test_flush.py FINISH_CEILING_SECONDS, LOCK_POLL_SECONDS and
             load_tc; test_gate.py FINISH_CEILING_SECONDS, THREAD,
-            load_tc and ring_argv (SSH fix round 1, Claude Opus 5.5,
-            unreviewed: the audit's LOW-27).
+            kill_own_fake, load_tc, own_fake and ring_argv (SSH fix round
+            1, Claude Opus 5.5, unreviewed: the audit's LOW-27; P3 fix
+            round 1c, Claude Opus 5.5, unreviewed: the audit's LOW-28,
+            kill_own_fake and own_fake added); test_health.py load_tc
+            (round 1c).
 @complexity O(1) per test: two to five tc runs and as many fake calls,
             each under a second. A blocked-child check polls /proc/locks
             at most BLOCK_CEILING_SECONDS / LOCK_POLL_SECONDS = 100 times, each
@@ -61,6 +74,7 @@ rewrites it as `clear`, so the D14 and D16 tests read its state
             lock file while a test holds a lock.
 """
 
+import contextlib
 import datetime
 import fcntl
 import importlib.machinery
@@ -68,8 +82,10 @@ import importlib.util
 import json
 import os
 import pathlib
+import pwd
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1334,6 +1350,209 @@ class CodexRouteTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(landed, ["000002-from-c.md"])
         self.assertTrue(read_once, "the stalled reader's mail is not in read/")
+
+
+# P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (2) and D36 (1), the
+# doorbell can't be switched off (C2 item 5), written here rather than read
+# from tc: each sender's own last-ring record in its outbox branch, its
+# mode, and what a send says when it cannot write it.
+RANG_RECORD_NAME = ".rang-{to}"
+RANG_RECORD_MODE = 0o600
+RECORD_NOT_WRITTEN_WORDS = "could not be written"
+RECORD_LOST_WORDS = "so this user's next send to {to} rings again"
+# A folder mode with read and write but no search (x): no name in it can
+# be looked at.
+NO_SEARCH_FOLDER_MODE = 0o600
+# A wrapper fake that writes what it finds at the sender's record (its
+# mode and mtime, or null when nothing is there) to SAW, then runs the
+# harness's fake codex FAKE with its own arguments, which records the call.
+RECORD_LOOKING_FAKE_BODY = """import json, os, sys
+try:
+    st = os.lstat(RANG)
+    seen = {"mode": st.st_mode & 0o7777, "mtime": st.st_mtime}
+except FileNotFoundError:
+    seen = None
+with open(SAW, "w") as f:
+    f.write(json.dumps(seen))
+os.execv(FAKE, [FAKE] + sys.argv[1:])
+"""
+# How far the record's time may sit from this test's own clock: the
+# seconds a tc start and a send take on a loaded machine.
+RECORD_CLOCK_SLACK_SECONDS = 10
+# A record dated this far after the replaced clock: a clock set back.
+FUTURE_SECONDS = 10000
+
+
+def rang_record(root, to):
+    """Where the running user's last-ring record for `to` lives under `root`: outbox/<login>/.rang-<to>.
+
+    @interacts  reads this process's user id and the user database.
+    @deps       os, pwd; RANG_RECORD_NAME.
+    @complexity O(1).
+    @alloc      one path, returned.
+    """
+    return root.path / "outbox" / pwd.getpwuid(os.geteuid()).pw_name / RANG_RECORD_NAME.format(to=to)
+
+
+class DoorbellRecordTest(unittest.TestCase):
+    """C2 item 5 (D35 (2), D36 (1)): each sender's own last-ring record, written before every ring, and a send that rings when that record is old or cannot be trusted, whatever the marker says.
+
+    @interacts  see the module block; the in-process tests also patch
+                os.lstat and os.fstat (test_shared's owner patches) for
+                the squatted branch, and chmod the branch and back.
+    @deps       _root.TcRoot, load_tc, own_fake, ring_argv, rang_record.
+    @complexity O(1) per test.
+    @alloc      one TcRoot per test or case.
+    """
+
+    def test_each_ring_writes_the_senders_own_record_0600_before_it_rings(self):
+        """A send to a codex name rings once, and a fake that looks first finds outbox/<user>/.rang-c already there, 0600, its mtime the send's time; a second send to the unread inbox rings nothing.
+
+        Must reject a record written after the ring (a sender killed
+        mid-ring would leave none, and its next send would read an older
+        time), a record the group could read or write, and a second ring
+        while the sender's own last ring is fresh and the marker clear.
+
+        @interacts  one join; two sends with PATH putting this file's
+                    record-looking wrapper first, which runs the harness
+                    fake.
+        @deps       own_fake, ring_argv, rang_record; _root.TcRoot.tc,
+                    fake_bin; json, time.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("codex", CODEX_QUEUE_EXIT["queued"])
+            saw = root.base / "record-seen.json"
+            env, _ = own_fake(root, RECORD_LOOKING_FAKE_BODY, RANG=str(rang_record(root, "c")), SAW=str(saw),
+                              FAKE=str(folder / "codex"))
+            self.join_codex(root)
+            began = time.time()
+            first = root.tc("send", "--from", "a", "--to", "c", "one", env=env)
+            second = root.tc("send", "--from", "a", "--to", "c", "two", env=env)
+            self.assertTrue((folder.parent / "calls.jsonl").exists(), "the fake codex never ran")
+            recorded = calls()
+            seen = json.loads(saw.read_text()) if saw.exists() else "the wrapper never ran"
+        self.assertEqual((first[0], second[0]), (0, 0), (first, second))
+        self.assertEqual([call["argv"] for call in recorded], [ring_argv(root, 1, "c", "a")])
+        self.assertIsInstance(seen, dict, f"no record when the ring ran: {seen}")
+        self.assertEqual(seen["mode"], RANG_RECORD_MODE)
+        self.assertLessEqual(abs(seen["mtime"] - began), RECORD_CLOCK_SLACK_SECONDS, seen)
+
+    def join_codex(self, root, name="c"):
+        """Join `name` as a Codex session on THREAD; fail the test if it does not.
+
+        @interacts  one tc join with CODEX_THREAD_ID set for that call.
+        @deps       _root.TcRoot.tc.
+        @complexity O(1).
+        @alloc      one card file.
+        """
+        code, out, err = root.tc("join", name, env={"CODEX_THREAD_ID": THREAD})
+        self.assertEqual(code, 0, f"tc join {name} exited {code}: {err}")
+
+    def test_a_marker_rewritten_to_clear_costs_at_most_one_backoff(self):
+        """In process: a ring fails, a member rewrites the marker to clear, and a send inside this sender's backoff rings nothing; one after it rings again (the fake asserted called), the inbox never empty.
+
+        The audit's MEDIUM-1 and REC-3 (test-strategist). The clock
+        (wall_clock) is replaced, so no test sleeps RING_BACKOFF_SECONDS.
+        Must reject a decision keyed on the marker alone: the forged
+        `clear` would then hold the doorbell off until the inbox empties,
+        which for a Codex member is never.
+
+        @interacts  loads tc in process; runs deliver_codex three times
+                    with PATH putting the harness fake first, the last two
+                    with wall_clock replaced; rewrites the marker in place.
+        @deps       load_tc, ring_argv, rang_record; _root.TcRoot.fake_bin;
+                    unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        card = {"name": "c", "kind": "codex", "route": "codex", "thread_id": THREAD}
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("codex", [CODEX_QUEUE_EXIT["unknown thread"], CODEX_QUEUE_EXIT["queued"]],
+                                          stderr=FAKE_UNKNOWN_THREAD_STDERR)
+            tc = load_tc(root)
+            marker = root.path / "mail" / ".ring-pending-c"
+            with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}):
+                failed = tc.deliver_codex(card, "a", "c", "one")
+                stamp = rang_record(root, "c").stat().st_mtime
+                marker.write_text(f"{CLEAR_STATE}\n")  # a member's rewrite, in place
+                with mock.patch.object(tc, "wall_clock", lambda: stamp + INSIDE_WINDOW_SECONDS):
+                    inside = tc.deliver_codex(card, "a", "c", "two")
+                rang_inside = calls()
+                with mock.patch.object(tc, "wall_clock", lambda: stamp + RING_BACKOFF_SECONDS + PAST_WINDOW_SECONDS):
+                    after = tc.deliver_codex(card, "a", "c", "three")
+            self.assertTrue((folder.parent / "calls.jsonl").exists(), "the fake codex never ran")
+            recorded = calls()
+        self.assertEqual((failed.exit, inside.exit, after.exit), (0, 0, 0))
+        self.assertEqual(len(rang_inside), 1, "a send inside the sender's own backoff rang over a clear marker")
+        self.assertEqual([call["argv"] for call in recorded],
+                         [ring_argv(root, 1, "c", "a"), ring_argv(root, 3, "c", "a")],
+                         "a forged clear marker held the doorbell off past the sender's own backoff")
+        self.assertTrue(after.words.endswith(RANG_WORDS.format(to="c")), after.words)
+
+    def test_a_record_missing_untrusted_dated_after_now_or_unreachable_counts_as_old(self):
+        """In process: after a ring that went through (marker clear, one unread), the sender's record is moved aside, made a link, dated after now, put in a branch with no search, or its branch reported as another user's; a send inside the backoff then rings again each time, and says so when it could not write the record.
+
+        C2 item 5: a record dated after now (the clock was set back), or
+        one that cannot be read or written, counts as old, with a warning
+        for one that cannot be written: a ring too many, never a lost
+        wake (D14). Must reject a send that trusts any of them as a fresh
+        ring, and one that writes the record through a link or into a
+        branch that is not this user's.
+
+        @interacts  per case: loads tc in process; runs deliver_codex
+                    twice with PATH putting the harness fake first, the
+                    second with wall_clock replaced; renames, links,
+                    dates or chmods the record or its branch by hand (the
+                    branch's mode put back), or patches os.lstat and
+                    os.fstat so the branch reads as another user's.
+        @deps       load_tc, ring_argv, rang_record; owner_patched_lstat
+                    and owner_patched_fstat from test_shared.py;
+                    _root.TcRoot.fake_bin; os, stat, unittest.mock.
+        @complexity O(1) per case, five cases.
+        @alloc      one TcRoot and one module per case.
+        """
+        from test_shared import owner_patched_fstat, owner_patched_lstat
+        card = {"name": "c", "kind": "codex", "route": "codex", "thread_id": THREAD}
+        cases = ("missing", "a link", "dated after now", "a branch with no search", "a squatted branch")
+        for case in cases:
+            with self.subTest(case=case), _root.TcRoot() as root:
+                folder, calls = root.fake_bin("codex", CODEX_QUEUE_EXIT["queued"])
+                tc = load_tc(root)
+                record = rang_record(root, "c")
+                branch = record.parent
+                with mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}), contextlib.ExitStack() as stack:
+                    first = tc.deliver_codex(card, "a", "c", "one")
+                    stamp = record.stat().st_mtime
+                    if case == "missing":
+                        os.rename(record, branch / "aside")
+                    elif case == "a link":
+                        os.rename(record, branch / "aside")
+                        record.symlink_to(branch / "aside")
+                    elif case == "dated after now":
+                        os.utime(record, (stamp + FUTURE_SECONDS, stamp + FUTURE_SECONDS))
+                    elif case == "a branch with no search":
+                        old_mode = stat.S_IMODE(os.lstat(branch).st_mode)
+                        branch.chmod(NO_SEARCH_FOLDER_MODE)
+                        stack.callback(branch.chmod, old_mode)
+                    else:
+                        stack.enter_context(mock.patch.object(os, "lstat", owner_patched_lstat(branch)))
+                        stack.enter_context(mock.patch.object(os, "fstat", owner_patched_fstat(branch)))
+                    stack.enter_context(mock.patch.object(tc, "wall_clock", lambda: stamp + INSIDE_WINDOW_SECONDS))
+                    second = tc.deliver_codex(card, "a", "c", "two")
+                self.assertTrue((folder.parent / "calls.jsonl").exists(), "the fake codex never ran")
+                recorded = calls()
+                self.assertEqual((first.exit, second.exit), (0, 0), (first, second))
+                self.assertEqual([call["argv"] for call in recorded],
+                                 [ring_argv(root, 1, "c", "a"), ring_argv(root, 2, "c", "a")],
+                                 f"a record {case} was trusted as a fresh ring")
+                unwritten = [w for w in second.warnings if RECORD_NOT_WRITTEN_WORDS in w]
+                if case in ("a link", "a branch with no search", "a squatted branch"):
+                    self.assertEqual(len(unwritten), 1, second.warnings)
+                    self.assertIn(RECORD_LOST_WORDS.format(to="c"), unwritten[0])
+                else:
+                    self.assertEqual(unwritten, [], second.warnings)
 
 
 if __name__ == "__main__":

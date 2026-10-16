@@ -66,10 +66,6 @@ JOIN_READS = {"CODEX_THREAD_ID", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE
 DEFAULT_REMOTE_TC = "~/TheConnection/tc"
 EXIT_REFUSED = 1
 EXIT_BAD_NAME = 6
-# CARDS fix round 1 (Claude Opus 5.5, unreviewed): the not-built note, written here.
-# SSH S1 (Claude Opus 5.5, unreviewed): the ssh route is built, so tc card
-# prints no note; a test asserts it stays silent.
-NOT_BUILT_NOTE = "note: sends to {name} are refused until the ssh route is built\n"
 BAD_NAME_WORDS = ('tc: bad name "{name}": letters, digits, dot, dash, underscore, '
                   '1 to 64, not starting with a dash\n')
 # A planted value that must never reach a card. Made up for the test.
@@ -311,7 +307,6 @@ class CardsTest(unittest.TestCase):
         self.assertEqual(out, "card written: x (other, account unknown, route ssh to u@h)\n")
         # SSH S1 (Claude Opus 5.5, unreviewed): ssh is in ROUTES, so no not-built note.
         self.assertEqual(err, "")
-        self.assertNotIn(NOT_BUILT_NOTE.format(name="x"), err)
         self.assertEqual(code2, 0, f"tc card y exited {code2}: {err2}")
         self.assertEqual(card2["ssh"], {"target": "h", "tc": "/opt/tc/tc"})
         self.assertEqual(err2, "")

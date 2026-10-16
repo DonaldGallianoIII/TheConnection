@@ -292,20 +292,27 @@ def load_tc(root):
 
 
 # K2 fix (Claude Opus 5.5, unreviewed).
-def named(path):
+def named(path, dir_fd=None):
     """`path` made absolute, its folders resolved and its last part kept as given.
 
     A link at the last part is named, not followed, so a K2 record says
     which name a call touched. K2 puts every path it records or compares
     through this, so the records and the inbox listing compare alike.
+    P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, tc now publishes
+    by name in the inbox's open descriptor. With `dir_fd`, `path` is a
+    name in the folder open at it, named by that folder's real path
+    (/proc/self/fd), as the kernel reaches it.
 
     @interacts  resolves the folders above `path` (lstat and readlink on
-                each). Writes nothing.
+                each), or reads the link /proc/self/fd/<dir_fd>. Writes
+                nothing.
     @deps       os, pathlib.
     @complexity O(d) over d parts of the path (about ten under a temp root).
     @alloc      one Path, returned.
     """
     path = pathlib.Path(os.fsdecode(path))
+    if dir_fd is not None:
+        return pathlib.Path(os.readlink(f"/proc/self/fd/{dir_fd}")) / path
     return path.parent.resolve() / path.name
 
 
@@ -443,8 +450,8 @@ class MailboxTest(unittest.TestCase):
             real_rename = pathlib.Path.rename
             real_link = os.link
 
-            def created(how, path):
-                """Record that `how` is about to create `path`, and whether anything is there now.
+            def created(how, path, dir_fd=None):
+                """Record that `how` is about to create `path` (a name in the folder open at `dir_fd`, when given), and whether anything is there now.
 
                 @interacts  lstats `path` (a link counts as there). Writes
                             nothing.
@@ -452,14 +459,16 @@ class MailboxTest(unittest.TestCase):
                 @complexity O(d) over d parts of the path.
                 @alloc      one dict, appended to creations.
                 """
-                creations.append({"how": how, "path": named(path), "existed": os.path.lexists(path)})
+                where = named(path, dir_fd)
+                creations.append({"how": how, "path": where, "existed": os.path.lexists(where)})
 
             def os_open(path, flags, *args, **kwargs):
                 """Record a path opened with O_CREAT, then open as the real os.open does.
 
-                A relative path given with dir_fd is recorded against the
-                working folder, so it never matches the .tmp: K2 then fails
-                loudly. tc passes no dir_fd.
+                P3 fix round 1a (Claude Opus 5.5, unreviewed): D35. tc
+                makes a message's .tmp by its name in the inbox's open
+                descriptor (dir_fd), so a name given with dir_fd is
+                recorded in that folder (named).
 
                 @interacts  creates or opens `path` through the real call.
                 @deps       created; os.
@@ -467,7 +476,7 @@ class MailboxTest(unittest.TestCase):
                 @alloc      one dict when O_CREAT is set.
                 """
                 if flags & os.O_CREAT:
-                    created("os.open", path)
+                    created("os.open", path, kwargs.get("dir_fd"))
                 return real_os_open(path, flags, *args, **kwargs)
 
             def builtin_open(file, mode="r", *args, **kwargs):
@@ -521,6 +530,11 @@ class MailboxTest(unittest.TestCase):
             def link(src, dst, *args, **kwargs):
                 """Record the state at this moment, as rename() does, then link as the real os.link does.
 
+                P3 fix round 1a (Claude Opus 5.5, unreviewed): D35. tc
+                links by name in the inbox's open descriptor
+                (src_dir_fd, dst_dir_fd), so each name is read in its
+                folder (named).
+
                 @interacts  reads the source file, lstats the target, and
                             lists the inbox through tc's unread(); links
                             through the real call.
@@ -529,11 +543,12 @@ class MailboxTest(unittest.TestCase):
                             source.
                 @alloc      one dict per call.
                 """
-                source = pathlib.Path(os.fsdecode(src))
+                source = named(src, kwargs.get("src_dir_fd"))
+                target = named(dst, kwargs.get("dst_dir_fd"))
                 renames.append({
-                    "src": named(src),
-                    "dst": named(dst),
-                    "dst_existed": os.path.lexists(dst),
+                    "src": source,
+                    "dst": target,
+                    "dst_existed": os.path.lexists(target),
                     "src_bytes": source.read_bytes() if source.is_file() else None,
                     "unread": [p.name for p in tc.unread(B)],
                 })
@@ -743,7 +758,7 @@ class MailboxTest(unittest.TestCase):
             self.assertTrue(any(line.startswith("TIMEOUT:") for line in lines(out)),
                             f"a wait with no mail printed no TIMEOUT: line{ran}")
 
-            lock = root.path / "mail" / f".wait-{D}.lock"
+            lock = root.path / "mail" / f"to-{D}" / ".wait.lock"  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35
             with root.listener(D, LISTENER_TIMEOUT_SECONDS) as first:
                 code, out, err, ran = run(root, "wait", D, "--timeout", str(WAIT_TIMEOUT_SECONDS))
                 self.assertEqual(code, EXIT_ALREADY_LISTENING,
