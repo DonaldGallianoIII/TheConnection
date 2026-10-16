@@ -1191,8 +1191,10 @@ class Board:
                     message files among them (tc.listeners and
                     tc.mailbox_summary, by their own @complexity; P3 fix
                     round 2, Claude Opus 5.5, unreviewed: the audit's
-                    LOW-6); the mailbox part twice when a message moved
-                    mid-poll.
+                    LOW-6). The mailbox part runs once: this tc never
+                    raises for a message that moved mid-poll, so the
+                    retry never runs (P3 fix round 3, Claude Opus 5.5,
+                    unreviewed: the audit's LOW-7).
         @alloc      one dict, returned.
         """
         try:

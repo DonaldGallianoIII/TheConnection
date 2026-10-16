@@ -77,9 +77,13 @@ that the fake is reachable.
             login, OTHER_MEMBER, PASSING_ERRNO_NAMES, PASSING_WORDS,
             seen_as, may_make_in and may_move_or_remove from
             test_ssh_route.py; hold from test_wake_files.py; ../tc.
-@complexity O(1) per test: one to fifteen tc runs, each under a second.
-            The busy test waits out tc's own lock bound (3 s), and the
-            size test pipes 1 MiB.
+@complexity O(1) per test: one to fifteen tc runs, each under a second,
+            but for FarKeyReadsTest's table test, which runs 20 cases in
+            20 roots, about 30 tc runs and three gates in process (P3 fix
+            round 3, Claude Opus 5.5, unreviewed: the audit's LOW-8).
+            The busy test and the table's busy case each wait out tc's
+            own lock bound (3 s), and the size test and the table's size
+            case each pipe 1 MiB.
 @alloc      one TcRoot per test (or per case), removed when its context
             exits; one open lock file while a test holds a lock.
 """

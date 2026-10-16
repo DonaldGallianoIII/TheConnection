@@ -70,7 +70,11 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             nothing left behind, so the near side keeps it queued (P3 fix
             round 2, Claude Opus 5.5, unreviewed: the audit's LOW-3, so
             does one that cannot write mail/.seq or make its inbox lock
-            for such a reason); each
+            for such a reason; P3 fix round 3, Claude Opus 5.5,
+            unreviewed: the audit's LOW-6, there no message is written
+            and no origin filed, but a counter write that fails can leave
+            mail/.seq empty, and the next send then counts from 1, past
+            the names already taken: next_seq); each
             failed ssh try (a connection failure, a timeout, a far 10)
             writes its words into a note beside the waiting file, which
             moves with the file, and `health` lists every outbox message
@@ -92,7 +96,12 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             and never refuses for its inbox lock: anything wrong there
             skips the ring with a warning, and the answer stays `already
             delivered`, exit 0 (P3 fix round 2, Claude Opus 5.5,
-            unreviewed: the audit's LOW-2).
+            unreviewed: the audit's LOW-2). So a retry that meets the
+            lock held past LOCK_WAIT_SECONDS is filed sent on the near
+            side with its ring skipped, until the next send to that
+            name rings (P3 fix round 3, Claude Opus 5.5, unreviewed:
+            the audit's LOW-3; before round 2 it stayed queued, and
+            tc flush rang it).
             While ROOT/.shared exists (C4) every command
             runs under umask 002 and every folder tc makes gets the group
             it names and mode 2775 (make_folder, D16), or 3775 (sticky,
@@ -4369,7 +4378,16 @@ def move_aside(box_fd, name, path, kind):
     The caller then finds that lock and its flock is refused while the
     other tc holds it: exit 3, not a second listener. Left: a third tc,
     or a member, taking the name in the instant between that rename and
-    the link back leaves the first lock away from its name.
+    the link back leaves the first lock away from its name. P3 fix round
+    3 (Claude Opus 5.5, unreviewed): the audit's LOW-5, option B. Left
+    too, the instant between the link back and the removal of the aside
+    name, when the put-back lock has two names (st_nlink 2): a third of
+    the owner's own tc that looks then finds a file with a second name,
+    moves it aside as it would a plant (samestat holds, so no link back)
+    and makes a fresh lock, while the first tc still holds the old one,
+    now only at an aside name. Two of the owner's waits then run for one
+    name. It needs three of the owner's own waits in one instant; the
+    cost is two listeners, never lost mail.
 
     P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-4. An
     own lock found at the name is left only when tc can open it (read
@@ -6176,6 +6194,14 @@ def ring_doorbell(card, sender, to, land=None, *, deadline=None, already=None, b
     rung on this retry: <why>`, and the answer is still `already`, exit
     0. So the near side never files a delivered message in refused/. A
     fresh send hands `busy_on_passing` (the gate's) to the lock (LOW-3).
+    P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-3,
+    option A. A held lock is the one case whose outcome moved: before
+    round 2 a retry that met it exited 10 and stayed queued, and tc
+    flush rang it later; now the near side files it in sent/ with its
+    ring skipped, and nothing retries it. Where the holder is another
+    codex send to `to`, that send's own ring counts this message. Where
+    it is a reader, a card or a deliberate hold, `to` is not rung for
+    this message until the next send to it rings.
 
     When a ring is owed, the marker is written (RING_RINGING) and this
     sender's record (write_rang_record, D33's branch checks) before the
@@ -8039,15 +8065,20 @@ def far_key_reads(work, keep=()):
     health, as gate_health kept it) is printed after stdout's words as
     JSON, scrubbed as data (far_data): its keys as they are, its string
     values through far_words. So the health is never scrubbed as text.
+    The audit's REC-1: when `work` printed nothing and returned nothing
+    (main()'s .shared check on its way through), far_logins and far_names
+    are not run at all.
 
     @interacts  runs `work` with this process's sys.stdout and sys.stderr
-                swapped for buffers; then far_logins' and far_names'
-                reads; writes the buffers' text to stdout and stderr, and
-                a returned value to stdout as JSON; may exit.
+                swapped for buffers; then, only when it printed or
+                returned something, far_logins' and far_names' reads;
+                writes the buffers' text to stdout and stderr, and a
+                returned value to stdout as JSON; may exit.
     @deps       far_logins, far_names, far_words, far_data; contextlib,
                 io, json, sys, traceback; EXIT_REFUSED.
-    @complexity O(w) over w characters printed, plus `work`'s own,
-                far_logins', far_names' and far_data's.
+    @complexity O(w) over w characters printed, plus `work`'s own, and,
+                when anything was printed or returned, far_logins',
+                far_names' and far_data's.
     @alloc      two buffers of what `work` printed and the value it
                 returned, freed on return.
     """
@@ -8067,11 +8098,13 @@ def far_key_reads(work, keep=()):
                 traceback.print_exc()
                 code = EXIT_REFUSED
     finally:
-        logins, names = far_logins(set(keep)), far_names(keep)
-        sys.stdout.write(far_words(out.getvalue(), logins, names))
-        if data is not None:
-            print(json.dumps(far_data(data, logins, names), indent=2))
-        sys.stderr.write(far_words(err.getvalue(), logins, names))
+        said, warned = out.getvalue(), err.getvalue()
+        if said or warned or data is not None:  # P3 fix round 3 (Claude Opus 5.5, unreviewed): REC-1, else no reads
+            logins, names = far_logins(set(keep)), far_names(keep)
+            sys.stdout.write(far_words(said, logins, names))
+            if data is not None:
+                print(json.dumps(far_data(data, logins, names), indent=2))
+            sys.stderr.write(far_words(warned, logins, names))
     if code:
         sys.exit(code)
 

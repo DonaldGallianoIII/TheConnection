@@ -1313,11 +1313,13 @@ tests/test_inbox_pinned.py (row (b)'s line).
 
 ### Not in the work set, for the architect
 
-- qa/human/route-ssh.md still expects the far side's absolute paths: step
+- qa/human/route-ssh.md expected the far side's absolute paths when this
+  was written: step
   9's `sent #1 to far-b: /home/qa/tc-qa/mail/to-far-b/000001-from-home-a.md`
   is now `mail/to-far-b/000001-from-home-a.md`, and step 17's holder words
   now read `another member (another process)`. It was outside this
-  round's work set.
+  round's work set. No longer so (P3 fix round 3, the audit's LOW-9):
+  the architect's `ba15fca` brought steps 9 and 17 to these words.
 - README and JOIN (the DOCS lane) do not show far words yet.
 
 ### Verified
@@ -1330,3 +1332,224 @@ tests/test_inbox_pinned.py (row (b)'s line).
   mail/.origins prints `sent #1 to b: mail/to-b/000001-from-homebox-b.md`
   and its warning with `mail/.origins`; a plain tc send there still
   prints its absolute path.
+
+---
+
+# Round 3: the far-key scrub keeps names whole
+
+Model:  Claude Opus 5.5 (the P3 fixer, round 3)
+Status: unreviewed
+Date:   2026-10-15
+Branch: Claude-Development-TheConnection-P3FIX, from round 2's head
+        `ba15fca`
+Brief:  audits/2026-10-15-2116-quick/fixes/round-3.md (in this
+        worktree), against that review's synthesis.md (its ids below),
+        agents/bugs-reviewer.md and agents/integration-reviewer.md; the
+        dev branch's contracts and decisions, read only (C3's "What a far
+        key reads carries nothing of this machine", D37)
+
+## Commits
+
+| Brief's | Commit | Items | Subject |
+|---|---|---|---|
+| (a) | `b9958e1` | 1 | Keep every mailbox name whole in what a far key reads |
+| (b) | `05161ab` | 2, 3 | Read a path beside the mailbox as a path, and move aside an own lock tc cannot open |
+| (c) | the commit that adds this section | 4 | The docs, REC-1 and this handoff |
+
+Each commit's full Python suite ran in the worktree at that commit
+(`python3 -m unittest discover -s tests -p 'test_*.py'`): 341 run, OK
+at `b9958e1`; 342 at `05161ab` (round 2 ended at 338). The count at (c)
+is under "Verified".
+
+## What was built
+
+### Item 1: MEDIUM-1, option B, widened
+
+- Words. `far_names(keep)` (tc) lists every mailbox name here, each
+  `to-<name>` in mail/ and each `<name>.json` in cards/, plus the names
+  the far key sent (its --as, and the --from and --to of its command).
+  `far_words(text, logins, names)` splits the text around each of those
+  names that stands whole (by FAR_LOGIN_EDGE, the logins' own edge,
+  longest first), replaces logins only in the pieces between them, and
+  joins the names back as they were. So `sent #1 to alex-codex:
+  mail/to-alex-codex/...` stays whole on a gate run as `alex`, and
+  `alex` is still replaced wherever it stands outside a name.
+- Health. `gate_answer` no longer prints the health: it returns what
+  `gate_health` kept, and `far_key_reads` prints it as JSON after
+  `far_data` walks it. Every key stays as it is (tc's fixed keys and
+  mailbox names), every string value goes through far_words, and every
+  pid is already `another process` or null (GATE_HEALTH_PROCESS). No
+  login, even one named `claude` or `codex`, rewrites a key, and two
+  members' `<login>-x` keys never fold into one.
+- LOW-1, no code beyond the guard: far_logins is unchanged. What is
+  left, said in far_words' doc: a login spelled exactly like a name the
+  far key itself sent (or like a mailbox name here) reads as that name
+  where it stands, and the far key sent it (or reads it in health
+  anyway). A login that is only part of such a name is replaced
+  everywhere it stands alone.
+- Tests, tests/test_gate.py, FarKeyReadsTest (each case in its own
+  subTest and TcRoot, assertions inside the block):
+  `test_a_login_that_is_a_dash_part_of_two_mailbox_names_leaves_both_names_whole`
+  (the running login over `<login>-claude` and `<login>-codex`, none
+  called `<login>`: the words of a send to `<login>-codex`, and the
+  health's mail and listeners keys; skipped where the login makes no
+  valid name),
+  `test_two_members_whose_mailbox_names_end_alike_keep_both_health_keys`
+  (shared; members ann and ben stood in by grp.getgrnam patched, with
+  mailboxes ann-x and ben-x), and
+  `test_a_login_named_like_a_fixed_health_key_leaves_that_key_whole`
+  (shared; members stood in with logins named like every fixed key the
+  gate's health gives). Every one of their four subtests fails on
+  round 2's tc (`ba15fca`): `another member-codex` in the words and
+  keys, one `another member-x` key for two names, and a top level of
+  one `another member` key.
+
+### Item 2: LOW-2
+
+After the `root + os.sep` replace, far_words replaces bare ROOT only
+where it ends a token (FAR_ROOT_END, bugs-reviewer's lookahead: the
+end, a blank, a quote, a backtick, a comma, a semicolon, a colon or a
+parenthesis). A path beside the mailbox such as `<ROOT>-src/tc` is left
+whole for FAR_ABSOLUTE_PATH_PATTERN and reads `a path on this machine`.
+Test: FarKeyReadsTest's table gains a 20th case, "a path beside the
+mailbox": a fake codex (asserted called) fails with words naming
+`<root>-src/tc`.
+
+### Item 3: LOW-4
+
+`move_aside` leaves this user's own lock at the name only when an
+`O_RDONLY | O_NOFOLLOW | O_NONBLOCK` open of it in the inbox's
+descriptor works (ENTRY_FLAGS, closed at once). Otherwise, an own file
+its owner set to mode 000, it is moved aside with words as before round
+2, and the wait or watch makes its lock and runs. Test:
+tests/test_wake_files.py, WakeLockPlaceTest,
+`test_the_owners_own_lock_at_mode_000_is_moved_aside_and_the_listener_runs`
+(wait and watch, private; skipped for the superuser, who opens the
+file anyway).
+
+### Item 4: docs, and REC-1
+
+- LOW-3, option A: ring_doorbell's doc and the module block say a codex
+  retry that meets the inbox lock held past the bound is filed sent on
+  the near side with its ring skipped, until the next send to that
+  name rings; before round 2 it stayed queued and tc flush rang it.
+  Where the holder is another codex send to the name, that send's ring
+  counts this message.
+- LOW-5, option B: move_aside's Left note now names the second window
+  too, between the link back and the removal of the aside name, where
+  a third of the owner's own waits finds the put-back lock with two
+  names, moves it aside and makes another: two listeners, never lost
+  mail.
+- LOW-6: the module block says that where mail/.seq's write fails no
+  message is written and no origin filed, but mail/.seq can be left
+  empty, and the next send counts from 1 past the names already taken,
+  as next_seq's doc says.
+- LOW-7: board/serve.py's Board.snapshot @complexity says the mailbox
+  part runs once, since this tc never raises for a message that moved.
+- LOW-8: tests/test_gate.py's module @complexity names the table test's
+  20 cases, about 30 tc runs and three gates in process.
+- LOW-9: the round 2 section above no longer says route-ssh.md expects
+  absolute far paths; `ba15fca` brought steps 9 and 17 to D37's words.
+- LOW-10: qa/human/route-ssh.md's header names `ba15fca`'s edits to
+  steps 9 and 17, by the architect session.
+- REC-1: far_key_reads runs far_logins and far_names only when `work`
+  printed or returned something. main()'s .shared check, whose success
+  path prints nothing, no longer lists four folders or reads the user
+  database for nothing.
+
+## Mutations
+
+Each was applied with the Edit tool to a scratch copy of the tree,
+checked equal to the worktree first, run (the module named), and put
+back by copying the file over it and checking it equal (`cmp`). Every
+red below is an assertion line, not an error. The line numbers are the
+tip's (tests/test_gate.py moved as (b) and (c) added lines); the
+assertions are quoted.
+
+| Mutation | Applied as | Run | Red, by subtest | Red line |
+|---|---|---|---|---|
+| item 1, the guard | far_words never splits (`if False else [text]`) | FarKeyReadsTest | the dash-part test, "the words" | tests/test_gate.py:1848, `self.assertEqual(got, (0, f"sent #1 to {codex}: mail/to-{codex}/000001-from-{KEY}.md\n", ""),` (the words read `another member-codex`) |
+| item 1, health as text | gate_answer prints the JSON itself, so far_words scrubs it as text | FarKeyReadsTest | the fixed-key test | tests/test_gate.py:1919, `self.assertEqual(health_keys(json.loads(out)), (GATE_HEALTH_TOP_KEYS, ...` (one top key, `another member`) |
+| item 1, both (round 2's tc, `ba15fca`) | tc replaced by `git show ba15fca:tc` | FarKeyReadsTest | all four new subtests | :1848 above; :1858 and :1890, `self.assertEqual((sorted(snap["mail"]), sorted(snap["listeners"])), (names, names),` (`another member-x` once for ann-x and ben-x); :1919 above |
+| item 2 | far_words replaces bare ROOT anywhere (`text.replace(root, FAR_ROOT_WORDS)`) | FarKeyReadsTest | the table's "a path beside the mailbox" | tests/test_gate.py:1815, `self.assertIn(shown, said, "the case did not reach the gate path it names, or its words changed")` (the words read `the mailbox-src/tc`) |
+| item 3 | move_aside returns None for any own lock (the open removed) | test_wake_files | the mode 000 test, wait and watch | tests/test_wake_files.py:659, `self.assertEqual(code, EXIT_TIMEOUT if kind == "wait" else 0,` (exit 1, "again each time tc moved one aside (3 times)") |
+
+The guard alone leaves the health keys of the dash-part test and of
+ann-x and ben-x whole: those are mailbox names, so far_words holds them
+whole even in JSON text. The fixed-key test is the one only the data
+walk protects. So each half of item 1 has a test that turns red without
+it.
+
+## Behavior changes, said plainly
+
+1. A far key reads every mailbox name whole, in the gate's words and in
+   its health keys, whatever the logins on the far machine are.
+2. The gate's health keys are never rewritten. Its string values (the
+   time, the shared group) still go through the scrub.
+3. A path beside the far mailbox whose name starts with the mailbox's
+   folder reads `a path on this machine`, not `the mailbox-...`.
+4. tc wait and tc watch move aside an own lock file they cannot open,
+   with words, and run; before, they exited 1.
+
+## Verified
+
+- The two commits' suites, above. (c): 342 run, OK; node --test 66
+  pass.
+- New tests with `-v`: listed in the report to the architect.
+- Every mutation above, run as said.
+- A hand run under a scratch TC_ROOT: two waits over `<login>-claude`
+  and `<login>-codex`, then a gated send to `<login>-codex` prints both
+  names whole, and the gate's health lists both under listeners and
+  mail.
+- Voice and American checks on route-ssh.md and this file.
+- Not run: the human scripts (the owner's); real ssh and real codex,
+  never.
+
+## What was not built
+
+As the brief says, not in this round: a code fix for LOW-1 beyond the
+guard, REC-2 to REC-4, and the DEBTs (DEBT-2's naming at the source is
+the class fix for the scrub).
+
+## Work set
+
+- tc; board/serve.py (one doc block, LOW-7); tests/test_gate.py;
+  tests/test_wake_files.py (item 3's test, its constants and one
+  module @interacts line); qa/human/route-ssh.md (its header); this
+  file. Nothing outside it changed.
+
+## Noticed and left, by tier
+
+- LOW: health's mailbox-name keys are folder names under mail/
+  (`to-<anything>`), not checked against C0. Round 3 keeps keys as they
+  are, so a member who makes such a folder by hand sets a key a far key
+  reads as made. Before, the text scrub ran over it.
+- LOW: the words for an own lock at mode 000 moved aside call it "not
+  this user's own wait lock", though it is this user's file. They are
+  the words this case got before round 2.
+- LOW: a login spelled like a word in tc's fixed words still makes them
+  read oddly (a member named `codex` turns `rang codex c` into `rang
+  another member c`). The known limit in far_words' doc covers it; only
+  the health keys are now safe from it.
+- REC: no test pins REC-1; what the far key reads is the same either
+  way.
+- REC: REC-4's first test (a far key naming a login in --from still
+  reads `another member` for it) would now fail by design: that login
+  reads as the name the key sent (LOW-1's residual). Not written.
+
+## Assumptions
+
+- Option B's "placeholder" is built as a split around the whole names,
+  not a placeholder character: nothing in the text can collide with it,
+  and the names go back as they were.
+- A name "stands whole" by FAR_LOGIN_EDGE, the logins' own edge, so
+  `to-<name>`, `.box-<name>.lock`, `-from-<name>.md` and
+  `cards/<name>.json` all hold the name whole.
+- main()'s far_key_reads call keeps passing no names of the far key's:
+  its one refusal (a .shared tc cannot read) names no mailbox, and this
+  side's names are held whole there too.
+- The two stand-in member tests patch grp.getgrnam, so one user plays
+  every member, as round 2's tests stand in owners by a patched lstat
+  or fstat.
+
+No pause was written.

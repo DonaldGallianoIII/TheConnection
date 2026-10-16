@@ -6,7 +6,10 @@ Model:  Claude Opus 5.5 (the SSH lane agent), 2026-10-15; the outbox
         round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15; the note on
         an older far tc, `TC_ROOT` in both gate lines (steps 4 and 20),
         and steps 12 and 15 to 17 brought to P3 fix rounds 1b and 1c by
-        the P3 fixer, Claude Opus 5.5, 2026-10-15
+        the P3 fixer, Claude Opus 5.5, 2026-10-15; steps 9 and 17
+        brought to D37's far words (`ba15fca`) by the architect session,
+        Claude Opus 5.5, 2026-10-15; this line added in P3 fix round 3
+        by the P3 fixer, Claude Opus 5.5, 2026-10-15
 Status: unreviewed
 
 What this checks: mail crosses to a second machine and back, and a key
