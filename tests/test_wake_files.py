@@ -52,7 +52,11 @@ second-user walk is qa/human/route-shared.md.
             hold one inbox lock shared (HOLD_SHARED_SCRIPT), one child
             holds a lock outside mail/ that a link at the old place leads
             to, and tc's process_uid is made to see no process, as
-            hidepid does. Writes nothing outside the root's temp folder.
+            hidepid does; the audit's LOW-1 test runs tc's hold_wake_lock
+            twice in process, the second with tc's move_aside, name_taken
+            or open_wake_lock wrapped to run the first whole, or to
+            rename the second's fresh lock by hand, at one moment of it.
+            Writes nothing outside the root's temp folder.
 @deps       python3 stdlib (argparse, contextlib, fcntl, gc, io, json, os,
             pathlib, pwd, stat, subprocess, sys, time, unittest,
             unittest.mock, warnings); tests/_root.py; UmaskTestCase,
@@ -265,6 +269,15 @@ THREAD = "t1"
 RANG_LINE = "rang codex {to} (queued; delivered when its turn ends or the session is resumed)"
 # The kinds of entry a member plants at the owner's lock name.
 PLANTS = ("a file", "a symlink", "a FIFO", "a file with another name too (a hard link)")
+# P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-1. The
+# moments a second of the owner's own waits is interrupted at, the second
+# aside name (tc's PLANTED_ASIDE_NAME with k 2), and the ending the flock
+# moment's hand move gives the lock.
+OWN_LOCK_BEFORE_LOOK = "before its look"
+OWN_LOCK_BEFORE_MOVE = "between its look and its move"
+OWN_LOCK_BEFORE_FLOCK = "before its flock"
+SECOND_ASIDE = "{lock}.planted-2"
+DISPLACED_SUFFIX = ".moved-by-another-wait"
 
 
 def login(uid):
@@ -1090,14 +1103,17 @@ class WakeFilesAreTheirOwnersTest(UmaskTestCase):
 
     Known gap: the list of wake files is hardcoded, as InboxPinnedTest's
     families are; a wake file added later is not covered until someone
-    adds its subtest.
+    adds its subtest. P3 fix round 2 (Claude Opus 5.5, unreviewed): and
+    two of the owner's own waits over one plant never both hold a lock
+    (the audit's LOW-1), at three moments.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, load_tc,
                 member, identity, members_patched, run_in_process, login,
                 contents from test_shared.py.
     @complexity O(f) subtests over f = 5 (four files, the marker twice),
-                plus eight for the planted entries.
+                plus eight for the planted entries and three for the
+                owner's two waits.
     @alloc      one TcRoot per subtest.
     """
 
@@ -1330,6 +1346,101 @@ class WakeFilesAreTheirOwnersTest(UmaskTestCase):
                     self.assertEqual((stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid),
                                      (True, WAKE_LOCK_MODE, os.geteuid()), "ann's own lock was not made at its name")
                     self.assertEqual(text, TARGET_TEXT, "the planted link's target changed")
+
+    # P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-1 (test-strategist REC-7).
+    def owners_waits_case(self, root, moment):
+        """Two of ann's own waits over one plant a member holds at her wait lock's name: wait B (the outer call) is interrupted at `moment` while wait A (or, for the flock moment, a move by hand) runs whole. What was seen, as plain values.
+
+        `moment`: OWN_LOCK_BEFORE_LOOK runs A just before B's move_aside
+        looks at the name (B finds A's fresh lock there); OWN_LOCK_BEFORE_MOVE
+        runs A after B's look and before B's rename (B judged the plant,
+        then its rename takes A's lock); OWN_LOCK_BEFORE_FLOCK moves B's
+        just-opened lock off its name before B's flock, as another of
+        ann's waits caught in the second moment would.
+
+        @interacts  one member child that plants and holds the lock, killed
+                    by its own pid; loads tc and calls hold_wake_lock in
+                    process with members_patched, and tc's move_aside,
+                    name_taken or open_wake_lock wrapped; renames a lock by
+                    hand for the flock moment; closes every lock it took.
+        @deps       member, identity, members_patched, run_in_process,
+                    load_tc; os, unittest.mock; OWNER, LOCK_NAME,
+                    FIRST_ASIDE, SECOND_ASIDE, DISPLACED_SUFFIX.
+        @complexity O(1).
+        @alloc      one module and up to three open lock files, closed
+                    before return.
+        """
+        lock = root.path / "mail" / f"to-{OWNER}" / LOCK_NAME.format(kind="wait")
+        planter, said = member(root, lock, "hold")
+        found = identity(lock)
+        tc = load_tc(root)
+        first, second, armed = [], [], [True]
+        targets = {OWN_LOCK_BEFORE_LOOK: "move_aside", OWN_LOCK_BEFORE_MOVE: "name_taken",
+                   OWN_LOCK_BEFORE_FLOCK: "open_wake_lock"}
+        real = getattr(tc, targets[moment])
+        try:
+            with members_patched(root.path, {found}, {planter.pid}):
+                share = tc.mailbox_share()
+
+                def interrupted(*args, **kwargs):
+                    if not armed[0] or moment == OWN_LOCK_BEFORE_FLOCK:
+                        result = real(*args, **kwargs)
+                        if armed[0]:  # the flock moment: B's lock leaves its name before B's flock
+                            armed[0] = False
+                            os.rename(lock, lock.with_name(lock.name + DISPLACED_SUFFIX))
+                        return result
+                    armed[0] = False
+                    first.append(tc.hold_wake_lock(OWNER, "wait", share))
+                    return real(*args, **kwargs)
+                with mock.patch.object(tc, targets[moment], interrupted):
+                    ran = run_in_process(lambda: second.append(tc.hold_wake_lock(OWNER, "wait", share)))
+            at_name = os.lstat(lock) if os.path.lexists(lock) else None
+            held = [os.fstat(f.fileno()) for f in first + second]
+            return {"said": said, "ran": ran, "first": len(first), "second": len(second),
+                    "held_at_name": [at_name is not None and os.path.samestat(st, at_name) for st in held],
+                    "plant_aside": identity(lock.with_name(FIRST_ASIDE.format(lock=lock.name)))
+                    if os.path.lexists(lock.with_name(FIRST_ASIDE.format(lock=lock.name))) else None,
+                    "found": found,
+                    "second_aside": os.path.lexists(lock.with_name(SECOND_ASIDE.format(lock=lock.name)))}
+        finally:
+            for f in first + second:
+                f.close()
+
+    def test_two_of_the_owners_own_waits_over_one_plant_never_both_hold_a_lock(self):
+        """Shared, ann joined, a member holding a plant at ann's wait lock's name: two of ann's own waits started together never both hold a lock, whichever moment the second is interrupted at. Before its look or between its look and its move, the second finds the first's lock, exits 3 with ALREADY_WORDS, and the first holds the lock at the name; the plant sits at the first aside name and nothing at the second. A lock moved off its name before the second's flock makes the second take the lock that has the name.
+
+        The audit's LOW-1 (bugs-reviewer): both waits judged the plant;
+        the first moved it and made its lock; the second's rename then
+        moved that fresh lock aside, over the plant, and made another, so
+        each flocked its own file and two listeners ran for one name.
+        Must reject a move_aside that moves this user's own lock, a
+        rename it never checks, and a flock kept on a file its name no
+        longer leads to.
+
+        @interacts  per moment: a shared mailbox with ann joined, then
+                    owners_waits_case.
+        @deps       shared_with_ann, owners_waits_case; os; ALREADY_WORDS,
+                    EXIT_ALREADY, MEMBER_HELD.
+        @complexity O(1): three cases.
+        @alloc      one TcRoot per case.
+        """
+        for moment in (OWN_LOCK_BEFORE_LOOK, OWN_LOCK_BEFORE_MOVE, OWN_LOCK_BEFORE_FLOCK):
+            with self.subTest(second_wait_interrupted=moment), _root.TcRoot() as root:
+                self.shared_with_ann(root)
+                got = self.owners_waits_case(root, moment)
+                code, out, err = got["ran"]
+                self.assertEqual(got["said"], MEMBER_HELD, "the member could not plant and hold the lock")
+                if moment == OWN_LOCK_BEFORE_FLOCK:
+                    self.assertEqual((code, got["second"]), (0, 1), f"the wait did not run: {out}{err}")
+                    self.assertEqual(got["held_at_name"], [True],
+                                     "the wait holds a lock its name no longer leads to")
+                else:
+                    self.assertEqual((code, out), (EXIT_ALREADY, ALREADY_WORDS["wait"].format(name=OWNER)),
+                                     f"a second of ann's own waits started: {err}")
+                    self.assertEqual((got["first"], got["second"]), (1, 0))
+                    self.assertEqual(got["held_at_name"], [True], "the first wait's lock lost its name")
+                    self.assertFalse(got["second_aside"], "a lock of ann's own was moved aside")
+                self.assertEqual(got["plant_aside"], got["found"], "the plant is not at the first aside name")
 
 
 if __name__ == "__main__":

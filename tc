@@ -96,7 +96,11 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             pinned descriptor; whatever else has a lock's name there is
             moved aside with words, so no member holds or redirects
             another's listener, and listeners names only a pid of the
-            inbox's owner. On a shared mailbox only the owner of a name's
+            inbox's owner. P3 fix round 2 (Claude Opus 5.5, unreviewed:
+            the audit's LOW-1): tc never moves aside a lock of its own
+            user's, puts back one its rename took by mistake, and keeps a
+            flock only on the file the lock's name leads to, so two of
+            the owner's own waits never both run. On a shared mailbox only the owner of a name's
             card may run `wait` or `watch` for it, and a name nobody
             joined is refused, exit 1, nothing made. The switch-over: on a
             private mailbox only, a lock still held at the old place in
@@ -4265,10 +4269,22 @@ def cmd_peek(args):
     refuse_lines([f"tc peek: {printable(p)} not shown ({why})" for p, why in skipped + unshown])
 
 
+# P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-1, one test of "this user's own lock".
+def own_wake_lock(st):
+    """True when the stat result `st` is what open_wake_lock keeps as this user's own wait or watch lock: a regular file with one name (st_nlink 1) that this user owns.
+
+    @interacts  reads this process's effective user id.
+    @deps       os, stat.
+    @complexity O(1).
+    @alloc      none.
+    """
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.geteuid()
+
+
 # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1) and D36 (2), each
 # member's listener is theirs alone, and only a name's owner listens for it.
 def move_aside(box_fd, name, path, kind):
-    """Move whatever has the name `name` in the inbox open at `box_fd` to the first free PLANTED_ASIDE_NAME there, for tc `kind` (wait or watch): one line of words naming what was there, whose it was and where it went; None when nothing was there by then. `path` names it, in the words only.
+    """Move whatever has the name `name` in the inbox open at `box_fd` to the first free PLANTED_ASIDE_NAME there, for tc `kind` (wait or watch): one line of words naming what was moved, whose it was and where it went; None when nothing was moved. `path` names it, in the words only.
 
     For a wait or watch lock's name, where the owner's tc found something
     that is not its own lock (open_wake_lock): another user's file, a
@@ -4279,31 +4295,51 @@ def move_aside(box_fd, name, path, kind):
     is never touched. A rename that fails is refused, exit 1, with words,
     and nothing is made.
 
+    P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-1. Two
+    of the owner's own tc waits over one plant could both run: both
+    judged the plant, the first moved it and made its lock, and the
+    second's rename then moved that fresh lock aside and made another.
+    Now nothing that is this user's own lock (own_wake_lock) is moved:
+    one found at the name is left, and the caller opens and uses it; and
+    when the rename took something other than what lstat judged, and it
+    is this user's own lock (another of the owner's tc made it in
+    between), it is linked back to its name, never over anything, and
+    its aside name removed (tc's own move undone), and nothing is said.
+    The caller then finds that lock and its flock is refused while the
+    other tc holds it: exit 3, not a second listener. Left: a third tc,
+    or a member, taking the name in the instant between that rename and
+    the link back leaves the first lock away from its name.
+
     @interacts  lstats `name` and each aside name tried, by name in
-                `box_fd`; renames one entry there; reads this process's
-                user id and the user database for the words; on a failed
-                rename one line to stderr and exit 1.
-    @deps       name_taken, refuse, user_name; os, stat;
-                PLANTED_ASIDE_NAME, EXIT_REFUSED.
+                `box_fd`; renames one entry there and lstats it at its
+                aside name; may link this user's own lock back to `name`
+                and remove the aside name; reads this process's user id
+                and the user database for the words; on a failed rename
+                one line to stderr and exit 1.
+    @deps       own_wake_lock, name_taken, refuse, user_name; contextlib,
+                os, stat; PLANTED_ASIDE_NAME, EXIT_REFUSED.
     @complexity O(k) over k aside names already taken (none in practice).
     @alloc      the words, returned.
     """
+    def described(found):
+        if stat.S_ISLNK(found.st_mode):
+            return "a symlink"
+        if stat.S_ISFIFO(found.st_mode):
+            return "a FIFO"
+        if stat.S_ISDIR(found.st_mode):
+            return "a folder"
+        if not stat.S_ISREG(found.st_mode):
+            return "not a regular file"
+        if found.st_nlink > 1:
+            return "a file with another name too (a hard link)"
+        return "a file"
+
     try:
         st = os.lstat(name, dir_fd=box_fd)
     except FileNotFoundError:
         return None
-    if stat.S_ISLNK(st.st_mode):
-        what = "a symlink"
-    elif stat.S_ISFIFO(st.st_mode):
-        what = "a FIFO"
-    elif stat.S_ISDIR(st.st_mode):
-        what = "a folder"
-    elif not stat.S_ISREG(st.st_mode):
-        what = "not a regular file"
-    elif st.st_nlink > 1:
-        what = "a file with another name too (a hard link)"
-    else:
-        what = "a file"
+    if own_wake_lock(st):  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-1, this user's own lock is never moved
+        return None
     k = 1
     while name_taken(PLANTED_ASIDE_NAME.format(lock=name, k=k), box_fd):
         k += 1
@@ -4313,10 +4349,19 @@ def move_aside(box_fd, name, path, kind):
     except FileNotFoundError:
         return None
     except OSError as err:
-        refuse(f"tc {kind}: {path} is {what} owned by {user_name(st.st_uid)}, not this user's own {kind} lock, "
-               f"and tc could not move it aside ({err.strerror}); nothing made", EXIT_REFUSED)
-    return (f"tc {kind}: {path} was {what} owned by {user_name(st.st_uid)}, not this user's own {kind} lock; "
-            f"moved it aside to {path.with_name(aside)} and made a new one")
+        refuse(f"tc {kind}: {path} is {described(st)} owned by {user_name(st.st_uid)}, not this user's own {kind} "
+               f"lock, and tc could not move it aside ({err.strerror}); nothing made", EXIT_REFUSED)
+    try:
+        moved = os.lstat(aside, dir_fd=box_fd)
+    except OSError:
+        moved = st
+    if not os.path.samestat(st, moved) and own_wake_lock(moved):  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-1
+        with contextlib.suppress(OSError):
+            os.link(aside, name, src_dir_fd=box_fd, dst_dir_fd=box_fd, follow_symlinks=False)
+            os.unlink(aside, dir_fd=box_fd)  # tc's own move undone: the lock keeps its name
+        return None
+    return (f"tc {kind}: {path} was {described(moved)} owned by {user_name(moved.st_uid)}, not this user's own "
+            f"{kind} lock; moved it aside to {path.with_name(aside)} and made a new one")
 
 
 def open_wake_lock(box_fd, box, kind):
@@ -4330,14 +4375,19 @@ def open_wake_lock(box_fd, box, kind):
     user's file, a link, a FIFO, a folder, a file with a second name) is
     moved aside inside the inbox with words (move_aside), and the lock is
     made again, at most WAKE_LOCK_TRIES times. Read only: flock needs no
-    more. The descriptor comes back blocking; the caller closes it.
+    more. The descriptor comes back blocking; the caller closes it. P3
+    fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-1.
+    "This user's own lock" is own_wake_lock, the test move_aside also
+    makes, so move_aside never moves one another of this user's tc made
+    in between: the next try opens it.
 
     @interacts  creates, or opens and fstats, one file by its name in
                 `box_fd`; fchmods an own one at another mode; may move
                 entries aside (move_aside); on a refusal one line to
                 stderr and exit 1.
-    @deps       move_aside, refuse; os, stat; WAKE_LOCK_NAME,
-                WAKE_LOCK_MODE, WAKE_LOCK_TRIES, EXIT_REFUSED.
+    @deps       own_wake_lock, move_aside, refuse; os, stat;
+                WAKE_LOCK_NAME, WAKE_LOCK_MODE, WAKE_LOCK_TRIES,
+                EXIT_REFUSED.
     @complexity O(1): at most WAKE_LOCK_TRIES + 1 tries of two opens, an
                 fstat and a move each.
     @alloc      one descriptor, returned, or closed before anything is
@@ -4362,7 +4412,7 @@ def open_wake_lock(box_fd, box, kind):
         if fd is not None:
             try:
                 st = os.fstat(fd)
-                if stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.geteuid():
+                if own_wake_lock(st):  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-1, move_aside's same test
                     if stat.S_IMODE(st.st_mode) != WAKE_LOCK_MODE:
                         os.fchmod(fd, WAKE_LOCK_MODE)
                     os.set_blocking(fd, True)
@@ -4468,45 +4518,70 @@ def hold_wake_lock(name, kind, share):
     held at the old place, mail/.<kind>-<name>.lock, by a listener started
     before round 1b, exits 3 as a held lock does (old_wake_lock_held).
 
+    P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-1. The
+    flock is taken while the inbox is still open, and once held, the
+    lock's name in the inbox must still lead to the file held (fstat
+    against an lstat by name): another of this user's tc may have moved
+    it between the open and the flock. Else this tc lets go and takes
+    the lock again, at most WAKE_LOCK_TRIES times, then refuses, exit 1,
+    with words. So two of the owner's own waits never both run, each on a
+    lock of its own (with move_aside's half of the fix).
+
     @interacts  shared: lstats the card (refuse_other_listener); private:
                 opens and flocks the old place for a moment
                 (old_wake_lock_held). Then opens mail/, the inbox and its
                 read/ (pinned_inbox, making the private inbox and read/
                 when missing), opens or makes the lock in the inbox
-                (open_wake_lock, moving a planted entry aside), closes the
-                folders, writes each move's line to stderr, and takes the
-                lock's flock without waiting; held already, one line to
-                stdout and exit 3 (already_listening).
+                (open_wake_lock, moving a planted entry aside), writes
+                each move's line to stderr, takes the lock's flock without
+                waiting, and fstats it and lstats its name in the inbox;
+                held already, one line to stdout and exit 3
+                (already_listening); its name moved away each time, one
+                line to stderr and exit 1. Closes the folders on every way
+                out.
     @deps       refuse_other_listener, old_wake_lock_held, pinned_inbox,
                 open_wake_lock, already_listening, refuse; fcntl, os, sys;
-                NO_INBOX_LISTEN_WORDS, EXIT_REFUSED.
-    @complexity O(1): a handful of opens and one flock try.
-    @alloc      one open lock file, returned; the inbox's two descriptors
-                for the moment it is opened.
+                WAKE_LOCK_NAME, WAKE_LOCK_TRIES, NO_INBOX_LISTEN_WORDS,
+                EXIT_REFUSED.
+    @complexity O(1): a handful of opens, then at most WAKE_LOCK_TRIES + 1
+                tries of one open_wake_lock, one flock try, one fstat and
+                one lstat each.
+    @alloc      one open lock file, returned (one at a time while it
+                tries); the inbox's two descriptors until it returns.
     """
     shared = share is not None
     if shared:
         refuse_other_listener(name, kind)
     elif old_wake_lock_held(name, kind):
         already_listening(name, kind)
+    lock_name = WAKE_LOCK_NAME.format(kind=kind)
     with pinned_inbox(name, shared, make_inbox=not shared) as inbox:
         if inbox.box.fd is None:
             if inbox.box.problem is not None:  # the words a poll said for it: tc could not list, or look at, <inbox>
                 refuse(f"{inbox.box.problem}, so its {kind} lock cannot be made there; nothing made", EXIT_REFUSED)
             refuse(NO_INBOX_LISTEN_WORDS.format(kind=kind, name=name), EXIT_REFUSED)
-        fd, said = open_wake_lock(inbox.box.fd, inbox.path, kind)
-    lock = open(fd, "rb", buffering=0)
-    try:
-        for line in said:
-            print(line, file=sys.stderr)
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock.close()
-        already_listening(name, kind)
-    except BaseException:
-        lock.close()
-        raise
-    return lock
+        for _ in range(WAKE_LOCK_TRIES + 1):  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-1, held at its name
+            fd, said = open_wake_lock(inbox.box.fd, inbox.path, kind)
+            lock = open(fd, "rb", buffering=0)
+            try:
+                for line in said:
+                    print(line, file=sys.stderr)
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    named = os.path.samestat(os.fstat(lock.fileno()), os.lstat(lock_name, dir_fd=inbox.box.fd))
+                except FileNotFoundError:
+                    named = False
+            except BlockingIOError:
+                lock.close()
+                already_listening(name, kind)
+            except BaseException:
+                lock.close()
+                raise
+            if named:
+                return lock
+            lock.close()  # its name leads elsewhere now: let go, and take the lock that has the name
+    refuse(f"tc {kind}: {inbox.path / lock_name} was moved away from its name each time this tc took it "
+           f"({WAKE_LOCK_TRIES + 1} times); nothing held", EXIT_REFUSED)
 
 
 def cmd_wait(args):
