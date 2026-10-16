@@ -115,8 +115,9 @@ Before you start:
 
 9. On homebox: `tc send --from home-a --to far-b "hello far"`.
    - It exits 0 and prints `sent over ssh to farbox-tc: sent #1 to
-     far-b: /home/qa/tc-qa/mail/to-far-b/000001-from-home-a.md` (the
-     numbers are farbox's).
+     far-b: mail/to-far-b/000001-from-home-a.md` (the numbers are
+     farbox's). The path is relative to farbox's mailbox: nothing a far
+     key reads names a path, a login or a pid on farbox (D37).
    - `ls ~/tc-qa-home/outbox/you/to-far-b/sent/` lists
      `000001-from-home-a.md`, the record of the send (D25, D32), and
      `ls ~/tc-qa-home/outbox/you/to-far-b/` shows no message waiting.
@@ -205,11 +206,12 @@ Before you start:
     fcntl.flock(f, fcntl.LOCK_EX); time.sleep(20)' &`. At once, on
     homebox: `tc send --from home-a --to far-b "while busy"`.
     - It exits 4: `farbox-tc was busy (exit 10: tc: another process is
-      holding far-b's lock: qa (pid <the holder's pid>); try again. If it
-      stays held, ask qa to let it go.); kept in outbox: ...`. It says
-      busy, never `could not reach`: the far tc was reached and answered
-      (P3 fix round 1c), and it names who holds the lock (round 1b, D35
-      (3)).
+      holding far-b's lock: another member (another process); try again.
+      If it stays held, ask another member to let it go.); kept in
+      outbox: ...`. It says busy, never `could not reach`: the far tc was
+      reached and answered (P3 fix round 1c). It names no login and no
+      pid on farbox (D37); on farbox itself, the same refusal names the
+      holder's login and pid (D35 (3)).
     - After 20 s, `tc flush` sends it and exits 0.
 
 ## A retry never delivers twice (D25)
