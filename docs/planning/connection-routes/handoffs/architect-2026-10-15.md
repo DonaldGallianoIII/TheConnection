@@ -1,0 +1,156 @@
+# End of session: the architect, 2026-10-15
+
+Model:  Claude Opus 5.5 (the TheConnection architect session)
+Status: unreviewed
+Date:   2026-10-15
+For:    whoever picks the architect's work back up, a new session or this
+        one after a restart. Read CLAUDE.md first, then this.
+
+## Where the plan stands
+
+The connection routes plan (`docs/planning/connection-routes/00-index.md`)
+runs in lanes and phase reviews. Merged into the dev branch,
+`Claude-Development-TheConnection`:
+
+| Phase | Lane | Merged at | Phase review |
+|---|---|---|---|
+| P0 | GROUND | `a029bda` | closed, fixes at `ab7bd31` |
+| P1 | CORE | `f5f6923` | closed with P2 |
+| P2 | CARDS | `4f35efc` | closed |
+| P4 | BOARD | `a2953cb` | closed, P4FIX at `eb3e187` |
+| P3, part 1 | SHARED | `84b97d2` | see below |
+| P3, part 2 | SSH | `616b9db` | see below |
+
+The P3 phase review (SHARED plus SSH on dev) said FIX THEN SHIP: two
+HIGH and one MEDIUM, all on a shared mailbox, all one member against
+another:
+
+1. HIGH-1: a member who owns an inbox could swap it for a link
+   mid-command, and another member's send, read, peek, wait, log,
+   health, flush count or far gate acted at the link's far end.
+2. HIGH-2: a member could hold another member's wait lock, so the
+   owner's `tc wait` exited 3 and `tc health` named the holder as the
+   listener.
+3. MEDIUM-1: a member could rewrite a Codex member's ring marker and
+   switch its doorbell off.
+
+D35 to D37 decided the fixes. They are built on
+`Claude-Development-TheConnection-P3FIX` (pushed, head `3718685`), in
+five rounds:
+
+- 1a: every inbox act opens the inbox once and works inside it.
+- 1b: the wait and watch locks live `0600` in the owner's inbox; only a
+  name's owner listens for it; busy words name the holder; each sender
+  keeps its own last-ring record.
+- 1c: the gate's health is an allow list; init makes `mail/.origins/`; a
+  far write failure that passes answers 10; stuck queues show in health.
+- 2: tests that pin eight protections no test pinned before; a check
+  that every inbox act has a class-proof row; and the gate gives a far
+  key no path, login or pid.
+- 3: that scrub keeps every mailbox name whole, and health is scrubbed
+  as data, its keys never changed.
+
+Each round was checked by the architect before the next: both suites
+(342 Python and 66 Node at the head), the board's headless check, every
+test a commit message names, mutations of its own on a scratch copy, a
+hand smoke of a private mailbox, and an old listener run beside the new
+tc. The rounds were reviewed twice (rounds 1a to 1c together, SHIP;
+round 2 alone, FIX THEN SHIP for one MEDIUM, which round 3 fixes).
+Round 3 itself was checked by the architect, not reviewed. The branch
+is not merged: the relay held the merge until morning, since a long run
+on another session reports only by tc mail overnight.
+
+## Next, in order
+
+1. The P3FIX merge into dev, after the relay's yes. Trial-merge it
+   into dev's tip first (a scratch worktree, `--no-commit`, then
+   `--abort`) and run both suites there. Then the relay's three
+   conditions (below), with a fresh count of live listeners: the count
+   changes as sessions come and go.
+2. The architect's lines on dev after the merge:
+   - CLAUDE.md: the wait lock's place (`mail/to-<name>/.wait.lock`, its
+     owner's, `0600`), Layout (the inbox's lock files, `.rang-<name>`,
+     the send lock, the `.stderr` note beside a waiting file, init's
+     `mail/.origins/`), Current focus and Status.
+   - contracts.md: the function list at the top (`inbox()` and
+     `real_folder()` are gone), exit row 1 (a wait or watch lock's
+     plant is moved aside, not refused), C3's `already delivered` for a
+     codex name, C3's far-10 words (`was busy`), C3's authorized_keys
+     line (`TC_ROOT=` in `command=`), C4's modes (`0600` wait, watch and
+     ring record), C4's FIFO line, C5's lock-time reason.
+   - known-bugs: a new entry, `per-owner-file-open-to-the-group` (the
+     P3 review's consolidator wrote it up); a fourth hit of
+     `no-follow-open-guards-only-the-last-name` (the live paths);
+     `listener-reported-live-without-the-lock` gains HIGH-2; and every
+     file that still names `mail/.wait-<name>.lock`.
+3. The D28 task: `tc wait` writes its exit reason into a record beside
+   its lock (D37 part 2), which also fixes `tc watch`'s false
+   `LISTENER DOWN` on a normal wake. Put the record's place in phases.md
+   first.
+4. The switch-over cleanup: once every session has re-armed under the
+   new tc, remove the private-only read of the old lock place and its
+   two tests together.
+5. The DOCS lane (P5): README, JOIN.md, and the decisions record. Carry
+   the P3 review's README and JOIN lists (exit codes 1, 4, 10 and 11 and
+   what a session does on each, the shared and ssh sections, D35's lock
+   place) and the stale lines the fix round's re-review listed.
+6. The human walks: `qa/human/route-shared.md` needs two real Linux
+   users (the owner's). `qa/human/route-ssh.md` is the architect's under
+   D30, on the owner's laptop when it is home. Ask the relay before any
+   change to an ssh config, a key or `authorized_keys`.
+7. Two asks the relay parked until after the merge: how far one member
+   trusts another's ssh card (P3 review DEBT-6), and init's member rerun
+   exiting 1 when it fixed everything (DEBT-14).
+
+## How to pick back up
+
+- The architect's mailbox is `ConnectionClaudeDev`; the relay is `a2`,
+  who carries the owner's words and approves merges into dev (D8). Arm
+  the listener in the background with a timeout and prove it with
+  `tc health`, as rule 6 says. Re-arm on exit 0 (after reading) and 2.
+- Every live session on the owner's machine runs `tc` from the dev
+  checkout, so a merge into dev goes live for all of them at once. The
+  relay's three conditions for any merge that changes `tc` or the board:
+  a heads-up mail one message before; the live listeners line from `tc
+  health` right after (every name listening before still listening,
+  none twice); and if anything reads wrong, put dev back first (`git
+  revert -m 1 <merge>`, since rule 3 forbids `git reset --hard`) and
+  investigate second.
+- Reviews use the djinn relay: a known-bugchecker alone, then a wave of
+  reviewers, then a synthesis, with audit folders under each worktree's
+  `audits/` (gitignored). Each fix round is one brief with rule 3 at its
+  top, word for word, and one fixer. The architect checks every round
+  before the next: both suites, every test a commit message names, and
+  mutations of its own on a scratch copy, which must go red on an
+  assertion, never in a helper.
+- Before every push: the leak scan of the whole tip tree and every new
+  commit message, with the pattern list kept outside the repo (rule
+  13).
+
+## Decisions this session
+
+D22 to D37, all approved by the relay for the owner, are in
+`decisions.md` with their contract lines. In short: the outbox per
+member (D22, D32, D33), busy and exit 10 (D23), the board's states and
+fonts (D24 to D27), mail to a dead listener (D28), tc fixing a member's
+own entries (D29), the laptop exception for real ssh (D30), init pinning
+ROOT (D31), whom tc protects (D34), and the P3 review's fixes (D35 to
+D37).
+
+## Said plainly
+
+- Nothing in this plan has run as a second Linux user. Every cross-member
+  test stands one user in for two, with ownership patched.
+- Real ssh and real codex have not run. The two-machine walk waits for
+  the laptop.
+- No human script has been walked by a person yet.
+- In the fix round's re-review, the breaker reviewer stopped twice
+  without a report. It is recorded as missing; the test-strategist
+  covered its ground and round 2 pinned what that showed.
+- One branch of round 3's scrub has no test: health's string values go
+  through the word scrub, and a mutation that skips it stays green. The
+  only such value today is the shared group's name. A test for it
+  belongs in the switch-over cleanup task.
+- A stated limit of the far-key scrub: a login spelled exactly like a
+  name the far key itself sent reads as that name where it stands. The
+  far key sent that string.
