@@ -6,7 +6,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
         wave 2 rulings (D17 to D21) the same day, and D22 to D37 on
-        2026-10-15.
+        2026-10-15; brought to the P3 fix's code at its merge, 2026-10-16.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
 Date:   2026-10-14
@@ -14,7 +14,8 @@ Date:   2026-10-14
 Names below that exist in `tc` today were read from `tc` at commit
 `1791cbf`: `ROOT`, `MAIL`, `STATUS`, `inbox()`, `unread()`, `next_seq()`,
 `cmd_send()`, `cmd_health()`, `listeners()`, `health_snapshot()`, `main()`.
-Everything else is new.
+Everything else is new. Since the P3 fix (`8b9b59d`), `inbox()` is gone:
+every inbox act opens the inbox once through `pinned_inbox()` (D35).
 
 **Exit codes.** The one list. A lane that needs a new code writes a
 pause; no lane reuses a number for a new meaning.
@@ -22,7 +23,7 @@ pause; no lane reuses a number for a new meaning.
 | Code | Meaning | Who exits with it | Since |
 |---|---|---|---|
 | 0 | ok (`wait`: mail; `watch`: heartbeat) | every command | today |
-| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force`, a body that is not UTF-8 text, an outbox branch another user owns or that is a link (D33); also a link or FIFO planted where tc opens a file, an inbox that is a link, not a folder, or one tc cannot list, a `.shared` tc cannot read, and on a shared mailbox an inbox not its owner's and `wait` or `watch` on a name the running user does not own (C4, D36) | `send`, `join`, `card`, router, `gate` (empty message), `flush` (a refused branch), `wait`, `watch`, `read`, `peek`, `log`, `status`, `init` | today (empty message), this plan (D17 to D21, D33, D36) |
+| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force`, a body that is not UTF-8 text, an outbox branch another user owns or that is a link (D33); also a link or FIFO planted where tc opens a file (at a wait or watch lock's name it is moved aside instead and the command runs, D35), an inbox that is a link, not a folder, or one tc cannot list, a `.shared` tc cannot read, a wait or watch lock that something else took again each time tc moved one aside, and on a shared mailbox an inbox not its owner's and `wait` or `watch` on a name the running user does not own (C4, D36) | `send`, `join`, `card`, router, `gate` (empty message), `flush` (a refused branch), `wait`, `watch`, `read`, `peek`, `log`, `status`, `init` | today (empty message), this plan (D17 to D21, D33, D36) |
 | 2 | `wait` timed out or hit its keepalive | `wait` | today |
 | 3 | another listener or watcher already holds this name's lock | `wait`, `watch` | today |
 | 4 | kept in the outbox: ssh could not reach the target, the target already has a queue, or another tc holds this member's send lock or it would not open | `send` (ssh route), `flush` | this plan (C3, D33) |
@@ -31,7 +32,7 @@ pause; no lane reuses a number for a new meaning.
 | 7 | refused by the gate | `gate` | this plan (C3) |
 | 8 | message over `SEND_BODY_MAX_BYTES` | `send`, `gate` | this plan (C0) |
 | 9 | usage error: an unknown command, flag or missing argument, or a malformed `--origin` on `tc send`; the usage text goes to stderr | every command (the parser) | this plan (D12, D33) |
-| 10 | busy: another process held `mail/.seq` or an inbox lock past `LOCK_WAIT_SECONDS`, or a send found `PUBLISH_MAX_TRIES` message numbers in a row taken by hand-made files (the next send starts past them), or a gate that could not write the message for a reason that passes (no space, a quota, an I/O error, D36); nothing written; try again. Never from `wait` or `watch`, so the re-arm rule below is unchanged. The ssh route and `flush` treat a far 10 like a dropped connection: the message stays queued (C3) | `send`, `read`, `card`, `join`, the codex route, `gate` | this plan (D23, D33, D36) |
+| 10 | busy: another process held `mail/.seq` or an inbox lock past `LOCK_WAIT_SECONDS`, or a send found `PUBLISH_MAX_TRIES` message numbers in a row taken by hand-made files (the next send starts past them), or a gate that could not write the message, the counter or the inbox lock's first make for a reason that passes (no space, a quota, an I/O error, D36); the message is not written (a failed counter write can leave `mail/.seq` empty, and the next send then starts again from 1, a taken name at a time); try again. Never from `wait` or `watch`, so the re-arm rule below is unchanged. The ssh route and `flush` treat a far 10 like a dropped connection: the message stays queued (C3) | `send`, `read`, `card`, `join`, the codex route, `gate` | this plan (D23, D33, D36) |
 | 11 | refused by the far side with a code tc does not know (anything but 0, 255, 10, 1, 6, 7, 8): the far code is in the words and in the note beside the file in `refused/`; nothing retries it. `flush` files it the same way and keeps its own exit, 0 or 4 | `send` (ssh route) | this plan (D33) |
 
 Why 9 (D12): argparse exits 2 on a usage error, the same code as a `wait`
@@ -311,7 +312,11 @@ deadlocks it (`ssh_capture` in `tc`, not a plain `subprocess.run`).
   gate runs as, then the `--as` name of the key), and answers an id that
   key has already filed with exit 0 and the words `already delivered`, so
   a flush retry never delivers twice and no other key or member can
-  pre-file another's ids.
+  pre-file another's ids. For a codex name, that retry also runs the ring
+  decision (a gate killed after filing and before its ring is rung by the
+  retry); it still exits 0 whatever is wrong at the inbox lock, adding
+  `rang codex <to>` or the warning `<to> was not rung on this retry:
+  <why>`, and a message it could not ring waits for the next send's ring.
 - **Queue order first.** If the sender's own branch already holds mail
   waiting for this target (files directly in an `outbox/<user>/to-<to>/`
   whose card points at it), the new message is published behind it
@@ -329,7 +334,8 @@ deadlocks it (`ssh_capture` in `tc`, not a plain `subprocess.run`).
   get a lock in time, or could not write the message for a reason that
   passes (no space, a quota, an I/O error), and wrote nothing. Treat it
   like exit 255: keep the message in `outbox/`, exit 4, and `tc flush`
-  retries it.
+  retries it. The words say `<target> was busy (exit 10: ...)`, never
+  `could not reach`: the far tc was reached and answered.
 - **A queue that stays stuck is shown, not hidden** (D36). Each failed
   try (a connection failure, a timeout, a far 10) writes the far side's
   last words, or the connection's reason, into a note beside the waiting
@@ -369,7 +375,7 @@ member's dead queue never holds up another member's mail.
 machine, **one key per sending name**:
 
 ```
-command="/home/you/TheConnection/tc gate --as homebox-b",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... homebox
+command="TC_ROOT=/home/you/TheConnection /home/you/TheConnection/tc gate --as homebox-b",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... homebox
 ```
 
 `tc gate --as <name>` reads `SSH_ORIGINAL_COMMAND`, splits it with
@@ -389,7 +395,9 @@ command="/home/you/TheConnection/tc gate --as homebox-b",no-pty,no-port-forwardi
   that carry this mailbox's folder path (`mail_problem` and
   `shared_problem`). A key health gains later stays home unless it is
   added to the list by name, so D35's line naming who holds a lock, and
-  D36's stuck-queue lines, never reach a far key.
+  D36's stuck-queue lines, never reach a far key. Its `listeners` and
+  `watchers` give each name `"another process"` or null, never a pid
+  (D37).
 - **What a far key reads carries nothing of this machine** (D36 part 5's
   scope, D37). Everything the gate gives a far key, its stdout, its
   stderr, its exit words and its health, names no path on this machine,
@@ -439,7 +447,8 @@ For a separate Linux user per account on one machine.
   `mail/.origins/`, `3770` on an inbox and its `read/`, `2750` on an
   outbox branch `outbox/<user>/` and on `mail/.origins/<user>/` and every
   folder in either, `2775` on any other folder; `0664` on `mail/.seq`,
-  the locks and the ring marker, `0600` on a send lock, `0640` on every
+  the inbox locks and the ring marker, `0600` on a send lock, a wait or
+  watch lock and a sender's ring record (D35, D36), `0640` on every
   message, card and status file; and writes `ROOT/.shared` at `0644`, holding the
   group name. It names and leaves the same entries as a member's rerun
   (below), and exits 1 once the rest is done if it left any.
@@ -548,7 +557,10 @@ For a separate Linux user per account on one machine.
     outside the mailbox (D19).
   - Lock and marker files open with `O_NONBLOCK` and an `S_ISREG` check,
     so a FIFO planted at a lock's name is refused with words instead of
-    hanging tc (D19).
+    hanging tc (D19). At a wait or watch lock's name, in the owner's own
+    inbox, the owner's tc moves it aside with words and makes its own
+    lock (D35). The one other exception: a gate's retry of an id already
+    filed for a codex name answers exit 0 with a warning (C3).
 - **Nobody touches another member's mail** (D20, Donald: "prevent that
   from occurring"; it replaces D19's trust trade). Under shared mode:
   1. Each inbox folder (`mail/to-<name>/` and its `read/`) is owned by
@@ -643,7 +655,8 @@ of `tc health` is not on the board's path.
   life of the process. A name seen listening within `DOWN_WINDOW_S` = 600
   and not listening now, with no mail reaching its inbox since, is
   `down`: the lock vanished and nothing woke it. The lock file's time
-  cannot be used: tc opens it at the listener's start. After a server
+  cannot be used: it is the time the lock was first made, not when the
+  current listener started (D35 keeps one lock file and reopens it). After a server
   restart nothing is `down`, `woken` or `working` until it has been seen
   listening again; the doc block says so.
 - **A listener that mail woke is not down** (D24, D28). `tc wait` exits

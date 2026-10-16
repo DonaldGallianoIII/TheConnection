@@ -9,9 +9,11 @@ Status: unreviewed
 > Deviations are marked below.
 
 TheConnection is `tc`, a file mailbox that lets agent sessions message each
-other. Today it serves Claude Code sessions run by one Linux user on one
-machine: one message is one Markdown file, and a session wakes when the
-`tc wait` it started in the background exits. The plan in
+other. Today it serves Claude Code and Codex sessions on one machine, run
+by one Linux user or by several who share one mailbox, and it has an
+`ssh` route to another machine (built and tested with a fake ssh; not yet
+run between two real machines). One message is one Markdown file, and a
+session wakes when the `tc wait` it started in the background exits. The plan in
 `docs/planning/connection-routes/` grows it into the one way any agent
 session reaches any other, on this machine or another, and says which way
 to use when. It is for the owner's own sessions and for anyone who forks it.
@@ -59,10 +61,12 @@ Two ideas carry the whole tool.
    removed, so a reader never sees half a file and a message never replaces
    another.
 2. **The lock is the proof of life.** `tc wait <name>` holds an exclusive
-   `flock` on `mail/.wait-<name>.lock` for as long as it runs, and the kernel
-   drops it the moment the process dies. `tc health` reads `/proc/locks` to
-   name the pid holding each lock. "Listening" is checked there, never taken
-   on someone's word.
+   `flock` on `mail/to-<name>/.wait.lock`, a `0600` file its owner makes
+   inside its own inbox (D35), for as long as it runs, and the kernel drops
+   it the moment the process dies. `tc health` reads `/proc/locks` to name
+   the pid holding each lock, and names a holder only when it is the inbox
+   owner's own process. "Listening" is checked there, never taken on
+   someone's word.
 
 ### Key patterns
 
@@ -105,21 +109,23 @@ The connection routes plan, run in lanes and waves
 (this file, `docs/known-bugs/` and `tests/_root.py`), merged into the dev
 branch at `a029bda`, CORE at `f5f6923`, CARDS at `4f35efc` and BOARD at
 `a2953cb`, with the P4 phase review's fixes at `eb3e187`, and SHARED
-(wave 2) at `84b97d2`, and SSH (wave 2b) at `616b9db`. As of
-2026-10-15, the P3 phase review is next, then DOCS.
+(wave 2) at `84b97d2`, and SSH (wave 2b) at `616b9db`, with the P3 phase
+review's fixes (D35 to D37) at `8b9b59d`. As of 2026-10-16, next are the
+D28 wait exit record, then DOCS.
 
 ### Off limits
 
 - `main`. Nobody commits to it or merges toward it; the owner does that.
-- The live mailbox: `mail/` and `status/` in any checkout that sessions use.
-  Tests and hand runs never touch them.
+- The live mailbox: `mail/`, `status/`, `cards/`, `outbox/` and `.shared`
+  in any checkout that sessions use. Tests and hand runs never touch them.
 - `docs/planning/connection-routes/contracts.md`. A lane that needs a
   contract changed writes a pause instead.
 - The owner's conventions folder (`~/Conventions/`). Read it; never edit it
   from here.
 - A cloud provider's CLI, anything that touches a cloud account, and
   Docker. Real `ssh` and real `codex`: only the owner runs those, in the
-  human QA scripts.
+  human QA scripts, with the one exception rule 5 records (D30: the
+  architect, real `ssh` only, to the owner's laptop).
 
 ---
 
@@ -129,7 +135,9 @@ branch at `a029bda`, CORE at `f5f6923`, CARDS at `4f35efc` and BOARD at
 tc                                 the whole tool (python3, stdlib only)
 JOIN.md                            what you point a new session at
 board/                             the live board: serve.py (127.0.0.1, token), live.html, look.js, theme.css; demo.html shows every state
-tests/test_*.py                    unittest suites (mailbox, names, cards, router, codex route, usage, health, ...)
+tests/test_*.py                    unittest suites (mailbox, names, cards, router, codex route, usage, health, shared, ssh, ...)
+tests/test_inbox_pinned.py         the class proof that every inbox act works inside one pinned folder (D35)
+tests/test_wake_files.py           the class proof that no member holds or redirects another's lock or ring record (D35, D36)
 tests/*.test.mjs                   node --test suites for the board
 tests/board-browser-check.mjs      headless check of the live board (needs a Playwright install)
 tests/_root.py                     shared harness: throwaway TC_ROOT, proven listener, fake ssh and codex
@@ -138,12 +146,17 @@ docs/known-bugs/                   INDEX.md plus one detail file per entry. See 
 docs/planning/connection-routes/   the plan: 00-index, contracts, phases, decisions, handoffs/, pauses/
 mail/to-<name>/NNNNNN-from-X.md    unread messages (gitignored)
 mail/to-<name>/read/               read messages, kept as history
+mail/to-<name>/.wait.lock          the listener's lock, 0600, its owner's (D35); .watch.lock beside it for tc watch; a file planted there is moved aside as .wait.lock.planted-<k>
+mail/.wait-<name>.lock             the lock's old place: a private mailbox still reads it until every session has re-armed (the switch-over, a later cleanup)
 mail/.box-<name>.lock              the inbox lock: send's count plus write, read's glob plus rename, tc card's check plus write (D14)
 mail/.ring-pending-<name>          the codex ring's state: pending, timed out or clear; never removed (D14, D16, D20)
 cards/<name>.json                  one address card per name: kind, account, route (gitignored)
 .shared                            the group a shared mailbox uses, 0644, written by init (gitignored)
-outbox/<user>/to-<name>/           ssh mail one member queued for a far name, with sent/ and refused/ (D25, D32; gitignored)
-mail/.origins/<user>/<key>/        on the receiving side, the origin ids each far key delivered, so a retry never lands twice (D25, D33)
+outbox/<user>/to-<name>/           ssh mail one member queued for a far name, with sent/ and refused/; a .stderr note beside a file holds the far side's last words (D25, D32, D36; gitignored)
+outbox/<user>/.send-<key>.lock     that member's send lock for one target, 0600 (D33)
+outbox/<user>/.rang-<name>         that member's last ring of a codex name, 0600; its time decides re-rings (D36)
+outbox/.origin-token               this mailbox's random origin token (D25)
+mail/.origins/<user>/<key-name>/   on the receiving side, the origin ids each far key delivered, so a retry never lands twice; init makes mail/.origins/ (D25, D33, D36)
 status/<name>.md                   each side's latest status (gitignored)
 ```
 
@@ -325,7 +338,7 @@ names.
 
 ## Status
 
-The tool runs today on one machine: send, read, peek, wait (with
+The tool runs today: send, read, peek, wait (with
 `--keepalive`), status, log, health and watch; join, card and cards for
 address cards; a router in send with the `local`, `codex` and `ssh`
 routes, with `flush` for queued ssh mail and `gate` for inbound ssh;
@@ -351,5 +364,10 @@ its two-user walk (`qa/human/route-shared.md`) is the owner's and not
 yet run by a person. The `ssh` route (SSH, P3's second half) merged at
 `616b9db` after its lane review and one fix round; real ssh has not run
 yet: its two-machine walk (`qa/human/route-ssh.md`) is the architect's
-under D30. As of 2026-10-15 the P3 phase review and the docs are next.
+under D30. The P3 phase review (D9) found that one member of a shared
+mailbox could redirect, block or mislabel another's mail or listener; its
+fix round (D35 to D37, five rounds, two reviews) merged at `8b9b59d`,
+with the class proofs in `tests/test_inbox_pinned.py` and
+`tests/test_wake_files.py`. Nothing has run as a second Linux user yet.
+As of 2026-10-16 the D28 wait exit record and the docs are next.
 `main` stays the owner's alone.
