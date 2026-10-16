@@ -452,12 +452,14 @@ Status: drafts; each runs only after a2 approves it for Donald.
 
 ### F1. The wait exit record (D28, D37 part 2)
 
-`tc wait` writes why it exited (mail, timeout, killed is the record's
-absence) into a record beside its lock in the owner's inbox: written by
-the owner, group-readable (`0640`), reached through the pinned inbox
-handle, never followed. `tc health`, `tc watch` and the board read it as
-that member's words, never as proof of a live listener; the held lock
-stays the only proof (rule 6). With it, `tc watch --names` stops calling
+As contract C5's "The wait exit record" has it: `tc wait` keeps
+`mail/to-<name>/.wait.exit` beside its lock, owner-written, `0640`,
+replaced whole through the pinned inbox handle, never followed:
+`listening <time>` once it holds the lock, then `mail <time>` or
+`timeout <time>` as it exits; a wait killed or crashed leaves
+`listening`. `tc health`, `tc watch` and the board read it as that
+member's words; the exit record is never proof of life, only the held
+lock is (rule 6). With it, `tc watch --names` stops calling
 a listener that mail woke `LISTENER DOWN` (known bug
 `liveness-gap-by-design-read-as-down`), and the board can tell a woken
 listener from a killed one after a restart. Must reject: a record read

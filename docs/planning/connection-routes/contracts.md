@@ -684,14 +684,33 @@ of `tc health` is not on the board's path.
   - The legend says the cases it cannot see: a session that crashes
     after reading its mail looks `working` until the window ends; and
     with no board page open, the board cannot tell when a listener went,
-    so it gives mail the benefit of the doubt. A planned follow-up has
-    `tc wait` write its exit reason so the board reads it from disk
-    (D28). Since the lock is `0600` (D35), the record lives beside the
-    lock, not in it (D37): a file in the owner's inbox, written by the
-    owner, group-readable, opened through the pinned inbox handle and
-    never followed. Readers take its contents as that member's own
-    words, never as proof of a live listener; the held lock stays the
-    only proof (rule 6).
+    unless its exit record (below) says why, so without one it gives
+    mail the benefit of the doubt.
+- **The wait exit record** (D28, D37, phases.md F1). `tc wait <name>`
+  keeps a one-line record beside its lock, `mail/to-<name>/.wait.exit`,
+  made by the owner at `0640` through the pinned inbox handle, replaced
+  whole (a `.tmp` beside it, then a rename, both by name in the open
+  inbox) and never followed: `listening <time>` once it holds the lock,
+  then `mail <time>` or `timeout <time>` as it exits on mail or at its
+  deadline (`<time>` as in a message header). A wait that is killed or
+  crashes leaves `listening`. A reader takes the record only from a
+  regular file with one name, owned by the inbox's owner, of at most a
+  named number of bytes; anything else is no record. **The exit record
+  is never proof of life; only the held lock is** (rule 6). It only says
+  why a lock that is gone went:
+  - lock gone, record `mail` or `timeout` dated after the board last saw
+    the lock (after a board restart, any date): the listener left on
+    purpose; the rules above apply, and it is never `down`;
+  - lock gone, record `listening`: it was killed or crashed, so `down`,
+    after a board restart too (until now nothing is `down` until seen
+    listening again);
+  - no record, or none readable (a tc from before F1): the rules above,
+    unchanged.
+  `tc watch --names` reads the same record and alerts `LISTENER DOWN`
+  only for a name whose lock went while its record still says
+  `listening` (known bug `liveness-gap-by-design-read-as-down`). `tc
+  health` shows each stopped name's last exit word and its age. The
+  gate's health leaves it out (D36 part 5's allow list).
 - `idle`: a card or inbox, no listener, not codex or ssh, not down,
   woken or working.
 - `unread` is a count, or `null` when tc could not see into the inbox
