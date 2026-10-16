@@ -28,9 +28,9 @@ docs/planning/connection-routes/handoffs/F1.md.
             their pids in teardown) and reads /proc/locks to prove each
             holds its lock. Writes nothing outside the root's temp
             folder.
-@deps       python3 stdlib (collections, datetime, os, pathlib, signal,
-            stat, subprocess, sys, threading, time, unittest,
-            unittest.mock);
+@deps       python3 stdlib (argparse, collections, contextlib, datetime,
+            io, json, os, pathlib, signal, stat, subprocess, sys,
+            threading, time, unittest, unittest.mock);
             tests/_root.py; UmaskTestCase, load_tc and owner_patched_fstat
             from test_shared.py; ../tc.
 @complexity O(1) per test: a handful of tc runs per root, one root per
@@ -41,8 +41,12 @@ docs/planning/connection-routes/handoffs/F1.md.
             every child it started.
 """
 
+import argparse
 import collections
+import contextlib
 import datetime
+import io
+import json
 import os
 import pathlib
 import signal
@@ -136,6 +140,19 @@ ALERT_CEILING_SECONDS = 10
 # its own), and the heartbeat of the watch over it.
 SHORT_WAIT_SECONDS = 4
 SHORT_HEARTBEAT_SECONDS = SHORT_WAIT_SECONDS + SPARE_POLLS_SECONDS
+# Item 4, tc health: the stopped names and the record each holds (none for
+# the last), a live listener's name, how long after GOOD_AT the replaced
+# clock reads (two minutes, which health words as 2m), the key health's
+# JSON carries them under, and the far key's command and name for the
+# gate's health (made up; the gate ignores the path).
+STOPPED = (("sb", "timeout 2026-10-16T12:00:00-05:00\n"), ("sc", GOOD_LINE),
+           ("sd", "listening 2026-10-16T12:00:00-05:00\n"), ("se", None))
+LIVE = "sf"
+LATER_SECONDS = 120
+LATER_WORDS = "2m ago"
+EXITS_KEY = "wait_exits"
+GATE_HEALTH = "/x/tc health --json"
+GATE_KEY = "farkey"
 # What a file outside the mailbox holds, that a link at a record's name
 # (or its .tmp's) leads to.
 OUTSIDE_TEXT = "outside the mailbox: tc must never write or read this\n"
@@ -237,6 +254,42 @@ def holds(lock, proc):
             return False
         time.sleep(LOCK_POLL_SECONDS)
     return False
+
+
+def run_in_process(call):
+    """Run `call` with stdout and stderr captured: (code, out, err). A SystemExit gives its code, a return 0, and any other exception its words, so a test fails on its assertion, never in here.
+
+    @interacts  runs `call`; captures stdout and stderr.
+    @deps       contextlib, io.
+    @complexity O(1), plus the call.
+    @alloc      the captured text, returned.
+    """
+    out, err = io.StringIO(), io.StringIO()
+    code = 0
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            call()
+        except SystemExit as stop:
+            code = 0 if stop.code is None else stop.code
+        except Exception as error:  # the run's result in words, read by the assertion
+            code = f"raised {type(error).__name__}: {error}"
+    return code, out.getvalue(), err.getvalue()
+
+
+def stop_names(root):
+    """Each of STOPPED made by hand under `root`: its inbox, a lock nobody holds (so health lists it stopped), and its record when it has one.
+
+    @interacts  makes folders and files under the root.
+    @deps       pathlib; STOPPED, WAIT_LOCK, RECORD.
+    @complexity O(1): four names.
+    @alloc      the files, removed with the root.
+    """
+    for name, line in STOPPED:
+        box = root.path / "mail" / f"to-{name}"
+        box.mkdir(parents=True)
+        (box / WAIT_LOCK).touch()
+        if line is not None:
+            (box / RECORD).write_text(line)
 
 
 def finish(proc, ceiling):
@@ -618,6 +671,90 @@ class WatchTest(UmaskTestCase):
             word = seen_record(box, time.time()).word
             self.assertEqual((looked, word, code, out.count(f"LISTENER DOWN: {NAME}")),
                              (True, LISTENING, EXIT_ALERT, 1), f"w said: {out!r} {err!r}")
+
+
+# F1 (Claude Opus 5.5, unreviewed): item 4.
+def parsed(text):
+    """`text` as JSON, or None when it is not JSON, so a test fails on its assertion, never on a parse.
+
+    @interacts  none.
+    @deps       json.
+    @complexity O(t) over t characters.
+    @alloc      the parsed value, returned.
+    """
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
+
+
+class HealthTest(UmaskTestCase):
+    """Item 4: tc health shows each stopped name's last exit word and its age, in words and under a new JSON key, and the gate's health never carries it.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, UmaskTestCase, load_tc, stop_names,
+                record_made, run_in_process, parsed.
+    @complexity O(1) per subtest.
+    @alloc      one TcRoot and one module per subtest.
+    """
+
+    def health_of(self, root, call):
+        """`call(tc)` for tc loaded on `root`, with tc's clock LATER_SECONDS past GOOD_AT, no GPU query, and the far key's health command set for the gate: what `call` returns.
+
+        @interacts  loads tc; patches its wall_clock and gpu_stats and the
+                    process's SSH_ORIGINAL_COMMAND while `call` runs.
+        @deps       load_tc; os, unittest.mock; GOOD_AT, LATER_SECONDS,
+                    GATE_HEALTH.
+        @complexity O(1), plus the call.
+        @alloc      one module.
+        """
+        tc = load_tc(root)
+        with mock.patch.object(tc, "wall_clock", lambda: GOOD_AT + LATER_SECONDS), \
+                mock.patch.object(tc, "gpu_stats", lambda: None), \
+                mock.patch.dict(os.environ, {"SSH_ORIGINAL_COMMAND": GATE_HEALTH}):
+            return call(tc)
+
+    def test_health_shows_each_stopped_names_last_exit_and_its_age_and_the_gate_never_does(self):
+        """sb, sc and sd stopped with records saying timeout, mail and listening, written two minutes before tc's clock; se stopped with no record; sf a live, proven listener whose own record says listening. tc health's listeners line: `sf (pid N) · stopped: sb (timeout, 2m ago), sc (mail, 2m ago), sd (listening, 2m ago), se`. Its JSON's wait_exits: sb, sc and sd, each its word and 120 s, and nothing for se or sf. The gate's health --json has no wait_exits key, while this mailbox's own health has one that is not empty.
+
+        Must reject a health that drops the exit, that shows a live
+        listener's record (only its lock says it is live), that invents a
+        record for a name with none, and a gate that hands the key to a
+        far key (GATE_HEALTH_KEYS stays as it is: an allow list).
+
+        @interacts  per subtest: stop_names' files; one proven listener;
+                    cmd_health or cmd_gate, and health_snapshot, in
+                    process (health_of).
+        @deps       stop_names, record_made, health_of, run_in_process,
+                    parsed; _root.TcRoot.listener; argparse.
+        @complexity O(1) per subtest.
+        @alloc      one TcRoot and one module per subtest.
+        """
+        words = f" · stopped: sb (timeout, {LATER_WORDS}), sc (mail, {LATER_WORDS}), sd (listening, {LATER_WORDS}), se"
+        exits = {"sb": {"word": TIMEOUT, "age_s": LATER_SECONDS}, "sc": {"word": MAIL, "age_s": LATER_SECONDS},
+                 "sd": {"word": LISTENING, "age_s": LATER_SECONDS}}
+        with self.subTest(shown="in words"), _root.TcRoot() as root:
+            stop_names(root)
+            with root.listener(LIVE, LISTENER_SECONDS) as pid:
+                record_made(root.path / "mail" / f"to-{LIVE}")
+                code, out, err = self.health_of(root, lambda tc: run_in_process(
+                    lambda: tc.cmd_health(argparse.Namespace(json=False))))
+            line = next((text for text in out.splitlines() if text.startswith("listeners")), None)
+            self.assertEqual((code, line), (0, f"listeners  {LIVE} (pid {pid}){words}"), err)
+        with self.subTest(shown="as JSON"), _root.TcRoot() as root:
+            stop_names(root)
+            with root.listener(LIVE, LISTENER_SECONDS):
+                record_made(root.path / "mail" / f"to-{LIVE}")
+                code, out, err = self.health_of(root, lambda tc: run_in_process(
+                    lambda: tc.cmd_health(argparse.Namespace(json=True))))
+            self.assertEqual((code, (parsed(out) or {}).get(EXITS_KEY)), (0, exits), err)
+        with self.subTest(shown="the gate's health"), _root.TcRoot() as root:
+            stop_names(root)
+            mine, (code, out, err) = self.health_of(root, lambda tc: (
+                tc.health_snapshot(gpu=False), run_in_process(lambda: tc.cmd_gate(argparse.Namespace(as_name=GATE_KEY)))))
+            gated = parsed(out) or {}
+            self.assertEqual((code, mine.get(EXITS_KEY) == exits, EXITS_KEY in gated), (0, True, False),
+                             f"the gate's keys: {sorted(gated)}; {err}")
 
 
 if __name__ == "__main__":

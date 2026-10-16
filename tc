@@ -242,8 +242,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             --names` reads it for each tracked name whose lock is gone,
             and alerts LISTENER DOWN only when it still says
             `listening`, is missing, or is older than the watch's last
-            sighting of that lock.
-@deps     python3 stdlib (argparse, collections, contextlib, errno, fcntl,
+            sighting of that lock. `health` shows each stopped name's last
+            exit word and its age, in words and as `wait_exits` in its
+            JSON; the gate's health leaves it out.
+@deps    python3 stdlib (argparse, collections, contextlib, errno, fcntl,
             grp, hashlib, io, json, pathlib, pwd, re, resource, secrets,
             selectors, shlex, shutil, signal, stat, subprocess, time,
             traceback, datetime, os, sys); Linux only
@@ -289,7 +291,9 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             and it grows with the history; the board's feed runs the same
             count every poll, mailbox_summary), plus O(W log W) over W
             files waiting in every outbox branch (P3 fix round 1c, Claude
-            Opus 5.5, unreviewed: stuck_outbox). Each watch poll O(k + n
+            Opus 5.5, unreviewed: stuck_outbox), plus O(s log s) over s
+            stopped names, one inbox open and one short read each for its
+            exit record (wait_exits, F1). Each watch poll O(k + n
             log n): /proc/locks, then one inbox open and one lstat per
             name for its lock (listeners; P3 fix round 1b, Claude Opus
             5.5, unreviewed: D35), plus one nvidia-smi run where it
@@ -9118,6 +9122,15 @@ def health_snapshot(cards=True, gpu=True, branches=True):
     .shared counts as shared), so the switch-over's old place is read on
     a private mailbox only.
 
+    F1 (Claude Opus 5.5, unreviewed): C5's wait exit record. `wait_exits`
+    holds, for each stopped name (in `listeners` with no pid) whose inbox
+    has a record (wait_exits, read_wait_exit), its word and its age:
+    {"word": "mail", "age_s": 120}. A live listener's record is left out:
+    only its held lock says it is live, and a stopped name's `listening`
+    means its wait was killed or crashed. Read last, after every other
+    look at an inbox. The gate's list leaves it out (GATE_HEALTH_KEYS does
+    not name it).
+
     @interacts  reads /proc, mail/ and each inbox in it, status/, cards/ (only when `cards`)
                 and ROOT/.shared; lists outbox/ and mail/.origins/, and
                 each outbox branch and queue this user can open, reading
@@ -9126,20 +9139,26 @@ def health_snapshot(cards=True, gpu=True, branches=True):
                 mailbox lstats each name's
                 locks and card and stats each holder's /proc/<pid>
                 (held_by_others); may run nvidia-smi (machine_stats, only
-                when `gpu`). Writes nothing.
+                when `gpu`); opens each stopped name's inbox and reads its
+                exit record, and reads the clock (wait_exits, wall_clock;
+                F1). Writes nothing.
     @deps       now_iso, machine_stats, session_counts, listeners,
                 mailbox_summary, cards_summary, squatted_branches,
-                stuck_outbox, held_by_others, shared_group.
-    @complexity O(p + k + n log n + M + m log m + c + e + h + W log W):
-                p processes, k lines in /proc/locks, n mailbox names, M
-                names in every inbox and read/ and the m message files
-                among them (mailbox_summary lists each folder in its
+                stuck_outbox, held_by_others, shared_group, wait_exits,
+                wall_clock.
+    @complexity O(p + k + n log n + M + m log m + c + e + h + W log W
+                + s log s): p processes, k lines in /proc/locks, n mailbox
+                names, M names in every inbox and read/ and the m message
+                files among them (mailbox_summary lists each folder in its
                 descriptor, sorts its message names and stats each one:
                 hundreds to thousands, growing with the history), c cards,
                 e entries in outbox/ and mail/.origins/ (one per member
                 each), h holders of the names' locks (held_by_others), W
-                files waiting in every outbox branch (stuck_outbox).
-    @alloc      one dict, returned.
+                files waiting in every outbox branch (stuck_outbox), s
+                stopped names, one inbox open and one short read each
+                (wait_exits; F1).
+    @alloc      one dict, returned; one small dict per stopped name with
+                an exit record in it (F1).
     """
     try:  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): LOW-8, a field, never a raise
         group, problem = shared_group(), None
@@ -9156,6 +9175,10 @@ def health_snapshot(cards=True, gpu=True, branches=True):
         snap["stuck_outbox"] = stuck_outbox()  # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4)
     snap["held_by_others"] = held_by_others(shared)  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3); the gate's list leaves it out (1c)
     snap["shared_group"], snap["shared_problem"] = group, problem  # SHARED H1 (Claude Opus 5.5, unreviewed): C4
+    # F1 (Claude Opus 5.5, unreviewed): each stopped name's last exit word and its age; never a listener.
+    now = wall_clock()
+    snap["wait_exits"] = {name: {"word": record.word, "age_s": max(0, round(now - record.at))}
+                          for name, record in wait_exits([n for n, pid in snap["listeners"].items() if not pid]).items()}
     return snap
 
 
@@ -9166,21 +9189,26 @@ def _gpu_text(gpus):
 
 
 # Phase fix round 1 (Claude Opus 5.5, unreviewed): names escaped, and this block.
-def _who(table):
-    """Listener or watcher names in words: `<name> (pid <p>)` for each live one, then the stopped ones.
+def _who(table, exits=None):
+    """Listener or watcher names in words: `<name> (pid <p>)` for each live one, then the stopped ones, each with its last exit word and its age when `exits` (health's `wait_exits`) has one: `b (mail, 2m ago)`.
 
     A name comes from an inbox folder's name (mail/to-<name>/, where its
     lock lives since D35), or on a private mailbox from an old lock's
     name in mail/ (the switch-over), so it goes through printable() (P3
-    fix round 2, Claude Opus 5.5, unreviewed: the audit's LOW-7).
+    fix round 2, Claude Opus 5.5, unreviewed: the audit's LOW-7). F1
+    (Claude Opus 5.5, unreviewed): the exit word is one of tc's own three
+    (read_wait_exit takes no other), so it prints as it is; a stopped
+    name's `listening` says its wait was killed or crashed.
 
     @interacts  none; string work only.
-    @deps       printable.
+    @deps       printable, _age.
     @complexity O(n) over n names in `table` (a few dozen).
     @alloc      two lists and one string, returned.
     """
+    exits = exits or {}
     up = [f"{printable(n)} (pid {pid})" for n, pid in table.items() if pid]
-    down = [printable(n) for n, pid in table.items() if not pid]
+    down = [printable(n) + (f" ({exits[n]['word']}, {_age(exits[n]['age_s'])} ago)" if n in exits else "")
+            for n, pid in table.items() if not pid]
     text = " · ".join(up) if up else "none running"
     return text + (f" · stopped: {', '.join(down)}" if down else "")
 
@@ -9216,6 +9244,12 @@ def cmd_health(args):
     (stuck_outbox): its path, member, the name it is for, its age, and
     the first line of its last failed try's note, or that none is noted.
 
+    F1 (Claude Opus 5.5, unreviewed): the `listeners` line names each
+    stopped name's last exit word and its age from `wait_exits`
+    (`stopped: b (mail, 2m ago), c (listening, 5m ago), d`), and --json
+    carries `wait_exits` as health_snapshot builds it. Who is listening
+    still comes from the locks alone.
+
     @interacts  see health_snapshot; prints to stdout.
     @deps       health_snapshot, describe_card, printable, _who, _age,
                 _gpu_text; json.
@@ -9229,7 +9263,7 @@ def cmd_health(args):
     m, s = snap["machine"], snap["sessions"]
     print(f"machine    load {m['load1']} / {m['cores']} cores · mem free {m['mem_avail_pct']}% · {_gpu_text(m['gpus'])}")
     print(f"sessions   {s['claude']} Claude Code · {s['codex']} Codex")
-    print(f"listeners  {_who(snap['listeners'])}")
+    print(f"listeners  {_who(snap['listeners'], snap['wait_exits'])}")  # F1 (Claude Opus 5.5, unreviewed): each stopped one's exit
     print(f"watchers   {_who(snap['watchers'])}")
     # CARDS R5 (Claude Opus 5.5, unreviewed): one line per card, `?` for a field it lacks.
     cards = []
