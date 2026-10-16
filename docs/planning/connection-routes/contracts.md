@@ -5,7 +5,7 @@ Status: draft. Reviewed once by a planning session (Claude Fable 5.1,
         2026-10-14, 24 findings, all folded in). Amended for D7 (any
         topology) on 2026-10-14, and for the CARDS pauses (D13) the codex lost wake (D14) and the BOARD
         pauses (D15) the P1 and P2 phase review (D16), and the
-        wave 2 rulings (D17 to D21) the same day, and D22 to D36 on
+        wave 2 rulings (D17 to D21) the same day, and D22 to D37 on
         2026-10-15.
         Fixed once a2 approves for Donald (D8); a lane that needs a change writes a pause and does not
         edit this file.
@@ -390,6 +390,14 @@ command="/home/you/TheConnection/tc gate --as homebox-b",no-pty,no-port-forwardi
   `shared_problem`). A key health gains later stays home unless it is
   added to the list by name, so D35's line naming who holds a lock, and
   D36's stuck-queue lines, never reach a far key.
+- **What a far key reads carries nothing of this machine** (D36 part 5's
+  scope, D37). Everything the gate gives a far key, its stdout, its
+  stderr, its exit words and its health, names no path on this machine,
+  no login and no pid. A path is given relative to the mailbox (for
+  example `mail/to-b/000012-from-homebox-b.md`), and a user or a process
+  that holds or owns something is said as `another member` or `another
+  process`. The near side shows what the far side printed, so this is
+  what a far sender sees.
 
 **What the gate may run** (D18). The gate starts no shell. Its one
 program is the codex ring, reached through the router for a recipient
@@ -663,9 +671,14 @@ of `tc health` is not on the board's path.
   - The legend says the cases it cannot see: a session that crashes
     after reading its mail looks `working` until the window ends; and
     with no board page open, the board cannot tell when a listener went,
-    so it gives mail the benefit of the doubt. A planned follow-up, once
-    SHARED merges, has `tc wait` write its exit reason into its lock file
-    so the board reads it from disk (D28).
+    so it gives mail the benefit of the doubt. A planned follow-up has
+    `tc wait` write its exit reason so the board reads it from disk
+    (D28). Since the lock is `0600` (D35), the record lives beside the
+    lock, not in it (D37): a file in the owner's inbox, written by the
+    owner, group-readable, opened through the pinned inbox handle and
+    never followed. Readers take its contents as that member's own
+    words, never as proof of a live listener; the held lock stays the
+    only proof (rule 6).
 - `idle`: a card or inbox, no listener, not codex or ssh, not down,
   woken or working.
 - `unread` is a count, or `null` when tc could not see into the inbox
