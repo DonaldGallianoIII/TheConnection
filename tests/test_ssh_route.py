@@ -35,7 +35,10 @@ it watched is reachable.
             other root; one (P3 fix round 1c: D36 (4)) starts that far
             gate through FAILING_GATE_BOOT,
             which makes each create of a .tmp there fail with a passing
-            errno and runs tc in the same process. One test's wrapper
+            errno and runs tc in the same process, and one (P3 fix round
+            2, Claude Opus 5.5, unreviewed: the audit's LOW-3) the same
+            way, with mail/.seq's write or an inbox lock's create failing
+            instead. One test's wrapper
             prints past tc's output cap on stdout after the fake. Six
             tests load tc as a module
             (TC_ROOT set to the harness root first, put back after) and
@@ -218,19 +221,46 @@ OWN_WRAPPER_MODE = 0o700
 # here by name), and the far gate's start-up that makes every create of a
 # .tmp fail with one: argv is the errno's name, tc's path, then tc's own
 # arguments. It runs tc as __main__ in the same process, so no other
-# program starts.
+# program starts. P3 fix round 2 (Claude Opus 5.5, unreviewed): the
+# audit's LOW-3. The errno's name is followed by a stage: "tmp" (as
+# before), "lock" (an inbox lock's create, mail/.box-<name>.lock, fails)
+# or "seq" (mail/.seq's write fails: tc's open of its descriptor gets a
+# file whose write raises, all else passed through).
 PASSING_ERRNO_NAMES = ("ENOSPC", "EDQUOT", "EIO")
-FAILING_GATE_BOOT = """import errno, os, runpy, sys
-failing = getattr(errno, sys.argv[1])
-real_open = os.open
+FAILING_GATE_BOOT = """import builtins, errno, os, runpy, sys
+failing, stage = getattr(errno, sys.argv[1]), sys.argv[2]
+real_open, real_text_open = os.open, builtins.open
 def open_failing(path, flags, *args, **kwargs):
-    if str(path).endswith(".tmp") and flags & os.O_CREAT:
+    name = os.path.basename(str(path))
+    if flags & os.O_CREAT and ((stage == "tmp" and name.endswith(".tmp"))
+                               or (stage == "lock" and name.startswith(".box-") and name.endswith(".lock"))):
         raise OSError(failing, os.strerror(failing), str(path))
     return real_open(path, flags, *args, **kwargs)
-os.open = open_failing
-sys.argv = sys.argv[2:]
+class FailingWrites:
+    def __init__(self, real):
+        self.real = real
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        self.real.close()
+        return False
+    def write(self, text):
+        raise OSError(failing, os.strerror(failing))
+def open_text(file, *args, **kwargs):
+    made = real_text_open(file, *args, **kwargs)
+    if stage == "seq" and isinstance(file, int) and os.readlink(f"/proc/self/fd/{file}").endswith("/mail/.seq"):
+        return FailingWrites(made)
+    return made
+os.open, builtins.open = open_failing, open_text
+sys.argv = sys.argv[3:]
 runpy.run_path(sys.argv[0], run_name="__main__")
 """
+# The stages a far failing gate takes (FAILING_GATE_BOOT): a message's .tmp
+# (round 1c), and the two writes a send makes before it (round 2).
+TMP_STAGE = "tmp"
+BEFORE_PUBLISH_STAGES = ("seq", "lock")
 # A far gate's busy words for a write that passes (tc's PASSING_WORDS,
 # written here); {what} names the step and its path, {why} the error.
 PASSING_WORDS = ("tc send: {what} ({why}); nothing sent. A full disk, a quota or an I/O error passes, so this is busy, "
@@ -415,7 +445,7 @@ def may_make_in(folder, uid, gids):
     return may(folder, uid, gids, MAY_WRITE) and may(folder, uid, gids, MAY_SEARCH)
 
 
-def far_gate_ssh(root, folder, far, key=FAR_KEY, fail_errno=None):
+def far_gate_ssh(root, folder, far, key=FAR_KEY, fail_errno=None, fail_stage=TMP_STAGE):
     """A loopback `ssh`: it runs the harness's fake at `folder` (the record, and its exit code: a non-zero one ends the call there), then hands the same stdin and the remote command, its last argument, to a real `tc gate --as <key>` under the far mailbox `far`, as sshd does with a forced command. The env for a call that should find it.
 
     No real ssh runs (rule 5): the fake records every call and is asserted
@@ -426,7 +456,8 @@ def far_gate_ssh(root, folder, far, key=FAR_KEY, fail_errno=None):
     an errno name (ENOSPC, say), runs that far gate through
     FAILING_GATE_BOOT, which makes every create of a .tmp fail with it:
     a far machine whose disk is full, or its quota reached, or its disk
-    failing.
+    failing. P3 fix round 2 (Claude Opus 5.5, unreviewed): `fail_stage`
+    picks what fails instead, "lock" or "seq" (FAILING_GATE_BOOT).
 
     @interacts  writes far-ssh-*/ssh (mode 0700), and with `fail_errno`
                 far-ssh-*/boot.py, in the root's temp folder; each call
@@ -444,7 +475,7 @@ def far_gate_ssh(root, folder, far, key=FAR_KEY, fail_errno=None):
         boot = home / "boot.py"
         boot.write_text(FAILING_GATE_BOOT)
         run = (f"{shlex.quote(sys.executable)} {shlex.quote(str(boot))} {shlex.quote(fail_errno)} "
-               f"{shlex.quote(str(_root.TC))}")
+               f"{shlex.quote(fail_stage)} {shlex.quote(str(_root.TC))}")
     wrapper = home / "ssh"
     wrapper.write_text("#!/bin/sh\n"
                        f"cat > {feed}\n"
@@ -1382,6 +1413,44 @@ class FarAnswerTest(unittest.TestCase):
                 self.assertEqual(note_lines[:1], [f"{TARGET} was busy ({reason})"],
                                  "the note beside the waiting file does not hold this try's words")
                 self.assertEqual((left, far_filed), ([], []), "the far gate left a file behind")
+
+    # P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-3, option A (test-strategist REC-8's twin).
+    def test_a_far_gate_whose_mail_seq_or_inbox_lock_cannot_be_written_answers_10_and_the_message_stays_queued(self):
+        """Through the loopback fake's real far gate, its mail/.seq's write or its inbox lock's create failing with each of PASSING_ERRNO_NAMES: the far gate answers 10 with its busy words naming that file, lands nothing and files nothing; this side exits 4 and keeps the message waiting, nothing in sent/ or refused/.
+
+        Must reject a far gate that answers either failure with an
+        uncaught OSError, exit 1, which this side files in refused/ for
+        good.
+
+        @interacts  per stage and errno: writes the loopback wrapper and
+                    its failing start-up; one tc card, one send.
+        @deps       far_gate_ssh, assert_called, outbox, queue; errno, os.
+        @complexity O(1): six cases.
+        @alloc      one TcRoot per case and the far mailbox in its temp
+                    folder.
+        """
+        for stage in BEFORE_PUBLISH_STAGES:
+            for name in PASSING_ERRNO_NAMES:
+                with self.subTest(stage=stage, errno=name), _root.TcRoot() as root:
+                    folder, calls = root.fake_bin("ssh", 0)
+                    far = root.base / "far"
+                    far.mkdir()
+                    env = far_gate_ssh(root, folder, far, fail_errno=name, fail_stage=stage)
+                    root.tc("card", "b", "--ssh", TARGET)
+                    code, out, err = root.tc("send", "--from", "a", "--to", "b", "hi", env=env)
+                    assert_called(self, folder, calls)
+                    path = queue(root, "b") / "000001-from-a.md"
+                    kept = (outbox(root, "b"), outbox(root, "b", "sent") + outbox(root, "b", "refused"))
+                    left = sorted(p.name for p in (far / "mail").rglob("*.md"))
+                    far_filed = sorted(p.name for p in (far / "mail").rglob("*")
+                                       if ".origins" in p.parts and p.is_file())
+                    what = (f"could not write {far / 'mail' / '.seq'}" if stage == "seq"
+                            else f"could not make {far / 'mail' / '.box-b.lock'}")
+                    far_words = PASSING_WORDS.format(what=what, why=os.strerror(getattr(errno, name)))
+                    self.assertEqual((code, out, err), (EXIT_QUEUED, "", BUSY_KEPT_WORDS.format(
+                        target=TARGET, reason=f"exit {EXIT_BUSY}: {far_words}", path=path)))
+                    self.assertEqual(kept, (["000001-from-a.md"], []), "a far 10 was not kept waiting")
+                    self.assertEqual((left, far_filed), ([], []), "the far gate landed or filed something")
 
 
 # SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and D33 part 1.

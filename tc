@@ -54,7 +54,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             ring. P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4).
             A gate that cannot write a message for a reason that passes
             (no space, a quota, an I/O error) answers busy, exit 10, with
-            nothing left behind, so the near side keeps it queued; each
+            nothing left behind, so the near side keeps it queued (P3 fix
+            round 2, Claude Opus 5.5, unreviewed: the audit's LOW-3, so
+            does one that cannot write mail/.seq or make its inbox lock
+            for such a reason); each
             failed ssh try (a connection failure, a timeout, a far 10)
             writes its words into a note beside the waiting file, which
             moves with the file, and `health` lists every outbox message
@@ -72,7 +75,11 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             group-writable marker says, and writes that record before
             each ring, and a retry of a message the far gate already
             delivered runs the same decision (P3 fix round 1b, Claude
-            Opus 5.5, unreviewed: D35 (2), D36 (1), the audit's LOW-1).
+            Opus 5.5, unreviewed: D35 (2), D36 (1), the audit's LOW-1),
+            and never refuses for its inbox lock: anything wrong there
+            skips the ring with a warning, and the answer stays `already
+            delivered`, exit 0 (P3 fix round 2, Claude Opus 5.5,
+            unreviewed: the audit's LOW-2).
             While ROOT/.shared exists (C4) every command
             runs under umask 002 and every folder tc makes gets the group
             it names and mode 2775 (make_folder, D16), or 3775 (sticky,
@@ -3214,8 +3221,20 @@ def busy_words(what, f):
     return LOCK_HELD_BY_WORDS.format(held=LOCK_HELD_WORDS.format(what=what), holders=named, ask=ask, init=init)
 
 
-def next_seq(deadline=None):
+def next_seq(deadline=None, busy_on_passing=False):
     """The next message number: mail/.seq read, raised by one and written back under its flock.
+
+    P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-3,
+    option A (D36 (4), exit row 10). With `busy_on_passing` (the far
+    gate's delivery), a write that fails for a reason that passes
+    (PASSING_WRITE_ERRNOS: no space, a quota, an I/O error), making mail/
+    or mail/.seq or rewriting the number, refuses busy, exit 10, with
+    PASSING_WORDS naming mail/.seq: no message is written and no origin
+    filed, so the near side keeps the message queued. Without it (tc
+    send's own) the OSError goes up as before. Known and not changed
+    here (option B, not taken): the counter is truncated before its
+    write, so a write that fails can leave mail/.seq empty, and the next
+    send then starts again from 1, a taken name at a time.
 
     @interacts  reads ROOT/.shared and makes mail/ when missing
                 (make_folder); opens mail/.seq through open_by_name,
@@ -3229,29 +3248,37 @@ def next_seq(deadline=None):
                 process is holding <ROOT>/mail/.seq's lock: <user> (pid
                 <pid>); try again. ...` naming each holder and whom to ask
                 (busy_words; P3 fix round 1b, Claude Opus 5.5, unreviewed:
-                D35 (3)), with nothing written (D20).
+                D35 (3)), with nothing written (D20). With
+                `busy_on_passing`, a passing write failure: one line to
+                stderr and exit 10.
     @deps       make_folder, open_by_name, flock_within, busy_words,
-                refuse; fcntl, os; EXIT_BUSY.
+                refuse; fcntl, os; EXIT_BUSY, PASSING_WRITE_ERRNOS,
+                PASSING_WORDS.
     @complexity O(1), plus waiting until `deadline` at most; a refusal
                 adds busy_words' read of /proc/locks.
     @alloc      one open file, closed on return.
     """
-    make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
-    # SHARED D17 (Claude Opus 5.5, unreviewed); P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-12, UTF-8 named.
-    with open(open_by_name(SEQ_FILE, os.O_RDWR | os.O_APPEND), "a+", encoding="utf-8") as f:
-        if not flock_within(f, fcntl.LOCK_EX, deadline):  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20
-            refuse(busy_words(SEQ_FILE, f), EXIT_BUSY)  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), the holder named
-        f.seek(0)
-        n = int(f.read().strip() or 0) + 1
-        f.seek(0)
-        f.truncate()
-        f.write(str(n))
+    try:  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-3 (option A), the gate's passing failure is busy
+        make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
+        # SHARED D17 (Claude Opus 5.5, unreviewed); P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-12, UTF-8 named.
+        with open(open_by_name(SEQ_FILE, os.O_RDWR | os.O_APPEND), "a+", encoding="utf-8") as f:
+            if not flock_within(f, fcntl.LOCK_EX, deadline):  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20
+                refuse(busy_words(SEQ_FILE, f), EXIT_BUSY)  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), the holder named
+            f.seek(0)
+            n = int(f.read().strip() or 0) + 1
+            f.seek(0)
+            f.truncate()
+            f.write(str(n))
+    except OSError as err:
+        if not (busy_on_passing and err.errno in PASSING_WRITE_ERRNOS):
+            raise
+        refuse(PASSING_WORDS.format(what=f"could not write {SEQ_FILE}", why=err.strerror), EXIT_BUSY)
     return n
 
 
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the inbox lock (D14), for send, read and card.
 @contextlib.contextmanager
-def inbox_lock(name, how=fcntl.LOCK_EX, deadline=None):
+def inbox_lock(name, how=fcntl.LOCK_EX, deadline=None, *, busy_on_passing=False, raising=False):
     """Hold mail/.box-<name>.lock (flock) for the `with` block.
 
     One lock per inbox. Held alone (LOCK_EX) by the codex route from its
@@ -3280,25 +3307,69 @@ def inbox_lock(name, how=fcntl.LOCK_EX, deadline=None):
     lock_deadline, which a send passes on to next_seq (one deadline per
     command); None means LOCK_WAIT_SECONDS from now.
 
-    @interacts  reads ROOT/.shared and makes mail/ (make_folder, D16);
+    P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-3,
+    option A. With `busy_on_passing` (the far gate's delivery), a write
+    that fails for a reason that passes (PASSING_WRITE_ERRNOS), making
+    mail/ or the lock file on its first use, refuses busy, exit 10, with
+    PASSING_WORDS naming the lock, before anything is written. The
+    audit's LOW-2, option A: `raising` True is the variant for a gate's
+    retry of a message already delivered (ring_doorbell), which must
+    never refuse: every failure (.shared or mail/ refused, a link, a
+    FIFO, a folder or a file it may not open at the lock's name, a
+    passing write failure, or the lock held past `deadline`, said as held
+    past LOCK_WAIT_SECONDS without reading its holders) is raised as
+    OSError, its words, naming the lock, in strerror, before the block
+    runs, and nothing exits.
+
+    @interacts  reads ROOT/.shared and makes mail/ (make_folder, D16; with
+                `raising`, share_or_raise and make_folder_with);
                 opens mail/.box-<name>.lock through open_by_name, creating
                 it empty (append mode, so it never truncates what is there)
-                and refusing a symlink or a FIFO there (exit 1, D17, D19),
+                and refusing a symlink or a FIFO there (exit 1, D17, D19;
+                with `raising`, open_regular and a raise),
                 and holds the flock until the block ends; the kernel drops
                 it if the process dies. Waits for it no later than
                 `deadline`, then names its holders (busy_words: /proc/locks,
                 each holder's /proc/<pid>, the user database, .shared),
-                writes one line to stderr and exits 10.
-    @deps       make_folder, open_by_name, flock_within, busy_words,
-                refuse; contextlib, fcntl, os; EXIT_BUSY.
+                writes one line to stderr and exits 10 (with `raising`,
+                raises LOCK_HELD_WORDS instead, reading no holder). With
+                `busy_on_passing`, a passing write failure on the lock's
+                first use: one line to stderr and exit 10.
+    @deps       make_folder, make_folder_with, share_or_raise,
+                open_by_name, open_regular, flock_within, busy_words,
+                refuse; contextlib, errno, fcntl, os; MAIL, EXIT_BUSY,
+                PASSING_WRITE_ERRNOS, PASSING_WORDS, LOCK_HELD_WORDS,
+                LOCK_WAIT_SECONDS.
     @complexity O(1), plus waiting until `deadline` at most; a refusal
                 adds busy_words' read of /proc/locks.
     @alloc      one open file for the block; mail/.box-<name>.lock, made on
-                first use and kept (nothing removes it).
+                first use and kept (nothing removes it); the words, when
+                raised.
     """
-    make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
-    with open(open_by_name(MAIL / f".box-{name}.lock", os.O_WRONLY | os.O_APPEND), "a") as lock:  # SHARED D17 (Claude Opus 5.5, unreviewed)
+    path = MAIL / f".box-{name}.lock"
+    if raising:  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-2 (option A), a retry never refuses
+        try:
+            make_folder_with(MAIL, share_or_raise(), raising=True)
+            fd = open_regular(path, os.O_WRONLY | os.O_APPEND)
+        except ValueError:
+            raise OSError(errno.EINVAL, f"{path} is not a regular file, which tc never opens") from None
+        except OSError as err:
+            why = ("is a symlink, which tc never follows" if err.errno == errno.ELOOP
+                   else "is not a regular file, which tc never opens" if err.errno in (errno.ENXIO, errno.EISDIR)
+                   else f"could not be opened ({err.strerror})")
+            raise OSError(err.errno, f"{path} {why}") from None
+    else:
+        try:  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-3 (option A), the gate's passing failure is busy
+            make_folder(MAIL)  # SHARED H1 (Claude Opus 5.5, unreviewed): D16
+            fd = open_by_name(path, os.O_WRONLY | os.O_APPEND)  # SHARED D17 (Claude Opus 5.5, unreviewed)
+        except OSError as err:
+            if not (busy_on_passing and err.errno in PASSING_WRITE_ERRNOS):
+                raise
+            refuse(PASSING_WORDS.format(what=f"could not make {path}", why=err.strerror), EXIT_BUSY)
+    with open(fd, "a") as lock:
         if not flock_within(lock, how, deadline):  # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20
+            if raising:  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-2, a retry's ring skipped, never refused
+                raise OSError(errno.EBUSY, f"{LOCK_HELD_WORDS.format(what=name)} past {LOCK_WAIT_SECONDS} s")
             refuse(busy_words(name, lock), EXIT_BUSY)  # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (3), the holder named
         yield
 
@@ -3400,12 +3471,18 @@ def route_and_deliver(sender, to, body, header_note=None, *, forward=True, on_la
     LOW-4. The gate's delivery (`forward` False) hands the local and codex
     routes busy_on_passing, so a message it cannot write for a reason that
     passes (no space, a quota, an I/O error) is Delivery exit 10, busy, and
-    the near side keeps it queued; tc send's own stays exit 1.
+    the near side keeps it queued; tc send's own stays exit 1. P3 fix
+    round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-3, option A.
+    The local route's inbox lock gets it too, and so does mail/.seq
+    (next_seq, through deliver_local and publish_message): such a failure
+    making the lock or writing the counter exits 10 there, nothing
+    written.
 
     @interacts  reads cards/<to>.json (card_route) and refuses (exit 1,
                 nothing written) a card it cannot route; for a local
                 delivery holds mail/.box-<to>.lock shared (inbox_lock;
-                held past the deadline by another process, exit 10,
+                held past the deadline by another process, or, for the
+                gate, a passing write failure making it, exit 10,
                 nothing written) and reads the card again; calls one
                 ROUTES function, which writes the message (and calls
                 `on_landed`, local and codex only).
@@ -3420,7 +3497,7 @@ def route_and_deliver(sender, to, body, header_note=None, *, forward=True, on_la
     deadline = lock_deadline()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one per command
     if deliver is deliver_local:
         # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the card read again under the shared lock.
-        with inbox_lock(to, fcntl.LOCK_SH, deadline):
+        with inbox_lock(to, fcntl.LOCK_SH, deadline, busy_on_passing=not forward):  # P3 fix round 2: LOW-3
             card, deliver = card_route(to)
             if deliver is deliver_local:  # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), the gate's 10
                 return deliver_local(card, sender, to, body, header_note, deadline=deadline, on_landed=on_landed,
@@ -3714,7 +3791,11 @@ def deliver_once(sender, to, body, header_note=None, *, origin=None, forward=Tru
     filed the id and before its ring is rung by the near side's retry.
     The answer is still exit 0, `already delivered`, with the ring's line
     or warning after it. A card that cannot be read rings nothing: the
-    retry is never refused for it.
+    retry is never refused for it. P3 fix round 2 (Claude Opus 5.5,
+    unreviewed): the audit's LOW-2, option A. Nor for the inbox lock: a
+    link, a FIFO or anything tc cannot open at its name, or the lock held
+    past the bound, skips the ring with a warning (ring_doorbell), and the
+    answer is still `already delivered`, exit 0.
 
     @interacts  opens mail/.origins/<user>/<sender>/ and lstats
                 <origin> there (origin_filed); for an id already filed,
@@ -5349,7 +5430,10 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on
     P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4).
     `busy_on_passing`, another keyword C2 leaves out, goes to
     publish_message: True for the far gate (route_and_deliver), so a write
-    that fails for a reason that passes is Delivery exit 10, not 1.
+    that fails for a reason that passes is Delivery exit 10, not 1. P3 fix
+    round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-3, option A.
+    It goes to next_seq too, so such a failure writing mail/.seq exits 10
+    there, before anything is published.
 
     @interacts  reads ROOT/.shared (mailbox_share) unless `inbox` is
                 given; opens mail/, mail/to-<to>/ and its read/ once
@@ -5358,7 +5442,8 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on
                 read/ it cannot look at, when shared not its card owner's);
                 when shared, lstats cards/<to>.json for the no-card
                 refusal; takes the mail/.seq flock (next_seq, once per
-                try, every try under one deadline; held past it, exit 10);
+                try, every try under one deadline; held past it, exit 10;
+                for the gate, a passing write failure there, exit 10);
                 private only, then makes mail/, the inbox and read/ when
                 missing, by name, and opens them (inbox_made); per try
                 lstats NNNNNN-from-<sender>.md in read/,
@@ -5403,7 +5488,7 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on
                                           f"that Linux user), which makes the inbox.", [])
     if deadline is None:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one deadline for every try
         deadline = lock_deadline()
-    n = next_seq(deadline)
+    n = next_seq(deadline, busy_on_passing)  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-3, the gate's 10
     mode = SHARED_OWNED_FILE_MODE if inbox.shared else NEW_FILE_MODE  # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20 item 2
     with inbox_made(inbox, to) as made:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): private only, after the number
         if made.box.fd is None:  # nothing to publish in, though one was made a moment ago
@@ -5487,7 +5572,9 @@ def publish_message(box, box_fd, history, n, sender, to, body, header_note, mode
                 to its .md name there and removes the .tmp's name there;
                 every try after the first takes a number (next_seq: the
                 mail/.seq flock, waiting no later than `deadline`, then
-                exit 10). Reads the clock (now_iso).
+                exit 10; with `busy_on_passing`, a passing write failure
+                there exits 10 too, P3 fix round 2). Reads the clock
+                (now_iso).
     @deps       next_seq, write_new_file, name_taken, now_iso, Delivery;
                 os; ROOT, SEQ_WIDTH, PUBLISH_MAX_TRIES,
                 NO_HARD_LINK_ERRNOS, PASSING_WRITE_ERRNOS, TMP_TAKEN_WHY,
@@ -5506,7 +5593,7 @@ def publish_message(box, box_fd, history, n, sender, to, body, header_note, mode
     # SHARED fix round 2 (Claude Opus 5.5, unreviewed): D20, never over a message; a taken name takes the next number.
     for tries in range(PUBLISH_MAX_TRIES):
         if tries:
-            n = next_seq(deadline)
+            n = next_seq(deadline, busy_on_passing)  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-3
         path = box / f"{n:0{SEQ_WIDTH}d}-from-{sender}.md"
         kept = next((f"{folder}/{path.name}" for folder, folder_fd in history
                      if folder_fd is not None and name_taken(path.name, folder_fd)), None)  # P3 fix round 1a: D35, by name
@@ -5883,7 +5970,9 @@ def deliver_codex(card, sender, to, body, header_note=None, *, deadline=None, on
 
     P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4).
     `busy_on_passing` goes to deliver_local (the far gate's, so a write
-    that fails for a reason that passes is exit 10).
+    that fails for a reason that passes is exit 10). P3 fix round 2
+    (Claude Opus 5.5, unreviewed): the audit's LOW-3. It goes to
+    ring_doorbell too, for the inbox lock's first create.
 
     @interacts  see ring_doorbell, with this send's message written
                 through deliver_local in the inbox ring_doorbell opened.
@@ -5894,12 +5983,12 @@ def deliver_codex(card, sender, to, body, header_note=None, *, deadline=None, on
     def land(inbox):
         return deliver_local(card, sender, to, body, header_note, deadline=deadline, on_landed=on_landed, inbox=inbox,
                              busy_on_passing=busy_on_passing)
-    return ring_doorbell(card, sender, to, land, deadline=deadline)
+    return ring_doorbell(card, sender, to, land, deadline=deadline, busy_on_passing=busy_on_passing)  # P3 fix round 2: LOW-3
 
 
 # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (2) and D36 (1), the
 # ring decision a fresh landing and a gate's retry share (C2 item 5, LOW-1).
-def ring_doorbell(card, sender, to, land=None, *, deadline=None, already=None):
+def ring_doorbell(card, sender, to, land=None, *, deadline=None, already=None, busy_on_passing=False):
     """The codex route's doorbell for `to` (its `card`), after a landing: a Delivery. `land`, given the open Inbox, lands this send's message and returns its Delivery (a fresh send, deliver_codex); None means nothing lands now and `already` is the Delivery to answer with (a retry whose origin id the far gate already filed, deliver_once).
 
     Under mail/.box-<to>.lock, held alone (D14): read the marker, open the
@@ -5925,7 +6014,16 @@ def ring_doorbell(card, sender, to, land=None, *, deadline=None, already=None):
     retry (the marker it wrote before the ring says owed), and a retry
     after a ring that went through rings nothing. A retry never refuses:
     a bad marker or inbox only skips the ring, with a warning for the
-    marker, and the retry still answers `already`.
+    marker, and the retry still answers `already`. P3 fix round 2 (Claude
+    Opus 5.5, unreviewed): the audit's LOW-2, option A, which makes that
+    true of the inbox lock too. A retry takes it through inbox_lock's
+    raising variant, so anything that would refuse a fresh send there (a
+    link, a FIFO or a folder at the lock's name, a file it may not open,
+    .shared or mail/ refused, a passing write failure making it, the lock
+    held past `deadline`) skips the ring with one warning, `<to> was not
+    rung on this retry: <why>`, and the answer is still `already`, exit
+    0. So the near side never files a delivered message in refused/. A
+    fresh send hands `busy_on_passing` (the gate's) to the lock (LOW-3).
 
     When a ring is owed, the marker is written (RING_RINGING) and this
     sender's record (write_rang_record, D33's branch checks) before the
@@ -5939,7 +6037,9 @@ def ring_doorbell(card, sender, to, land=None, *, deadline=None, already=None):
     is refused, Delivery exit 1, nothing sent (D17, D19).
 
     @interacts  holds mail/.box-<to>.lock (inbox_lock: busy past
-                `deadline`, exit 10, nothing landed or rung) while it
+                `deadline`, exit 10, nothing landed or rung; for a retry,
+                any failure there is a warning and no ring, never an
+                exit) while it
                 lstats and reads the marker, opens mail/, the inbox and
                 its read/ (pinned_inbox, refusing a bad one for a fresh
                 send only), counts the inbox's messages in its descriptor,
@@ -5953,7 +6053,7 @@ def ring_doorbell(card, sender, to, land=None, *, deadline=None, already=None):
     @deps       lock_deadline, inbox_lock, ring_marker_problem,
                 pinned_inbox, unread_count, ring_owed, ring_backoff,
                 rang_long_ago, write_ring_marker, write_rang_record,
-                ring_codex, clock_words, wall_clock, Delivery;
+                ring_codex, clock_words, wall_clock, Delivery; contextlib;
                 RING_RINGING, RING_FAILED, RING_TIMED_OUT, RING_CLEAR,
                 RING_BACKOFF_SECONDS, EXIT_REFUSED.
     @complexity O(U + u log u) over U names in the inbox and the u of
@@ -5972,7 +6072,14 @@ def ring_doorbell(card, sender, to, land=None, *, deadline=None, already=None):
     fresh = land is not None
     if deadline is None:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): LOW-3, the command's own when given
         deadline = lock_deadline()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one per command
-    with inbox_lock(to, deadline=deadline):
+    with contextlib.ExitStack() as held:
+        try:  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-2 (option A), a retry's lock never refuses
+            held.enter_context(inbox_lock(to, deadline=deadline, busy_on_passing=busy_on_passing, raising=not fresh))
+        except OSError as err:
+            if fresh:
+                raise
+            return Delivery(already.exit, already.words, already.warnings + [f"{to} was not rung on this retry: "
+                                                                             f"{err.strerror}"])
         bad = ring_marker_problem(marker)  # SHARED D17 (Claude Opus 5.5, unreviewed): a planted link; D19 a FIFO
         if bad is not None:
             if fresh:

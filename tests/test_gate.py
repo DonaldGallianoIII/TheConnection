@@ -47,7 +47,12 @@ that the fake is reachable.
             so a message's .tmp fails to be made, written or linked
             (failing_write); SharedOriginsTest moves mail/.origins and a
             member's folder in it aside by hand, and runs a second
-            member's gate in process with branch_user patched.
+            member's gate in process with branch_user patched. P3 fix
+            round 2 (Claude Opus 5.5, unreviewed): failing_write also
+            fails mail/.seq's write (reading /proc/self/fd to know it) or
+            an inbox lock's create; one test moves a codex name's inbox
+            lock aside by hand and puts a link at its name, to a file in
+            the root's temp folder.
 @deps       python3 stdlib (argparse, builtins, contextlib, errno, fcntl,
             io, json, os, pathlib, shlex, shutil, signal, stat,
             subprocess, sys, unittest, unittest.mock); tests/_root.py;
@@ -213,6 +218,18 @@ NOT_ASCII_BODY = "café ✓"
 # user is the running user; ann and ben, two other members, take the next
 # two ids, so each owns what the model says it owns.
 ANN_UID_STEP, BEN_UID_STEP = 1, 2
+# P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-3. How
+# failing_write knows the two writes a send makes before its publish: the
+# end of mail/.seq's path, and an inbox lock's name (mail/.box-<name>.lock,
+# tc's, written here) by its start and end.
+SEQ_PATH_END = f"{os.sep}mail{os.sep}.seq"
+INBOX_LOCK_LEAD, INBOX_LOCK_TAIL = ".box-", ".lock"
+# The audit's LOW-2. What a link planted at a codex name's inbox lock
+# leads to, outside TC_ROOT; and the warning a retry gives when its ring
+# was skipped: the name, then why (tc's words, written here).
+OUTSIDE_TEXT = "a file outside the mailbox; tc must not touch it\n"
+NOT_RUNG_WORDS = "{to} was not rung on this retry: {why}\n"
+LINK_WHY = "{path} is a symlink, which tc never follows"
 
 
 def filing(root, key, origin):
@@ -323,25 +340,41 @@ class FailingWrite:
         """
         raise OSError(self.number, os.strerror(self.number))
 
+    def __getattr__(self, name):
+        """Every other attribute of the wrapped file (fileno, seek, read, truncate), so mail/.seq's flock and read work before its write fails (P3 fix round 2, Claude Opus 5.5, unreviewed).
+
+        @interacts  whatever the wrapped file's attribute does.
+        @deps       none.
+        @complexity O(1).
+        @alloc      none.
+        """
+        return getattr(self.real, name)
+
 
 @contextlib.contextmanager
 def failing_write(tc, stage, number):
-    """While entered, the message .tmp tc makes fails at `stage` with OSError(`number`): "make" its os.open, "write" its write (tc's open of a descriptor to write returns a FailingWrite), "link" its os.link.
+    """While entered, the message .tmp tc makes fails at `stage` with OSError(`number`): "make" its os.open, "write" its write (tc's open of a descriptor to write returns a FailingWrite), "link" its os.link; or (P3 fix round 2) "seq" mail/.seq's write (tc's open of mail/.seq's descriptor returns a FailingWrite), "lock" an inbox lock's create (its os.open with O_CREAT).
 
     P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), the audit's
     LOW-4 and LOW-11. One Linux user cannot fill a disk on purpose, so the
-    three calls a publish makes are stood in for.
+    three calls a publish makes are stood in for. P3 fix round 2 (Claude
+    Opus 5.5, unreviewed): the audit's LOW-3, and the two writes a send
+    makes before its publish.
 
     @interacts  patches os.open, os.link and tc's module name `open` while
-                entered.
-    @deps       FailingWrite; builtins, os, unittest.mock.
+                entered; reads /proc/self/fd for the "seq" stage.
+    @deps       FailingWrite; builtins, os, unittest.mock; SEQ_PATH_END,
+                INBOX_LOCK_LEAD, INBOX_LOCK_TAIL.
     @complexity O(1) per call.
     @alloc      the patches, undone on exit.
     """
     real_open, real_link = os.open, os.link
 
     def opened(path, flags, *args, **kwargs):
-        if stage == "make" and str(path).endswith(".tmp") and flags & os.O_CREAT:
+        name = os.path.basename(str(path))
+        if flags & os.O_CREAT and ((stage == "make" and name.endswith(".tmp")) or
+                                   (stage == "lock" and name.startswith(INBOX_LOCK_LEAD)
+                                    and name.endswith(INBOX_LOCK_TAIL))):
             raise OSError(number, os.strerror(number))
         return real_open(path, flags, *args, **kwargs)
 
@@ -352,7 +385,11 @@ def failing_write(tc, stage, number):
 
     def text_open(file, mode="r", *args, **kwargs):
         made = builtins.open(file, mode, *args, **kwargs)
-        return FailingWrite(made, number) if stage == "write" and isinstance(file, int) and "w" in mode else made
+        if stage == "write" and isinstance(file, int) and "w" in mode:
+            return FailingWrite(made, number)
+        if stage == "seq" and isinstance(file, int) and os.readlink(f"/proc/self/fd/{file}").endswith(SEQ_PATH_END):
+            return FailingWrite(made, number)
+        return made
 
     with mock.patch.object(os, "open", opened), mock.patch.object(os, "link", linked), \
             mock.patch.object(tc, "open", text_open, create=True):
@@ -742,6 +779,44 @@ class GateTest(unittest.TestCase):
         self.assertEqual([call["argv"] for call in rang], [ring_argv(root, 1, "c", KEY)])
         self.assertEqual(landed, [f"000001-from-{KEY}.md"])
 
+    # P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-2, option A (test-strategist REC-9).
+    def test_a_retry_to_a_codex_name_with_a_link_at_its_inbox_lock_still_answers_already_delivered(self):
+        """c joined as codex: a gated send with --origin lands and rings; mail/.box-c.lock is moved aside and a symlink to a file outside TC_ROOT put at its name; the same retry exits 0 with `already delivered`, one stderr line saying c was not rung and why, the link's target unchanged, the fake called once in all, one message landed.
+
+        Must reject a retry of a delivered message that exits 1 on its
+        inbox lock: the near side would file a message the far side holds
+        in refused/, for good (C3 promises exit 0 for an id already filed).
+
+        @interacts  one join with CODEX_THREAD_ID set; two gate runs; one
+                    rename and one link made by hand; the fake codex's
+                    record, asserted there.
+        @deps       gate; _root.TcRoot.fake_bin; os.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = root.fake_bin("codex", 0)
+            root.tc("join", "c", env={"CODEX_THREAD_ID": THREAD})
+            command = f"/x/tc send --from a --to c --origin {ORIGIN}"
+            first = gate(root, command, "hi")
+            lock = root.path / "mail" / ".box-c.lock"
+            os.rename(lock, lock.with_name(lock.name + ".aside"))
+            outside = root.base / "outside-lock"
+            outside.write_text(OUTSIDE_TEXT)
+            lock.symlink_to(outside)
+            retry = gate(root, command, "hi")
+            record = folder.parent / "calls.jsonl"
+            self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
+            rang = calls()
+            kept = outside.read_text()
+            landed = sorted(p.name for p in (root.path / "mail" / "to-c").glob("*.md"))
+            self.assertEqual(first[0], 0, first)
+            self.assertEqual(retry, (0, ALREADY_WORDS.format(origin=ORIGIN),
+                                     NOT_RUNG_WORDS.format(to="c", why=LINK_WHY.format(path=lock))))
+            self.assertEqual(kept, OUTSIDE_TEXT, "the link's target changed")
+            self.assertEqual(len(rang), 1, f"the fake codex ran {len(rang)} times: {rang}")
+            self.assertEqual(landed, [f"000001-from-{KEY}.md"])
+
     def test_a_file_planted_at_the_origins_folders_name_is_a_warning_after_delivery(self):
         """A regular file at mail/.origins (a member's touch): a gated send with --origin delivers, exits 0, warns that the id could not be filed, and prints no traceback.
 
@@ -956,6 +1031,49 @@ class GateInProcessTest(unittest.TestCase):
                                              + "\n"))
                     self.assertEqual(sent, EXIT_REFUSED, "tc send's own write failure is no longer a refusal")
                     self.assertEqual(left, [], "a write that failed left a file in the inbox")
+                    self.assertFalse(filed, "a delivery that never landed filed its origin")
+
+    # P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-3, option A (test-strategist REC-8).
+    def test_a_passing_write_failure_at_mail_seq_or_the_inbox_lock_is_busy_at_the_gate(self):
+        """In process, per errno PASSING_ERRNO_NAMES names: once one gated send has landed, mail/.seq's write failing; or, on the first send to b, the inbox lock's create failing: the gate exits 10 with the busy words naming mail/.seq or the lock, lands no message and files no origin.
+
+        Must reject a gate that answers either failure with an uncaught
+        OSError, exit 1: the near side would file the message in refused/
+        for good. Not asserted, since option A leaves it as it was: what
+        mail/.seq holds after its write failed (its truncate comes first,
+        so it may be empty; the audit's option B, not taken).
+
+        @interacts  per errno and stage: loads tc; one gate call in process
+                    to land a first message (the "seq" stage), then one
+                    under failing_write; lists the inbox.
+        @deps       load_tc, run_gate, failing_write, filing; errno, os.
+        @complexity O(1): six cases.
+        @alloc      one TcRoot and one module per case.
+        """
+        for name in PASSING_ERRNO_NAMES:
+            number = getattr(errno, name)
+            for stage in ("seq", "lock"):
+                with self.subTest(errno=name, stage=stage), _root.TcRoot() as root:
+                    tc = load_tc(root)
+                    landed_first = []
+                    if stage == "seq":
+                        landed_first.append(self.run_gate(tc, f"/x/tc send --from a --to b --origin {OTHER_ORIGIN}"))
+                    with failing_write(tc, stage, number):
+                        try:
+                            gated = self.run_gate(tc, f"/x/tc send --from a --to b --origin {ORIGIN}")
+                        except OSError as err:  # what a gate run as a command exits 1 on, with a traceback
+                            gated = (f"raised {type(err).__name__}: {err}", "", "")
+                    box = root.path / "mail" / "to-b"
+                    left = sorted(p.name for p in box.rglob("*") if p.is_file()) if box.exists() else []
+                    filed = filing(root, KEY, ORIGIN).exists()
+                    what = (f"could not write {root.path / 'mail' / '.seq'}" if stage == "seq"
+                            else f"could not make {root.path / 'mail' / '.box-b.lock'}")
+                    want_left = [f"000001-from-{KEY}.md"] if stage == "seq" else []
+                    self.assertEqual([code for code, _, _ in landed_first], [0] if stage == "seq" else [],
+                                     landed_first)
+                    self.assertEqual(gated, (EXIT_BUSY, "", PASSING_WORDS.format(what=what, why=os.strerror(number))
+                                             + "\n"))
+                    self.assertEqual(left, want_left, "a write that failed landed a message or left a file")
                     self.assertFalse(filed, "a delivery that never landed filed its origin")
 
     # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (5), anything new stays home unless named.
