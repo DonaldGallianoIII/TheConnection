@@ -111,7 +111,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             another's listener, and listeners names only a pid of the
             inbox's owner. P3 fix round 2 (Claude Opus 5.5, unreviewed:
             the audit's LOW-1): tc never moves aside a lock of its own
-            user's, puts back one its rename took by mistake, and keeps a
+            user's (P3 fix round 3, Claude Opus 5.5, unreviewed: the
+            audit's LOW-4, one it can open; an own file it cannot open is
+            moved aside with words), puts back one its rename took by
+            mistake, and keeps a
             flock only on the file the lock's name leads to, so two of
             the owner's own waits never both run. On a shared mailbox only the owner of a name's
             card may run `wait` or `watch` for it, and a name nobody
@@ -935,6 +938,13 @@ FAR_MEMBER_WORDS = "another member"
 FAR_PROCESS_WORDS = "another process"
 FAR_PATH_WORDS = "a path on this machine"
 FAR_ROOT_WORDS = "the mailbox"
+# P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-2. What
+# must follow the mailbox's own folder, written bare (ROOT with no slash
+# after it), for it to read FAR_ROOT_WORDS: the end of the text, a blank,
+# a quote, a backtick, a comma, a semicolon, a colon or a parenthesis.
+# Anything else makes it part of another path (<ROOT>-src/tc), which is
+# left whole for FAR_ABSOLUTE_PATH_PATTERN.
+FAR_ROOT_END = r"(?=$|[\s'\"`,;:()])"
 # A pid in tc's words: LOCK_HOLDER_WORDS' "(pid N)", UNKNOWN_ASK_WORDS'
 # "pid N".
 FAR_PID_PATTERN = re.compile(r"\bpid [0-9]+\b")
@@ -4361,14 +4371,22 @@ def move_aside(box_fd, name, path, kind):
     or a member, taking the name in the instant between that rename and
     the link back leaves the first lock away from its name.
 
+    P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-4. An
+    own lock found at the name is left only when tc can open it (read
+    only, never through a link, never blocking, ENTRY_FLAGS, closed at
+    once). One its owner made unopenable (mode 000, say) is moved aside
+    with words, as before round 2, so the wait runs instead of exiting 1
+    with words about moves that never happened.
+
     @interacts  lstats `name` and each aside name tried, by name in
-                `box_fd`; renames one entry there and lstats it at its
-                aside name; may link this user's own lock back to `name`
-                and remove the aside name; reads this process's user id
-                and the user database for the words; on a failed rename
-                one line to stderr and exit 1.
+                `box_fd`; when it is this user's own lock, opens it there
+                read only and closes it; renames one entry there and
+                lstats it at its aside name; may link this user's own
+                lock back to `name` and remove the aside name; reads this
+                process's user id and the user database for the words; on
+                a failed rename one line to stderr and exit 1.
     @deps       own_wake_lock, name_taken, refuse, user_name; contextlib,
-                os, stat; PLANTED_ASIDE_NAME, EXIT_REFUSED.
+                os, stat; ENTRY_FLAGS, PLANTED_ASIDE_NAME, EXIT_REFUSED.
     @complexity O(k) over k aside names already taken (none in practice).
     @alloc      the words, returned.
     """
@@ -4390,7 +4408,12 @@ def move_aside(box_fd, name, path, kind):
     except FileNotFoundError:
         return None
     if own_wake_lock(st):  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-1, this user's own lock is never moved
-        return None
+        try:  # P3 fix round 3 (Claude Opus 5.5, unreviewed): LOW-4, only one tc can open
+            os.close(os.open(name, ENTRY_FLAGS, dir_fd=box_fd))
+        except OSError:
+            pass  # this user's own file, but one tc cannot open (its owner set it to 000): moved aside as before
+        else:
+            return None
     k = 1
     while name_taken(PLANTED_ASIDE_NAME.format(lock=name, k=k), box_fd):
         k += 1
@@ -4430,7 +4453,10 @@ def open_wake_lock(box_fd, box, kind):
     fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-1.
     "This user's own lock" is own_wake_lock, the test move_aside also
     makes, so move_aside never moves one another of this user's tc made
-    in between: the next try opens it.
+    in between: the next try opens it. P3 fix round 3 (Claude Opus 5.5,
+    unreviewed): the audit's LOW-4. move_aside leaves an own lock only
+    when it opens; an own file this open fails on (its owner set it to
+    000) is moved aside with words, and the next try makes the lock.
 
     @interacts  creates, or opens and fstats, one file by its name in
                 `box_fd`; fchmods an own one at another mode; may move
@@ -7941,10 +7967,13 @@ def far_words(text, logins, names=()):
     `alex`, which is still replaced wherever it stands outside a name.
     What is left (the audit's LOW-1): a login spelled exactly like one of
     `names` reads as that name where it stands, and the far key sent it
-    (or, for a mailbox name here, reads it in health anyway).
+    (or, for a mailbox name here, reads it in health anyway). The audit's
+    LOW-2: the mailbox's own folder written bare reads FAR_ROOT_WORDS only
+    where it ends a token (FAR_ROOT_END); a path beside it that starts
+    with its text (<ROOT>-src/tc) reads FAR_PATH_WORDS whole.
 
     @interacts  none; string work only.
-    @deps       re, os; ROOT, FAR_ROOT_WORDS, FAR_PATH_WORDS,
+    @deps       re, os; ROOT, FAR_ROOT_WORDS, FAR_ROOT_END, FAR_PATH_WORDS,
                 FAR_PROCESS_WORDS, FAR_MEMBER_WORDS, FAR_PID_PATTERN,
                 FAR_ABSOLUTE_PATH_PATTERN, FAR_LOGIN_EDGE.
     @complexity O(t x (l + n + 4)) over t characters, l logins (a few)
@@ -7954,7 +7983,8 @@ def far_words(text, logins, names=()):
     """
     root = str(ROOT)
     if root != os.sep:
-        text = text.replace(root + os.sep, "").replace(root, FAR_ROOT_WORDS)
+        text = text.replace(root + os.sep, "")
+        text = re.sub(re.escape(root) + FAR_ROOT_END, FAR_ROOT_WORDS, text)  # P3 fix round 3: LOW-2, a token's end
     text = FAR_ABSOLUTE_PATH_PATTERN.sub(FAR_PATH_WORDS, text)
     text = FAR_PID_PATTERN.sub(FAR_PROCESS_WORDS, text)
     whole = "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True))

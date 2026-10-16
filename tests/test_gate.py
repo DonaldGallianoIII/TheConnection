@@ -52,8 +52,10 @@ that the fake is reachable.
             fails mail/.seq's write (reading /proc/self/fd to know it) or
             an inbox lock's create; one test moves a codex name's inbox
             lock aside by hand and puts a link at its name, to a file in
-            the root's temp folder. FarKeyReadsTest (D37 (1)) drives 19
-            gate paths, each in its own root: as commands and in process,
+            the root's temp folder. FarKeyReadsTest (D37 (1)) drives 20
+            gate paths (P3 fix round 3, Claude Opus 5.5, unreviewed: the
+            20th, a codex error naming a path beside the root, the
+            audit's LOW-2), each in its own root: as commands and in process,
             with a lock holder (test_wake_files.hold) and a proven
             listener, both killed by their own pids with the root, fake
             codexes (asserted called), links and files made by hand, a
@@ -254,6 +256,12 @@ LINK_WHY = "{path} is a symlink, which tc never follows"
 # to it.
 MEMBER_WORDS = "another member"
 PROCESS_WORDS = "another process"
+# P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-2. How the
+# gate says a path outside the mailbox (tc's words, written here), and a
+# path beside the mailbox: its folder's own path plus this, as
+# bugs-reviewer's <ROOT>-src/tc.
+PATH_WORDS = "a path on this machine"
+BESIDE_ROOT_TAIL = "-src/tc"
 PID_PATTERN = re.compile(r"\bpid [0-9]+")
 # A .shared that names no group on one line, so main() refuses every
 # command but init on it, before the gate's own code runs.
@@ -1430,7 +1438,7 @@ class FarKeyReadsTest(UmaskTestCase):
     @deps       gate, gate_in_process, failing_write, hold, load_tc,
                 owner_patched_fstat, primary_group, login, health_keys;
                 _root.TcRoot; errno, grp, json, os, re, unittest.mock.
-    @complexity O(c) over c = 19 cases, each a few tc runs; the busy case
+    @complexity O(c) over c = 20 cases, each a few tc runs; the busy case
                 waits out tc's lock bound (3 s), and the size case pipes
                 1 MiB. Round 3's tests: O(1) each, two to five tc runs per
                 root.
@@ -1631,6 +1639,21 @@ class FarKeyReadsTest(UmaskTestCase):
         self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
         return got, [], []
 
+    # P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-2.
+    def case_path_beside_the_mailbox(self, root):
+        """A codex name whose fake codex fails with words naming a path beside the mailbox, its folder's path plus a tail (<ROOT>-src/tc).
+
+        @interacts  one fake codex (asserted called) and a join; one gate
+                    run.
+        @deps       codex_c, gate; BESIDE_ROOT_TAIL.
+        @complexity O(1).
+        @alloc      the run's output, returned.
+        """
+        record = self.codex_c(root, 1, stderr=f"codex: could not read {root.path}{BESIDE_ROOT_TAIL}\n")
+        got = gate(root, "/x/tc send --from a --to c")
+        self.assertTrue(record.exists(), f"{record} missing: the fake codex never ran")
+        return got, [], []
+
     def case_record_not_written(self, root):
         """A codex name, and a file where the running user's outbox branch goes, so the last-ring record cannot be written.
 
@@ -1739,13 +1762,15 @@ class FarKeyReadsTest(UmaskTestCase):
         D37 (1): a far key never learns this machine's folders, users or
         processes. Must reject a gate path whose words skip the one
         place every word the gate prints goes through, and a health that
-        hands over a listener's pid.
+        hands over a listener's pid. P3 fix round 3 (Claude Opus 5.5,
+        unreviewed): the audit's LOW-2. Must reject a path beside the
+        mailbox read as `the mailbox` plus its tail.
 
         @interacts  per case: one TcRoot and the case's own setup and gate
                     runs (see the case methods).
         @deps       the case methods; MEMBER_WORDS, PROCESS_WORDS,
-                    PID_PATTERN, ORIGIN, KEY.
-        @complexity O(c) over c = 19 cases.
+                    PATH_WORDS, PID_PATTERN, ORIGIN, KEY.
+        @complexity O(c) over c = 20 cases.
         @alloc      one TcRoot per case.
         """
         cases = [  # the path, its case, its exit, words that show the path ran
@@ -1764,6 +1789,8 @@ class FarKeyReadsTest(UmaskTestCase):
              f"origin {ORIGIN} was not filed: mail/.origins is not there"),
             ("a filing that failed", self.case_filing_failed, 0, f"origin {ORIGIN} could not be filed under mail/.origins"),
             ("a ring that failed", self.case_ring_failed, 0, "ring failed for c: codex: could not read "),
+            ("a path beside the mailbox", self.case_path_beside_the_mailbox, 0,  # round 3: LOW-2
+             f"codex: could not read {PATH_WORDS}; the mail is in its inbox"),
             ("the last-ring record not written", self.case_record_not_written, 0,
              f"outbox/{MEMBER_WORDS}/.rang-c could not be written"),
             ("a marker refused", self.case_marker_refused, EXIT_REFUSED,

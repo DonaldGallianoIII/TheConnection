@@ -56,6 +56,8 @@ second-user walk is qa/human/route-shared.md.
             twice in process, the second with tc's move_aside, name_taken
             or open_wake_lock wrapped to run the first whole, or to
             rename the second's fresh lock by hand, at one moment of it.
+            P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's
+            LOW-4 test sets the owner's own lock to mode 000 by hand.
             Writes nothing outside the root's temp folder.
 @deps       python3 stdlib (argparse, contextlib, fcntl, gc, io, json, os,
             pathlib, pwd, stat, subprocess, sys, time, unittest,
@@ -281,6 +283,11 @@ OWN_LOCK_BEFORE_MOVE = "between its look and its move"
 OWN_LOCK_BEFORE_FLOCK = "before its flock"
 SECOND_ASIDE = "{lock}.planted-2"
 DISPLACED_SUFFIX = ".moved-by-another-wait"
+# P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-4. The
+# mode an owner can set on their own lock file so that tc, run as that
+# owner, cannot open it; and the superuser's id, who opens it anyway.
+LOCKED_OUT_MODE = 0o000
+SUPERUSER_UID = 0
 
 
 def login(uid):
@@ -619,6 +626,43 @@ class WakeLockPlaceTest(UmaskTestCase):
                                     f"{planted} did not move to {aside} as itself")
                     self.assertEqual((stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode)), (True, WAKE_LOCK_MODE))
                     self.assertEqual(after, TARGET_TEXT, "the link's target changed")
+
+    # P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's LOW-4.
+    def test_the_owners_own_lock_at_mode_000_is_moved_aside_and_the_listener_runs(self):
+        """Private: the owner's own mail/to-x/.wait.lock or .watch.lock, left by an earlier run and then set to mode 000 by hand: tc wait x and tc watch x run as ever (exit 2, exit 0), never exit 1, move it aside with words naming it as this user's file, and make a new 0600 lock of their own.
+
+        The audit's LOW-4 (bugs-reviewer): move_aside left any own lock in
+        place, open_wake_lock could not open it, and tc wait exited 1 with
+        words claiming three moves that never happened. Must reject a
+        move_aside that leaves an own lock tc cannot open.
+
+        @interacts  per kind: one wait or watch that makes the lock, a
+                    chmod by hand, one more wait or watch.
+        @deps       listen, identity, login; _root.TcRoot; os, stat;
+                    LOCK_NAME, FIRST_ASIDE, MOVED_WORDS, WAKE_LOCK_MODE,
+                    LOCKED_OUT_MODE, SUPERUSER_UID.
+        @complexity O(1) per kind, two kinds.
+        @alloc      one TcRoot per kind.
+        """
+        if os.geteuid() == SUPERUSER_UID:
+            self.skipTest("the superuser opens a file at mode 000, so tc moves nothing")
+        for kind in KINDS:
+            with self.subTest(kind=kind), _root.TcRoot() as root:
+                self.assertEqual(listen(root, kind, "x")[0], EXIT_TIMEOUT if kind == "wait" else 0)
+                lock = root.path / "mail" / "to-x" / LOCK_NAME.format(kind=kind)
+                os.chmod(lock, LOCKED_OUT_MODE)
+                found = identity(lock)
+                code, out, err = listen(root, kind, "x")
+                aside = lock.with_name(FIRST_ASIDE.format(lock=lock.name))
+                moved = identity(aside) if os.path.lexists(aside) else None
+                st = os.lstat(lock)
+                self.assertEqual(code, EXIT_TIMEOUT if kind == "wait" else 0,
+                                 f"tc {kind} did not run over its owner's own lock at mode 000: {out}{err}")
+                self.assertIn(MOVED_WORDS.format(kind=kind, path=lock, what="a file", owner=login(os.geteuid()),
+                                                 aside=aside), err)
+                self.assertEqual(moved, found, f"the lock at mode 000 is not what sits at {aside}")
+                self.assertEqual((stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid),
+                                 (True, WAKE_LOCK_MODE, os.geteuid()), "no new lock of the owner's at its name")
 
     def test_on_a_private_mailbox_a_listener_from_before_still_counts_until_it_rearms(self):
         """The switch-over, private: with mail/.wait-x.lock and .watch-x.lock held by listeners from before round 1b, tc health names their pids, a new tc wait x and tc watch x exit 3 with today's words and make no inbox; once they go, a new wait runs and health names none; a FIFO at the old place stops nothing, and nor does a link there to a lock a live child holds, which health names for nobody.
