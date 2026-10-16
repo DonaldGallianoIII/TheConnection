@@ -23,7 +23,9 @@ Status: unreviewed
 @deps       python3 stdlib (argparse, contextlib, fcntl, importlib, io,
             json, os, pathlib, subprocess, sys, unittest); tests/_root.py;
             FINISH_CEILING_SECONDS and wait_until_blocked from
-            test_codex_route.py; ../tc.
+            test_codex_route.py; ../tc. Imported by test_gate.py:
+            files_under (P3 fix round 2, Claude Opus 5.5, unreviewed: the
+            audit's LOW-28, option A).
 @complexity O(1) per test: one to six tc runs, each under a second. The
             size test pipes 1 MiB twice.
 @alloc      one TcRoot per test, removed when its context exits; the size

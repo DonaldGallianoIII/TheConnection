@@ -250,7 +250,10 @@ else:
         os.utime(fd, (float(stamp), float(stamp)))
     print("REWRITTEN", flush=True)
 """
-MEMBER_HELD, MEMBER_BUSY, MEMBER_DENIED, MEMBER_REWROTE = "HELD", "BUSY", "DENIED", "REWRITTEN"
+# What MEMBER_SCRIPT prints. Its BUSY line (a flock someone else holds)
+# has no name here: no test asserts it (P3 fix round 2, Claude Opus 5.5,
+# unreviewed: the audit's LOW-9).
+MEMBER_HELD, MEMBER_DENIED, MEMBER_REWROTE = "HELD", "DENIED", "REWRITTEN"
 # How long the owner's wait runs, and the owner's watch's heartbeat and
 # poll gap: one poll, where the member tries again, then the end.
 CLASS_LISTEN_SECONDS = 1.0
@@ -898,9 +901,10 @@ class HolderNamedTest(UmaskTestCase):
 
         Must reject a health that names nobody for a lock a stranger
         holds (the stuck member learns of it only from a failed command),
-        a gate that hands that line to a far key (round 1c's allow list
-        comes later; until then the gate's projection drops it), and a
-        private mailbox that ever reports one (one user). P3 fix round 2
+        a gate that hands that line to a far key (round 1c's allow list,
+        GATE_HEALTH_KEYS, leaves it home; P3 fix round 2: the audit's
+        LOW-10), and a private mailbox that ever reports one (one user).
+        P3 fix round 2
         (Claude Opus 5.5, unreviewed): test-strategist REC-1. Must reject
         a listeners() that names any holder of an owner's lock: the only
         holder of ann's watch lock is another member's process, and

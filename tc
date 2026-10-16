@@ -155,9 +155,12 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             entry under the four (round 6, D29). The only command line
             it prints is D23's chmod g-w,o-w, to the owner of ROOT or of
             a folder above it, which the walk judges by path. Shared
-            or not, the locks, mail/.seq, status files and the ring marker
-            are opened without following a symlink, and a link at any of
-            them, or at an inbox or its read/, is refused, exit 1 (D17).
+            or not, the inbox locks, mail/.seq, status files and the ring
+            marker are opened without following a symlink, and a link at
+            any of them, or at an inbox or its read/, is refused, exit 1
+            (D17); a link at a wait or watch lock's name is moved aside
+            instead, as above (P3 fix round 2, Claude Opus 5.5,
+            unreviewed: the audit's LOW-7).
             P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, every
             inbox act through one pinned handle. A command opens each
             inbox and its read/ once, by name in mail/'s descriptor and
@@ -169,8 +172,9 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             same way to count them. So a member who swaps an inbox or a
             branch for a link or another folder mid-command leads tc
             nowhere. A FIFO or anything else that is not a
-            regular file at a lock, mail/.seq or a status file is refused
-            at once, exit 1, never waited on (D19). Messages are read only
+            regular file at an inbox lock, mail/.seq or a status file is
+            refused at once, exit 1, never waited on (D19); at a wait or
+            watch lock's name it is moved aside, never waited on either. Messages are read only
             from regular files: read, peek and log name anything else and
             never read it, read leaves it in place, and wait, the counts
             and health leave it out; health and watch never take a linked
@@ -8520,7 +8524,10 @@ def _gpu_text(gpus):
 def _who(table):
     """Listener or watcher names in words: `<name> (pid <p>)` for each live one, then the stopped ones.
 
-    A name comes from a lock file's name, so it goes through printable().
+    A name comes from an inbox folder's name (mail/to-<name>/, where its
+    lock lives since D35), or on a private mailbox from an old lock's
+    name in mail/ (the switch-over), so it goes through printable() (P3
+    fix round 2, Claude Opus 5.5, unreviewed: the audit's LOW-7).
 
     @interacts  none; string work only.
     @deps       printable.

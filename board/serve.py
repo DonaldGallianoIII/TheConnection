@@ -120,7 +120,11 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             owner's since D35; on a private mailbox, until every listener
             started before has re-armed, also mail/.wait-*.lock: P3 fix
             round 1b, Claude Opus 5.5, unreviewed) and tc.mailbox_summary()
-            (globs and stats mail/ and status/ under tc's ROOT); reads the
+            (opens mail/ once and each mail/to-<name>/ and its read/ by
+            name, lists each in its own descriptor and stats each message
+            name there, never through a link, and lstats each name's
+            status file; P3 fix round 2, Claude Opus 5.5, unreviewed: the
+            audit's LOW-6, true to tc since its round 1a); reads the
             load average and /proc/meminfo itself. Never runs nvidia-smi
             and never scans the process list. Reads cards/*.json and the
             head of status/<name>.md; lists mail/to-*/ and mail/to-*/read/,
@@ -152,14 +156,19 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             urllib.parse); ../tc; Linux
             (/proc: /proc/locks through tc, the load average and
             /proc/meminfo read here).
-@complexity feed(), per poll: O(k + m (log W + log K) + n + c^2). The
+@complexity feed(), per poll: O(k + n log n + M + m (log m + log W +
+            log K) + c^2). The
             snapshot: tc.listeners is O(k + n log n), k lines in
             /proc/locks (tens) and n names (single digits to tens), one
             inbox opened and one lock lstat()ed per name (P3 fix round
             1b, Claude Opus 5.5, unreviewed: D35);
-            tc.mailbox_summary is O(n + m), since it stats every message
-            file, m of them (about 800 after two weeks of heavy use, and
-            only growing, since read/ is kept). Here: every inbox listed
+            tc.mailbox_summary is O(n log n + M + m log m) over the M
+            names listed in every inbox and read/ and the m message files
+            among them (about 800 after two weeks of heavy use, and only
+            growing, since read/ is kept): one listing per folder, one
+            stat per message name and a sort per folder (P3 fix round 2,
+            Claude Opus 5.5, unreviewed: the audit's LOW-6, tc's own
+            @complexity since its round 1a). Here: every inbox listed
             again and each of the m names matched twice (no body read);
             the last WIRE_HISTORY picked in O(m log W), W = 50; W + n + l
             more stats for l linked pairs (at most n^2/2, tens in
@@ -1177,8 +1186,13 @@ class Board:
                     /proc/meminfo through machine_now.
         @deps       tc.now_iso, tc.listeners, tc.mailbox_summary;
                     machine_now.
-        @complexity O(k + n + m): k lines in /proc/locks, n names, m message
-                    files; twice m when a message moved mid-poll.
+        @complexity O(k + n log n + M + m log m): k lines in /proc/locks, n
+                    names, M names listed in every inbox and read/ and the m
+                    message files among them (tc.listeners and
+                    tc.mailbox_summary, by their own @complexity; P3 fix
+                    round 2, Claude Opus 5.5, unreviewed: the audit's
+                    LOW-6); the mailbox part twice when a message moved
+                    mid-poll.
         @alloc      one dict, returned.
         """
         try:

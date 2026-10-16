@@ -921,3 +921,300 @@ alone.
 - REC-7 uses two roots, not three (item 4).
 
 No pause was written.
+
+---
+
+# Round 2: pin what no test pinned; two retry gaps; D37
+
+Model:  Claude Opus 5.5 (the P3 fixer, round 2)
+Status: unreviewed
+Date:   2026-10-15
+Branch: Claude-Development-TheConnection-P3FIX, from round 1c's head
+        `0fe13e7`
+Brief:  audits/2026-10-15-1851-custom/fixes/round-2.md (in this
+        worktree), against that review's synthesis.md (its Fix List, Fix
+        disagreements, Conflicts Resolved and Coverage) and
+        test-strategist's mutation table (A to Y) and REC-1 to REC-17;
+        the dev branch's contracts and decisions, read only (C3, exit row
+        10, C4, D35, D36, and D37 at `3e9d18c`)
+
+## Commits
+
+| Brief's | Commit | Items | Subject |
+|---|---|---|---|
+| (a) | `b8c0d61` | 1 | The eight protections no test pinned |
+| (b) | `3058e37` | 2 | The class proof's family list made a red test |
+| (c) | `b4c3ce8` | 3, 4 | A retry's inbox lock never refuses; the gate's passing write failure at mail/.seq or the lock is busy |
+| (d) | `940360e` | 5 | Two of the owner's own waits never both hold a lock |
+| (e) | the commit that adds this section | 6, 7 | Three two-user steps; the small LOWs; this handoff |
+| (f) | see "Item 8" below | 8 | D37 (1): what a far key reads carries nothing of this machine |
+
+Every commit's full Python suite ran on a copy of that commit's tree
+(`python3 -m unittest discover -s tests -p 'test_*.py'`): 332 run, OK at
+`b8c0d61`; 333 at `3058e37`; 336 at `b4c3ce8`; 337 at `940360e` (round
+1c ended at 329). The counts at (e) and (f) are under "Verified".
+
+## What was built
+
+### Item 1: the eight green mutations, pinned
+
+No tc change. Each test asserts by value.
+
+- A and S (tests/test_inbox_pinned.py, REC-4): InboxPinnedTest gains
+  three rows. (g) "tc health's listeners" swaps after listeners' own pin
+  of ann's inbox, whose far end holds a `.wait.lock` a child holds;
+  health must name no listener for ann and no far-end holder. (g) "tc
+  health's held_by_others" lets three looks pass and swaps after its own
+  pin; the far end's wait and watch locks are held by children reported
+  as another member's (test_wake_files.holder_patched_stat), and
+  held_by_others must be []. (k) "tc health's stuck_outbox over another
+  member's branch" swaps the branch row's branch; the real queued
+  message carries a note `REAL_NOTE`, the far end a note of
+  PLANTED_TEXT, and tc's wall_clock stands a day and an hour ahead; the
+  stuck line must carry the real note. Row is a namedtuple with three
+  new fields (locks, holder, late), defaults keeping every old row as it
+  was.
+- B (tests/test_wake_files.py, REC-1): HolderNamedTest's health test
+  keeps `watchers` and asserts it names no pid for ann while the only
+  holder of her watch lock is another member's process.
+- C (REC-2), WakeLockPlaceTest,
+  `test_a_lock_another_member_planted_and_holds_is_never_the_owners_listener_even_when_proc_hides_its_holder`:
+  a member plants and holds ann's `.wait.lock` (members_patched), tc's
+  process_uid sees nothing (hidepid); listeners and health_snapshot name
+  no pid for ann and never the member's. HIGH-2's own symptom, by name
+  in the docstring.
+- D and G (REC-3), HolderNamedTest,
+  `test_health_never_lists_the_owners_own_holder_and_names_every_holder_of_a_shared_lock`:
+  ann's own process holds her wait lock, two children hold her inbox
+  lock shared (HOLD_SHARED_SCRIPT), one reported as another member's;
+  held_by_others lists exactly that one, and tc read's busy words name
+  both holders in /proc/locks order (holders_in_order) and ask both
+  users and the init user.
+- E (REC-6): the switch-over test's link at `mail/.wait-z.lock` now leads
+  to a lock a live child holds (outside mail/), and `tc wait z` must still
+  exit 2; health names nobody for z.
+- T (tests/test_health.py, REC-5), StuckOutboxTest,
+  `test_another_members_stuck_mail_is_listed_and_a_fifo_or_link_at_its_note_never_blocks_or_leads_health`:
+  another member's branch made by hand, a message dated two days ago,
+  its note a FIFO, then a link to a file outside the mailbox; tc health
+  --json must return within 10 s, list it with that member and no note,
+  and print nothing of the link's target.
+
+### Item 2: the family list's known gap, a red test
+
+tests/test_inbox_pinned.py, EveryInboxActHasARowTest,
+`test_every_inbox_act_in_tc_has_a_row_or_a_named_exemption` (REC-15):
+`pinning_functions` parses tc with ast and finds each top-level function
+that calls pinned_inbox, open_inbox or pin_folder. The set must equal
+COVERED (13 functions, each by the row labels that reach it) plus
+EXEMPT (6, each with a reason: the three pin helpers; inbox_made, which
+makes and opens nothing on a shared mailbox; hold_wake_lock, which only
+the inbox's owner runs, D36 (2); deliver_ssh, the sender's own branch,
+D32 to D34). It also fails on an entry that no longer pins, a label
+ROWS lacks, an entry in both, and an empty reason.
+
+### Item 3: a retry's inbox lock never refuses (LOW-2, option A)
+
+`inbox_lock` (tc) gains `raising`: every failure (.shared or mail/
+refused, a link, a FIFO, a folder or a file tc may not open at the
+lock's name, a passing write failure, the lock held past the bound) is
+an OSError with words naming the lock, and nothing exits. A held lock is
+said as LOCK_HELD_WORDS past LOCK_WAIT_SECONDS, without reading its
+holders. `ring_doorbell` takes a retry's lock that way (an
+ExitStack around the old `with`), and on any failure answers the
+retry's `already delivered`, exit 0, with one warning, `<to> was not
+rung on this retry: <why>`. A fresh send's lock is as before. The doc
+line integration LOW-4 named ("A retry never refuses") is now true of
+the lock, and says so; deliver_once's doc says so too. Test:
+tests/test_gate.py
+`GateTest.test_a_retry_to_a_codex_name_with_a_link_at_its_inbox_lock_still_answers_already_delivered`
+(REC-9).
+
+### Item 4: the gate's passing write failure before its publish (LOW-3, option A)
+
+`next_seq` and `inbox_lock` take `busy_on_passing`: for the gate (from
+route_and_deliver, through deliver_local, publish_message,
+deliver_codex and ring_doorbell), an OSError in PASSING_WRITE_ERRNOS
+making mail/ or mail/.seq, or writing the number, or making the lock on
+its first use, answers 10 with PASSING_WORDS naming mail/.seq (`could
+not write`) or the lock (`could not make`). tc send's own goes up as
+before. Option B was not taken: mail/.seq is truncated before its write,
+so a write that fails can still leave it empty; next_seq's doc says so,
+and no test asserts what mail/.seq holds after the failure (REC-8's
+"still reads 1" line is not asserted, since option A does not make it
+true). Tests: tests/test_gate.py
+`GateInProcessTest.test_a_passing_write_failure_at_mail_seq_or_the_inbox_lock_is_busy_at_the_gate`
+(failing_write gains "seq" and "lock" stages; FailingWrite passes every
+other attribute through), and its twin, tests/test_ssh_route.py
+`FarAnswerTest.test_a_far_gate_whose_mail_seq_or_inbox_lock_cannot_be_written_answers_10_and_the_message_stays_queued`
+(FAILING_GATE_BOOT takes a stage; far_gate_ssh a `fail_stage`).
+
+### Item 5: two of the owner's own waits (LOW-1)
+
+Three parts in tc, one per moment of the race, each pinned by its own
+subtest of tests/test_wake_files.py
+`WakeFilesAreTheirOwnersTest.test_two_of_the_owners_own_waits_over_one_plant_never_both_hold_a_lock`:
+
+1. `move_aside` moves nothing that is this user's own lock
+   (`own_wake_lock`, the test `open_wake_lock` now shares): subtest
+   "before its look" (REC-7 as designed), where wait A runs whole just
+   before wait B's move_aside looks.
+2. When move_aside's rename took something other than what its lstat
+   judged, and it is this user's own lock, it links it back to its name
+   (never over anything) and removes the aside name: subtest "between
+   its look and its move", where A runs after B's look and before B's
+   rename. The brief's suggested fix alone (part 3) does not catch
+   either of these two moments: A's check passed before B's move.
+3. `hold_wake_lock` takes the flock while the inbox is still open and
+   keeps it only when the lock's name still leads to the file held
+   (fstat against an lstat by name); else it lets go and takes the lock
+   again, at most WAKE_LOCK_TRIES + 1 times, then refuses, exit 1:
+   subtest "before its flock", where B's fresh lock is moved off its
+   name by hand between B's open and B's flock.
+
+Left, said in move_aside's doc: a third tc, or a member, taking the name
+in the instant between part 2's rename and its link back.
+
+### Item 6: three two-user steps
+
+qa/human/route-shared.md, as REC-17 designed them: step 32 (D36 (2):
+ben's wait and watch on ann are refused and change nothing in her inbox;
+a name nobody joined is refused and makes nothing), step 33 (D35 (1):
+ben plants and holds `.watch.lock` in ann's inbox before she ever ran tc
+watch; health's `held` line names ben, and ann's watch moves it aside and
+runs), and step 44 (D36 (4): ben's stuck mail shows in ann's tc health,
+and a FIFO ben plants as its note never hangs it), each with pass and
+fail lines and a put-back. Every step after 31 is renumbered (by two up
+to the old 41, by three after), with the references to them. The lead
+paragraph's "(step 31)" pointed at the old step 31 since round 1b's
+renumbering and meant the ROOT walk; it now says step 35.
+
+### Item 7: the small ones
+
+- LOW-6: board/serve.py's module block says what tc.mailbox_summary does
+  since round 1a (each inbox and read/ opened by name and listed in its
+  descriptor), and its feed() and Board.snapshot cost lines carry tc's
+  own O(n log n + M + m log m).
+- LOW-7: tc's module block says a link or FIFO at an inbox lock, mail/.seq
+  or a status file is refused, and one at a wait or watch lock's name is
+  moved aside; `_who`'s doc says a name comes from an inbox folder's name
+  (or an old lock's, on a private mailbox).
+- LOW-8: tests/test_cards.py's `NOT_BUILT_NOTE` is gone, with the three
+  comment lines above it that described it (see "Work set").
+- LOW-9: `MEMBER_BUSY` dropped; a comment says MEMBER_SCRIPT's BUSY line
+  has no name because no test asserts it.
+- LOW-10: the docstring now says round 1c's allow list leaves
+  held_by_others home.
+- LOW-28: tests/test_router.py's @deps names its importer, test_gate.py
+  (files_under).
+- ring_doorbell's doc, integration LOW-4: item 3.
+
+## Mutations
+
+Each was applied with the Edit tool to a scratch copy of the tree,
+checked equal to the worktree first, run (the modules named), and put
+back by copying the file over it and checking it equal (`cmp`). Every
+red below is an assertion line, not an error. Line numbers changed as
+later commits added lines; the assertions are quoted.
+
+| Mutation | Applied as | Run | Red, by subtest | Red line |
+|---|---|---|---|---|
+| A | listeners stats the lock by path, `MAIL / entry / lock_name` | test_inbox_pinned | (g) tc health's listeners, both kinds | `self.assertIsNone(listening.get(OWNER), f"health named a listener for {OWNER} from a lock outside her "` |
+| B | listeners names any holder (`if True`) | test_wake_files, test_inbox_pinned | HolderNamedTest's health test | `self.assertIsNone(watchers.get(OWNER), f"health named another member's holder as ann's watcher: {watchers}")` |
+| C | listeners counts a lock another user owns (`or st.st_uid != box.st.st_uid` dropped) | the same | both `read_by` subtests of the REC-2 test | `self.assertIsNone(listening.get(OWNER), f"{source} named a listener for {OWNER} from a lock "` |
+| D | held_by_others lists the owner's own holder (`and uid != owner` dropped) | the same | the REC-3 test | `self.assertEqual(held, [{"name": OWNER, "lock": "inbox", "path": str(box_lock), "pid": stranger,` |
+| E | old_wake_lock_held opens without O_NOFOLLOW | the same | the switch-over test | `self.assertEqual((fifo[0], link[0]), (EXIT_TIMEOUT, EXIT_TIMEOUT), (fifo, link))` (2, 3) |
+| G | _flock_holders keeps one holder per file (`holders[f[5]] = [int(f[4])]`) | the same | the REC-3 test | the held line above (it listed []: the holder kept was ann's); the words line, `self.assertEqual(ran, (EXIT_BUSY, "", words), ...)`, is next |
+| S | stuck_outbox reads the note by path (`note_first_line(str(note_path(f.path)), None)`) | test_inbox_pinned, test_health | (k), both kinds | `self.assertNotIn(PLANTED_TEXT, shown, "tc printed a planted file from the far end")` |
+| T | note_first_line opens without O_NONBLOCK | test_health, test_inbox_pinned | the REC-5 test, note a FIFO | `self.fail(f"tc health hung on {planted} at another member's note")` (no tc health was left running) |
+| item 2 | a throwaway function calling pinned_inbox added to tc | EveryInboxActHasARowTest | check "every pinning function is covered or exempt" | `self.assertEqual(sorted(set(found) - set(COVERED) - set(EXEMPT)), [],` |
+| item 3 | ring_doorbell's retry takes the refusing lock (`raising=False`) | test_gate, test_codex_route | the REC-9 test | `self.assertEqual(retry, (0, ALREADY_WORDS.format(origin=ORIGIN),` (exit 1 with the symlink words) |
+| item 4, mail/.seq | next_seq's catch always raises | GateInProcessTest, FarAnswerTest | the three "seq" subtests of each new test | `self.assertEqual(gated, (EXIT_BUSY, "", PASSING_WORDS.format(...` and `self.assertEqual((code, out, err), (EXIT_QUEUED, "", BUSY_KEPT_WORDS.format(` (a far traceback, exit 1) |
+| item 4, the lock | inbox_lock's catch always raises | the same | the three "lock" subtests of each | the same two lines |
+| item 5, part 1 | move_aside's own-lock check removed | test_wake_files | "before its look" | `self.assertEqual((code, out), (EXIT_ALREADY, ALREADY_WORDS["wait"].format(name=OWNER)),` (0) |
+| item 5, part 2 | move_aside's link back removed (`if False`) | the same | "between its look and its move" | the same line |
+| item 5, part 3 | hold_wake_lock keeps any flock (`if True: return lock`) | the same | "before its flock" | `self.assertEqual(got["held_at_name"], [True],` ([False]) |
+| item 5, all three | the three removed together | the same | all three subtests | the two lines above |
+
+The in-process gate test catches an OSError from cmd_gate as the run's
+result, so the item 4 mutations fail on its assertion, not as an error.
+
+## Tests whose words or helpers changed
+
+- tests/test_wake_files.py: `hold` takes a script (HOLD_SHARED_SCRIPT);
+  `holders_in_order` added; the switch-over test's link case; the module
+  and class blocks.
+- tests/test_gate.py: FailingWrite passes other attributes through;
+  failing_write's two new stages.
+- tests/test_ssh_route.py: FAILING_GATE_BOOT's stage, far_gate_ssh's
+  `fail_stage`; its @deps names test_health.py's new import.
+- tests/test_inbox_pinned.py: Row's three fields, the module block (r =
+  16 rows, 32 subtests).
+
+## Behavior changes, said plainly
+
+1. A far gate's retry of an id already filed for a codex name answers
+   `already delivered`, exit 0, whatever is wrong at the inbox lock, with
+   one warning that the name was not rung on this retry.
+2. A far gate out of space, quota or disk health at mail/.seq or at an
+   inbox lock's first create answers 10, not an uncaught exit 1; the near
+   side keeps the message queued.
+3. tc wait and tc watch never move a lock of their own user's aside;
+   one their rename took by mistake goes back to its name; and their
+   flock is kept only at the lock's name, else retaken, then exit 1 with
+   words after WAKE_LOCK_TRIES + 1 tries.
+
+## Verified
+
+- The four commits' suites, above. (e) and (f): under "Item 8".
+- New tests with `-v`: listed in the report to the architect.
+- Every mutation above, run as said.
+- Voice and American checks on route-shared.md and this file.
+- Not run: the human scripts (the owner's); real ssh and real codex,
+  never.
+
+## What was not built
+
+As the brief says, not in this round:
+
+- LOW-4 and LOW-5: no code. The architect restarts any board at the
+  merge, and D28's exit record comes after the merge, its place now
+  decided by D37 part 2.
+- REC-14 (a descriptor bound per feed), REC-18 (the architect's
+  switch-over walk) and the DEBTs.
+
+## Work set
+
+- tests/test_cards.py's fence was ":72 only". Line 72 was
+  `NOT_BUILT_NOTE`; the three comment lines above it (69 to 71) described
+  only it, and left alone they would have read as BAD_NAME_WORDS'
+  comment, so they went with it.
+- qa/human/route-shared.md's lead paragraph: the stale "(step 31)" was
+  fixed with the renumbering (item 6).
+
+## Noticed and left, by tier
+
+- LOW: a private gate's first send to a new name makes the inbox (its
+  `mkdir`) after the number; a passing failure there is still an uncaught
+  OSError, exit 1. The brief's LOW-3 named mail/.seq and the lock only.
+- LOW: tc send's own passing failure at mail/.seq or the lock is still an
+  uncaught OSError (a traceback, exit 1); row 10 names only the gate.
+- LOW: cmd_log's doc still says "Only real inbox folders are entered
+  (lstat)" above the round 1a paragraph that replaced it (synthesis,
+  "noticed, unreviewed").
+- REC: a test of the race the item 5 doc leaves (a third party taking
+  the name between move_aside's rename and its link back) would need
+  three actors in one interleaving; none was written.
+
+## Assumptions
+
+- A retry's warning names the lock and why, and for a held lock says it
+  was held past the bound without naming the holder: no refusal, so
+  D35 (3)'s naming rule for busy refusals does not apply.
+- Option A for LOW-3 covers making mail/ as well as mail/.seq and the
+  lock, since `make_folder(MAIL)` sits inside both.
+- held_by_others' row reports its holders as another member's; with
+  them reported as the owner's, nothing would ever be listed, and the
+  row could not go red.
+
+No pause was written.
