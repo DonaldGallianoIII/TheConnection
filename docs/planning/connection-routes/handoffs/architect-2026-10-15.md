@@ -16,6 +16,40 @@ contracts, known-bugs, phases' follow-ups F1 and F2) are on dev. Items 1
 and 2 under "Next" are done; F1 (the D28 record) is next, after the
 relay approves it.
 
+## Stopped, 2026-10-16 at the owner's word
+
+The relay approved F1 and F2, then the owner stopped every session at
+07:50. Where it stands:
+
+- **F1, the wait exit record** (contract C5 "The wait exit record", on
+  dev at `c6f47f3`): branch `Claude-Development-TheConnection-F1`,
+  pushed after a clean leak scan, head `58dafe8`, a work-in-progress
+  commit. Done: the writer and the one reader (`557cd92`), `tc watch
+  --names` (`d2030a1`), `tc health` (`a338a13`), the board (`3d22de0`),
+  the tests in `tests/test_wait_exit.py` and the two human steps. Not
+  done: the handoff (`handoffs/F1.md`), and the lane's record of its
+  mutations (the agent ran 35, each red on an assertion, but its notes
+  were in a scratch folder, so they must be run again). Open: pause
+  `pauses/F1-1.md`. `tests/test_shared.py:935` lists every file after a
+  wait and now meets `.wait.exit`, so its two subtests fail; and the
+  legend words the brief named live in `board/look.js`, not
+  `live.html`, checked by `tests/board-patch.test.mjs:144`. Both sit
+  outside F1's work set. The full suite was not run at the tip.
+  Behavior the relay should confirm: a killed listener now stays `down`
+  on the board past the 10-minute window as well as after a restart, so
+  a session closed for good reads `down` until its name listens again;
+  and the board's date check takes 2 s of slack, not 1 s.
+- **F2, the switch-over cleanup:** not started. It waits until no
+  listener from before the merge holds the old lock place; at 07:15 the
+  relay's `tc watch` (started 07:05:13, before the merge) still did.
+- **Then the DOCS lane (P5).**
+
+The queue when work resumes: answer pause F1-1 with the relay; finish
+F1 (the two outside files, the handoff, the full suite); the architect's
+checks (both suites, the board check, commit cites, mutations of its
+own); a quick review; the merge ask with the relay's three conditions.
+Then F2, then DOCS.
+
 ## Where the plan stands
 
 The connection routes plan (`docs/planning/connection-routes/00-index.md`)
