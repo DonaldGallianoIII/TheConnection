@@ -778,6 +778,55 @@ class HealthTest(UmaskTestCase):
                              f"the gate's keys: {sorted(gated)}; {err}")
 
 
+# F1 (Claude Opus 5.5, unreviewed): item 6, the record is never proof of life (rule 6).
+class NeverAListenerTest(UmaskTestCase):
+    """Item 2's promise, item 6's test: with the lock gone and the record saying listening or mail, listeners() and tc health name no pid.
+
+    @interacts  see the module block.
+    @deps       _root.TcRoot, UmaskTestCase, load_tc, record_made,
+                lock_gone, seen_record, parsed.
+    @complexity O(1) per subtest.
+    @alloc      one TcRoot and one module per subtest.
+    """
+
+    def test_a_record_never_makes_a_name_a_listener(self):
+        """b's wait killed by its pid (record listening), or ended on mail (record mail), its lock gone: tc's listeners() gives b None, tc health --json's listeners gives b null, and tc health's words list b only after `stopped:`, with no pid.
+
+        Known bug listener-reported-live-without-the-lock: a listening
+        claim with no lock behind it. Must reject a reader that takes the
+        record as a listener: the record says what a wait last wrote, and
+        only a held lock says it runs.
+
+        @interacts  per subtest: one proven listener killed by its pid, or
+                    a send and a wait that ends on it; reads /proc/locks;
+                    listeners() in process; tc health twice.
+        @deps       _root.TcRoot.listener, _root.TcRoot.tc, load_tc,
+                    record_made, lock_gone, seen_record, parsed; os,
+                    signal, time.
+        @complexity O(1) per subtest.
+        @alloc      one TcRoot and one module per subtest.
+        """
+        for word in (LISTENING, MAIL):
+            with self.subTest(record=word), _root.TcRoot() as root:
+                box = root.path / "mail" / f"to-{NAME}"
+                if word == LISTENING:
+                    with root.listener(NAME, LISTENER_SECONDS) as pid:
+                        record_made(box)
+                        os.kill(pid, signal.SIGKILL)
+                        gone = lock_gone(box / WAIT_LOCK, pid)
+                else:
+                    root.tc("send", "--from", SENDER, "--to", NAME, "task")
+                    gone = root.tc("wait", NAME, "--timeout", str(WAKE_CEILING_SECONDS))[0] == EXIT_MAIL
+                seen = seen_record(box, time.time()).word
+                listed = load_tc(root).listeners("wait")
+                as_json = (parsed(root.tc("health", "--json")[1]) or {}).get("listeners", {})
+                line = next((text for text in root.tc("health")[1].splitlines() if text.startswith("listeners")), "")
+                self.assertEqual((gone, seen, NAME in listed, listed.get(NAME), NAME in as_json, as_json.get(NAME),
+                                  line.startswith(f"listeners  none running · stopped: {NAME} ({word}, "),
+                                  "pid" in line),
+                                 (True, word, True, None, True, None, True, False), line)
+
+
 # F1 (Claude Opus 5.5, unreviewed): item 5.
 def load_serve():
     """Load board/serve.py as a module, as the board tests do.

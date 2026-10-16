@@ -5,7 +5,9 @@ Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14; fix rounds by
         long names, the fonts, the stale line) by Claude Opus 5.5 (the P4
         phase fixer), 2026-10-15; its round 2 (D28's late mail, D27's
         peers, an unreadable inbox, a damaged token, the jump under the
-        stale line) by Claude Opus 5.5 (the P4 phase fixer), 2026-10-15
+        stale line) by Claude Opus 5.5 (the P4 phase fixer), 2026-10-15;
+        step 22's restart bullet and step 23 (the wait exit record, F1)
+        by Claude Opus 5.5 (the F1 lane agent), 2026-10-16
 Status: unreviewed. Written, not yet run by a person.
 
 What this checks: `board/serve.py` serves the live board on 127.0.0.1 only,
@@ -333,10 +335,36 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       list. Its tree's heading comes to just under the stale line, never
       behind it. The same at phone width.
     - Restart the server with the same command and open the new URL it
-      prints (the token is new). Nothing reads `✕ no listener`,
-      `◔ working` or `△ woken · not read` until a listener has been seen
-      and then stops: a restart forgets who was listening.
-23. A reports_to cycle. Write two cards that report to each other:
+      prints (the token is new). Nothing reads `◔ working` or
+      `△ woken · not read` until a listener has been seen and then stops:
+      a restart forgets who was listening. `c`, whose listener you
+      stopped with Ctrl+C in step 16, reads `✕ no listener` at once:
+      Ctrl+C stopped its wait before it wrote an exit, so its exit record
+      still says listening (F1, C5; F1 lane agent, Claude Opus 5.5,
+      2026-10-16, unreviewed). No other name reads `✕ no listener`.
+23. Restart after a kill (F1, C5's wait exit record). Added by the F1
+    lane agent (Claude Opus 5.5), 2026-10-16. Status: unreviewed.
+    `b`'s listener runs in terminal 2 (step 8). In terminal 4, find its
+    pid with `./tc health` and stop it hard: `kill -9 <pid>`. Stop the
+    server (Ctrl+C in terminal 1), start it again with the same command,
+    and open the new URL it prints.
+    - Pass: on the first answer, before any poll has seen `b` listen,
+      `b` reads `✕ no listener` with a dashed border, and
+      `cat $TC_ROOT/mail/to-b/.wait.exit` reads `listening <time>`: its
+      wait was killed before it wrote an exit.
+    - Fail: `b` reads `○ idle`, `◔ working` or `△ woken · not read`.
+
+    In terminal 2 run `./tc wait b` again. Within 3 s `b` reads
+    `● listening`. In terminal 4 mail it: `./tc send --from a --to b "one
+    more"`. Its wait exits with `MAIL:`, and
+    `cat $TC_ROOT/mail/to-b/.wait.exit` reads `mail <time>`. Restart the
+    server once more and open the new URL.
+    - Pass: `b` reads `○ idle`, never `✕ no listener`: its record says
+      mail woke it, so it left on purpose.
+    - Fail: `b` reads `✕ no listener`.
+
+    Then run `./tc wait b` again in terminal 2, as before this step.
+24. A reports_to cycle. Write two cards that report to each other:
     ```
     echo '{"version": 1, "name": "p", "kind": "claude", "account": "lab", "route": "local", "reports_to": "q"}' > $TC_ROOT/cards/p.json
     echo '{"version": 1, "name": "q", "kind": "claude", "account": "shop", "route": "local", "reports_to": "p"}' > $TC_ROOT/cards/q.json
@@ -344,7 +372,7 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     - Within 3 s `p` is a root with `q` under it, and `p`'s box carries a
       dashed badge `reports to q · cycle`, so the loop shows in words. At
       phone width the same words sit under `p`'s row.
-24. Close the tab, then stop the server with Ctrl+C and both listeners with
+25. Close the tab, then stop the server with Ctrl+C and both listeners with
     Ctrl+C. Run `unset TC_ROOT` in each terminal. The throwaway mailbox is
     under the system temp folder.
 
