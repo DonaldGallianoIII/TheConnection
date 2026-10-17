@@ -23,6 +23,33 @@ names (rule 13).
 
 Next: the DOCS lane (P5), its brief sent to the relay before it starts.
 
+Later the same day: DOCS (P5), the plan's last lane, merged at
+`4179b88` after a ux and an integration review and one fix round, and
+pause DOCS-1 (an explicit empty text argument read stdin and could hang)
+was fixed on its own branch, merged at `8fe7e32`. Every lane of the plan
+is in the dev branch. main on GitHub stays at `c9427e5` until the owner
+asks for the next update.
+
+**Plan work is stopped** until the owner answers one question, put to
+him by the relay: most Linux systems already have a `tc` (the kernel's
+traffic control, `/usr/sbin/tc`), so a bare `tc` there runs the wrong
+program. Keep the name with the README's warning, or rename the command.
+No rename starts before he answers.
+
+The queue, when work resumes:
+1. The owner's answer on the name; a rename, if he wants one, is a plan
+   of its own (code, tests, docs, QA scripts, the live sessions' paths).
+2. The owner's human walks, never run by a person yet:
+   `qa/human/route-local.md` (part B is the plan's exit test: a stranger
+   gets two sessions talking from the README alone), `route-codex.md`,
+   `two-accounts.md`, `shapes.md`, `route-shared.md` (two Linux users)
+   and `route-ssh.md` (the architect's under D30, with the laptop).
+3. Updating main from dev when the owner asks.
+4. Not started, each needing the relay's word: the RECs and DEBTs the
+   reviews listed (for example a test that runs every README command,
+   one member's trust in another's ssh card, init's member rerun exit),
+   and the 18 old lock files the owner may remove.
+
 ## Update, 2026-10-16
 
 The relay said yes in the morning. P3FIX merged into dev at `8b9b59d`

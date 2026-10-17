@@ -94,7 +94,8 @@ changed.
 - **`qa/human/route-ssh.md`, `qa/human/route-shared.md`.** Unchanged.
   The steps I could check against the code agree with it (below).
 - **`pauses/DOCS-1.md`** (new). An empty text argument makes `tc send`
-  wait on stdin.
+  wait on stdin. Settled by a2 for the owner and fixed on its own branch,
+  merged into the dev branch at `8fe7e32` (the architect, 2026-10-17).
 
 ## Every README command I ran, and the result
 
@@ -206,8 +207,10 @@ unset: 357 run, OK. `node --test tests/*.test.mjs`: 68 pass, 0 fail.
    --from a --to b ""` is not refused as empty: `read_body` treats `""`
    as no text and reads stdin, and with stdin open it waits. It hung
    once in this lane's own session until killed. With stdin at
-   `/dev/null` it refuses, exit 1, as documented. Not fixed (no code in
-   this lane); the docs never pass `""`.
+   `/dev/null` it refuses, exit 1, as documented. Not fixed in this
+   lane (no code here); the docs never pass `""`. Fixed after the lane:
+   an explicit `""` or blank text now refuses at once, exit 1 (merged at
+   `8fe7e32`; the architect, 2026-10-17).
 2. **Withdrawn in round 1.** This item said `CLAUDE.md`'s Layout still
    lists `mail/.wait-<name>.lock` as read by a private mailbox. It does
    not: at the lane's base `f160bbc`, `CLAUDE.md:153` already says tc
@@ -367,7 +370,8 @@ All under throwaway roots in this session's scratchpad (`docsfix1-*`),
 - ux REC-3 (`TC_ROOT` set once for a session), REC-4 (a `RELAY.md`),
   REC-5 (an ssh tunnel for the board), REC-7 (where the second user's
   tc comes from, and the shared prompt), REC-8 (a TTY note when send
-  reads stdin; code, beside pause DOCS-1).
+  reads stdin with no text given; code, not done. Pause DOCS-1's own
+  case, an explicit empty text, is fixed at `8fe7e32`).
 - ux REC-9 (a) "the same number" in route-local step 2 and (b) its
   nested backticks in step 3. Its (c) is covered by the LOW-7 fix.
 - integration's blast-radius lines are `CLAUDE.md`, `contracts.md` and
