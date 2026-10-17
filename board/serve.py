@@ -79,7 +79,9 @@ query. Cards never come from tc's health:
 State, first match wins, in D15 and D24's order: `writing` (its newest sent
 message is at most WRITING_WINDOW_S old, listener or not); then, for a name
 with no pid now whose wait exit record says `listening`, `down` (F1,
-below); then, for a name with no pid now that this Board saw listening
+below; F1 fix round 1: unless a second look at the locks finds it held,
+a session that re-armed between the two reads, which is `listening`);
+then, for a name with no pid now that this Board saw listening
 within DOWN_WINDOW_S, one of `down`, `woken` or `working` (after_listening). Mail woke it when a message
 landed in its inbox no earlier than tc's POLL_SECONDS before it was last
 seen listening and no later than POLL_SECONDS after the first poll that
@@ -173,7 +175,8 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             unreviewed): for each name with no pid, tc.wait_exits opens
             its inbox by name in mail/ and reads its wait exit record
             (read_wait_exit: never through a link, never blocking, only
-            the inbox owner's one-line file).
+            the inbox owner's one-line file); F1 fix round 1: when one
+            says `listening`, tc.listeners("wait") once more.
             Opens no message body. Writes nothing to the mailbox, and
             reads and writes no bytecode cache of tc's. main() binds one
             TCP socket on 127.0.0.1, prints the URL with the token once to
@@ -220,7 +223,12 @@ partner is a lower relay is drawn as that relay's `worker`, marked
             unreviewed): for each of the g names with no pid now (every
             name that ever listened and is not listening), one inbox
             open and one short read of its exit record (tc.wait_exits,
-            O(g log g)). In all about m + W + n + l + s(K + 2) stats and
+            O(g log g)). F1 fix round 1 (Claude Opus 5.5, unreviewed):
+            when any of those records says `listening`, tc.listeners runs
+            once more, O(k + n log n), so a session that re-armed between
+            the two reads is listening, never down (the audit's LOW-3); a
+            killed listener's record keeps saying `listening`, so with one
+            on the board every poll lists the locks twice. In all about m + W + n + l + s(K + 2) stats and
             g record reads per poll at most, and no child process. One
             request: O(1) to route, plus one feed() or one read of a board
             file (tens of KB).
@@ -1141,9 +1149,12 @@ class Board:
     when it has one, else from the record's time.
 
     @interacts  see the module block; each poll also opens each stopped
-                name's inbox and reads its exit record (tc.wait_exits).
+                name's inbox and reads its exit record (tc.wait_exits),
+                and lists the locks again when one says `listening` (F1
+                fix round 1).
     @deps       load_tc and the module's helpers; stopped_state,
-                down_age, tc.wait_exits, tc.left_on_purpose (F1).
+                down_age, tc.wait_exits, tc.left_on_purpose (F1);
+                tc.listeners again (F1 fix round 1).
     @complexity O(1) to build, plus one load of tc.
     @alloc      the tc module, last_listening_at, first_missing_at, wakes
                 and nested_cards, held for the object's life (the module
@@ -1269,14 +1280,20 @@ class Board:
         @interacts  see the module block; updates last_listening_at,
                     first_missing_at, wakes and, through note_nested,
                     nested_cards; reads each name with no pid's wait exit
-                    record (tc.wait_exits; F1).
+                    record (tc.wait_exits; F1); when one says `listening`,
+                    lists the locks once more (tc.listeners; F1 fix round
+                    1) and takes a pid found then.
         @deps       snapshot, read_cards, scan_messages, feed_from (P3 fix
                     round 1c: status_preview, file_age, wake_of,
                     after_listening, hierarchy; F1: stopped_state),
-                    note_nested, tc.wait_exits; contextlib, heapq, os;
+                    note_nested, tc.wait_exits, tc.listeners and
+                    tc.WAIT_EXIT_LISTENING (F1 fix round 1); contextlib,
+                    heapq, os;
                     tc.POLL_SECONDS.
         @complexity O(k + m (log W + log K) + n + c^2 + g log g) per poll;
-                    the module block names each term.
+                    the module block names each term (a second
+                    tc.listeners, O(k + n log n), on a poll where a name
+                    with no pid has a `listening` record: F1 fix round 1).
         @alloc      the scan's two descriptors per name, closed before
                     return (P3 fix round 1c); the per-poll objects the module block lists (a Message,
                     a sorted pair and a default count dict per message
@@ -1291,6 +1308,21 @@ class Board:
         now = self.clock()
         snap = self.snapshot()
         pids = snap["listeners"]
+        # Model: Claude Opus 5.5 (the F1 lane agent), 2026-10-16. Status:
+        # unreviewed. C5's wait exit record of each name with no pid now,
+        # through tc's one reader (wait_exits); never a listener.
+        exits = self.tc.wait_exits([name for name, pid in pids.items() if not pid])
+        # F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-3. A
+        # session that re-armed between the lock listing and the record read
+        # holds its lock and wrote its own `listening`: look at the locks once
+        # more for each such name, and a name held now is listening, not down.
+        rearmed = [name for name, record in exits.items() if record.word == self.tc.WAIT_EXIT_LISTENING]
+        if rearmed:
+            again = self.tc.listeners("wait")
+            for name in rearmed:
+                if again.get(name):
+                    pids[name] = again[name]
+                    del exits[name]
         for name, pid in pids.items():
             if pid:
                 self.last_listening_at[name] = now
@@ -1305,11 +1337,7 @@ class Board:
                 # D28: the first poll that finds no pid after a sighting.
                 self.first_missing_at.setdefault(name, now)
 
-        # Model: Claude Opus 5.5 (the F1 lane agent), 2026-10-16. Status:
-        # unreviewed. C5's wait exit record of each name with no pid now,
-        # through tc's one reader (wait_exits); never a listener.
-        exits = self.tc.wait_exits([name for name, pid in pids.items() if not pid])
-        cards = read_cards(self.tc.ROOT / CARDS_FOLDER, self.note_nested)
+        cards =read_cards(self.tc.ROOT / CARDS_FOLDER, self.note_nested)
         # P3 fix round 1c (Claude Opus 5.5, unreviewed): round 1a's MEDIUM. The
         # scan's folders stay open until every message is dated in them.
         with contextlib.ExitStack() as held:

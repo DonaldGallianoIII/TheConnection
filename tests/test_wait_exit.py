@@ -4,7 +4,10 @@ D28, D37 part 2): `tc wait <name>` keeps one line beside its lock,
 mail/to-<name>/.wait.exit, `listening` once it holds the lock and `mail`
 or `timeout` as it exits 0 or 2, replaced whole and never followed; one
 reader takes it only from the inbox owner's one-line regular file; and
-the record is never proof of life.
+the record is never proof of life. F1 fix round 1 (Claude Opus 5.5,
+unreviewed): a plant at the record's names is moved aside with words; a
+down node carries how long ago it stopped; and a session that re-arms
+between a lock listing and the record read is never read as killed.
 
 Model:  Claude Opus 5.5 (the F1 lane agent), 2026-10-16
 Status: unreviewed
@@ -31,8 +34,14 @@ docs/planning/connection-routes/handoffs/F1.md.
             SSH_ORIGINAL_COMMAND set. Loads board/serve.py and runs
             Board.feed() on a clock the test sets, over listeners it
             kills by their pids; writes one record by hand (a .tmp
-            renamed over it) and moves one aside. Writes nothing outside
-            the root's temp folder.
+            renamed over it) and moves one aside. F1 fix round 1 (Claude
+            Opus 5.5, unreviewed): lists an inbox for a write's own .tmp;
+            writes records dated minutes or an hour back by hand and
+            reads each down node's down_age_s; runs cmd_watch in process
+            (resource.setrlimit made a no-op, gpu_stats replaced) and
+            Board.feed(), each with tc's listeners replaced so one listing
+            misses a held lock. Writes nothing outside the root's temp
+            folder.
 @deps       python3 stdlib (argparse, collections, contextlib, datetime,
             importlib, io, json, os, pathlib, pwd, signal, stat,
             subprocess, sys, threading, time, unittest, unittest.mock);
@@ -41,7 +50,8 @@ docs/planning/connection-routes/handoffs/F1.md.
 @complexity O(1) per test: a handful of tc runs per root, one root per
             subtest; the killed-listener test reads /proc/locks until the
             lock goes, at most LOCK_GONE_SECONDS; each watch subtest runs
-            up to its watch's heartbeat (about 8 to 14 s).
+            up to its watch's heartbeat (about 8 to 14 s; the re-arm
+            watch, REARM_HEARTBEAT_SECONDS).
 @alloc      one TcRoot per subtest, removed when its context exits, with
             every child it started.
 """
@@ -196,6 +206,17 @@ NINE_MIN_S = 9 * 60
 ELEVEN_MIN_S = 11 * 60
 LONG_WAIT_S = 3600
 STOP_SEEN_S = 5
+# F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-2 and
+# LOW-3. An in-process watch's heartbeat and poll (a few polls, the first
+# fed the stale listing), and thresholds no real machine reaches.
+REARM_HEARTBEAT_SECONDS = 1.0
+REARM_POLL_SECONDS = 0.2
+QUIET_ARGS = {"load_ratio": 100000.0, "mem_min_pct": 0.0, "gpu_max_c": 100000.0}
+# Which call of tc's listeners each reader makes first after the session
+# re-arms: a watch lists once at its start and once per poll, so its first
+# poll's is the second; a feed's snapshot lists first.
+WATCH_FIRST_POLL_LISTING = 2
+BOARD_FIRST_LISTING = 1
 # What a file outside the mailbox holds, that a link at a record's name
 # (or its .tmp's) leads to.
 OUTSIDE_TEXT = "outside the mailbox: tc must never write or read this\n"
@@ -1065,6 +1086,81 @@ class BoardTest(UmaskTestCase):
             clock["now"] += STOP_SEEN_S
             after = {n["id"]: (n["state"], n["down_age_s"]) for n in board.feed()["nodes"]}.get(NAME)
             self.assertEqual((made, seen, gone, after), (True, "listening", True, ("down", STOP_SEEN_S)))
+
+
+# F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-2 and LOW-3.
+def stale_listing(real, name, at):
+    """A stand-in for tc's listeners that answers its call number `at` (from 1) with `name` holding no lock, as a listing taken a moment before that name's session re-armed would, and every other call as `real` does. Returns (the stand-in, a dict whose "served" says the stale answer went out).
+
+    @interacts  none until called; then calls `real`.
+    @deps       none.
+    @complexity O(1) per call, plus `real`'s.
+    @alloc      one dict per call (a copy of the listing).
+    """
+    state = {"calls": 0, "served": False}
+
+    def listing(*args, **kwargs):
+        found = dict(real(*args, **kwargs))
+        state["calls"] += 1
+        if state["calls"] == at:
+            state["served"] = True
+            found[name] = None
+        return found
+    return listing, state
+
+
+class RearmTest(UmaskTestCase):
+    """The audit's LOW-2 and LOW-3: a session that re-arms between a lock listing and the record read (its new wait holds the lock and wrote `listening`) is never read as killed, by tc watch --names or by the board.
+
+    @interacts  see the module block; runs cmd_watch in process with tc's
+                listeners, gpu_stats and resource.setrlimit replaced, and
+                Board.feed() with its tc's listeners replaced.
+    @deps       _root.TcRoot, UmaskTestCase, load_tc, serve,
+                stale_listing, record_made, run_in_process.
+    @complexity O(1) per subtest.
+    @alloc      one TcRoot per subtest.
+    """
+
+    def test_a_listener_that_rearmed_between_the_listing_and_the_record_is_never_down(self):
+        """b listens (a proven listener, its record `listening`). The watch: w tracks b, and its first poll's listing misses b's lock, as one taken just before b re-armed would; it still heartbeats, exit 0, with no LISTENER DOWN. The board: its first listing misses b's lock the same way; b reads listening with its pid, never down.
+
+        Staged in process: the stale listing is tc's listeners answering
+        once without b, while b's real lock is held and its record says
+        `listening`, the order the race gives. Must reject a watch or a
+        board that takes that record as a kill with no second look at the
+        locks.
+
+        @interacts  per subtest: one proven listener; cmd_watch in process,
+                    or one Board feed, with the first listing stale.
+        @deps       stale_listing, record_made, run_in_process,
+                    load_tc, serve.Board; argparse, unittest.mock.
+        @complexity O(1): one REARM_HEARTBEAT_SECONDS watch, one feed.
+        @alloc      one TcRoot and one module per subtest.
+        """
+        with self.subTest(reader="tc watch --names"), _root.TcRoot() as root:
+            box = root.path / "mail" / f"to-{NAME}"
+            with root.listener(NAME, LISTENER_SECONDS):
+                made = record_made(box)
+                tc = load_tc(root)
+                # The watch's start lists b (call 1); its first poll's listing (call 2) is the stale one.
+                listing, state = stale_listing(tc.listeners, NAME, WATCH_FIRST_POLL_LISTING)
+                args = argparse.Namespace(name=WATCHER, heartbeat=REARM_HEARTBEAT_SECONDS, poll=REARM_POLL_SECONDS,
+                                          names=NAME, **QUIET_ARGS)
+                with mock.patch.object(tc.resource, "setrlimit", lambda *a: None), \
+                        mock.patch.object(tc, "gpu_stats", lambda: None), \
+                        mock.patch.object(tc, "listeners", listing):
+                    code, out, err = run_in_process(lambda: tc.cmd_watch(args))
+            self.assertEqual((made, state["served"], code, "LISTENER DOWN" in out), (True, True, 0, False),
+                             f"w said: {out!r} {err!r}")
+        with self.subTest(reader="the board"), _root.TcRoot() as root:
+            box = root.path / "mail" / f"to-{NAME}"
+            board = serve.Board(root=root.path, clock=time.time)
+            with root.listener(NAME, LISTENER_SECONDS) as pid:
+                made = record_made(box)
+                listing, state = stale_listing(board.tc.listeners, NAME, BOARD_FIRST_LISTING)
+                with mock.patch.object(board.tc, "listeners", listing):
+                    node = {n["id"]: (n["state"], n["listener_pid"]) for n in board.feed()["nodes"]}.get(NAME)
+            self.assertEqual((made, state["served"], node), (True, True, ("listening", pid)))
 
 
 if __name__ == "__main__":

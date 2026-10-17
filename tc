@@ -250,7 +250,9 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             --names` reads it for each tracked name whose lock is gone,
             and alerts LISTENER DOWN only when it still says
             `listening`, is missing, or is older than the watch's last
-            sighting of that lock. `health` shows each stopped name's last
+            sighting of that lock, and a second look at the locks still
+            finds it gone (F1 fix round 1, Claude Opus 5.5, unreviewed:
+            the audit's LOW-2, a session re-arming in between). `health` shows each stopped name's last
             exit word and its age, in words and as `wait_exits` in its
             JSON; the gate's health leaves it out.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
@@ -306,7 +308,9 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             name for its lock (listeners; P3 fix round 1b, Claude Opus
             5.5, unreviewed: D35), plus one nvidia-smi run where it
             exists, plus one inbox open and one short read per tracked
-            name whose lock is gone (wait_exits, F1); it reads no cards. O(p) once per
+            name whose lock is gone (wait_exits, F1), plus the same
+            listing once more on a poll that would alert for a listener
+            (F1 fix round 1); it reads no cards. O(p) once per
             heartbeat. join O(1), or O(u) for a codex card's unread count;
             card O(u) for its unread count; cards O(c). init O(f + d) over f
             folders and files under the shared folders (hundreds to
@@ -9438,7 +9442,12 @@ def cmd_watch(args):
     timed out, left on purpose and is not down (known bug
     liveness-gap-by-design-read-as-down). Which names are alive still
     comes from the locks alone (listeners); the record only says why a
-    lock that is gone went.
+    lock that is gone went. F1 fix round 1 (Claude Opus 5.5, unreviewed):
+    the audit's LOW-2. A woken session that re-arms between the listing
+    and the record read has taken its lock and written its own
+    `listening`, which reads as a kill; so before it alerts, the watch
+    lists the locks once more and drops each name held again (its
+    sighting stamped), alerting only for a lock still gone.
 
     @interacts  checks the name first (C0, exit 6, nothing written); caps
                 its own address space; reads ROOT/.shared once
@@ -9448,7 +9457,9 @@ def cmd_watch(args):
                 listeners) and runs nvidia-smi; reads the clock
                 (wall_clock) before each listing and, for each tracked name
                 whose lock is gone, its exit record (wait_exits; F1);
-                prints a HEARTBEAT or ALERT line.
+                when one does not say it left on purpose, the locks once
+                more (listeners; F1 fix round 1); prints a HEARTBEAT or
+                ALERT line.
     @deps       require_names, mailbox_share, hold_wake_lock,
                 machine_stats, listeners, wait_exits, left_on_purpose,
                 wall_clock, session_counts, _breaches; resource, sys,
@@ -9458,8 +9469,10 @@ def cmd_watch(args):
                 per inbox), plus /proc/meminfo and one nvidia-smi run where
                 it exists (machine_stats), plus one inbox open and one
                 short read for each of the g tracked names whose lock is
-                gone (wait_exits; F1); no cards and no .shared read per
-                poll. O(p) once per heartbeat over p processes
+                gone (wait_exits; F1), plus a second O(k + n log n)
+                listing on a poll that would alert for a listener (F1 fix
+                round 1; at most once per poll); no cards and no .shared
+                read per poll. O(p) once per heartbeat over p processes
                 (session_counts). One poll every args.poll seconds until
                 the heartbeat.
     @alloc      one open lock file for its lifetime, closed on every way
@@ -9492,7 +9505,12 @@ def cmd_watch(args):
             seen.update(dict.fromkeys(alive_at_start & now_alive, stamp))
             gone = sorted(alive_at_start - now_alive)
             exits = wait_exits(gone)  # F1: the record says why each lock that is gone went; never a listener
-            problems += [f"LISTENER DOWN: {n}" for n in gone if not left_on_purpose(exits.get(n), seen[n])]
+            down = [n for n in gone if not left_on_purpose(exits.get(n), seen[n])]
+            if down:  # F1 fix round 1 (Claude Opus 5.5, unreviewed): LOW-2, a re-arm between the listing and the read
+                again = listeners("wait", shared)
+                seen.update(dict.fromkeys((n for n in down if again.get(n)), stamp))
+                down = [n for n in down if not again.get(n)]
+            problems += [f"LISTENER DOWN: {n}" for n in down]
             if problems:
                 print(f"ALERT {now_iso()}: " + "; ".join(problems))
                 print(f"  now: load {m['load1']} / {m['cores']}, mem free {m['mem_avail_pct']}%, {_gpu_text(m['gpus'])}")
