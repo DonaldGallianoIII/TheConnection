@@ -1,83 +1,60 @@
 # QA: the shared mailbox, two Linux users in one group (C4, D19, D20, D21)
 
-Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; the D21
-        steps (6, 7, 13 to 15, and 22) added by the SHARED fixer, Claude
-        Opus 5.5; step 25's words and steps 27 to 29 added in round 2 by
-        the SHARED fixer, Claude Opus 5.5; steps 30 and 31, and the words
-        of steps 3, 15, 28 and 29, in round 3 by the SHARED fixer, Claude
-        Opus 5.5, 2026-10-15; steps 15, 30 and 31 changed in round 4 by
-        the SHARED fixer, Claude Opus 5.5, 2026-10-15; steps 15 and 31,
-        and the paragraph after step 23, changed in round 5 by the
-        SHARED fixer, Claude Opus 5.5, 2026-10-15; steps 15 and 31
-        changed, and step 32 added, in round 6 by the SHARED fixer,
-        Claude Opus 5.5, 2026-10-15; the lead paragraph changed, and
-        step 33 added, in round 7 by the SHARED fixer, Claude Opus 5.5,
-        2026-10-15; the lead paragraph changed in round 8 by the SHARED
-        fixer, Claude Opus 5.5, 2026-10-15; steps 34 to 39 (D22) added,
-        and the last step renumbered, by the SSH lane agent, Claude Opus
-        5.5, 2026-10-15; steps 34 to 40 rewritten for D32 and D33, and
-        the last step renumbered and its words made to name both folders,
-        in fix round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15;
-        step 29's words changed for D35 (3), steps 30 and 31 added after
-        it, and every step after them renumbered by two, in P3 fix round
-        1b by the P3 fixer, Claude Opus 5.5, 2026-10-15; steps 5 and 37
-        to 42 brought to P3 fix round 1c (init makes mail/.origins/, the
-        note beside a waiting file, the squatted line's sentence, the
-        flush count's words, `ls -la` for the send lock) by the P3 fixer,
-        Claude Opus 5.5, 2026-10-15; steps 32, 33 and 44 added (D36 (2),
-        D35 (1) with a planted watch lock, D36 (4) with a FIFO note),
-        the steps after 31 renumbered by two and the last two by three,
-        with the references to them, in P3 fix round 2 by the P3 fixer,
-        Claude Opus 5.5, 2026-10-15 (the step numbers earlier in this
-        list are as each round wrote them)
+Model:  Claude Opus 5.5 (the SHARED lane agent), 2026-10-14; changed in
+        many fix rounds since, each listed under "Round history" at the
+        end; what you need, the order with route-ssh.md, `M` set in each
+        shell, the moves aside and the cleanup by the DOCS2 lane agent,
+        Claude Opus 5.5, 2026-10-17
 Status: unreviewed
 
-What this checks: two Linux users in one group share one mailbox. Each
-can send, wait and read. Neither can delete, rename or rewrite the other's
-unread mail (D20). Only the user who ran init can change the group, and a
-send to a name nobody joined is refused even when an inbox is there
-(D21). A planted link is never printed (D19). A member who sets
-`mail/.seq` back or holds a lock can make the other's command fail, never
-lose a message or hang it, and init never shares a ROOT the group may
-write (round 2); that failure names who holds the lock, a member cannot
-hold another member's listener, and a member who rewrites a Codex
-member's doorbell holds it off for one backoff at most (P3 fix round 1b,
-D35, D36). Only a name's owner listens for it, a file a member plants
-and holds at the owner's watch lock is moved aside, and a member's
-stuck outbox mail shows in every member's `tc health`, a FIFO planted
-as its note never hanging it (P3 fix round 2, D35 (1), D36 (2) and
-(4)). A file a member plants under a message's name, in the
-inbox or in read/, never replaces it, and init refuses a ROOT a member
-could swap through a folder above it (round 3, D20, D23). tc read calls
-neither of two such files forged, and a planted name of any length
-wakes `tc wait` at most once (round 4). A member's init on the init
-user's ROOT is refused with words that name who ran init and charge no
-one, and a member who makes ROOT first stops the init user's init
-(round 5, D28). That refused init then fixes the member's own entries
-itself, through a no-follow open (round 6, D29). Every folder from ROOT
-down is pinned by identity: init opens ROOT once, right after its walk,
-and goes on only when it is the folder the walk looked at (on a
-member's rerun, the init user's); then it opens each of the four, each
-folder below them and each entry by its name in the folder above it,
-never by its path, and changes an entry only when it is the one the
-walk found. So a link or another folder swapped in for ROOT, a folder
-above it, a folder on the way, or an entry, while init runs, never
-leads either walk out of the mailbox (rounds 7 and 8). ROOT's owner and
-every folder above it are judged by the walk, by path, before that (step
-35). A file with a second name (a hard link) is never changed, and a
-nest of folders too deep is named and left (round 8). The only command
-line tc prints is D23's `chmod g-w,o-w`, to the owner of ROOT or of a
-folder above it (steps 28 and 35); for an entry under the four it
-prints none. The tests in
-`tests/test_shared.py` prove the modes, the owners and the checks tc
-makes, but one user cannot prove another user's refusals. This script
-does, by hand.
+<!-- What you need, the order and the short lead: the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17. Status: unreviewed. -->
+## What you need
+
+- One machine with two Linux users, here `ann` and `ben`, and a login
+  with sudo for steps 1 to 3, step 35 and the cleanup.
+- A `tc` each user can run, from this branch: the same checkout, if it
+  and every folder above it are readable by the group (on many systems
+  a home folder is not), or each user's own clone at the same commit
+  (`git rev-parse HEAD` in each prints the same). Every `tc` below is
+  that copy, run as `python3 /path/to/tc` or `./tc`.
+- Two terminals for each user: some steps keep a wait running in one.
+- For steps 38 to 44 only: a far machine that ann's ssh key reaches
+  through `tc gate` and ben's does not. `qa/human/route-ssh.md` sets it
+  up; the next section says when. Those steps run real `ssh`. No step
+  runs real `codex`: step 31 uses a stand-in.
 
 The names here are made up: users `ann` and `ben`, group `tcshare`,
-mailbox `/srv/tc-shared`. Use your own. Every `tc` below is your own copy
-of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
-`ssh` and real `codex` are not needed. Record what you saw in
+mailbox `/srv/tc-shared`. Use your own. Record what you saw in
 `qa/results/` (D4).
+
+## The order, with route-ssh.md
+
+Walking both files, walk them as ann, so route-ssh.md's `you` is ann:
+
+1. route-ssh.md, steps 1 to 22.
+2. This file, steps 1 to 45. Steps 38 to 44 reuse route-ssh.md's alias
+   `farbox-tc` and its far name `far-b`, so their setup is done.
+3. This file's cleanup, steps 46 to 50.
+4. route-ssh.md's cleanup, steps 23 to 28, once, last.
+
+Walking this file alone: before step 38, as ann, do route-ssh.md's steps
+2 to 7, and at the end its cleanup for what those steps made.
+
+## What this checks
+
+Two Linux users in one group share one mailbox. Each can send, wait and
+read. Neither can delete, rename or rewrite the other's unread mail,
+card, status or queued ssh mail, or hold the other's listener. Only the
+user who ran init
+can change the group, and a send to a name nobody joined is refused. A
+planted link is never printed, a planted file never replaces a message,
+and init never shares a ROOT a member could swap. Through the files
+every member must write, the worst a member can do is make a command
+fail, with words that name who holds the lock. The tests in
+`tests/test_shared.py` prove the modes, the owners and the checks tc
+makes, but one user cannot prove another user's refusals. This script
+does, by hand. Which round added which check is under "Round history"
+at the end.
 
 ## Setup, once, as a user with sudo
 
@@ -101,6 +78,10 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
      (step 35), since a member could rename the mailbox away and put
      their own in its place.
 4. In every terminal below: `export TC_ROOT=/srv/tc-shared`.
+   <!-- The aside folder: the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17. Status: unreviewed. -->
+   As ann and as ben, once: `mkdir -p -m 0700 ~/tc-qa-aside`. Nothing
+   in this walk is removed: each "Put it back" moves what it clears into
+   this folder, and you remove it yourself when you choose.
 
 ## ann shares the mailbox
 
@@ -215,11 +196,17 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
 
 ## Nobody touches another member's unread mail (D20)
 
+<!-- Steps 16 and 17: M set in each user's own shell, by the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17. Status: unreviewed. -->
 16. As ann: `tc send --from ann --to ann "ann's own note, do not touch"`.
-    Note the file it names, below `M`:
-    `M=/srv/tc-shared/mail/to-ann/00000N-from-ann.md` (N from the
-    output). It is ann's unread mail, written by ann, in ann's inbox.
-17. As ben, try each of these. Each is refused, and the file is unchanged:
+    Note the file it names. It is ann's unread mail, written by ann, in
+    ann's inbox. Below, `M` stands for that path, and each shell that
+    uses `$M` sets it for itself: a variable set in ann's shell never
+    reaches ben's.
+17. As ben, first set `M` in ben's own shell, with the N from ann's
+    output: `M=/srv/tc-shared/mail/to-ann/00000N-from-ann.md`. Check it:
+    `ls -l $M` prints the file, owner `ann`. If it prints `ls`'s own
+    listing of the current folder instead, `M` is not set in this shell.
+    Then try each of these. Each is refused, and the file is unchanged:
     - `rm $M`: `rm: cannot remove ...: Operation not permitted`.
     - `mv $M /srv/tc-shared/mail/to-ann/renamed.md`: `Operation not
       permitted`.
@@ -230,8 +217,8 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
     - `echo fake > /srv/tc-shared/mail/to-ann/fake.md` works (a member may
       put a new file in an inbox: that is how a send lands). Then
       `mv /srv/tc-shared/mail/to-ann/fake.md $M`: `Operation not
-      permitted`. Then `rm /srv/tc-shared/mail/to-ann/fake.md`, which
-      works, since ben owns it.
+      permitted`. Then `mv /srv/tc-shared/mail/to-ann/fake.md
+      ~/tc-qa-aside/step17-fake.md`, which works, since ben owns it.
     - `mv /srv/tc-shared/mail/to-ann /srv/tc-shared/mail/to-gone`:
       `Operation not permitted` (the sticky `mail/`; ann owns `to-ann`).
 18. As ben: `tc read ann`.
@@ -261,8 +248,8 @@ of this branch's `tc`, run as `python3 /path/to/tc` or `./tc`. Real
       mail, so ann's words never land in a folder ben owns.
     - `ls -A /srv/tc-shared/mail/to-ghost` prints nothing, and both
       `cat`s print the same number.
-    - As ben: `rmdir /srv/tc-shared/mail/to-ghost`. It works: ben owns
-      it.
+    - As ben: `mv /srv/tc-shared/mail/to-ghost
+      ~/tc-qa-aside/step22-to-ghost`. It works: ben owns it.
 23. As ann: `tc read ann`.
     - It prints `ann's own note, do not touch`, unchanged.
 
@@ -295,8 +282,11 @@ mail.
     - `tc log` prints the history on stdout, and on stderr `tc log:
       /srv/tc-shared/mail/to-ann/000099-from-ben.md not shown (it is a
       symlink, which tc never follows)`.
-26. As ann: `rm /srv/tc-shared/mail/to-ann/000099-from-ben.md`.
-    - It works: ann owns her inbox. ben could also remove his own link.
+26. As ann: `mv /srv/tc-shared/mail/to-ann/000099-from-ben.md
+    ~/tc-qa-aside/step26-link`. `mv` moves the link itself, never the
+    file it points at.
+    - It works: ann owns her inbox. ben could also move his own link
+      out.
 
 ## A member's worst is a failed command (D20, D21, round 2)
 
@@ -382,8 +372,9 @@ mail.
       is running. Not starting a second.` and exits 3, or health names
       ben's holder as ann's listener, or the mail lands and nothing
       wakes.
-    - Put it back. As ben: `kill %1`, then `rm
-      /srv/tc-shared/mail/.wait-ann.lock` (ben's own file).
+    - Put it back. As ben: `kill %1`, then `mv
+      /srv/tc-shared/mail/.wait-ann.lock ~/tc-qa-aside/step30-wait-ann.lock`
+      (ben's own file).
 31. A member rewrites a Codex member's doorbell to `clear`, and it costs
     at most one backoff, never the doorbell for good (D35 (2), D36 (1),
     P3 fix round 1b). Real codex is not needed: a stand-in named `codex`,
@@ -418,7 +409,8 @@ mail.
       `2`: the forged `clear` held the doorbell off for one backoff at
       most. Fail: no `rang codex` line and still `1`: the marker alone
       decided, and annc would never be rung while its mail waits unread.
-    - Put it back. As ann: `tc read annc`. As ben: `rm -r ~/tc-qa-bin`.
+    - Put it back. As ann: `tc read annc`. As ben: `mv ~/tc-qa-bin
+      ~/tc-qa-aside/step31-bin`.
 32. Only a name's owner listens for it, and a name nobody joined is
     refused (D36 (2), P3 fix round 2). The tests show this with one
     Linux user standing in for two; this step shows the kernel's view.
@@ -439,7 +431,8 @@ mail.
       prints nothing, and no `to-nobody-here` appears. Fail: any exit
       other than 1, an `ALREADY` or `HEARTBEAT` line, a changed listing
       of ann's inbox, or a `to-nobody-here` folder.
-    - Put it back. As ben: `rm /tmp/before-ben.txt`.
+    - Put it back. As ben: `mv /tmp/before-ben.txt
+      ~/tc-qa-aside/step32-before-ben.txt`.
 33. A member plants and holds ann's watch lock before ann has ever run
     tc watch, and ann's watch moves it aside and runs (D35 (1), P3 fix
     round 2).
@@ -467,9 +460,9 @@ mail.
       ann's at `-rw-------`. Fail: `ALREADY WATCHING` and exit 3,
       `Operation not permitted` (ann's tc could not move ben's file), no
       `held` line, or a `.watch.lock` that is not ann's at `-rw-------`.
-    - Put it back. As ben: `kill %1`. As ann: `rm
-      /srv/tc-shared/mail/to-ann/.watch.lock.planted-1` (ann owns the
-      inbox, so she may remove a file in it).
+    - Put it back. As ben: `kill %1`. The file tc moved aside,
+      `.watch.lock.planted-1`, stays where tc put it, out of the lock's
+      way; the cleanup at the end moves it aside with the whole mailbox.
 
 ## Nothing planted replaces read mail, and nobody swaps ROOT (round 3)
 
@@ -580,11 +573,12 @@ mail.
       and group unchanged. Round 5 printed a `chgrp` and a `chmod` line
       for the message instead, and pasting them after ann's swap changed
       this folder.
-    - Put it back. As ann: `rm
-      /srv/tc-shared/mail/to-ann/read/000001-from-ben.md`, then `mv
+    - Put it back. As ann: `mv
+      /srv/tc-shared/mail/to-ann/read/000001-from-ben.md
+      ~/tc-qa-aside/step36-link` (the link), then `mv
       /srv/tc-shared/mail/to-ann/read/aside
-      /srv/tc-shared/mail/to-ann/read/000001-from-ben.md`. As ben: `rmdir
-      ~/tc-qa-folder`.
+      /srv/tc-shared/mail/to-ann/read/000001-from-ben.md`. As ben: `mv
+      ~/tc-qa-folder ~/tc-qa-aside/step36-folder`.
 
 ## A folder swapped on the way never leads init out of the mailbox (round 7)
 
@@ -623,19 +617,16 @@ mail.
     - As ben: the same `ls` commands print the three lines you noted,
       each mode and group unchanged. No `chgrp` or `chmod` line is
       printed.
-    - Put it back. As ann: `rm /srv/tc-shared/mail/to-ann/read` (the
-      link), then `mv /srv/tc-shared/mail/to-ann/read-aside
-      /srv/tc-shared/mail/to-ann/read`. As ben: `rm ~/tc-qa-folder2/notes`,
-      then `rmdir ~/tc-qa-folder2/sub ~/tc-qa-folder2`.
+    - Put it back. As ann: `mv /srv/tc-shared/mail/to-ann/read
+      ~/tc-qa-aside/step37-link` (the link; with no `/` at its end, `mv`
+      moves the link, not the folder it points at), then `mv
+      /srv/tc-shared/mail/to-ann/read-aside
+      /srv/tc-shared/mail/to-ann/read`. As ben: `mv ~/tc-qa-folder2
+      ~/tc-qa-aside/step37-folder2`.
 
 ## Each member's outbox is their own (D22)
 
-Added by the SSH lane agent (Claude Opus 5.5), 2026-10-15; rewritten for
-D32 and D33 in fix round 1 by the SSH fixer, Claude Opus 5.5, 2026-10-15
-(the old step 38, a known limit, is the check in step 43 now: P3 fix
-round 1b renumbered it from 39, and P3 fix round 2 from 41). Status:
-unreviewed.
-
+<!-- Added by the SSH lane agent (Claude Opus 5.5), 2026-10-15; its history is under "Round history"; the setup sentence changed for the order at the top by the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17. Status: unreviewed. -->
 ssh runs as the Linux user who ran `tc send`, with that user's keys, so
 one member's dead queue must never hold up another's mail, and each
 member's `tc flush` sends only that member's files. Each member's ssh
@@ -643,10 +634,12 @@ mail waits in a branch of the outbox that member alone owns,
 `outbox/<user>/` (D32), mode 2750, so no other member can move, rename,
 remove or plant anything in it (D33). These steps need a far machine
 that ann's ssh key reaches through `tc gate` and ben's does not.
-`qa/human/route-ssh.md` sets one up: as ann, do its steps 2 to 7 (not 1
-or 8), with `TC_ROOT=/srv/tc-shared` still exported from step 4 here.
-`farbox-tc` below is the ssh alias that file makes, and `far-b` the name
-on the far machine. Both are made up; use yours.
+`qa/human/route-ssh.md` sets one up. If you walked it first, as the
+order at the top says, its steps 2 to 7 are done: go on to step 38. If
+not, as ann, do its steps 2 to 7 now (not 1 or 8), with
+`TC_ROOT=/srv/tc-shared` still exported from step 4 here. `farbox-tc`
+below is the ssh alias that file makes, and `far-b` the name on the far
+machine. Both are made up; use yours.
 
 38. As ann: `tc card far-b --ssh farbox-tc --remote-tc '~/tc-qa/tc'`.
     - It prints `card written: far-b (other, account unknown, route ssh
@@ -732,19 +725,116 @@ on the far machine. Both are made up; use yours.
       failed try is noted. Fail: no stuck line for ben's mail, or a `tc
       health` that hangs (stop it with Ctrl+C, and write down that it
       hung).
-    - Put it back. As ben: `rm
-      /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md.stderr` (the
-      FIFO), then `mv /srv/tc-shared/outbox/ben/to-far-b/kept-note
-      /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md.stderr`. Step 45
-      then removes both, as before.
-45. Put it back. As ben: `rm
+    - Put it back. As ben: `mv
+      /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md.stderr
+      ~/tc-qa-aside/step44-fifo` (the FIFO), then `mv
+      /srv/tc-shared/outbox/ben/to-far-b/kept-note
+      /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md.stderr`.
+<!-- Step 45 and the cleanup rewritten by the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17: moves aside, never rm, and route-ssh.md's cleanup once, last. Status: unreviewed. -->
+45. Put it back. As ben: `mv
     /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md
-    /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md.stderr` (ben's own
-    file and its note) and `rmdir
-    /srv/tc-shared/outbox/.squatted-ann-1` (the folder ben made in step
-    40, moved aside). As ann: run `qa/human/route-ssh.md`'s undo steps.
+    /srv/tc-shared/outbox/ben/to-far-b/<n>-from-ben.md.stderr
+    ~/tc-qa-aside/` (ben's own file and its note, so nothing of ben's
+    waits for far-b any more), then `mv
+    /srv/tc-shared/outbox/.squatted-ann-1 ~/tc-qa-aside/step40-squatted`
+    (the folder ben made in step 40, which ann moved aside).
+    route-ssh.md's cleanup comes later, once (the order at the top).
 
-## Afterward
+## Cleanup
 
-46. The mailbox `/srv/tc-shared`, the folder `/srv/team` that step 35
-    made, and the group stay until you remove them yourself.
+Nothing here removes anything. Each step moves what this walk made out
+of the way, and what is moved aside is yours to remove when you choose.
+
+46. In every terminal, as ann and as ben: `unset TC_ROOT`.
+47. As a user with sudo: `sudo mkdir -m 0700 /srv/tc-qa-aside`, then
+    `sudo mv /srv/tc-shared /srv/team /srv/tc-qa-aside/`. That takes the
+    mailbox and the team folder from step 35, with `tc` and `tc2` in it.
+    - `ls /srv` no longer lists `tc-shared` or `team`, and neither user
+      can reach what is under `/srv/tc-qa-aside`.
+48. If you walked route-ssh.md too, do its cleanup now, steps 23 to 28,
+    once. Walking this file alone, do its cleanup for what its steps 2
+    to 7 made: its steps 23 and 24, and in its step 25 the key only.
+49. Left for you to remove yourself, when you choose: `/srv/tc-qa-aside`
+    (the mailbox and the team folder), `~/tc-qa-aside` of ann and of ben
+    (what each "Put it back" moved there), and the group `tcshare`, with
+    ann and ben in it.
+50. Record what you saw in `qa/results/route-shared.md`, with made-up
+    names only.
+
+## Round history
+
+<!-- Moved here from the top of this file (the Model block's list, the outbox section's note and the old lead paragraph), words kept but for each one's opening clause, by the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17. Status: unreviewed. -->
+A walker can skip this section. It says which round wrote which step
+and which check, as each round recorded it. The step numbers in it are
+as each round wrote them, not as they stand now.
+
+**Who changed what.** The SHARED lane agent, Claude Opus 5.5, wrote this
+file on 2026-10-14; the D21 steps (6, 7, 13 to 15, and 22) added by the
+SHARED fixer, Claude Opus 5.5; step 25's words and steps 27 to 29 added
+in round 2 by the SHARED fixer, Claude Opus 5.5; steps 30 and 31, and
+the words of steps 3, 15, 28 and 29, in round 3 by the SHARED fixer,
+Claude Opus 5.5, 2026-10-15; steps 15, 30 and 31 changed in round 4 by
+the SHARED fixer, Claude Opus 5.5, 2026-10-15; steps 15 and 31, and the
+paragraph after step 23, changed in round 5 by the SHARED fixer, Claude
+Opus 5.5, 2026-10-15; steps 15 and 31 changed, and step 32 added, in
+round 6 by the SHARED fixer, Claude Opus 5.5, 2026-10-15; the lead
+paragraph changed, and step 33 added, in round 7 by the SHARED fixer,
+Claude Opus 5.5, 2026-10-15; the lead paragraph changed in round 8 by
+the SHARED fixer, Claude Opus 5.5, 2026-10-15; steps 34 to 39 (D22)
+added, and the last step renumbered, by the SSH lane agent, Claude Opus
+5.5, 2026-10-15; steps 34 to 40 rewritten for D32 and D33, and the last
+step renumbered and its words made to name both folders, in fix round 1
+by the SSH fixer, Claude Opus 5.5, 2026-10-15; step 29's words changed
+for D35 (3), steps 30 and 31 added after it, and every step after them
+renumbered by two, in P3 fix round 1b by the P3 fixer, Claude Opus 5.5,
+2026-10-15; steps 5 and 37 to 42 brought to P3 fix round 1c (init makes
+mail/.origins/, the note beside a waiting file, the squatted line's
+sentence, the flush count's words, `ls -la` for the send lock) by the P3
+fixer, Claude Opus 5.5, 2026-10-15; steps 32, 33 and 44 added (D36 (2),
+D35 (1) with a planted watch lock, D36 (4) with a FIFO note), the steps
+after 31 renumbered by two and the last two by three, with the
+references to them, in P3 fix round 2 by the P3 fixer, Claude Opus 5.5,
+2026-10-15.
+
+**The outbox section (D22).** Added by the SSH lane agent (Claude Opus
+5.5), 2026-10-15; rewritten for D32 and D33 in fix round 1 by the SSH
+fixer, Claude Opus 5.5, 2026-10-15 (the old step 38, a known limit, is
+the check in step 43 now: P3 fix round 1b renumbered it from 39, and P3
+fix round 2 from 41). Status: unreviewed.
+
+**The checks, by round.** Two Linux users in one group share one
+mailbox. Each can send, wait and read. Neither can delete, rename or
+rewrite the other's unread mail (D20). Only the user who ran init can
+change the group, and a send to a name nobody joined is refused even
+when an inbox is there (D21). A planted link is never printed (D19). A
+member who sets `mail/.seq` back or holds a lock can make the other's
+command fail, never lose a message or hang it, and init never shares a
+ROOT the group may write (round 2); that failure names who holds the
+lock, a member cannot hold another member's listener, and a member who
+rewrites a Codex member's doorbell holds it off for one backoff at most
+(P3 fix round 1b, D35, D36). Only a name's owner listens for it, a file
+a member plants and holds at the owner's watch lock is moved aside, and
+a member's stuck outbox mail shows in every member's `tc health`, a FIFO
+planted as its note never hanging it (P3 fix round 2, D35 (1), D36 (2)
+and (4)). A file a member plants under a message's name, in the inbox or
+in read/, never replaces it, and init refuses a ROOT a member could swap
+through a folder above it (round 3, D20, D23). tc read calls neither of
+two such files forged, and a planted name of any length wakes `tc wait`
+at most once (round 4). A member's init on the init user's ROOT is
+refused with words that name who ran init and charge no one, and a
+member who makes ROOT first stops the init user's init (round 5, D28).
+That refused init then fixes the member's own entries itself, through a
+no-follow open (round 6, D29). Every folder from ROOT down is pinned by
+identity: init opens ROOT once, right after its walk, and goes on only
+when it is the folder the walk looked at (on a member's rerun, the init
+user's); then it opens each of the four, each folder below them and each
+entry by its name in the folder above it, never by its path, and changes
+an entry only when it is the one the walk found. So a link or another
+folder swapped in for ROOT, a folder above it, a folder on the way, or
+an entry, while init runs, never leads either walk out of the mailbox
+(rounds 7 and 8). ROOT's owner and every folder above it are judged by
+the walk, by path, before that (step 35). A file with a second name (a
+hard link) is never changed, and a nest of folders too deep is named
+and left (round 8). The only command line tc prints is D23's `chmod
+g-w,o-w`, to the owner of ROOT or of a folder above it (steps 28 and
+35); for an entry under the four it prints none.
