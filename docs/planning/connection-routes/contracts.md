@@ -559,7 +559,8 @@ For a separate Linux user per account on one machine.
     so a FIFO planted at a lock's name is refused with words instead of
     hanging tc (D19). At a wait or watch lock's name, in the owner's own
     inbox, the owner's tc moves it aside with words and makes its own
-    lock (D35). The one other exception: a gate's retry of an id already
+    lock (D35); the same holds at the wait exit record's names
+    (`.wait.exit` and its temp names, F1). The one other exception: a gate's retry of an id already
     filed for a codex name answers exit 0 with a warning (C3).
 - **Nobody touches another member's mail** (D20, Donald: "prevent that
   from occurring"; it replaces D19's trust trade). Under shared mode:
@@ -657,8 +658,9 @@ of `tc health` is not on the board's path.
   `down`: the lock vanished and nothing woke it. The lock file's time
   cannot be used: it is the time the lock was first made, not when the
   current listener started (D35 keeps one lock file and reopens it). After a server
-  restart nothing is `down`, `woken` or `working` until it has been seen
-  listening again; the doc block says so.
+  restart nothing is `woken` or `working` until it has been seen
+  listening again, and nothing is `down` except a name whose exit record
+  says `listening` (below); the doc block says so.
 - **A listener that mail woke is not down** (D24, D28). `tc wait` exits
   when mail lands and a session re-arms only after its turn, so a name
   seen listening within `DOWN_WINDOW_S`, not listening now, whose inbox
@@ -689,8 +691,9 @@ of `tc health` is not on the board's path.
 - **The wait exit record** (D28, D37, phases.md F1). `tc wait <name>`
   keeps a one-line record beside its lock, `mail/to-<name>/.wait.exit`,
   made by the owner at `0640` through the pinned inbox handle, replaced
-  whole (a `.tmp` beside it, then a rename, both by name in the open
-  inbox) and never followed: `listening <time>` once it holds the lock,
+  whole (a `.tmp` beside it with a fresh random name per write, then a
+  rename, both by name in the open inbox; the owner's own leftovers of
+  that form are removed, anyone else's moved aside) and never followed: `listening <time>` once it holds the lock,
   then `mail <time>` or `timeout <time>` as it exits on mail or at its
   deadline (`<time>` as in a message header). A wait that is killed or
   crashes leaves `listening`. A reader takes the record only from a
@@ -707,8 +710,10 @@ of `tc health` is not on the board's path.
   - no record, or none readable (a tc from before F1): the rules above,
     unchanged.
   `tc watch --names` reads the same record and alerts `LISTENER DOWN`
-  only for a name whose lock went while its record still says
-  `listening` (known bug `liveness-gap-by-design-read-as-down`). `tc
+  for a name whose lock went unless its record says `mail` or `timeout`
+  written since the lock was last seen, and it looks at the locks a
+  second time first, so a session that re-armed in between is never
+  called down (known bug `liveness-gap-by-design-read-as-down`). `tc
   health` shows each stopped name's last exit word and its age. The
   gate's health leaves it out (D36 part 5's allow list).
 - **The pill warns only on a fresh stop** (a2 for the owner, 2026-10-17,

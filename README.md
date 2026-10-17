@@ -86,7 +86,9 @@ checking never gets in a listener's way.
   session counts, who is listening) once per heartbeat. The default heartbeat is just
   under the cache TTL, so a watch also keeps the cache warm (see "Keep the cache warm").
 - exits 5 with an `ALERT` line early if load stays over 0.9 x cores for 3 polls, free
-  memory drops under 15%, a GPU passes 85C, or a listener named in `--names` stops.
+  memory drops under 15%, a GPU passes 85C, or a listener named in `--names` stops
+  without having left on purpose: a wait that left on mail or at its timeout says so
+  in its exit record (`mail/to-<name>/.wait.exit`), and the watch lets it be.
 - exits 3 if another `tc watch a` is already running.
 
 Either way, re-arm it after you handle the output. Thresholds are flags:

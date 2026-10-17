@@ -83,9 +83,14 @@ reached the dev branch with the P4FIX merge, `eb3e187`.
 2026-10-15 by the first review to check `tc` against it (SHARED's round 6
 re-review): `tc watch --names` prints `LISTENER DOWN` and exits 5 when a
 watched `tc wait` exits 0 on mail, since it compares only the locks held
-at its start with the locks held now. Not yet fixed. The planned follow-up
-in D28 (`tc wait` writes its exit reason into its lock file) is the fix
-for both the board and `tc watch`.
+at its start with the locks held now. Fixed by F1 (merged into the dev
+branch at `f57e490`): `tc wait` keeps an exit record beside its lock,
+`mail/to-<name>/.wait.exit` (not in the lock: D35 made the lock `0600`),
+and `tc watch --names` and the board read it. A wait that left on mail
+or at its timeout is never called down; one that was killed is, on the
+board even after a restart. The checks: `tests/test_wait_exit.py`,
+`WatchTest` and `BoardTest`. The record is never proof of life; only
+the held lock is.
 
 **Tier when hit:** MEDIUM. The board's one alarm fired on every normal
 delivery, so it could not mark a real failure. Nothing is lost: mail

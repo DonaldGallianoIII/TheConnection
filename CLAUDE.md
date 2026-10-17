@@ -110,8 +110,9 @@ The connection routes plan, run in lanes and waves
 branch at `a029bda`, CORE at `f5f6923`, CARDS at `4f35efc` and BOARD at
 `a2953cb`, with the P4 phase review's fixes at `eb3e187`, and SHARED
 (wave 2) at `84b97d2`, and SSH (wave 2b) at `616b9db`, with the P3 phase
-review's fixes (D35 to D37) at `8b9b59d`. As of 2026-10-16, next are the
-D28 wait exit record, then DOCS.
+review's fixes (D35 to D37) at `8b9b59d`, and F1, the wait exit record,
+at `f57e490`. As of 2026-10-17, next are F2 (the switch-over cleanup),
+then DOCS.
 
 ### Off limits
 
@@ -137,7 +138,8 @@ JOIN.md                            what you point a new session at
 board/                             the live board: serve.py (127.0.0.1, token), live.html, look.js, theme.css; demo.html shows every state
 tests/test_*.py                    unittest suites (mailbox, names, cards, router, codex route, usage, health, shared, ssh, ...)
 tests/test_inbox_pinned.py         the class proof that every inbox act works inside one pinned folder (D35)
-tests/test_wake_files.py           the class proof that no member holds or redirects another's lock or ring record (D35, D36)
+tests/test_wake_files.py           the class proof that no member holds or redirects another's lock, ring record or exit record (D35, D36, F1)
+tests/test_wait_exit.py            the wait exit record: writer, reader, tc watch, tc health and the board (F1)
 tests/*.test.mjs                   node --test suites for the board
 tests/board-browser-check.mjs      headless check of the live board (needs a Playwright install)
 tests/_root.py                     shared harness: throwaway TC_ROOT, proven listener, fake ssh and codex
@@ -147,6 +149,7 @@ docs/planning/connection-routes/   the plan: 00-index, contracts, phases, decisi
 mail/to-<name>/NNNNNN-from-X.md    unread messages (gitignored)
 mail/to-<name>/read/               read messages, kept as history
 mail/to-<name>/.wait.lock          the listener's lock, 0600, its owner's (D35); .watch.lock beside it for tc watch; a file planted there is moved aside as .wait.lock.planted-<k>
+mail/to-<name>/.wait.exit          the wait's exit record, 0640, its owner's: listening, mail or timeout and a time; never proof of life (C5, F1)
 mail/.wait-<name>.lock             the lock's old place: a private mailbox still reads it until every session has re-armed (the switch-over, a later cleanup)
 mail/.box-<name>.lock              the inbox lock: send's count plus write, read's glob plus rename, tc card's check plus write (D14)
 mail/.ring-pending-<name>          the codex ring's state: pending, timed out or clear; never removed (D14, D16, D20)
@@ -368,6 +371,9 @@ under D30. The P3 phase review (D9) found that one member of a shared
 mailbox could redirect, block or mislabel another's mail or listener; its
 fix round (D35 to D37, five rounds, two reviews) merged at `8b9b59d`,
 with the class proofs in `tests/test_inbox_pinned.py` and
-`tests/test_wake_files.py`. Nothing has run as a second Linux user yet.
-As of 2026-10-16 the D28 wait exit record and the docs are next.
+`tests/test_wake_files.py`. F1, the wait exit record (D28, D37 part 2),
+merged at `f57e490`: `tc watch --names` no longer calls a listener that
+mail woke down, and the board reads a killed one as down after a restart
+too, its pill warning only on a fresh stop. Nothing has run as a second
+Linux user yet. As of 2026-10-17 F2 and the docs are next.
 `main` stays the owner's alone.
