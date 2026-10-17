@@ -214,6 +214,22 @@ def seen_record(box, now):
     return Seen(word, kind, stat.S_IMODE(st.st_mode), st.st_uid, tmp_left, one_line, fresh)
 
 
+# F1 finish (Claude Opus 5.5, unreviewed): a planted .tmp that tc removed made
+# the assertion's own lstat raise, an error, not a red assertion.
+def mode_at(path):
+    """The full st_mode of whatever is at `path`, not followed, or None when nothing is there; never raises, so a test fails on its assertion, never here.
+
+    @interacts  lstats one path.
+    @deps       os.
+    @complexity O(1).
+    @alloc      none.
+    """
+    try:
+        return os.lstat(path).st_mode
+    except OSError:
+        return None
+
+
 def written(word):
     """The Seen a record `word` written by this user's tc just now gives.
 
@@ -390,7 +406,7 @@ class WriterTest(UmaskTestCase):
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, seen_record, written,
-                lock_gone.
+                mode_at, lock_gone.
     @complexity O(1) per subtest.
     @alloc      one TcRoot per subtest.
     """
@@ -484,7 +500,7 @@ class WriterTest(UmaskTestCase):
         @interacts  per subtest: makes the inbox and what sits at the
                     .tmp's name by hand; one wait (under a time limit);
                     lstats the record, the .tmp's name and the target.
-        @deps       _root.TcRoot.tc; seen_record, written; os.
+        @deps       _root.TcRoot.tc; seen_record, written, mode_at; os.
         @complexity O(1) per subtest.
         @alloc      one TcRoot per subtest.
         """
@@ -508,7 +524,7 @@ class WriterTest(UmaskTestCase):
                 code, out, err = root.tc("wait", NAME, "--timeout", AT_ONCE, timeout=WAKE_CEILING_SECONDS)
                 lines = err.splitlines()
                 self.assertEqual((code, len(lines), all(str(box / RECORD_TMP) in line for line in lines),
-                                  seen_record(box, time.time()).word, os.lstat(box / RECORD_TMP).st_mode,
+                                  seen_record(box, time.time()).word, mode_at(box / RECORD_TMP),
                                   outside.read_text()),
                                  (EXIT_TIMEOUT, 2, True, None, kind, OUTSIDE_TEXT),
                                  f"what tc said: {err!r}")
