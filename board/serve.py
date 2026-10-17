@@ -16,7 +16,10 @@ serves an allow list of the board's own files.
 prints `board: http://127.0.0.1:<port>/live.html#token=<t>` once and serves
 until Ctrl+C or SIGTERM. The token sits in the URL fragment, which the
 browser never sends, so it reaches no server log and no referrer. The
-mailbox is tc's: TC_ROOT if set, else the folder tc lives in.
+mailbox is tc's: TC_ROOT if set, else the folder tc lives in. A TC_ROOT
+set but empty or only whitespace refuses before anything is read or
+bound, with tc's words and tc's exit 9 (EMPTYROOT, Claude Opus 5.5,
+unreviewed).
 
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
@@ -1947,10 +1950,26 @@ def main(argv=None):
                 one line to stdout, sets a SIGTERM handler. A usage error,
                 --port 80 among them, goes to stderr in words and exits 2
                 (argparse's) before anything is loaded or bound.
-    @deps       argparse, secrets, signal; Board, BoardServer.
-    @complexity O(1) to start; then one request at a time per thread.
-    @alloc      one Board and one BoardServer, closed on the way out.
+                EMPTYROOT (Claude Opus 5.5, unreviewed): first of all, a
+                TC_ROOT set but empty or only whitespace refuses as tc
+                does: tc is loaded for its words and code only, its
+                ROOT_EMPTY_WORDS goes to stderr after `serve.py: `, and
+                the exit is tc's EXIT_USAGE (9). Nothing of the mailbox is
+                read, nothing is bound, no URL is printed, --help included.
+    @deps       argparse, os.environ, secrets, signal; Board, BoardServer;
+                load_tc (tc's ROOT_EMPTY_WORDS, DEFAULT_INVOKED_NAME and
+                EXIT_USAGE, on a refusal only).
+    @complexity O(1) to start; then one request at a time per thread. The
+                TC_ROOT check is O(r) over r characters in its value; a
+                refusal adds one compile of tc, O(s) over its s bytes.
+    @alloc      one Board and one BoardServer, closed on the way out; on a
+                refusal, one tc module, freed at exit.
     """
+    # EMPTYROOT (Claude Opus 5.5, unreviewed): an empty TC_ROOT refuses before anything is read or bound.
+    if "TC_ROOT" in os.environ and not os.environ["TC_ROOT"].strip():
+        tc = load_tc()
+        print(f"serve.py: {tc.ROOT_EMPTY_WORDS.format(tc=tc.DEFAULT_INVOKED_NAME)}", file=sys.stderr, flush=True)
+        sys.exit(tc.EXIT_USAGE)
     ap = argparse.ArgumentParser(prog="serve.py",
                                  description="The live board: a read-only feed of the mailbox on 127.0.0.1.")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,

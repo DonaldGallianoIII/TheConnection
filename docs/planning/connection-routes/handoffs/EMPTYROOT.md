@@ -19,7 +19,8 @@ the folder tc is in.
 | Item | Commit | Subject |
 |---|---|---|
 | 1, 2, 3 | `ec54431` | An empty or whitespace-only TC_ROOT refuses, exit 9, before any command runs (EMPTYROOT) |
-| 3 | the commit that adds this file | This handoff |
+| 3 | `015cc46` | This handoff |
+| 4 | the commit that adds item 4 below | board/serve.py refuses an empty TC_ROOT too |
 
 Line numbers below are at `ec54431`.
 
@@ -128,12 +129,95 @@ AssertionError: 0 != 9 : stdout: 'sent #1 to b: /tmp/tc-test-g33_7y8w/work/mail/
    `python3 board/serve.py` with an empty `TC_ROOT` still serves the
    working folder as the mailbox (`board/serve.py:516` reads it as
    is). Outside this lane's work set; not changed. A one-line check at
-   the serve's start would close it.
+   the serve's start would close it. Closed since, by item 4 below.
 3. `tc gate` as a forced command with an empty `TC_ROOT` now exits 9
    with the line above, printed before `far_key_reads`. The line holds
    no path and no login, only the invoked name. The near side reads a
    far 9 as an unknown code, exit 11, and files the message in
    `refused/`.
+
+## Item 4: board/serve.py refuses too
+
+Added after the lane's first handoff, to close note 2 under For the
+architect. Line numbers here are at the commit that adds this section.
+
+1. `board/serve.py:1968` to `board/serve.py:1972`, first thing in
+   `main()`, before the parser: the same check as tc's. On a hit it
+   loads tc for its words and code (`load_tc()`, which reads tc's
+   source and runs its top level only; tc's top level reads no
+   mailbox file), prints `serve.py: ` and then tc's
+   `ROOT_EMPTY_WORDS`, formatted with tc's `DEFAULT_INVOKED_NAME`, to
+   stderr, and exits tc's `EXIT_USAGE`. Nothing is bound, no URL is
+   printed, no Board is built. The line, as run by hand from an empty
+   scratch folder with `TC_ROOT="  "`:
+
+   ```
+   serve.py: tc: TC_ROOT is set but empty or only whitespace, so it names no mailbox folder. Unset it to use the folder tc is in, or set it to the mailbox's folder.
+   ```
+
+   Exit 9, and the folder stayed empty. Two choices. The prefix
+   names who refused, the way serve.py's other stderr lines do; the
+   rest is tc's sentence word for word. The name in it is tc's
+   default, not the invoked one: `invoked_name()` would say
+   `serve.py`, and "the folder serve.py is in" is wrong, since an
+   unset `TC_ROOT` means the folder tc is in. Like tc, the check runs
+   before the parser, so `serve.py --help` with an empty `TC_ROOT`
+   refuses too.
+2. Doc blocks: `main()`'s block (`board/serve.py:1943`) adds the
+   refusal to `@interacts`, `os.environ` and `load_tc` to `@deps`, the
+   check and the refusal's compile to `@complexity`, the tc module to
+   `@alloc`. The module block, `board/serve.py:19` to
+   `board/serve.py:22`, says an empty `TC_ROOT` refuses.
+3. Test: `tests/test_board_server.py:564` `EmptyRootStartTest`,
+   `test_an_empty_tc_root_refuses_before_anything_is_bound` at
+   `tests/test_board_server.py:576`. It starts
+   `python3 board/serve.py --port 0` with `TC_ROOT` `""` and `"   "`
+   from an empty folder in a TcRoot's base, waits up to
+   `REFUSE_CEILING_S` (5 s), and kills a child still running by its
+   own pid (`stop_child`, `tests/test_board_server.py:546`, also in
+   cleanup). Each subTest checks one thing: exit 9, each of three
+   word fragments, one stderr line, no `board: http` on stdout, the
+   folder still empty. The harness's `start(argv=)` always sets
+   `TC_ROOT` to its root and keeps the test's working folder, so the
+   test runs the child with subprocess itself. Constants at
+   `tests/test_board_server.py:121` to `tests/test_board_server.py:136`.
+
+### Red, before the fix
+
+`env -u TC_ROOT PYTHONDONTWRITEBYTECODE=1 python3 -m unittest
+tests.test_board_server.EmptyRootStartTest`, with the test in place and
+serve.py at `015cc46`: `Ran 1 test in 10.022s`, `FAILED (failures=12)`.
+Every subTest fails but the folder check (the old serve.py made no file
+there; it bound and served). The first red line, token cut:
+
+```
+AssertionError: 'still running after 5 s' != 9 : stdout: 'board: http://127.0.0.1:42019/live.html#token=<cut>\n'
+```
+
+### Green, after
+
+`env -u TC_ROOT PYTHONDONTWRITEBYTECODE=1 python3 -m unittest
+tests.test_board_server`: `Ran 12 tests`, `OK`.
+
+`env -u TC_ROOT PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover
+-s tests -p 'test_*.py'`: `Ran 371 tests in 252.122s`, `OK`. It ran
+before the last doc-block-only edits to `tests/test_board_server.py`;
+that suite ran again after them, `Ran 12 tests`, `OK`.
+
+`node --test tests/*.test.mjs`: `# tests 68`, `# pass 68`, `# fail 0`.
+
+### Mutation
+
+On a fresh scratch copy of `tc`, `board/` and `tests/` in the session's
+scratch folder, never in the worktree, with
+`PYTHONDONTWRITEBYTECODE=1`: the four-line check in serve.py's `main()`
+removed. `python3 -m unittest tests.test_board_server`:
+`Ran 12 tests in 17.932s`, `FAILED (failures=12)`. The first red line,
+token cut:
+
+```
+AssertionError: 'still running after 5 s' != 9 : stdout: 'board: http://127.0.0.1:45649/live.html#token=<cut>\n'
+```
 
 ## Not verified
 
