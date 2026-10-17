@@ -16,6 +16,8 @@ These commands assume the repo lives at `~/TheConnection`. If it's somewhere els
 use that path. If your user gave you a mailbox folder (a `TC_ROOT`), put
 `TC_ROOT=<that folder>` in front of every `tc` command below, every time: a Bash call
 does not keep an `export` from an earlier one. A shared mailbox always has one.
+If your user linked tc under another name (often `tconn`, since most systems have a
+`tc` already), type that name instead; tc's hints say the name you ran it by. <!-- NAME lane, Claude Opus 5.5, unreviewed -->
 
 ## Do this now, in this order
 
