@@ -258,6 +258,10 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             the audit's LOW-2, a session re-arming in between). `health` shows each stopped name's last
             exit word and its age, in words and as `wait_exits` in its
             JSON; the gate's health leaves it out.
+            NAME (Claude Opus 5.5, unreviewed): every hint that tells a
+            person a command to type, and the usage lines, say the name
+            tc was run by (invoked_name: sys.argv[0]'s base name, else
+            tc), so a link named tconn prints `Run: tconn read b`.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
             grp, hashlib, io, json, pathlib, pwd, re, resource, secrets,
             selectors, shlex, shutil, signal, stat, subprocess, time,
@@ -445,6 +449,18 @@ EXIT_USAGE = 9
 # folder that means "here" or "up").
 NAME_MAX_CHARS = 64
 NAME_PATTERN = re.compile(rf"[A-Za-z0-9._][A-Za-z0-9._-]{{0,{NAME_MAX_CHARS - 1}}}")
+# NAME (Claude Opus 5.5, unreviewed): the name tc was run by. Most Linux
+# systems already have a `tc` (traffic control), so a stranger may link ours
+# as `tconn`, and every hint that tells a person a command to type says the
+# name they ran (invoked_name). The plain name, when sys.argv[0] gives
+# nothing usable: empty (`python3 -c`), or not a word a shell takes
+# unquoted (`python3 -m unittest` sets it to that, spaces and all).
+DEFAULT_INVOKED_NAME = "tc"
+# A usable invoked name: a word a person can paste into a shell as it is,
+# never a leading dash (an option) or dot, at most a Linux file name's
+# length (NAME_MAX, 255 bytes), since a longer one names no file anyone ran.
+INVOKED_NAME_MAX_CHARS = 255
+INVOKED_NAME_PATTERN = re.compile(rf"[A-Za-z0-9_][A-Za-z0-9._+-]{{0,{INVOKED_NAME_MAX_CHARS - 1}}}")
 # Row 6 of the exit table (contracts.md), each refused before anything is
 # written: a bad name under C0, for any name argument including
 # --reports-to; a name that reports to itself (join, card); a bad ssh target
@@ -559,7 +575,8 @@ INIT_USER_WORDS = "only the user who ran init ({owner}) can change the group"
 # entries through a no-follow open (on the init user's ROOT, refuse_walk;
 # else init's own walk), so tc prints no chgrp or chmod line to paste: a
 # pasted line follows a link the folder's owner could swap in first.
-OWN_FIX_WORDS = "runs tc init --shared --group {group}, which fixes their own entries through a no-follow open"
+# NAME (Claude Opus 5.5, unreviewed): {tc} is invoked_name().
+OWN_FIX_WORDS = "runs {tc} init --shared --group {group}, which fixes their own entries through a no-follow open"
 # SHARED fix round 7 (Claude Opus 5.5, unreviewed): the audit's HIGH-1
 # (audits/2026-10-15-0408-quick). Init's two walks (shared_entries and
 # fix_own_entries, through walk_pinned) reach every entry under the four
@@ -1038,8 +1055,9 @@ ORIGINS_NAME = ".origins"
 # A gate there that finds none makes nothing: the message is delivered, no
 # id is filed, and these words say who makes the folder. Until then a
 # retry of the message may be delivered twice: a duplicate, never a loss.
+# NAME (Claude Opus 5.5, unreviewed): {tc} is invoked_name(), in the command to run.
 ORIGINS_NOT_MADE_WORDS = ("origin {origin} was not filed: {top} is not there, and on a shared mailbox only tc init "
-                          "makes it. The user who ran init ({init}) runs tc init --shared --group {group} again to "
+                          "makes it. The user who ran init ({init}) runs {tc} init --shared --group {group} again to "
                           "make it. Until then a retry of this message may be delivered twice: a duplicate, never "
                           "a loss.")
 # C3's words for a message whose origin id is already filed: the far
@@ -1075,16 +1093,18 @@ WAKE_LOCK_TRIES = 3
 # made, on a shared mailbox for a tc wait or tc watch run by anyone but the
 # owner of the name's card, and for a name nobody has joined.
 ONLY_OWNER_LISTENS_WORDS = "tc {kind}: {name}'s inbox belongs to {owner}; only {owner} listens for it"
+# NAME (Claude Opus 5.5, unreviewed): {tc} is invoked_name(), in the command to run; the prefix stays tc.
 NOBODY_JOINED_LISTEN_WORDS = ("tc {kind}: nobody has joined as {name} on this shared mailbox; its owner runs "
-                              "tc join {name} first")
+                              "{tc} join {name} first")
 # What a second tc wait or tc watch for a name says before it exits 3,
 # word for word as before round 1b, by kind; {name} is the name.
 ALREADY_WORDS = {"wait": "ALREADY LISTENING: another `tc wait {name}` is running. Not starting a second.",
                  "watch": "ALREADY WATCHING: another `tc watch {name}` is running. Not starting a second."}
 # The owner's own wait or watch on a shared mailbox whose inbox is gone:
 # only tc join makes an inbox there (D20), so the words say to rejoin.
+# NAME (Claude Opus 5.5, unreviewed): {tc} is invoked_name(), as above.
 NO_INBOX_LISTEN_WORDS = ("tc {kind}: {name} has a card but no inbox on this shared mailbox; nothing made. Run "
-                         "tc join {name}, which makes it.")
+                         "{tc} join {name}, which makes it.")
 # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (2) and D36 (1), the
 # doorbell can't be switched off (C2 item 5). Each sender's own record of
 # its last ring to a codex name, directly in that Linux user's outbox
@@ -1198,6 +1218,29 @@ def keepalive_seconds():
     return max(MIN_KEEPALIVE_SECONDS, CACHE_TTL_SECONDS - margin)
 
 
+# NAME (Claude Opus 5.5, unreviewed): hints say the name tc was run by.
+def invoked_name():
+    """The name tc was run by, for a hint that tells a person a command to type: sys.argv[0]'s base name, else DEFAULT_INVOKED_NAME.
+
+    Run as `tconn` (a link, since most systems already have a `tc`), the
+    hints say `tconn read b`. A base name INVOKED_NAME_PATTERN does not
+    fullmatch (empty, spaces, a leading dash, past INVOKED_NAME_MAX_CHARS)
+    gives the plain name. Read where it is needed, never kept in a global.
+    The words that name the tool itself (`tc send: ...`, `tc: ...`) do not
+    use it, and nor does the codex ring, which names tc's full path.
+
+    @interacts  reads sys.argv[0]. Writes nothing.
+    @deps       os.path.basename, sys; INVOKED_NAME_PATTERN,
+                DEFAULT_INVOKED_NAME.
+    @complexity O(c) over c characters in sys.argv[0]; the match stops
+                past INVOKED_NAME_MAX_CHARS.
+    @alloc      the base name string, returned.
+    """
+    arg0 = sys.argv[0] if sys.argv and isinstance(sys.argv[0], str) else ""
+    name = os.path.basename(arg0)
+    return name if INVOKED_NAME_PATTERN.fullmatch(name) else DEFAULT_INVOKED_NAME
+
+
 # CARDS R1 (Claude Opus 5.5, unreviewed): the one name check, contract C0.
 def valid_name(name):
     """True when `name` may be a mailbox name under C0.
@@ -1279,7 +1322,7 @@ def shared_problem_words(problem):
     file's, and init rewrites it.
 
     @interacts  none; string work only.
-    @deps       ROOT, SHARED_MARKER_NAME.
+    @deps       invoked_name; ROOT, SHARED_MARKER_NAME.
     @complexity O(1).
     @alloc      one string, returned.
     """
@@ -1287,7 +1330,8 @@ def shared_problem_words(problem):
         return (f"tc: cannot read {ROOT / SHARED_MARKER_NAME} ({problem.__cause__.strerror}); this user "
                 f"needs search (x) access on every folder from / down to {ROOT}, and read access to "
                 f".shared. Nothing done.")
-    return f"tc: {problem}; nothing done. Run tc init --shared --group <g> to rewrite it."
+    # NAME (Claude Opus 5.5, unreviewed): the command to run says the invoked name; the prefix stays tc.
+    return f"tc: {problem}; nothing done. Run {invoked_name()} init --shared --group <g> to rewrite it."
 
 
 def set_shared_umask(fn):
@@ -1488,8 +1532,8 @@ def make_folder_with(path, share, raising=False):
     @interacts  see make_folder; with `raising`, raises OSError where it
                 would refuse.
     @deps       in_shared_folders, shared_folder_mode, refuse, printable,
-                user_name, group_name; os, stat, errno; OWN_FIX_WORDS,
-                SHARED_BRANCH_MODE, NEW_BRANCH_FOLDER_MODE.
+                user_name, group_name, invoked_name; os, stat, errno;
+                OWN_FIX_WORDS, SHARED_BRANCH_MODE, NEW_BRANCH_FOLDER_MODE.
     @complexity O(d) over d missing folders, as make_folder.
     @alloc      one descriptor per new folder under a shared mailbox,
                 closed before return.
@@ -1514,7 +1558,7 @@ def make_folder_with(path, share, raising=False):
                      f"{printable(share.group)}; under a shared mailbox every folder under mail/, "
                      f"status/, cards/ and outbox/ is in that group, or other members cannot use it. "
                      f"Nothing written. Its owner, {user_name(st.st_uid)}, "
-                     f"{OWN_FIX_WORDS.format(group=printable(share.group))}.")
+                     f"{OWN_FIX_WORDS.format(tc=invoked_name(), group=printable(share.group))}.")
             return
     elif path.is_dir():
         return
@@ -2266,8 +2310,8 @@ def settle_marker_mode(marker, root_fd):
                 another user's writable one reads the user database and
                 writes one line to stderr; on a failure one line to
                 stderr and exit 1.
-    @deps       refuse, user_name; os, stat, sys; SHARED_MARKER_NAME,
-                SHARED_MARKER_MODE, EXIT_REFUSED.
+    @deps       refuse, user_name, invoked_name; os, stat, sys;
+                SHARED_MARKER_NAME, SHARED_MARKER_MODE, EXIT_REFUSED.
     @complexity O(1).
     @alloc      one descriptor, closed before return.
     """
@@ -2286,7 +2330,7 @@ def settle_marker_mode(marker, root_fd):
             os.close(fd)
     except OSError as err:
         refuse(f"tc init: could not set {marker} to mode {SHARED_MARKER_MODE:04o} ({err.strerror}); "
-               f"run tc init again, or set it by hand", EXIT_REFUSED)
+               f"run {invoked_name()} init again, or set it by hand", EXIT_REFUSED)  # NAME (Claude Opus 5.5, unreviewed)
 
 
 # SHARED fix round 5 (Claude Opus 5.5, unreviewed): D28. What init's walk
@@ -2767,8 +2811,8 @@ def cmd_init(args):
                 first, and the last refusal's line after.
     @deps       pin_root, shared_entries, shared_group, marker_other_owner,
                 root_walk_problem, refuse_walk, settle_marker_mode,
-                write_new_file, refuse, printable; contextlib, grp, os,
-                sys; SHARED_FOLDER_NAMES, SHARED_MARKER_NAME,
+                write_new_file, refuse, printable, invoked_name;
+                contextlib, grp, os, sys; SHARED_FOLDER_NAMES, SHARED_MARKER_NAME,
                 SHARED_MARKER_MODE, INIT_USER_WORDS, OWN_FIX_WORDS,
                 SHARED_UMASK, ROOT_MODE, ROOT_UMASK.
     @complexity O(f + d) over f folders and files under the four folders:
@@ -2859,7 +2903,7 @@ def cmd_init(args):
         if skipped:  # SHARED fix round 6 (Claude Opus 5.5, unreviewed): D29, its owner's init, never a line to paste
             lead = f"tc init: {len(skipped)} skipped, each named above"
             refuse(f"{lead}. The owner of each folder or file among them "
-                   f"{OWN_FIX_WORDS.format(group=printable(group))}." if fixable
+                   f"{OWN_FIX_WORDS.format(tc=invoked_name(), group=printable(group))}." if fixable
                    else f"{lead}; its owner fixes each by hand.", EXIT_REFUSED)
     finally:
         os.close(root_fd)
@@ -3902,7 +3946,7 @@ def file_origin(origin, scope):
                 lstats it; for the words, lstats ROOT/.shared and reads
                 the user database (init_user_name).
     @deps       origin_folder, owned_by_me, init_user_name, printable,
-                OriginsNotMade; os, stat; MAIL, ORIGINS_NAME,
+                invoked_name, OriginsNotMade; os, stat; MAIL, ORIGINS_NAME,
                 NEW_FILE_FLAGS, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE,
                 ORIGINS_NOT_MADE_WORDS.
     @complexity O(1).
@@ -3914,7 +3958,7 @@ def file_origin(origin, scope):
         fds, folder, share = origin_folder(scope, True)
     except OriginsNotMade as missing:  # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (3)
         return ORIGINS_NOT_MADE_WORDS.format(origin=origin, top=MAIL / ORIGINS_NAME, init=init_user_name(),
-                                             group=printable(missing.args[0].group))
+                                             tc=invoked_name(), group=printable(missing.args[0].group))
     except OSError as err:
         return f"origin {origin} could not be filed under {MAIL / ORIGINS_NAME} ({err.strerror}), {lost}"
     mode = SHARED_OWNED_FILE_MODE if share is not None else NEW_FILE_MODE
@@ -4653,8 +4697,9 @@ def refuse_other_listener(name, kind):
     @interacts  lstats cards/<name>.json; reads this process's user id and
                 the user database for the words; on a refusal one line to
                 stderr and exit 1.
-    @deps       refuse, user_name; os; CARDS, ONLY_OWNER_LISTENS_WORDS,
-                NOBODY_JOINED_LISTEN_WORDS, EXIT_REFUSED.
+    @deps       refuse, user_name, invoked_name; os; CARDS,
+                ONLY_OWNER_LISTENS_WORDS, NOBODY_JOINED_LISTEN_WORDS,
+                EXIT_REFUSED.
     @complexity O(1).
     @alloc      the words, on a refusal.
     """
@@ -4662,7 +4707,7 @@ def refuse_other_listener(name, kind):
     try:
         owner = os.lstat(card).st_uid
     except FileNotFoundError:
-        refuse(NOBODY_JOINED_LISTEN_WORDS.format(kind=kind, name=name), EXIT_REFUSED)
+        refuse(NOBODY_JOINED_LISTEN_WORDS.format(kind=kind, name=name, tc=invoked_name()), EXIT_REFUSED)
     except OSError as err:
         refuse(f"tc {kind}: could not look at {card} ({err.strerror}); nothing made", EXIT_REFUSED)
     if owner != os.geteuid():
@@ -4726,7 +4771,8 @@ def hold_wake_lock(name, kind, share, keep_inbox=False):
                 out. With `keep_inbox`, duplicates the inbox's descriptor
                 once the lock is held (F1).
     @deps       refuse_other_listener, pinned_inbox,
-                open_wake_lock, already_listening, refuse; fcntl, os, sys;
+                open_wake_lock, already_listening, refuse, invoked_name;
+                fcntl, os, sys;
                 WAKE_LOCK_NAME, WAKE_LOCK_TRIES, NO_INBOX_LISTEN_WORDS,
                 EXIT_REFUSED.
     @complexity O(1): a handful of opens, then at most WAKE_LOCK_TRIES + 1
@@ -4744,7 +4790,7 @@ def hold_wake_lock(name, kind, share, keep_inbox=False):
         if inbox.box.fd is None:
             if inbox.box.problem is not None:  # the words a poll said for it: tc could not list, or look at, <inbox>
                 refuse(f"{inbox.box.problem}, so its {kind} lock cannot be made there; nothing made", EXIT_REFUSED)
-            refuse(NO_INBOX_LISTEN_WORDS.format(kind=kind, name=name), EXIT_REFUSED)
+            refuse(NO_INBOX_LISTEN_WORDS.format(kind=kind, name=name, tc=invoked_name()), EXIT_REFUSED)
         for _ in range(WAKE_LOCK_TRIES + 1):  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-1, held at its name
             fd, said = open_wake_lock(inbox.box.fd, inbox.path, kind)
             lock = open(fd, "rb", buffering=0)
@@ -4980,7 +5026,9 @@ def cmd_wait(args):
                 of an earlier write, or moves anything else of that form
                 aside (F1 fix round 2).
     @deps       require_names, mailbox_share, hold_wake_lock, unread,
-                keepalive_seconds, write_wait_exit; contextlib, os,
+                keepalive_seconds, write_wait_exit, invoked_name (the
+                command each exit line tells the person to run, NAME);
+                contextlib, os,
                 resource, sys, time; MAIL, WAIT_EXIT_LISTENING,
                 WAIT_EXIT_MAIL, WAIT_EXIT_TIMEOUT.
     @complexity O(U + u log u) per poll over U names in the inbox and the
@@ -5022,15 +5070,16 @@ def cmd_wait(args):
             msgs = unread(args.name, shared)
             if msgs:
                 record(WAIT_EXIT_MAIL)  # F1: before the lock goes
-                print(f"MAIL: {len(msgs)} unread for {args.name}. Run: tc read {args.name}")
+                # NAME (Claude Opus 5.5, unreviewed): each hint says the invoked name.
+                print(f"MAIL: {len(msgs)} unread for {args.name}. Run: {invoked_name()} read {args.name}")
                 return
             time.sleep(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
         record(WAIT_EXIT_TIMEOUT)  # F1: before the lock goes
         if args.keepalive:
             print(f"KEEPALIVE: no mail for {args.name} in {timeout:g}s. This wake refreshed the cache. "
-                  f"Re-arm: tc wait {args.name} --keepalive")
+                  f"Re-arm: {invoked_name()} wait {args.name} --keepalive")
         else:
-            print(f"TIMEOUT: no mail for {args.name} in {timeout:g}s. Re-arm: tc wait {args.name}")
+            print(f"TIMEOUT: no mail for {args.name} in {timeout:g}s. Re-arm: {invoked_name()} wait {args.name}")
         sys.exit(EXIT_TIMEOUT)
 
 
@@ -5470,7 +5519,8 @@ def cmd_join(args):
     name had no card, or was rung to a thread that has since gone. So with
     unread mail waiting, the join writes the ring marker, and the next
     send rings this thread whatever the count; it also prints `<n> unread
-    waiting for <name>: run tc read <name>` so this session can read now.
+    waiting for <name>: run tc read <name>` (tc there the invoked name,
+    invoked_name, NAME) so this session can read now.
     With none waiting it rewrites any marker as RING_CLEAR (D20 item 5:
     never removed), since nothing is owed, so an old thread's backoff
     never holds back this thread's first ring. A symlink, a FIFO or
@@ -5500,8 +5550,8 @@ def cmd_join(args):
     @deps       require_names, refuse_self_report, refuse, account_label,
                 mailbox_share, claim_inbox, write_card, describe_card,
                 now_iso, THREAD_ID_PATTERN, inbox_lock, ring_marker_problem,
-                unread_count, write_ring_marker, RING_JOINED, RING_CLEAR;
-                os, sys.
+                unread_count, write_ring_marker, RING_JOINED, RING_CLEAR,
+                invoked_name; os, sys.
     @complexity O(1), plus O(t) over t characters of CODEX_THREAD_ID; a
                 codex card adds O(u) over u unread messages (single digits).
     @alloc      one card dict, freed on exit; one card file, kept; under a
@@ -5527,8 +5577,8 @@ def cmd_join(args):
     else:
         kind = "other"
     if kind == "codex" and not thread:
-        refuse("tc join: kind codex needs CODEX_THREAD_ID, the thread the codex route "
-               "rings, and it is not set. Run tc join inside the Codex session.", EXIT_REFUSED)
+        refuse("tc join: kind codex needs CODEX_THREAD_ID, the thread the codex route "  # NAME (Claude Opus 5.5, unreviewed)
+               f"rings, and it is not set. Run {invoked_name()} join inside the Codex session.", EXIT_REFUSED)
     pid = os.environ.get("CLAUDE_PID")
     card = {
         "version": CARD_VERSION,
@@ -5566,7 +5616,7 @@ def cmd_join(args):
             problem = None
     print(f"joined as {describe_card(card)}")
     if waiting:
-        print(f"{waiting} unread waiting for {args.name}: run tc read {args.name}")
+        print(f"{waiting} unread waiting for {args.name}: run {invoked_name()} read {args.name}")  # NAME (Claude Opus 5.5, unreviewed)
     if problem is not None:
         print(f"tc join: {marker} could not be {'written' if waiting else 'cleared'} "
               f"({problem}), so the next send to {args.name} may not ring it",
@@ -5590,7 +5640,7 @@ def cmd_card(args):
                 `unknown` (D13).
     @deps       require_names, refuse_self_report, refuse, inbox_lock,
                 unread_count, far_account, write_card, describe_card,
-                now_iso, ROUTES.
+                now_iso, invoked_name, ROUTES.
     @complexity O(u) over u unread messages for the name (single digits).
     @alloc      one card dict, freed on exit; one card file, kept; one open
                 lock file.
@@ -5624,7 +5674,7 @@ def cmd_card(args):
         if waiting and not args.force:
             refuse(f"tc card: {args.name} has {waiting} unread here. Once its card says ssh, "
                    f"sends go to the other machine and that mail is never read. Read it first "
-                   f"(tc read {args.name}), or pass --force.", EXIT_REFUSED)
+                   f"({invoked_name()} read {args.name}), or pass --force.", EXIT_REFUSED)  # NAME (Claude Opus 5.5, unreviewed)
         write_card(card)
     print(f"card written: {describe_card(card)}")
     # CARDS fix round 1 (Claude Opus 5.5, unreviewed): say that sends are
@@ -5706,12 +5756,13 @@ def card_route(to):
 
     @interacts  reads cards/<to>.json (read_card); on a refusal writes one
                 line to stderr and exits.
-    @deps       read_card, refuse, ROUTES, deliver_local, CARDS.
+    @deps       read_card, refuse, invoked_name, ROUTES, deliver_local, CARDS.
     @complexity O(1): one small file.
     @alloc      the card dict, returned.
     """
-    fix = (f"Ask {to}'s owner to rejoin (tc join {to}, run in {to}'s own session), or, "
-           f"if {to} lives on another machine, write its card with tc card {to} --ssh <target>.")
+    tc = invoked_name()  # NAME (Claude Opus 5.5, unreviewed): the commands to run say the invoked name
+    fix = (f"Ask {to}'s owner to rejoin ({tc} join {to}, run in {to}'s own session), or, "
+           f"if {to} lives on another machine, write its card with {tc} card {to} --ssh <target>.")
     try:
         card = read_card(to)
     except ValueError as problem:
@@ -5924,9 +5975,9 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on
                 taken: Delivery exit 10. Once published, calls `on_landed`
                 when given. Closes what it opened before it returns.
     @deps       mailbox_share, pinned_inbox, inbox_made, refuse,
-                lock_deadline, next_seq, publish_message, Delivery; errno,
-                os; CARDS, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE,
-                EXIT_REFUSED.
+                lock_deadline, next_seq, publish_message, Delivery,
+                invoked_name; errno, os; CARDS, SHARED_OWNED_FILE_MODE,
+                NEW_FILE_MODE, EXIT_REFUSED.
     @complexity O(b) over b bytes of body, once per try: one try in an
                 honest mailbox, at most PUBLISH_MAX_TRIES, a bound reached
                 by a set-back mail/.seq or by names planted ahead of it
@@ -5953,7 +6004,7 @@ def deliver_local(card, sender, to, body, header_note=None, *, deadline=None, on
             return Delivery(EXIT_REFUSED, f"tc send: nobody has joined as {to} on this shared mailbox", [])
         if not box_existed:
             return Delivery(EXIT_REFUSED, f"tc send: {to} has a card but no inbox on this shared mailbox; "
-                                          f"nothing sent. Ask {to}'s owner to rejoin (tc join {to}, run as "
+                                          f"nothing sent. Ask {to}'s owner to rejoin ({invoked_name()} join {to}, run as "
                                           f"that Linux user), which makes the inbox.", [])
     if deadline is None:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one deadline for every try
         deadline = lock_deadline()
@@ -6807,8 +6858,8 @@ def branch_problem(path, st, share, top_level):
     @interacts  reads this process's user id and the user database;
                 lstats names beside `path` and its folder (aside_path,
                 clearer). Writes nothing.
-    @deps       aside_path, clearer, user_name, group_name, printable; os,
-                stat; OWN_FIX_WORDS.
+    @deps       aside_path, clearer, user_name, group_name, printable,
+                invoked_name; os, stat; OWN_FIX_WORDS.
     @complexity O(1), plus aside_path's.
     @alloc      the words, returned.
     """
@@ -6836,7 +6887,7 @@ def branch_problem(path, st, share, top_level):
     else:
         return None
     return (f"{path} {what}; tc wrote nothing there. Its owner, you, "
-            f"{OWN_FIX_WORDS.format(group=printable(share.group))}.")
+            f"{OWN_FIX_WORDS.format(tc=invoked_name(), group=printable(share.group))}.")
 
 
 def claim_branch(path):
@@ -7612,7 +7663,8 @@ def file_outcome(path, where, outcome):
     failed) stays waiting, with a warning: the next tc flush sends it
     again and the far side answers already delivered (D25). SSH_KEPT:
     left where it is; exit 4, words `could not reach <target> (<reason>);
-    kept in outbox: <path>. Run: tc flush`, or for a far 10 `<target> was
+    kept in outbox: <path>. Run: <invoked name> flush` (invoked_name,
+    NAME), or for a far 10 `<target> was
     busy (exit 10: <its words>); kept in outbox: ...` (kept_summary; P3
     fix round 1c, Claude Opus 5.5, unreviewed: the audit's LOW-15).
     SSH_REFUSED: into refused/,
@@ -7647,7 +7699,7 @@ def file_outcome(path, where, outcome):
                 refused (write_note); moves the note beside a filed
                 message with it (carry_note).
     @deps       file_away, write_note, carry_note, note_path,
-                kept_summary, printable_lines; EXIT_QUEUED, EXIT_FAR_UNKNOWN,
+                kept_summary, printable_lines, invoked_name; EXIT_QUEUED, EXIT_FAR_UNKNOWN,
                 FAR_ANSWER_CODES, OUTBOX_SENT, OUTBOX_REFUSED,
                 SSH_OUTPUT_MAX_BYTES, SSH_SENT, SSH_KEPT.
     @complexity O(s) over s characters the far side printed, at most
@@ -7667,7 +7719,7 @@ def file_outcome(path, where, outcome):
             write_note(note_path(path), [summary, *stderr, *cut])
         except OSError as err:
             warnings.append(f"this try's words could not be kept beside it at {note_path(path)} ({err.strerror})")
-        return (EXIT_QUEUED, f"{summary}; kept in outbox: {path}. Run: tc flush", warnings)
+        return (EXIT_QUEUED, f"{summary}; kept in outbox: {path}. Run: {invoked_name()} flush", warnings)  # NAME (Claude Opus 5.5, unreviewed)
     if outcome.kind == SSH_SENT:
         answer = printable_lines(outcome.out.strip())
         words = f"sent over ssh to {where.target}" + (f": {answer}" if answer else "")
@@ -7752,7 +7804,7 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
        file but this one, whatever its number, SSH fix round 1, the
        audit's LOW-7), the message stays queued behind it without
        trying, exit 4, `<target> has <n> waiting in the outbox; queued
-       behind them. Run: tc flush`.
+       behind them. Run: <invoked name> flush` (invoked_name, NAME).
     7. Else one ssh run (ssh_run) with --origin
        <token>-<number>-<random part>-<sender> (D25), and the message is
        filed by the answer (file_outcome), all under the send lock:
@@ -7803,8 +7855,8 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
     @deps       ssh_where, outbox_queue, claim_branch, origin_token,
                 origin_nonce, origin_id, lock_deadline, next_seq,
                 pin_folder, publish_message, send_lock, queue_ahead,
-                ssh_run, file_outcome, file_away, outbox_text, Delivery;
-                os; CARDS, SEQ_FILE, SEQ_WIDTH, FOLDER_FLAGS, OUTBOX_SENT,
+                ssh_run, file_outcome, file_away, outbox_text, Delivery,
+                invoked_name; os; CARDS, SEQ_FILE, SEQ_WIDTH, FOLDER_FLAGS, OUTBOX_SENT,
                 OUTBOX_REFUSED, ORIGIN_HEADER_NOTE, ORIGIN_SEQ_MAX_DIGITS,
                 SEQ_TOO_LONG_WORDS, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE,
                 EXIT_BAD_NAME, EXIT_REFUSED, EXIT_QUEUED.
@@ -7824,7 +7876,7 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
     where = ssh_where(card)
     if where.why is not None:
         return Delivery(EXIT_BAD_NAME, f"tc send: the card {CARDS / f'{to}.json'} {where.why}; nothing sent. "
-                                       f"Write it again with tc card {to} --ssh <target>.", [])
+                                       f"Write it again with {invoked_name()} card {to} --ssh <target>.", [])  # NAME (Claude Opus 5.5, unreviewed)
     if deadline is None:
         deadline = lock_deadline()
     box = outbox_queue(to)  # SSH fix round 1 (Claude Opus 5.5, unreviewed): D32, this user's own branch
@@ -7879,11 +7931,11 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
         if not held:
             busy = why if why is not None else "another tc is sending to it right now (a send or a tc flush)"
             return Delivery(EXIT_QUEUED, f"{where.target} was not tried: {busy}; kept in outbox: {path}. "
-                                         f"Run: tc flush", warnings)
+                                         f"Run: {invoked_name()} flush", warnings)  # NAME (Claude Opus 5.5, unreviewed)
         ahead = queue_ahead(where.target, path)
         if ahead:
             return Delivery(EXIT_QUEUED, f"{where.target} has {ahead} waiting in the outbox; queued behind them. "
-                                         f"Run: tc flush", warnings)
+                                         f"Run: {invoked_name()} flush", warnings)  # NAME (Claude Opus 5.5, unreviewed)
         outcome = ssh_run(where, sender, to, origin_id(token, published.n, nonce, sender), outbox_text(body))
         code, words, filed = file_outcome(path, where, outcome)
     return Delivery(code, words, warnings + filed)
@@ -7989,8 +8041,9 @@ def cmd_flush(args):
     @deps       require_names, outbox_branch, outbox_queue, claim_branch,
                 outbox_files, other_branches, queue_route, owned_by_me,
                 send_lock, outbox_message, outbox_text, ssh_run,
-                file_outcome, printable, user_name, refuse; os, sys;
-                SSH_SENT, SSH_KEPT, EXIT_QUEUED, EXIT_REFUSED, EXIT_BUSY.
+                file_outcome, printable, user_name, refuse, invoked_name;
+                os, sys; SSH_SENT, SSH_KEPT, EXIT_QUEUED, EXIT_REFUSED,
+                EXIT_BUSY.
     @complexity O(w x (q + w log w) + c + W log W) plus one ssh run of at
                 most SSH_SEND_SECONDS per file (SSH fix round 1, the
                 audit's LOW-12): w of this user's files waiting in this
@@ -8006,6 +8059,7 @@ def cmd_flush(args):
                 one open lock file per target while it is flushed.
     """
     require_names(args.to)
+    tc = invoked_name()  # NAME (Claude Opus 5.5, unreviewed): the commands to run say the invoked name
     routes = {}
 
     def route(name):  # SSH fix round 1 (Claude Opus 5.5, unreviewed): LOW-8, each card once per run
@@ -8037,7 +8091,7 @@ def cmd_flush(args):
         where = route(f.to)
         if where.target is None:
             left.append((f, f"{where.why}; it is never sent another way. To send it over ssh, write the card again "
-                            f"with tc card {printable(f.to)} --ssh <target>, then run tc flush"))
+                            f"with {tc} card {printable(f.to)} --ssh <target>, then run {tc} flush"))
         elif where.target not in targets:
             targets.append(where.target)
     for target in targets:
@@ -8060,7 +8114,7 @@ def cmd_flush(args):
                 except (OSError, ValueError) as err:
                     why = err.strerror if isinstance(err, OSError) and err.strerror else str(err)
                     print(f"tc flush: {lead}: could not read {printable(f.path)} ({why}); stopped for {target}, "
-                          f"so its mail stays in order. Move it out of the outbox by hand, then run tc flush.",
+                          f"so its mail stays in order. Move it out of the outbox by hand, then run {tc} flush.",
                           file=sys.stderr)
                     stopped = f"{lead}, ahead of it, could not be read"
                     break
@@ -8088,7 +8142,7 @@ def cmd_flush(args):
         owners.setdefault(target, []).append(user_name(f.st.st_uid))
     for target, names in owners.items():  # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-16, reads for 1 and many
         print(f"{len(names)} waiting for {target} from other members ({', '.join(sorted(set(names)))}); "
-              f"each member sends their own with tc flush", flush=True)
+              f"each member sends their own with {tc} flush", flush=True)
     selection = "in the outbox" if args.to is None else f"for {printable(args.to)}"  # SSH fix round 1 (Claude Opus 5.5, unreviewed): LOW-14
     if not mine and not theirs:
         print(f"nothing waiting {selection}" + (f": {pick.why}" if pick is not None and pick.why else ""),
@@ -9448,8 +9502,8 @@ def cmd_watch(args):
                 ALERT line.
     @deps       require_names, mailbox_share, hold_wake_lock,
                 machine_stats, listeners, wait_exits, left_on_purpose,
-                wall_clock, session_counts, _breaches; resource, sys,
-                time.
+                wall_clock, session_counts, _breaches, invoked_name;
+                resource, sys, time.
     @complexity O(k + n log n + g) per poll: k lines in /proc/locks and n
                 entries in mail/ (listeners: one folder open and one lstat
                 per inbox), plus /proc/meminfo and one nvidia-smi run where
@@ -9499,7 +9553,7 @@ def cmd_watch(args):
             if problems:
                 print(f"ALERT {now_iso()}: " + "; ".join(problems))
                 print(f"  now: load {m['load1']} / {m['cores']}, mem free {m['mem_avail_pct']}%, {_gpu_text(m['gpus'])}")
-                print(f"Re-arm after handling: tc watch {args.name}")
+                print(f"Re-arm after handling: {invoked_name()} watch {args.name}")  # NAME (Claude Opus 5.5, unreviewed)
                 sys.exit(EXIT_ALERT)
             if time.monotonic() >= deadline:
                 break
@@ -9510,7 +9564,7 @@ def cmd_watch(args):
         print(f"HEARTBEAT {now_iso()}: load {m['load1']} (peak {peak_load}) / {m['cores']}, "
               f"mem free {m['mem_avail_pct']}% (low {low_mem}%), {gpu}, "
               f"{s['claude']} Claude Code, {s['codex']} Codex, listening: {', '.join(up) or 'none'}")
-        print(f"Re-arm: tc watch {args.name}")
+        print(f"Re-arm: {invoked_name()} watch {args.name}")  # NAME (Claude Opus 5.5, unreviewed)
 
 
 # CARDS R6 (Claude Opus 5.5, unreviewed): the one parser class (D12).
@@ -9548,15 +9602,18 @@ def main():
                 its refusal names nothing of this machine: P3 fix round 2,
                 Claude Opus 5.5, unreviewed, D37 (1)), then whatever the
                 chosen cmd_* does.
-    @deps       TcParser, set_shared_umask, far_key_reads; every cmd_*
-                function.
+    @deps       TcParser, set_shared_umask, far_key_reads, invoked_name
+                (the parser's prog, so usage lines say the name tc was run
+                by, NAME); every cmd_* function.
     @complexity O(a) over a arguments to parse, plus the command.
     @alloc      the parser and the parsed arguments, freed on exit.
     """
     # Phase fix round 1 (Claude Opus 5.5, unreviewed): agent sessions, not only Claude.
-    ap = TcParser(prog="tc", description="Mailbox between agent sessions: a Claude Code session "
-                                          "wakes when its tc wait exits; a Codex session runs tc "
-                                          "join once, and then a send rings it.")
+    # NAME (Claude Opus 5.5, unreviewed): usage, --help and argparse's own error line say the invoked name.
+    tc = invoked_name()
+    ap = TcParser(prog=tc, description="Mailbox between agent sessions: a Claude Code session "
+                                        f"wakes when its {tc} wait exits; a Codex session runs {tc} "
+                                        "join once, and then a send rings it.")
     sub = ap.add_subparsers(dest="cmd", required=True, parser_class=TcParser)
 
     s = sub.add_parser("send", help="send a message (text arg or stdin)")

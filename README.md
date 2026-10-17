@@ -81,16 +81,37 @@ it directly.
 ```
 git clone https://github.com/DonaldGallianoIII/TheConnection ~/TheConnection
 chmod +x ~/TheConnection/tc
-mkdir -p ~/.local/bin && ln -s ~/TheConnection/tc ~/.local/bin/tc
+command -v tc
 ```
 
-The last line puts `tc` on your `PATH`. Most Linux systems already have
-a `tc` (the kernel's traffic control, `/usr/sbin/tc`), which answers
-`Object "health" is unknown, try "tc help".` Check with `command -v tc`:
-it must print the `~/.local/bin/tc` path. On Ubuntu and Debian,
-`~/.local/bin` joins `PATH` at your next login once it exists, ahead of
-`/usr/sbin`; elsewhere, add it yourself. Below, a bare `tc` means that
-link. Without it, write `~/TheConnection/tc` each time.
+<!-- NAME lane (Claude Opus 5.5), 2026-10-17: link as tconn when the system has a tc. Status: unreviewed. -->
+The last line asks whether your system already has a `tc`. Most Linux
+systems do: the kernel's traffic control, at `/usr/sbin/tc`, which
+answers `Object "health" is unknown, try "tc help".` Pick the name for
+your link by what it printed.
+
+- **It printed nothing.** Link ours as `tc`:
+  ```
+  mkdir -p ~/.local/bin && ln -s ~/TheConnection/tc ~/.local/bin/tc
+  ```
+- **It printed a path, such as `/usr/sbin/tc`.** Leave that one alone and
+  link ours as `tconn`, then type `tconn` wherever this README says `tc`:
+  ```
+  mkdir -p ~/.local/bin && ln -s ~/TheConnection/tc ~/.local/bin/tconn
+  ```
+
+tc's hints follow the name you ran it by. Run as `tconn`, a wait that
+finds mail prints `MAIL: 1 unread for a. Run: tconn read a`, and its
+usage lines, `--help` and a mistyped command's error line say `tconn`.
+Run by its path, it says `tc`. The words that open a refusal
+(`tc send: empty message`) stay `tc` under any name.
+
+On Ubuntu and Debian, `~/.local/bin` joins `PATH` at your next login
+once it exists; elsewhere, add it yourself. Check with `command -v tc`
+(or `command -v tconn`): it must print the `~/.local/bin` path. Below, a
+bare `tc` means that link, under the name you gave it. Without a link,
+write `~/TheConnection/tc` each time: the file in the repo is always
+`tc`.
 
 The mailbox lives next to the script: `mail/`, `status/`, `cards/` and,
 once ssh mail has gone out, `outbox/` (all gitignored). To keep it
