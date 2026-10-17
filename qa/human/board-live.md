@@ -5,7 +5,13 @@ Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14; fix rounds by
         long names, the fonts, the stale line) by Claude Opus 5.5 (the P4
         phase fixer), 2026-10-15; its round 2 (D28's late mail, D27's
         peers, an unreadable inbox, a damaged token, the jump under the
-        stale line) by Claude Opus 5.5 (the P4 phase fixer), 2026-10-15
+        stale line) by Claude Opus 5.5 (the P4 phase fixer), 2026-10-15;
+        step 22's restart bullet and step 23 (the wait exit record, F1)
+        by Claude Opus 5.5 (the F1 lane agent), 2026-10-16; step 23's
+        read before the last wait and its `stopped earlier` bullet by
+        Claude Opus 5.5 (the F1 fixer, round 1), 2026-10-17; step 23's
+        re-armed `c` and its pill counts by Claude Opus 5.5 (the F1
+        fixer, round 2), 2026-10-17
 Status: unreviewed. Written, not yet run by a person.
 
 What this checks: `board/serve.py` serves the live board on 127.0.0.1 only,
@@ -252,7 +258,8 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       again with `chmod u+rwx $TC_ROOT/mail/to-c`; the badge goes.
     - The legend says what the states cannot see: a crash after reading
       (it looks working for up to 10 min), and, with no board page open,
-      when a listener went.
+      when a listener went, unless its exit record says why (without
+      one, mail that came meanwhile counts as a wake).
     - The tree's lines are thin and solid, with no words; the `native` line
       is dash-dot, with no words, and the badges on `far` and `r` say
       `native` in words. A quiet mail line is thicker than a tree line.
@@ -333,10 +340,56 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       list. Its tree's heading comes to just under the stale line, never
       behind it. The same at phone width.
     - Restart the server with the same command and open the new URL it
-      prints (the token is new). Nothing reads `✕ no listener`,
-      `◔ working` or `△ woken · not read` until a listener has been seen
-      and then stops: a restart forgets who was listening.
-23. A reports_to cycle. Write two cards that report to each other:
+      prints (the token is new). Nothing reads `◔ working` or
+      `△ woken · not read` until a listener has been seen and then stops:
+      a restart forgets who was listening. `c`, whose listener you
+      stopped with Ctrl+C in step 16, reads `✕ no listener` at once:
+      Ctrl+C stopped its wait before it wrote an exit, so its exit record
+      still says listening (F1, C5; F1 lane agent, Claude Opus 5.5,
+      2026-10-16, unreviewed). No other name reads `✕ no listener`.
+23. Restart after a kill (F1, C5's wait exit record). Added by the F1
+    lane agent (Claude Opus 5.5), 2026-10-16. Status: unreviewed.
+    First bring `c` back, so `b` is the one name down below (F1 fix
+    round 2, Claude Opus 5.5, 2026-10-17, unreviewed): `c`'s listener
+    has been stopped since step 16, and its `still there?` is unread. In
+    terminal 3 run `./tc read c`, then `./tc wait c`. Within 3 s `c`
+    reads `● listening`.
+    `b`'s listener runs in terminal 2 (step 8). In terminal 4, find its
+    pid with `./tc health` and stop it hard: `kill -9 <pid>`. Stop the
+    server (Ctrl+C in terminal 1), start it again with the same command,
+    and open the new URL it prints.
+    - Pass: on the first answer, before any poll has seen `b` listen,
+      `b` reads `✕ no listener` with a dashed border, and
+      `cat $TC_ROOT/mail/to-b/.wait.exit` reads `listening <time>`: its
+      wait was killed before it wrote an exit.
+    - Pass (F1 fix round 1, Claude Opus 5.5, 2026-10-17, unreviewed;
+      `c` and the pill's counts, round 2): `b`'s box says `stopped N m ago` (or `s` or `h`). A restarted
+      board never saw `b` listen, so it counts from the record's time,
+      when that wait began (step 8, so most likely 10 min or more ago).
+      `c` reads `● listening`. Under 10 min, the pill warns with
+      `1 listening · 1 no listener`; at 10 min or more it stays calm,
+      `live · 1 listening · ⊘ 1 stopped earlier`, in that glyph and
+      those words, while `b`'s box still reads `✕ no listener`. Open the
+      new URL again with `?gray=1` put before the `#`, as in step 16: in
+      grayscale the footer's legend still says `⊘ stopped earlier` in
+      words, and so does the pill when it counts `b` there.
+    - Fail: `b` reads `○ idle`, `◔ working` or `△ woken · not read`.
+
+    In terminal 2 run `./tc wait b` again. Within 3 s `b` reads
+    `● listening`. In terminal 4 mail it: `./tc send --from a --to b "one
+    more"`. Its wait exits with `MAIL:`, and
+    `cat $TC_ROOT/mail/to-b/.wait.exit` reads `mail <time>`. Restart the
+    server once more and open the new URL.
+    - Pass: `b` reads `○ idle`, never `✕ no listener`: its record says
+      mail woke it, so it left on purpose.
+    - Fail: `b` reads `✕ no listener`.
+
+    In terminal 4 run `./tc read b`, so the `one more` is read: a wait
+    started over unread mail exits at once with `MAIL:` and is not
+    listening. Then run `./tc wait b` again in terminal 2, as before this
+    step, and within 3 s `b` reads `● listening`. (F1 fix round 1, Claude
+    Opus 5.5, 2026-10-17. Status: unreviewed.)
+24. A reports_to cycle. Write two cards that report to each other:
     ```
     echo '{"version": 1, "name": "p", "kind": "claude", "account": "lab", "route": "local", "reports_to": "q"}' > $TC_ROOT/cards/p.json
     echo '{"version": 1, "name": "q", "kind": "claude", "account": "shop", "route": "local", "reports_to": "p"}' > $TC_ROOT/cards/q.json
@@ -344,7 +397,7 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
     - Within 3 s `p` is a root with `q` under it, and `p`'s box carries a
       dashed badge `reports to q · cycle`, so the loop shows in words. At
       phone width the same words sit under `p`'s row.
-24. Close the tab, then stop the server with Ctrl+C and both listeners with
+25. Close the tab, then stop the server with Ctrl+C and both listeners with
     Ctrl+C. Run `unset TC_ROOT` in each terminal. The throwaway mailbox is
     under the system temp folder.
 

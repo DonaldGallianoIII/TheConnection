@@ -15,7 +15,11 @@
  * hand, so no real clock or network is read. Then the badge lines on a
  * native pair's boxes and outline rows, with mail or without and never on
  * account `unknown`, and on a reports_to cycle's root; and the poller's
- * stale line over the board once an answer is late or refused.
+ * stale line over the board once an answer is late or refused. F1 fix
+ * round 1 (Claude Opus 5.5, unreviewed): the pill warns only on a stop
+ * under 10 min old and counts older ones as `stopped earlier`, a down box
+ * says when it stopped, and that age redraws the box only when its words
+ * change.
  *
  * Model: Claude Opus 5.5 (the BOARD lane agent), 2026-10-14. Status: unreviewed.
  *
@@ -29,7 +33,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   STATES, NOTE_WORDS, CONN_WORDS, LINK_WORDS, UNREAD_WORDS, INBOX_WORDS, LEGEND_WORDS, boardView, diffBoard, createBoard,
-  patchBoard, pillText, layoutLevels, levelPort, createPoller, outlineView, tokenProblem, CONFIG,
+  patchBoard, pillText, layoutLevels, levelPort, createPoller, outlineView, tokenProblem, CONFIG, STOPPED_EARLIER,
 } from '../board/look.js';
 
 /**
@@ -141,7 +145,9 @@ test('a woken session warns in its own glyph and words and its wire is not the d
 test('both legends name the two cases the states cannot see', () => {
   for (const [view, words] of [['graph', LEGEND_WORDS.graph], ['outline', LEGEND_WORDS.outline]]) {
     assert.match(words, /a crash after reading \(it looks working for up to 10 min\)/, `${view} legend: ${words}`);
-    assert.match(words, /with no board page open, when a listener went/, `${view} legend: ${words}`);
+    // F1 (Claude Opus 5.5, unreviewed): the second case in C5's words since the wait exit record.
+    assert.match(words, /with no board page open, when a listener went, unless its exit record says why \(without one, mail that came meanwhile counts as a wake\)/,
+      `${view} legend: ${words}`);
     assert.ok(!words.includes('only a crash after reading'), `${view} legend still says a crash is the only case: ${words}`);
   }
 });
@@ -264,6 +270,53 @@ test('the pill names down nodes in the word their boxes show', () => {
   const feed = { nodes: [node('l', { listener_pid: 12 }), node('d', { state: 'down' })] };
   assert.deepEqual(pillText(feed), { text: `1 listening · 1 ${STATES.down.word}`, state: 'warn', listening: 1 });
   assert.equal(STATES.down.word, 'no listener');
+});
+
+// F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1, a2's ruling
+// for the owner (C5, "The pill warns only on a fresh stop"). The feed's
+// down_age_s either side of DOWN_WINDOW_S (600 s), written here.
+const NINE_MIN_S = 9 * 60;
+const ELEVEN_MIN_S = 11 * 60;
+test('the pill warns only on a stop under 10 min old; an older one counts as stopped earlier in its own glyph and words, and every down box still reads down with when it stopped', () => {
+  const fresh = { nodes: [node('l', { listener_pid: 12 }), node('f', { state: 'down', down_age_s: NINE_MIN_S })] };
+  assert.deepEqual(pillText(fresh), { text: `1 listening · 1 ${STATES.down.word}`, state: 'warn', listening: 1 },
+    'a stop 9 min old did not warn');
+  const old = { nodes: [node('l', { listener_pid: 12 }), node('o', { state: 'down', down_age_s: ELEVEN_MIN_S })] };
+  assert.deepEqual(pillText(old),
+    { text: `live · 1 listening · ${STOPPED_EARLIER.glyph} 1 ${STOPPED_EARLIER.word}`, state: 'up', listening: 1 },
+    'a stop 11 min old warned, or was not counted as stopped earlier');
+  const many = {
+    nodes: [
+      ...['l1', 'l2', 'l3', 'l4'].map((id, i) => node(id, { listener_pid: 20 + i })),
+      node('f', { state: 'down', down_age_s: NINE_MIN_S }),
+      ...['o1', 'o2', 'o3'].map((id) => node(id, { state: 'down', down_age_s: ELEVEN_MIN_S })),
+    ],
+  };
+  assert.equal(pillText(many).text, `4 listening · 1 ${STATES.down.word} · ${STOPPED_EARLIER.glyph} 3 ${STOPPED_EARLIER.word}`);
+  assert.deepEqual([STOPPED_EARLIER.glyph, STOPPED_EARLIER.word], ['⊘', 'stopped earlier']);
+  assert.ok(!Object.values(STATES).some((s) => s.glyph === STOPPED_EARLIER.glyph), 'stopped earlier shares a state\'s glyph');
+  const view = boardView({ nodes: [...fresh.nodes, old.nodes[1]], wires: [], links: [] });
+  assert.deepEqual([view.nodes.f.state, view.nodes.f.note], ['down', `${NOTE_WORDS.stopped} 9 m ago`]);
+  assert.deepEqual([view.nodes.o.state, view.nodes.o.note], ['down', `${NOTE_WORDS.stopped} 11 m ago`]);
+  const rows = Object.fromEntries(outlineView({ nodes: old.nodes, wires: [], links: [] }).groups.flatMap((g) => g.rows)
+    .map((r) => [r.id, [r.glyph, r.word, r.note]]));
+  assert.deepEqual(rows.o, [STATES.down.glyph, STATES.down.word, `${NOTE_WORDS.stopped} 11 m ago`]);
+  for (const words of [LEGEND_WORDS.graph, LEGEND_WORDS.outline]) {
+    assert.ok(words.includes(`${STOPPED_EARLIER.glyph} ${STOPPED_EARLIER.word}: `), `the legend has no stopped earlier: ${words}`);
+    // F1 fix round 2 (Claude Opus 5.5, unreviewed): a stop of exactly 10 min counts as stopped earlier, so the legend says so.
+    assert.ok(words.includes(`${STOPPED_EARLIER.word}: counted in the pill, a listener that went 10 min ago or more;`),
+      `the legend's stopped earlier is not a stop 10 min ago or more: ${words}`);
+  }
+});
+
+test('a down node\'s age lays the board out again only when the words on its box change', () => {
+  const at = (age) => ({ nodes: [node('o', { state: 'down', down_age_s: age })], wires: [], links: [] });
+  const board = createBoard(createFakeKit());
+  patchBoard(board, at(ELEVEN_MIN_S), 800);
+  const same = patchBoard(board, at(ELEVEN_MIN_S + 1), 800);
+  assert.equal(same.updateNodes.length, 0, 'a second inside the same minute redrew the box');
+  const next = patchBoard(board, at(ELEVEN_MIN_S + 60), 800);
+  assert.deepEqual(next.updateNodes.map((v) => v.note), [`${NOTE_WORDS.stopped} 12 m ago`]);
 });
 
 test('nodes named __proto__, constructor and toString lay out and draw like any other (C0 allows all three)', () => {

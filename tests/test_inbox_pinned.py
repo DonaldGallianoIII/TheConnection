@@ -24,7 +24,11 @@ locks a child holds; (h) tc flush's count over other members' branches
 a codex tc join, and a codex send's ring decision; (j) the board's own
 scan (board/serve.py, scan_messages); (k) tc health's stuck_outbox over
 another member's branch, whose far end holds a note of its own beside the
-queued message's name (P3 fix round 2, REC-4).
+queued message's name (P3 fix round 2, REC-4); (l) the wait exit records'
+one read, wait_exits, which tc health, tc watch and the board share, over
+an inbox whose far end holds an exit record of its own (F1, Claude Opus
+5.5, unreviewed). Row (e)'s real inbox holds the wait's exit record beside
+its lock since F1: the record goes in the folder the lock was taken in.
 
 Known gap: the family list is hardcoded. A command added later that
 touches an inbox or a branch is not covered until someone adds its row.
@@ -97,15 +101,18 @@ inbox (moved aside, still pinned) holds after the act.
             for held_by_others' row patches os.stat so each holder's
             /proc/<pid> reads as another member's; for the stuck row,
             writes a note beside the real queued message and replaces
-            tc's wall_clock. EveryInboxActHasARowTest reads ../tc's text
-            and parses it; it runs nothing.
+            tc's wall_clock. F1 (Claude Opus 5.5, unreviewed): for the
+            exit records' row, one more tc wait in the setup and a
+            record planted in each far end, and tc's wait_exits called in
+            process. EveryInboxActHasARowTest reads ../tc's text and
+            parses it; it runs nothing.
 @deps       python3 stdlib (argparse, ast, collections, contextlib,
             importlib, io, json, os, pathlib, resource, stat, sys, time,
             unittest, unittest.mock); tests/_root.py; UmaskTestCase, as_member,
             load_tc and primary_group from test_shared.py; hold,
             holder_patched_stat and HOLDER_UID_STEP from
             test_wake_files.py; ../tc; ../board/serve.py.
-@complexity O(r x k) subtests over r = 16 rows and k = 2 kinds of swap,
+@complexity O(r x k) subtests over r = 17 rows and k = 2 kinds of swap,
             each a fresh root with four to seven tc runs of setup, up to
             four lock holders, and one command in process over a mailbox
             of a dozen entries.
@@ -220,6 +227,15 @@ HELD_BY_OTHERS_LOOKS = LISTENER_LOOKS + 1
 REAL_NOTE = "real note: the last failed try's words"
 NOTE_SUFFIX = ".stderr"
 STALE_SHIFT_SECONDS = 86400 + 3600
+# F1 (Claude Opus 5.5, unreviewed): the wait exit record's name beside
+# WAIT_LOCK (tc's WAIT_EXIT_NAME, written here), the word a wait that finds
+# mail writes there, and the record the far ends of the exit records' row
+# hold: a real record's form, so a read that reaches a far end would take
+# it, with a made-up word and date no real record in this test has.
+WAIT_EXIT = ".wait.exit"
+WAIT_EXIT_MAIL = "mail"
+PLANTED_EXIT = "timeout 2001-09-09T01:46:40+00:00\n"
+PLANTED_EXIT_WORD = "timeout"
 # One row: its family, its label, whether it swaps an inbox or a branch,
 # whether ann joins as codex, whether ann's message is read in setup, the
 # os calls its swap waits on, what it patches for its call, and how many
@@ -228,9 +244,11 @@ STALE_SHIFT_SECONDS = 86400 + 3600
 # P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-4. The lock names its
 # far ends hold, each held by a child; whose process those children read
 # as ("owner", ann's, or "member", another member's); and how many seconds
-# past now tc's wall_clock reads (the stuck row).
-Row = collections.namedtuple("Row", "family label target codex read_first looks environ stdin skip locks holder late",
-                             defaults=(0, (), "owner", 0))
+# past now tc's wall_clock reads (the stuck row). F1 (Claude Opus 5.5,
+# unreviewed): the exit record its far ends hold, when set, and then ann's
+# own wait runs in the setup, so her real inbox holds a real record.
+Row = collections.namedtuple("Row", "family label target codex read_first looks environ stdin skip locks holder late "
+                                    "exit_record", defaults=(0, (), "owner", 0, None))
 # Real os.lstat, bound once here, so the patches in place while a swap
 # runs never color what the far end looks like.
 REAL_LSTAT = os.lstat
@@ -421,6 +439,8 @@ ROWS = (
     # P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-4, health's look into another member's branch.
     Row("k", "tc health's stuck_outbox over another member's branch", "branch", False, False, LOOKS, {}, None,
         late=STALE_SHIFT_SECONDS),
+    # F1 (Claude Opus 5.5, unreviewed): the wait exit records' one read, which tc health, tc watch and the board share.
+    Row("l", "the exit records' read (wait_exits)", "inbox", False, False, LOOKS, {}, None, exit_record=PLANTED_EXIT),
 )
 # P3 fix round 2 (Claude Opus 5.5, unreviewed): test-strategist REC-15
 # (synthesis REC-17), the family list's known gap made a red test. The
@@ -446,6 +466,7 @@ COVERED = {
     "unread_count": ("tc card", "a codex tc join", "a codex send's ring decision"),
     "ring_doorbell": ("a codex send's ring decision",),
     "stuck_outbox": ("tc health's stuck_outbox over another member's branch",),
+    "wait_exits": ("the exit records' read (wait_exits)",),  # F1 (Claude Opus 5.5, unreviewed)
 }
 EXEMPT = {
     "pin_folder": "the pin itself: one folder opened by its name in an open folder, never through a link",
@@ -492,6 +513,8 @@ class InboxPinnedTest(UmaskTestCase):
                  root.tc("send", "--from", SENDER, "--to", OWNER, REAL_TEXT)]
         if row.read_first:
             setup.append(root.tc("read", OWNER))
+        if row.exit_record is not None:  # F1 (Claude Opus 5.5, unreviewed): ann's wait finds ben's mail and says so
+            setup.append(root.tc("wait", OWNER, "--timeout", str(WAIT_SECONDS)))
         if row.target == "branch":
             setup.append(root.tc("card", FAR_NAME, "--ssh", SSH_TARGET))
         for code, out, err in setup:
@@ -540,6 +563,7 @@ class InboxPinnedTest(UmaskTestCase):
             "a codex send's ring decision": lambda: tc.cmd_send(argparse.Namespace(sender=SENDER, to=OWNER,
                                                                                    message=SENT_TEXT, origin=None)),
             "the board's scan": lambda: board_scan_and_dates(root.path / "mail"),
+            "the exit records' read (wait_exits)": lambda: tc.wait_exits([OWNER]),  # F1 (Claude Opus 5.5, unreviewed)
         }
         return commands[row.label]
 
@@ -566,6 +590,14 @@ class InboxPinnedTest(UmaskTestCase):
             self.assertEqual((ran.code, ran.err), (0, ""))
             self.assertEqual(json.loads(ran.out)["held_by_others"], [],
                              "health listed a lock held at the far end, outside the inbox it opened")
+            return
+        if row.family == "l":  # F1 (Claude Opus 5.5, unreviewed): the record read is the real inbox's, never a far end's
+            self.assertEqual((ran.code, ran.err), (0, ""))
+            words = {name: record.word for name, record in (ran.value or {}).items()}
+            self.assertEqual(words, {OWNER: WAIT_EXIT_MAIL}, f"the exit record read is not the real inbox's "
+                                                             f"(a far end's says {PLANTED_EXIT_WORD}): {ran.value}")
+            self.assertLessEqual(abs(ran.value[OWNER].at - time.time()), REAL_AGE_SECONDS,
+                                 f"the exit record's time is not the real one's: {ran.value}")
             return
         if row.family == "k":
             self.assertEqual((ran.code, ran.err), (0, ""))
@@ -597,8 +629,11 @@ class InboxPinnedTest(UmaskTestCase):
                              "tc read did not move the real message into the real read/")
         elif row.label == "tc wait's poll":
             self.assertEqual((ran.code, ran.out), (0, f"MAIL: 1 unread for {OWNER}. Run: tc read {OWNER}\n"))
-            self.assertEqual(files_in(real), [WAIT_LOCK, "000001-from-ben.md"],
-                             "the wait's lock is not in the real inbox beside its mail (D35 (1))")
+            # F1 (Claude Opus 5.5, unreviewed): the exit record sits beside the lock, in the folder the lock is in.
+            self.assertEqual(files_in(real), [WAIT_EXIT, WAIT_LOCK, "000001-from-ben.md"],
+                             "the wait's lock and exit record are not in the real inbox beside its mail (D35 (1), F1)")
+            self.assertEqual((real / WAIT_EXIT).read_text().partition(" ")[0], WAIT_EXIT_MAIL,
+                             "the real inbox's exit record does not say the wait ended on mail")
         elif row.label == "tc log":
             self.assertIn(REAL_TEXT, ran.out, "tc log did not show the real message")
             self.assertEqual((ran.code, ran.err), (0, ""))
@@ -660,7 +695,9 @@ class InboxPinnedTest(UmaskTestCase):
         Opus 5.5, unreviewed): REC-4. tc health's listeners and
         held_by_others must name no holder of a lock at the far end, and
         its stuck line must carry the real branch's note, never the far
-        end's.
+        end's. F1 (Claude Opus 5.5, unreviewed): the exit records' read
+        must give the real inbox's record, never a far end's, and tc
+        wait's exit record must land in the real inbox beside its lock.
 
         @interacts  per subtest: build's setup, plant's two trees (with the
                     row's locks, each held by a child), one command in
@@ -673,7 +710,7 @@ class InboxPinnedTest(UmaskTestCase):
                     ROWS, LINK, REAL_FOLDER, ASIDE_PREFIX, INBOX_PLANT,
                     BRANCH_PLANT, PLANTED_AGE_SECONDS, PLANTED_TEXT,
                     PLANTED_SENDER, NOTE_SUFFIX, HOLDER_UID_STEP.
-        @complexity O(r x k): r = 16 rows, k = 2 kinds.
+        @complexity O(r x k): r = 17 rows, k = 2 kinds.
         @alloc      one TcRoot per subtest.
         """
         _, group, _ = primary_group()
@@ -686,6 +723,8 @@ class InboxPinnedTest(UmaskTestCase):
                     layout += tuple((name, "") for name in row.locks)
                     if row.late:
                         layout += ((f"to-{FAR_NAME}/{QUEUED_NAME}{NOTE_SUFFIX}", PLANTED_TEXT),)
+                    if row.exit_record is not None:  # F1 (Claude Opus 5.5, unreviewed): a far end's own record
+                        layout += ((WAIT_EXIT, row.exit_record),)
                     outside, other = root.base / "outside", root.base / "other"
                     plant(outside, layout, PLANTED_AGE_SECONDS)
                     plant(other, layout, PLANTED_AGE_SECONDS)

@@ -45,7 +45,11 @@ renamed, mail/.seq raised), and the feed reads only their names.
             (D24, D28) close two folders to the board (mode 000, opened
             again before the root goes), put hand-made files in read/ and
             move one message out of the board's sight, each in its own
-            root.
+            root. F1 (Claude Opus 5.5, unreviewed): a test that kills a
+            listener first waits for its wait exit record, and the D28
+            test lets b's wait end on its mail (reading /proc/locks until
+            it lets go), since a killed wait's record says listening and
+            reads down, after a restart and past the window too (C5).
 @alloc      one TcRoot per test, removed when its context exits; the feeds
             are plain dicts dropped at the end of each test.
 """
@@ -138,6 +142,10 @@ OLD_STATUS_S = 100
 MAIL_PROBLEM = "made-up reason: cannot list this inbox"
 # A newest-mail age under 0: tc's mailbox_summary rounds now less a future mtime.
 NEGATIVE_AGE_S = -5
+# Model: Claude Opus 5.5 (the F1 lane agent), 2026-10-16. Status: unreviewed.
+# The wait exit record's name in each inbox (tc's WAIT_EXIT_NAME, C5),
+# written here rather than read from tc.
+WAIT_EXIT_NAME = ".wait.exit"
 # A .pyc header (PEP 552): the magic number, then three little-endian
 # 32-bit words: flags (0, checked by the source's mtime and size), the
 # source's mtime and its size, each kept to 32 bits.
@@ -366,6 +374,24 @@ def snapshot_for(listening, names):
     return stand_in
 
 
+# Model: Claude Opus 5.5 (the F1 lane agent), 2026-10-16. Status: unreviewed.
+def exit_record_made(box):
+    """True once the wait exit record (C5, F1) is in the inbox `box`, within LOCK_CEILING_SECONDS: a listener proven by its lock writes it just after it takes the lock.
+
+    @interacts  lstats one name until it is there.
+    @deps       os, time; _root.LOCK_CEILING_SECONDS, _root.LOCK_POLL_SECONDS;
+                WAIT_EXIT_NAME.
+    @complexity at most LOCK_CEILING_SECONDS / LOCK_POLL_SECONDS lstats.
+    @alloc      none.
+    """
+    end = time.monotonic() + _root.LOCK_CEILING_SECONDS
+    while time.monotonic() < end:
+        if os.path.lexists(box / WAIT_EXIT_NAME):
+            return True
+        time.sleep(_root.LOCK_POLL_SECONDS)
+    return os.path.lexists(box / WAIT_EXIT_NAME)
+
+
 def every_path(root):
     """Every path under `root`, relative and sorted: the root's file list.
 
@@ -398,7 +424,11 @@ class FeedTest(unittest.TestCase):
         are the harness's; three wires with the right from, to and seq. The
         feeds write nothing. Second feed on the same Board, 20 s later on
         its clock, after b's listener is killed with no new mail: b is
-        down. A new Board has seen nobody listening, so b is idle there.
+        down. A new Board has seen nobody listening, but b's wait exit
+        record still says listening, since its wait was killed, so b is
+        down there too (F1, C5; before F1 it read idle). The file list
+        is taken once both listeners have written their records, which
+        each does just after it takes its lock (F1).
 
         The three messages run between a and b only: tc's router rings
         `codex` for a name with a codex card and runs `ssh` for one with
@@ -439,6 +469,8 @@ class FeedTest(unittest.TestCase):
             board = serve.Board(root=root.path, clock=clock)
             with root.listener("a", LISTENER_TIMEOUT_SECONDS) as pid_a:
                 with root.listener("b", LISTENER_TIMEOUT_SECONDS) as pid_b:
+                    for name in ("a", "b"):  # F1 (Claude Opus 5.5, unreviewed): each writes its record after its lock
+                        exit_record_made(root.path / "mail" / f"to-{name}")
                     before = every_path(root.path)
                     inside = board.feed()
                     # Past the window, so the senders read listening.
@@ -470,8 +502,9 @@ class FeedTest(unittest.TestCase):
         self.assertEqual(later["b"]["state"], "down", json.dumps(later["b"]))
         self.assertIsNone(later["b"]["listener_pid"])
         self.assertEqual(later["a"]["state"], "listening")
-        self.assertEqual(by_id(fresh)["b"]["state"], "idle",
-                         "a new Board has seen nobody listening, so nothing is down")
+        # F1 (Claude Opus 5.5, unreviewed): C5, a killed listener reads down after a restart too.
+        self.assertEqual(by_id(fresh)["b"]["state"], "down",
+                         "b's wait was killed and its exit record still says listening, so a new Board reads it down")
 
     def test_status_is_the_first_line_after_the_header_cut_at_80(self):
         """`tc status a <100 characters>`: the node's status is the first 80, no header.
@@ -601,7 +634,9 @@ class FeedTest(unittest.TestCase):
         WOKEN_GRACE_S with nothing read it reads woken, and after `tc read
         b` working again: never down. c, a listener lost with no mail,
         reads down: the control, so the test cannot pass by never saying
-        down. Past DOWN_WINDOW_S both fade to idle. b's listener output
+        down. Past DOWN_WINDOW_S b fades to idle, and c, whose wait exit
+        record still says listening (it was killed), stays down (F1, C5;
+        before F1 both faded to idle). b's listener output
         says MAIL:, so its wait ended on the mail, not on a kill. The
         message's mtime is set on the fake clock's own line, so no wall
         clock decides a state.
@@ -623,6 +658,7 @@ class FeedTest(unittest.TestCase):
             board = serve.Board(root=root.path, clock=clock)
             with root.listener("b", LISTENER_TIMEOUT_SECONDS) as pid_b:
                 with root.listener("c", LISTENER_TIMEOUT_SECONDS) as pid_c:
+                    exit_record_made(root.path / "mail" / "to-c")  # F1 (Claude Opus 5.5, unreviewed): killed after it
                     seen = by_id(board.feed())
                     code, out, err = root.tc("send", "--from", "a", "--to", "b", "task")
                     self.assertEqual(code, 0, f"tc send exited {code}: {err}")
@@ -658,7 +694,8 @@ class FeedTest(unittest.TestCase):
         self.assertEqual(pair(grace), {"b": ("working", None), "c": ("down", None)})
         self.assertEqual(pair(late), {"b": ("woken", None), "c": ("down", None)})
         self.assertEqual(pair(read), {"b": ("working", None), "c": ("down", None)})
-        self.assertEqual(pair(faded), {"b": ("idle", None), "c": ("idle", None)})
+        # F1 (Claude Opus 5.5, unreviewed): C5, c's record says listening, so it stays down past the window.
+        self.assertEqual(pair(faded), {"b": ("idle", None), "c": ("down", None)})
 
     # Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
     def test_a_sign_of_life_after_a_wake_reads_working(self):
@@ -726,7 +763,10 @@ class FeedTest(unittest.TestCase):
         """c's listener is killed with no mail and reads down; mail sent after the board saw it gone leaves it down (D28).
 
         b and c listen, proven, and the board sees both. a mails b while b
-        still listens; then both listeners end. One poll later b reads
+        still listens; then b's wait ends on that mail and c's is killed
+        (F1, Claude Opus 5.5, unreviewed: b's wait now runs until it sees
+        the mail, so its exit record says mail; a kill would leave it
+        saying listening, which reads down, C5). One poll later b reads
         working (its mail landed inside its wake window, and the grace
         runs) and c down. Then a mails c, and that mail lands past
         POLL_SECONDS after the poll that first found c gone: c reads down
@@ -749,9 +789,16 @@ class FeedTest(unittest.TestCase):
             board = serve.Board(root=root.path, clock=clock)
             with root.listener("b", LISTENER_TIMEOUT_SECONDS) as pid_b:
                 with root.listener("c", LISTENER_TIMEOUT_SECONDS) as pid_c:
+                    exit_record_made(root.path / "mail" / "to-c")  # F1 (Claude Opus 5.5, unreviewed): killed after it
                     seen = by_id(board.feed())
                     code, out, err = root.tc("send", "--from", "a", "--to", "b", "task")
                     self.assertEqual(code, 0, f"tc send exited {code}: {err}")
+                    # F1 (Claude Opus 5.5, unreviewed): b's wait ends on its mail, as a real wake does.
+                    lock = root.path / "mail" / "to-b" / ".wait.lock"
+                    end = time.monotonic() + WAKE_CEILING_S
+                    while pid_b in _root.flock_holders(lock) and time.monotonic() < end:
+                        time.sleep(_root.LOCK_POLL_SECONDS)
+                    self.assertNotIn(pid_b, _root.flock_holders(lock), f"b's wait never saw its mail in {WAKE_CEILING_S} s")
             age_file(root.path / "mail" / "to-b" / "000001-from-a.md", FAKE_NOW + 1)
             clock.now = FAKE_NOW + RECENT_SEND_S
             gone = by_id(board.feed())
