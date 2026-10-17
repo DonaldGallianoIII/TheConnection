@@ -194,7 +194,9 @@ route <route> is not built yet; nothing sent`, exit 1, nothing written.
      marker says pending or timed out. Release the lock. The marker is a
      file that, once made, is never removed: its contents carry its state
      (pending, timed out, or clear), in both private and shared mode
-     (D20).
+     (D20). "Pending" is any of the first lines tc writes for a ring it
+     owes: `ringing`, `failed`, or `joined with unread mail`; then
+     `timed out` and `clear`.
   2. Outside the lock, ring:
      `codex queue --thread <thread_id> --message "MAIL: <n> unread for <to>. Run: TC_ROOT=<root> <tc path> read <to>, act on it, reply with TC_ROOT=<root> <tc path> send --from <to> --to <sender>."`
      (root and path quoted with `shlex.quote`). The marker is written
@@ -583,7 +585,7 @@ For a separate Linux user per account on one machine.
   5. The files everyone must write stay group-writable and are never
      deleted under shared mode: `mail/.seq`, the lock files, and the ring
      marker (whose contents carry its state: pending, timed out, or
-     clear, instead of being removed). The worst a member can do through
+     clear, as C2 spells them, instead of being removed). The worst a member can do through
      them is make a send fail, or a ring come once more or once fewer;
      never read, lose or alter mail.
   6. `.shared` is `0644`, owned by whoever ran init and writable by that

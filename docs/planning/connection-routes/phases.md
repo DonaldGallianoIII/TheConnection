@@ -515,8 +515,10 @@ talking by following the README alone.
 - **Do:** add every open item Donald settled while the lanes ran.
 
 ### D4. Human QA per route
-- **Files:** `qa/human/route-local.md`, `route-codex.md`, `route-ssh.md`,
-  `route-shared.md`, `two-accounts.md`, `shapes.md` (new); results in
+- **Files:** `qa/human/route-local.md`, `route-codex.md`,
+  `two-accounts.md`, `shapes.md` (new), and `route-ssh.md`,
+  `route-shared.md` (made by the SSH and SHARED lanes; DOCS brings them
+  true); results in
   `qa/results/`. `shapes.md` walks the three D7 shapes by hand under a
   temp `TC_ROOT` and checks the live board draws each.
 - **Do:** step by step, what to type and what to see. `two-accounts.md` is
