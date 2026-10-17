@@ -903,10 +903,13 @@ class SharedTest(UmaskTestCase):
         unreviewed, D36 (3)). The
         inbox and its read/ then come from the first join (D20), the
         message from the first send, the status file from the first
-        status, and the wait lock from a wait that times out at once (P3
-        fix round 1b, Claude Opus 5.5, unreviewed: b's own wait, before
-        the send, since D36 (2) refuses a wait on a name nobody joined, and
-        its lock is in b's inbox at WAKE_LOCK_MODE, D35 (1)).
+        status, and the wait lock and its exit record from a wait that
+        times out at once (P3 fix round 1b, Claude Opus 5.5, unreviewed:
+        b's own wait, before the send, since D36 (2) refuses a wait on a
+        name nobody joined, and its lock is in b's inbox at
+        WAKE_LOCK_MODE, D35 (1); F1, Claude Opus 5.5, unreviewed: the
+        record, mail/to-b/.wait.exit, is 0640 like any inbox file that is
+        not a lock, C5).
         Must reject an init that makes no top folder (the second user's
         first command would need write access to ROOT), a later folder
         without setgid (0775), or a top folder left in the primary group
@@ -933,7 +936,9 @@ class SharedTest(UmaskTestCase):
                     self.assertEqual(run[0], 0, run[2])
                 self.assertEqual(waited[0], EXIT_TIMEOUT, waited[2])
                 self.assertEqual(sorted(made), ["cards", "cards/b.json", "mail", "mail/.box-b.lock",
-                                                ORIGINS_FOLDER, "mail/.seq", "mail/to-b", "mail/to-b/.wait.lock",
+                                                ORIGINS_FOLDER, "mail/.seq", "mail/to-b",
+                                                "mail/to-b/.wait.exit",  # F1 (Claude Opus 5.5, unreviewed): C5's record
+                                                "mail/to-b/.wait.lock",
                                                 "mail/to-b/000001-from-a.md", "mail/to-b/read", "outbox",
                                                 "status", "status/b.md"])
                 self.assertEqual(made, {p: shared_as(p, k, gid) for p, (k, m, g) in made.items()})

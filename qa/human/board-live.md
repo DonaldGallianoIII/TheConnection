@@ -254,7 +254,8 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       again with `chmod u+rwx $TC_ROOT/mail/to-c`; the badge goes.
     - The legend says what the states cannot see: a crash after reading
       (it looks working for up to 10 min), and, with no board page open,
-      when a listener went.
+      when a listener went, unless its exit record says why (without
+      one, mail that came meanwhile counts as a wake).
     - The tree's lines are thin and solid, with no words; the `native` line
       is dash-dot, with no words, and the badges on `far` and `r` say
       `native` in words. A quiet mail line is thicker than a tree line.

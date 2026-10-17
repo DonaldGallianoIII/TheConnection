@@ -715,10 +715,15 @@ const DOWN_WINDOW_MIN = 10;
 // the P4 phase fixer, round 2. Status: unreviewed.
 // D24's two states in words, on both legends, with the two cases they
 // cannot see (C5, D28).
+// F1 (Claude Opus 5.5, unreviewed): the second case in C5's words since the
+// wait exit record. A killed listener's record says listening, so the board
+// reads it down even with no page open; only with no record (a tc from
+// before F1) does mail that came meanwhile count as a wake.
 const WAKE_WORDS = `${STATES.working.glyph} ${STATES.working.word}: mail woke it and it is on its turn · `
   + `${STATES.woken.glyph} ${STATES.woken.word}: mail woke it and nothing has read it · `
   + `the board cannot see a crash after reading (it looks ${STATES.working.word} for up to ${DOWN_WINDOW_MIN} min) `
-  + 'or, with no board page open, when a listener went (mail that came meanwhile counts as a wake)';
+  + 'or, with no board page open, when a listener went, unless its exit record says why '
+  + '(without one, mail that came meanwhile counts as a wake)';
 export const LEGEND_WORDS = Object.freeze({
   outline: 'outline: each session under the one it reports to, or that mail shows it works for · '
     + `traffic: newest first, arrow toward the reader · ${WAKE_WORDS}`,

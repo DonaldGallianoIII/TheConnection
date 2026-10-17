@@ -141,7 +141,9 @@ test('a woken session warns in its own glyph and words and its wire is not the d
 test('both legends name the two cases the states cannot see', () => {
   for (const [view, words] of [['graph', LEGEND_WORDS.graph], ['outline', LEGEND_WORDS.outline]]) {
     assert.match(words, /a crash after reading \(it looks working for up to 10 min\)/, `${view} legend: ${words}`);
-    assert.match(words, /with no board page open, when a listener went/, `${view} legend: ${words}`);
+    // F1 (Claude Opus 5.5, unreviewed): the second case in C5's words since the wait exit record.
+    assert.match(words, /with no board page open, when a listener went, unless its exit record says why \(without one, mail that came meanwhile counts as a wake\)/,
+      `${view} legend: ${words}`);
     assert.ok(!words.includes('only a crash after reading'), `${view} legend still says a crash is the only case: ${words}`);
   }
 });
