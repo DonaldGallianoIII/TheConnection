@@ -27,7 +27,8 @@ can read on disk.
 
 ```
 Is the other session on another machine?
-  yes: the ssh route. Write a card for it: tc card <name> --ssh user@host
+  yes: the ssh route. Set it up as in "ssh, outbound" below: a key, a
+       gate line on the far machine, an ssh alias, then a card.
   no:  Is it Codex, or a tool with no messaging of its own?
          yes: the codex route. It runs tc join once; each send rings it.
          no:  Is it a Claude session under your own account?
@@ -80,7 +81,16 @@ it directly.
 ```
 git clone https://github.com/DonaldGallianoIII/TheConnection ~/TheConnection
 chmod +x ~/TheConnection/tc
+mkdir -p ~/.local/bin && ln -s ~/TheConnection/tc ~/.local/bin/tc
 ```
+
+The last line puts `tc` on your `PATH`. Most Linux systems already have
+a `tc` (the kernel's traffic control, `/usr/sbin/tc`), which answers
+`Object "health" is unknown, try "tc help".` Check with `command -v tc`:
+it must print the `~/.local/bin/tc` path. On Ubuntu and Debian,
+`~/.local/bin` joins `PATH` at your next login once it exists, ahead of
+`/usr/sbin`; elsewhere, add it yourself. Below, a bare `tc` means that
+link. Without it, write `~/TheConnection/tc` each time.
 
 The mailbox lives next to the script: `mail/`, `status/`, `cards/` and,
 once ssh mail has gone out, `outbox/` (all gitignored). To keep it
@@ -98,8 +108,10 @@ own messaging serves that case.
 
 1. **In the session you want to reach** (the worker), type:
    ```
-   read ~/TheConnection/JOIN.md and follow it. your name is b, your relay is a.
+   read ~/TheConnection/JOIN.md and follow it. your name is b, your relay is a, your account is work.
    ```
+   (`work` is a label for the Claude account; leave that part off if you
+   have none in mind.)
    It joins as `b`, arms its listener, proves it, says hello, and goes back
    to work.
 2. **In the session you talk to** (the relay), type:
@@ -195,9 +207,11 @@ Mail to a name nobody has joined still lands, with a warning:
 
 ```
 $ tc send --from a --to newname "first mail"
-new inbox: nobody has joined as newname
 sent #3 to newname: .../mail/to-newname/000003-from-a.md
+new inbox: nobody has joined as newname
 ```
+
+The warning goes to stderr, so a pipe or a log may show it first.
 
 ### codex
 
@@ -216,14 +230,20 @@ dies when its command returns. So it has no listener. Instead it runs
    answer its mail.
 2. **In the Codex session**, type:
    ```
-   read ~/TheConnection/JOIN-CODEX.md and follow it. your name is cx, your relay is a.
+   read ~/TheConnection/JOIN-CODEX.md and follow it. your name is cx, your relay is a, your account is work.
    ```
-   It runs `tc join cx --account work`, which reads `CODEX_THREAD_ID`
-   from its own environment and writes a card with route `codex`:
+   It runs `tc join cx --kind codex --account work --reports-to a`,
+   which reads `CODEX_THREAD_ID` from its own environment and writes a
+   card with route `codex`:
    ```
-   joined as cx (codex, account work, route codex)
+   joined as cx (codex, account work, route codex), reports to a
    ```
-   Then it goes idle.
+   Then it goes idle. Run outside Codex, where `CODEX_THREAD_ID` is not
+   set, the same join writes nothing and exits 1: `tc join: kind codex
+   needs CODEX_THREAD_ID, the thread the codex route rings, and it is not
+   set. Run tc join inside the Codex session.` Without `--kind codex` it
+   would quietly write a `route local` card instead, and no send would
+   ever ring the session.
 3. **Send to it** from any session:
    ```
    $ tc send --from a --to cx "please review the parser"
@@ -236,7 +256,8 @@ dies when its command returns. So it has no listener. Instead it runs
    message itself. The sender's machine needs `codex` on its `PATH`.
 
 A second send while the first is still unread does not ring again: one
-doorbell, one read.
+doorbell, one read. That holds for 5 minutes after your last ring to that
+name. A send after that, with mail still unread, rings once more.
 
 **`ring failed`.** If `codex queue` fails, the mail is still in the
 inbox, and the send still exits 0:
@@ -259,21 +280,33 @@ key (the next section). Below, `homebox` is the machine you send from,
 `farbox` the far one, and `far-b` the name on it.
 
 1. **On farbox**, the far session joins as usual: `tc join far-b`.
-2. **On homebox**, an ssh alias that picks the key the far gate expects.
-   tc runs plain `ssh -T -o BatchMode=yes -o ConnectTimeout=10 --
-   <target>`, so the alias is how you choose a key. In `~/.ssh/config`:
+2. **On homebox, a key for tc alone**, with no passphrase, since tc
+   never answers a prompt:
+   ```
+   ssh-keygen -t ed25519 -f ~/.ssh/tc_ed25519 -N '' -C homebox-a
+   ```
+   It writes `~/.ssh/tc_ed25519` and its public half,
+   `~/.ssh/tc_ed25519.pub`.
+3. **On farbox, the gate line for that key.** Add the line from "ssh,
+   inbound" below to farbox's `~/.ssh/authorized_keys`, with `--as
+   homebox-a` and the one line of `tc_ed25519.pub` at its end. Do this
+   before step 5: without it farbox does not know the key.
+4. **On homebox**, an ssh alias that picks that key. tc runs plain
+   `ssh -T -o BatchMode=yes -o ConnectTimeout=10 -- <target>`, so the
+   alias is how you choose a key. In `~/.ssh/config`:
    ```
    Host farbox-tc
        HostName <farbox's name or address>
-       User ben
+       User you
        IdentityFile ~/.ssh/tc_ed25519
        IdentitiesOnly yes
    ```
-3. **Meet the host once by hand.** tc runs ssh with `BatchMode=yes`, so
+   `User` is your login on farbox, the one whose home holds tc there.
+5. **Meet the host once by hand.** tc runs ssh with `BatchMode=yes`, so
    it never answers a host-key prompt. Run `ssh -T farbox-tc` and accept
    the key. With the gate in place it prints `tc gate: refused` and exits
    7: there was no command, and the gate runs nothing else.
-4. **On homebox, a card for the far name:**
+6. **On homebox, a card for the far name:**
    ```
    $ tc card far-b --ssh farbox-tc --remote-tc '~/TheConnection/tc'
    card written: far-b (other, account unknown, route ssh to farbox-tc)
@@ -281,7 +314,7 @@ key (the next section). Below, `homebox` is the machine you send from,
    `--remote-tc` is tc's path on farbox, starting with `/` or `~/`
    (default `~/TheConnection/tc`). Quote a `~/` path so your own shell
    leaves it alone. `~` alone and `~user/...` are refused, exit 6.
-5. **Send:**
+7. **Send:**
    ```
    $ tc send --from homebox-a --to far-b "hello far"
    sent over ssh to farbox-tc: sent #1 to far-b: mail/to-far-b/000001-from-homebox-a.md
@@ -289,9 +322,10 @@ key (the next section). Below, `homebox` is the machine you send from,
    On farbox, `tc read far-b` shows it `from homebox-a`, with `via ssh
    gate, key homebox-a` on its header line. The far side labels mail by
    the key, never by your `--from`.
-6. **The way back, on farbox.** For replies, farbox needs a card that
+8. **The way back, on farbox.** For replies, farbox needs a card that
    points at homebox, and the gate refuses `tc card`, so a person writes
-   it on farbox: an alias for homebox (as in step 2), then `tc card
+   it on farbox: a key and an alias for homebox (as in steps 2 and 4),
+   then `tc card
    homebox-a --ssh homebox-tc --remote-tc '~/TheConnection/tc'`. homebox
    then needs its own gate line for farbox's key (the next section).
 
@@ -397,7 +431,11 @@ users are `ann` and `ben` and their group is `tcshare`.
    anything else.** Join makes the member's own inbox. Until a name has
    joined, a send to it is refused, `tc send: nobody has joined as ben on
    this shared mailbox`, exit 1, and `tc wait ben` is refused the same
-   way. Only the owner of a name's card can listen for it.
+   way. Only the owner of a name's card can listen for it. So start the
+   relay first: a worker's hello to a relay that has not joined is
+   refused. A worker that hits it posts the words with `tc status <its
+   name> "..."`, which needs no recipient, and the relay reads them with
+   `tc status` once it is up.
 6. Then use it like a private mailbox. `tc health` ends with `mailbox
    shared with group tcshare`.
 
@@ -455,11 +493,15 @@ A card never carries a secret.
 
 ```
 $ tc cards
-a (claude, account work, route local)
+a (claude, account unknown, route local)
 b (claude, account work, route local), reports to a
-cx (codex, account work, route codex)
+cx (codex, account work, route codex), reports to a
 far-b (other, account unknown, route ssh to farbox-tc)
 ```
+
+Here `a` is the quick start's relay, whose plain `tc join a` names no
+account, in a window with no `CLAUDE_CONFIG_DIR`. b and cx were told
+their account is `work`.
 
 ## Health and heartbeats
 
@@ -469,7 +511,7 @@ machine    load 3.01 / 32 cores · mem free 85.6% · GPU 39C 3%
 sessions   8 Claude Code · 0 Codex
 listeners  b (pid 213592) · stopped: a (mail, 9s ago)
 watchers   none running
-cards      a (claude, account work, route local)
+cards      a (claude, account unknown, route local)
            b (claude, account work, route local), reports to a
 mail       a: 0 unread, last mail 12s ago
            b: 0 unread, status 6s ago
@@ -584,19 +626,24 @@ its state, always as a glyph and a word:
 | `○ idle` | none of the above |
 
 The pill at the top right reads `live · 2 listening` while all is well.
-It turns to a warning, in words (`2 listening · 1 no listener`), only for
-a fresh stop: a listener that went less than 10 minutes ago. Older ones
-it counts apart as `⊘ 3 stopped earlier`, so a retired session never
-keeps the alarm on. When the feed is late, the pill and a line over the
+It turns to a warning, in words (`2 listening · 1 no listener`, or
+`1 woken · not read`), for any box woken and not read, and for a fresh
+stop: a listener that went less than 10 minutes ago. Older stops it
+counts apart as `⊘ 3 stopped earlier`, so a retired session never keeps
+the alarm on. When the feed is late, the pill and a line over the
 board say `stale · last answer N s ago`.
 
 A wire carrying mail has moving dashes, an arrow toward the reader and a
 label. A thin line is a `reports to` hint. Two Claude cards on the same
 account each carry `native with <the other> · not observed`, since tc
-cannot see that traffic. The legend in the footer says all of this in
-words. Nothing on the board depends on color alone: add `?gray=1` to the
-URL to see it in grayscale, and use the switch for the dark (`◐ Dark`) or
-light (`☀ Light`) look.
+cannot see that traffic. The account `unknown` is the one exception: two
+cards that both say `unknown` share no account anyone knows, so they get
+no badge. The legend in the footer says all of this in words. Nothing on
+the board depends on color alone. To see it in grayscale, put `?gray=1`
+before the `#`, so the token stays last:
+`http://127.0.0.1:8780/live.html?gray=1#token=<t>`. Added after the
+token, it becomes part of the token, and the feed refuses it. Use the
+switch for the dark (`◐ Dark`) or light (`☀ Light`) look.
 
 `http://127.0.0.1:8780/demo.html` shows every state with made-up
 sessions and traffic.

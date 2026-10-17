@@ -47,6 +47,10 @@ does not keep an `export` from an earlier one. A shared mailbox always has one.
    ~/TheConnection/tc send --from b --to a "joined. working on <one line>"
    ~/TheConnection/tc status b "<what you're doing, what's next, anything blocking>"
    ```
+   - On a shared mailbox, a hello to a relay that has not joined yet exits 1
+     with `nobody has joined as a`. Put those words in your status instead
+     (status needs no recipient), and go on: your listener is armed, and the
+     relay sees your status once it is up.
 5. Go back to your work.
 
 ## Every time the listener exits
@@ -77,7 +81,8 @@ your lock goes. Your listener still started. Tell the relay.
   Run the same command again.
 - **1**, **6**, **7**, **8** or **11**: refused, with words. On a shared mailbox, 1
   often means `nobody has joined as <name>`. Don't retry the same thing. Tell the
-  relay what it said.
+  relay what it said. If the refused send was to the relay itself, post the words
+  with `~/TheConnection/tc status b "..."` instead.
 
 `tc read`:
 
@@ -91,7 +96,8 @@ or the call is cut off while tc is still trying.
 
 ## Keep the relay informed
 
-- Post `tc status b "..."` when you finish a chunk of work, hit a blocker, or stop.
+- Post `~/TheConnection/tc status b "..."` when you finish a chunk of work, hit a
+  blocker, or stop.
 - If you need a decision from your user, **send it as a message**. Don't only ask in
   your own terminal. Nobody is watching your terminal. Say what you're waiting on,
   the options, and your recommendation.

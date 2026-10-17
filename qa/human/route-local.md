@@ -66,9 +66,10 @@ Every other terminal starts with `export TC_ROOT=<that path>`. Real
 9. In terminal 1: `./tc send --from a --to b "" < /dev/null; echo $?`.
    - `tc send: empty message`, and `1`.
 10. In terminal 1: `./tc send --from a --to nobody-yet "hi"; echo $?`.
-    - `new inbox: nobody has joined as nobody-yet`, then `sent #2 to
-      nobody-yet: ...`, and `0`. On a private mailbox, mail to a name
-      nobody joined still lands.
+    - `sent #2 to nobody-yet: ...`, then `new inbox: nobody has joined
+      as nobody-yet`, and `0`. On a private mailbox, mail to a name
+      nobody joined still lands. (The warning goes to stderr; piped to a
+      file or `less`, it may come first.)
 11. A long message on stdin. In terminal 1:
     ```
     ./tc send --from a --to b <<'EOF'

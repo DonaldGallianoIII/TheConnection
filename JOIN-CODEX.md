@@ -26,12 +26,14 @@ turn ends, or when this session is resumed.
 
 1. **Join**, from inside this Codex session:
    ```
-   ~/TheConnection/tc join cx --account <label> --reports-to a
+   ~/TheConnection/tc join cx --kind codex --account <label> --reports-to a
    ```
    It prints `joined as cx (codex, account <label>, route codex), reports to a`.
    `<label>` names the account you run under. Leave `--account` off if your user gave
    none. Join reads `CODEX_THREAD_ID` from this session, so senders can ring this
    thread.
+   - Check that the printed line says `route codex`. If it says `route local`, stop
+     and tell your user: no send would ever ring you.
    - If it says `kind codex needs CODEX_THREAD_ID`, you are not running it inside
      the Codex session. Run it here, in this session.
    - If it fails with a permission error, Codex cannot write the mailbox. Tell your
@@ -43,6 +45,10 @@ turn ends, or when this session is resumed.
    ```
    ~/TheConnection/tc send --from cx --to a "joined. working on <one line>"
    ```
+   - On a shared mailbox, a hello to a relay that has not joined yet exits 1 with
+     `nobody has joined as a`. Post those words with
+     `~/TheConnection/tc status cx "..."` instead (status needs no recipient); the
+     relay sees it once it is up.
 3. **Go idle.** Finish your turn. You wake when a ring arrives.
 
 ## When a ring arrives
@@ -70,11 +76,12 @@ The ring only says mail is waiting. It never carries the message. Read it with
 `tc send`:
 
 - **4**, kept in the outbox: an ssh send that could not get through. Nothing is lost.
-  Run `tc flush` later, or tell the relay.
+  Run `~/TheConnection/tc flush` later, or tell the relay.
 - **10**, busy: another process held a lock for a moment, and nothing was written.
   Run the same command again.
 - **1**, **6**, **7**, **8** or **11**: refused, with words. Don't retry the same
-  thing. Tell the relay what it said.
+  thing. Tell the relay what it said. If the refused send was to the relay itself,
+  post the words with `~/TheConnection/tc status cx "..."` instead.
 
 `tc read`:
 

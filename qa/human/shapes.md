@@ -18,8 +18,10 @@ No session is needed: the mail is sent by hand, from terminals. Real
 `ssh` and real `codex` are not needed. Run everything from the repo
 root, in a plain terminal (not one inside a Claude Code session, whose
 `CLAUDECODE=1` makes every card a `claude` card, so cards on one account
-grow `native with ...` badges). Each shape gets its own throwaway
-mailbox. Names here are made up.
+grow `native with ...` badges). Run `unset CLAUDECODE CLAUDE_CONFIG_DIR`
+there first: with `CLAUDE_CONFIG_DIR` set, step 6's cards read that
+folder's base name, not `account unknown`. Each shape gets its own
+throwaway mailbox. Names here are made up.
 
 Each box's title is its name and its role: `a · orchestrator`, `b ·
 worker`, `x · peer`, with `· inferred` when the role came from mail
@@ -85,6 +87,7 @@ rather than a card. Look for those words, never a color.
 9. In terminal 1:
    ```
    export TC_ROOT=$(mktemp -d)
+   echo $TC_ROOT
    for p in "o1 w1" "o1 w2" "o2 w3" "o2 w4" "o1 o2"; do set -- $p; ./tc send --from $1 --to $2 "hi"; ./tc send --from $2 --to $1 "back"; done
    ```
 10. Start the board and open its URL.
@@ -97,8 +100,10 @@ rather than a card. Look for those words, never a color.
     - Pass: two trees, each orchestrator over its own two workers, and
       the wire between o1 and o2. Fail: one orchestrator drawn as the
       other's worker, or no wire between them.
-11. Send one more message and watch it move: in terminal 1, `./tc send
-    --from o1 --to o2 "one more"`.
+11. Send one more message and watch it move. Terminal 1 is busy running
+    the board, so open terminal 2 in the repo root and run `export
+    TC_ROOT=<the path step 9 echoed>`, then `./tc send --from o1 --to o2
+    "one more"`.
     - Within 3 s the wire from o1 to o2 shows moving dashes, an arrow at
       o2 and a label, and o1's box reads `✎ writing` for about 10 s, then
       `○ idle` again.
@@ -113,6 +118,6 @@ rather than a card. Look for those words, never a color.
 
 ## Afterward
 
-14. Run `unset TC_ROOT`. The three throwaway mailboxes are under the
+14. Run `unset TC_ROOT` in both terminals. The three throwaway mailboxes are under the
     system temp folder.
 15. Record what you saw in `qa/results/shapes.md`.

@@ -23,7 +23,14 @@ plays the Claude side by hand as `a`:
 ```
 export TC_ROOT=$(mktemp -d)
 echo $TC_ROOT
+unset CLAUDECODE CLAUDE_CONFIG_DIR
 ```
+
+The `unset` makes terminal 1's cards read as the steps expect. With
+`CLAUDECODE=1` (a shell inside a Claude Code session) the kind reads
+`claude`, not `other`; with `CLAUDE_CONFIG_DIR` set (a window set up
+for one of your accounts) the account reads that folder's base name, not
+`unknown`. If you skip it, read those two words as yours.
 
 ## Setup
 
@@ -42,14 +49,15 @@ echo $TC_ROOT
 4. In the Codex session, type: `Your mailbox is TC_ROOT=<the path>. Read
    <repo>/JOIN-CODEX.md and follow it. Your name is cx, your relay is
    a.`
-   - It runs `TC_ROOT=<the path> <repo>/tc join cx ... --reports-to a`,
-     which prints `joined as cx (codex, account ..., route codex),
-     reports to a`; then it sends a hello to `a` and ends its turn. It
-     starts no `tc wait`.
-   - Pass: a `route codex` card, a hello, no wait. Fail: `kind codex
-     needs CODEX_THREAD_ID` (the join did not run inside Codex), a
-     permission error (the sandbox could not write the mailbox), or a
-     `tc wait` started.
+   - It runs `TC_ROOT=<the path> <repo>/tc join cx --kind codex ...
+     --reports-to a`, which prints `joined as cx (codex, account ...,
+     route codex), reports to a`; then it sends a hello to `a` and ends
+     its turn. It starts no `tc wait`.
+   - Pass: a `route codex` card, a hello, no wait. Fail: a `route local`
+     card (the join left off `--kind codex`), `kind codex needs
+     CODEX_THREAD_ID` (the join did not run inside Codex), a permission
+     error (the sandbox could not write the mailbox), or a `tc wait`
+     started.
 5. In terminal 1: `./tc cards`, then `./tc read a`.
    - `cards` lists `cx (codex, account ..., route codex), reports to a`.
    - `read` prints cx's hello.
@@ -103,8 +111,8 @@ echo $TC_ROOT
 ## Mail before the join still wakes it (D16)
 
 13. In terminal 1: `./tc send --from a --to cx2 "sent before you joined"`.
-    - `new inbox: nobody has joined as cx2`, then `sent #<n> to cx2:
-      ...`, and no ring: there is no card yet.
+    - `sent #<n> to cx2: ...`, then `new inbox: nobody has joined as
+      cx2`, and no ring: there is no card yet.
 14. In terminal 3: `codex --add-dir <the TC_ROOT path>`. In that session,
     the same prompt as step 4 with the name `cx2`.
     - Its join prints `joined as cx2 (codex, ...)`, then `1 unread waiting
