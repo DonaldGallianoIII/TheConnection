@@ -32,15 +32,28 @@ Every other terminal starts with `export TC_ROOT=<that path>`. Real
      `joined as b (other, account work, route local), reports to a`. In
      a shell inside a Claude Code session the kind reads `claude`
      instead of `other`.
+<!-- Steps 2 and 3 reworded by the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17: the pid check and a pasteable expected line. Status: unreviewed. -->
 2. In terminal 2: `./tc wait b --timeout 300`. In terminal 1: `./tc
-   health`.
-   - Its `listeners` line names `b (pid NNNN)`. `pgrep -f "tc wait b"`
-     lists the same number.
-   - Pass: health names b with that pid. Fail: `listeners  none
-     running`, or a pid that `pgrep` does not list.
-3. In terminal 1: `./tc wait b --timeout 5; echo $?`.
-   - It prints `ALREADY LISTENING: another `tc wait b` is running. Not
-     starting a second.` and `3`, at once.
+   health`. Its `listeners` line names `b (pid NNNN)`. Then, still in
+   terminal 1, give that pid to `ps`:
+   ```
+   ps -o args= -p NNNN
+   ```
+   - `ps` prints one line, the command line of the process health named:
+     `python3 ./tc wait b --timeout 300`, the wait you started in
+     terminal 2.
+   - Pass: health names b with a pid, and `ps` prints that line for it.
+     Fail: `listeners  none running`, or `ps` prints nothing or some
+     other command.
+3. In terminal 1:
+   ```
+   ./tc wait b --timeout 5; echo $?
+   ```
+   - It prints these two lines, at once:
+     ```
+     ALREADY LISTENING: another `tc wait b` is running. Not starting a second.
+     3
+     ```
 4. In terminal 1: `./tc send --from a --to b "hello b"`.
    - It prints `sent #1 to b: <TC_ROOT>/mail/to-b/000001-from-a.md`.
    - Within 5 s, terminal 2 prints `MAIL: 1 unread for b. Run: tc read b`

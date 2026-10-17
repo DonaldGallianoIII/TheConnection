@@ -65,6 +65,21 @@ Before you start:
   it.
 - Both mailboxes are scratch folders made below, never the live one.
 
+<!-- The order, by the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17. Status: unreviewed. -->
+## The order, with route-shared.md
+
+Walking this file alone: steps 1 to 28, in order.
+
+Walking it with `qa/human/route-shared.md` too, walk both as the same
+Linux user, the one route-shared.md calls ann, so `you` here is ann:
+
+1. This file, steps 1 to 22.
+2. route-shared.md, steps 1 to 45. Its steps 38 to 44 reuse this file's
+   alias `farbox-tc` and far name `far-b`.
+3. route-shared.md's cleanup, its steps 46 to 50.
+4. This file's cleanup, steps 23 to 28, once, last. Doing it earlier
+   takes away the far setup route-shared.md's steps 38 to 44 need.
+
 ## Setup
 
 1. On homebox, a scratch mailbox with its own copy of tc. A tc's
@@ -275,24 +290,39 @@ run.
     - On homebox, `tc read home-a` prints `# #... from far-b to home-a,
       <time>, via ssh gate, key far-b`, then `hello home`.
 
-## Undo every step
+## Cleanup
+
+<!-- Rewritten by the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17: moves aside, never rm. Status: unreviewed. -->
+Nothing here removes a file. Each step edits a config file back, or
+moves what this walk made into a folder of its own, `~/tc-qa-aside` on
+each machine, which you remove yourself when you choose. Skip what you
+did not make: walking route-shared.md alone, you made only steps 2 to
+7's.
 
 23. On farbox: delete the line ending `tc-qa-home-a` from
-    `~/.ssh/authorized_keys` (step 4), then `rm -r ~/tc-qa` (steps 2, 7
-    and the far mailbox).
+    `~/.ssh/authorized_keys` (step 4). Then `mkdir -p -m 0700
+    ~/tc-qa-aside` and `mv ~/tc-qa ~/tc-qa-aside/` (steps 2, 7 and the
+    far mailbox).
 24. On homebox: delete the `Host farbox-tc` and `Host farbox-tc-dead`
     blocks from `~/.ssh/config` (steps 5 and 14). Only if step 6 asked
-    you to accept farbox's host key, remove the entry it added:
-    `ssh-keygen -R <farbox's name or address>`. If farbox was known
-    before (step 2 reached it with your normal key), leave the entry:
-    it is yours, not this script's.
-25. On homebox: `rm ~/.ssh/tc_qa_ed25519 ~/.ssh/tc_qa_ed25519.pub`
-    (step 3), then `rm -r ~/tc-qa-home` (step 1 and the home mailbox).
+    you to accept farbox's host key, take out the entry it added:
+    `ssh-keygen -R <farbox's name or address>` (it keeps the file as it
+    was in `~/.ssh/known_hosts.old`). If farbox was known before (step
+    2 reached it with your normal key), leave the entry: it is yours,
+    not this script's.
+25. On homebox: `mkdir -p -m 0700 ~/tc-qa-aside`, then `mv
+    ~/.ssh/tc_qa_ed25519 ~/.ssh/tc_qa_ed25519.pub ~/tc-qa-aside/` (step
+    3), then `mv ~/tc-qa-home ~/tc-qa-aside/` (step 1 and the home
+    mailbox).
 26. If you ran the way back: on homebox, delete the line ending
     `tc-qa-far-b` from `~/.ssh/authorized_keys` (step 20); on farbox,
     delete the `Host homebox-tc` block from `~/.ssh/config`, run
     `ssh-keygen -R <homebox's name or address>` only if step 21 asked
-    you to accept homebox's host key, and `rm ~/.ssh/tc_qa_back_ed25519
-    ~/.ssh/tc_qa_back_ed25519.pub` (steps 19 and 21).
-27. Record what you saw in `qa/results/` (D4), with every machine name,
+    you to accept homebox's host key, and `mv ~/.ssh/tc_qa_back_ed25519
+    ~/.ssh/tc_qa_back_ed25519.pub ~/tc-qa-aside/` (steps 19 and 21).
+27. Left for you to remove yourself, when you choose: `~/tc-qa-aside`
+    on each machine. On homebox it holds the step 3 key, whose gate
+    line step 23 took off farbox, and on farbox the step 19 key, whose
+    line step 26 took off homebox: neither opens anything now.
+28. Record what you saw in `qa/results/` (D4), with every machine name,
     alias, address and user name replaced by the made-up ones above.

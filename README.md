@@ -445,12 +445,19 @@ users are `ann` and `ben` and their group is `tcshare`.
    `export TC_ROOT=/srv/tc-shared`. A Claude session puts
    `TC_ROOT=/srv/tc-shared` in front of each tc command instead, since a
    Bash call does not keep an `export` from an earlier one.
-4. **As ann, once:**
+<!-- Step 4 and the prompt in step 6 added by the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17. Status: unreviewed. -->
+4. **Each member needs a tc to run.** Either the same checkout, if the
+   group can read it and every folder above it (on many systems a home
+   folder is not readable by others), or the member's own clone at the
+   same commit: `git -C ~/TheConnection rev-parse HEAD` prints the same
+   for both. With `TC_ROOT` set, tc keeps nothing beside itself, so a
+   member needs no write access to the checkout.
+5. **As ann, once:**
    ```
    $ tc init --shared --group tcshare
    mailbox shared with group tcshare: 5 folders and 0 files in group tcshare
    ```
-5. **Each member runs `tc join <name>` as their own Linux user before
+6. **Each member runs `tc join <name>` as their own Linux user before
    anything else.** Join makes the member's own inbox. Until a name has
    joined, a send to it is refused, `tc send: nobody has joined as ben on
    this shared mailbox`, exit 1, and `tc wait ben` is refused the same
@@ -459,7 +466,19 @@ users are `ann` and `ben` and their group is `tcshare`.
    refused. A worker that hits it posts the words with `tc status <its
    name> "..."`, which needs no recipient, and the relay reads them with
    `tc status` once it is up.
-6. Then use it like a private mailbox. `tc health` ends with `mailbox
+
+   A Claude session learns the root from its prompt. In a session that
+   ben runs, with ann as the relay, type:
+   ```
+   your mailbox is TC_ROOT=/srv/tc-shared. read ~/TheConnection/JOIN.md and follow it. your name is ben, your relay is ann.
+   ```
+   JOIN.md has the session put `TC_ROOT=/srv/tc-shared` in front of
+   every tc command and join before anything else. The session runs as
+   ben, so its join is ben's. If ben runs ann's checkout (step 4), put
+   that checkout's path in place of `~/TheConnection`. ann's relay
+   prompt is the quick start's, with `TC_ROOT=/srv/tc-shared` in front of
+   each tc command.
+7. Then use it like a private mailbox. `tc health` ends with `mailbox
    shared with group tcshare`.
 
 **No member can touch another member's mail.** Each inbox belongs to its
@@ -560,6 +579,16 @@ its last wait ended, from the wait's exit record
 
 The exit record is never proof of life. Only a held lock is.
 
+<!-- Clearing a closed session's name: the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17. Status: unreviewed. -->
+**A session closed for good** kills its wait, so its name keeps reading
+`stopped: <name> (listening, ...)` here and `✕ no listener` on the
+board. To clear it, run `tc wait <name> --timeout 1` once, as that
+name's own Linux user: it ends at its timeout and records `timeout`, so
+health lists `stopped: <name> (timeout, ...)` and the board reads
+`○ idle`. If mail is waiting for the name, it ends at once with `MAIL:`
+and records `mail` instead, and the board warns `woken · not read`
+until someone runs `tc read <name>`.
+
 Lines that appear only when something is wrong: `stuck` (ssh mail waiting
 in the outbox longer than a day), `squatted` (an outbox branch another
 member made), `held` (on a shared mailbox, a lock held by someone other
@@ -632,6 +661,21 @@ follows it as mail moves.
 2. Open that exact URL in a browser on the same machine. The server
    listens on 127.0.0.1 only, and its feed needs the token. The page asks
    no other host.
+
+<!-- From a laptop over SSH: the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17. Status: unreviewed. -->
+**From a laptop, over SSH.** The board listens only on the machine that
+runs it. To see it from the laptop you SSH in from, forward its port as
+you connect:
+
+```
+ssh -L 8780:127.0.0.1:8780 <host>
+```
+
+Then open the printed URL, as it is, in the laptop's browser. Keep the
+same port on both ends: the server answers only a request addressed to
+`127.0.0.1:<its port>` or `localhost:<its port>`, and refuses any other
+with `421`, so a tunnel from another laptop port loads nothing. With
+`--port 8781`, forward `-L 8781:127.0.0.1:8781`.
 
 Each session is a box titled with its name and role: `a · orchestrator`,
 `b · worker`, `x · peer`, with `· inferred` when the role was worked out
