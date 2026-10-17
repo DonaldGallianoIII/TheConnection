@@ -9,7 +9,9 @@ Model:  Claude Opus 5.5 (the SSH lane agent), 2026-10-15; the outbox
         the P3 fixer, Claude Opus 5.5, 2026-10-15; steps 9 and 17
         brought to D37's far words (`ba15fca`) by the architect session,
         Claude Opus 5.5, 2026-10-15; this line added in P3 fix round 3
-        by the P3 fixer, Claude Opus 5.5, 2026-10-15
+        by the P3 fixer, Claude Opus 5.5, 2026-10-15; step 12 brought to
+        D37's `"another process"` and R2's `root` keys by the R2 lane
+        agent, Claude Opus 5.5, 2026-10-17, unreviewed
 Status: unreviewed
 
 What this checks: mail crosses to a second machine and back, and a key
@@ -150,8 +152,12 @@ Before you start:
       `watchers`, `mail` (each name's `unread`, `newest_mail_age_s` and
       `status_age_s`) and `shared_group` (D36 (5)). No `cards`, no
       `mail_problem` or `shared_problem` (they carry the far mailbox's
-      path), no `squatted`, `held_by_others` or `stuck_outbox`. On
-      farbox, `tc health --json` run there does have `cards`.
+      path), no `root` or `root_from` (the far mailbox's path and where
+      it came from), no `squatted`, `held_by_others`, `stuck_outbox` or
+      `wait_exits`. On farbox, `tc health --json` run there does have
+      `cards`, `root` and `root_from`.
+    - Each name under `listeners` and `watchers` reads `"another
+      process"` (a live one) or null (none), never a pid (D37).
 13. The gate never forwards (D18). On farbox: `tc card onward --ssh
     elsewhere`. On homebox: `tc card onward --ssh farbox-tc --remote-tc
     '~/tc-qa/tc'`, then `tc send --from home-a --to onward "go on"`.

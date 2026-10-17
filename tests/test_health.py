@@ -19,8 +19,13 @@ Tests for `tc health` and `tc watch` against a throwaway TC_ROOT.
             another member's branch, a message in it, and a FIFO or a
             symlink (to a file in the root's temp folder) at its note by
             hand, and runs tc health with a ceiling on its time.
+            HealthRootTest (R2, Claude Opus 5.5, unreviewed) runs tc
+            through tests/_root.py with TC_ROOT set, then a copy of tc
+            it puts in the root, with TC_ROOT unset, so the default is
+            that root and never this checkout's own mailbox.
 @deps       python3 stdlib (argparse, contextlib, io, json, os, pathlib,
-            subprocess, sys, tempfile, time, unittest, unittest.mock);
+            shutil, subprocess, sys, tempfile, time, unittest,
+            unittest.mock);
             tests/_root.py for HealthCardsTest and StuckOutboxTest;
             load_tc from test_codex_route.py; FAKE_CONNECT_STDERR,
             OTHER_MEMBER, SSH_CONNECT_FAILED, TARGET, assert_called, login
@@ -36,6 +41,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -85,6 +91,16 @@ AGE_SLACK_SECONDS = 30
 OTHERS_MESSAGE = "000003-from-{member}.md"
 NOTE_SUFFIX = ".stderr"
 OUTSIDE_NOTE_TEXT = "outside the mailbox: tc health must never read this"
+# R2 (Claude Opus 5.5, unreviewed): the mailbox tc health read and where
+# that came from, written here rather than read from tc: health's first
+# line in words, the --json keys, and each source's value and words.
+ROOT_LINE = "mailbox    {root}, {words}"
+ROOT_KEY = "root"
+ROOT_FROM_KEY = "root_from"
+ROOT_FROM_ENV = "TC_ROOT"
+ROOT_FROM_DEFAULT = "default"
+ROOT_FROM_ENV_WORDS = "from TC_ROOT"
+ROOT_FROM_DEFAULT_WORDS = "TC_ROOT unset, so the folder tc is in"
 
 
 class HealthTest(unittest.TestCase):
@@ -352,6 +368,61 @@ class StuckOutboxTest(unittest.TestCase):
                                  "health did not list the other member's stuck mail, or read its planted note")
                 self.assertLessEqual(abs(stuck[0]["age_s"] - TWO_DAYS_SECONDS), AGE_SLACK_SECONDS, stuck)
                 self.assertNotIn(OUTSIDE_NOTE_TEXT, out, "health read the file a planted link at the note leads to")
+
+
+# R2 (Claude Opus 5.5, unreviewed): a wrong TC_ROOT is the project's loudest hazard.
+class HealthRootTest(unittest.TestCase):
+    """`tc health` names the mailbox it read and where that came from: TC_ROOT, or the default, the folder tc is in.
+
+    @interacts  runs tc through tests/_root.py with TC_ROOT set, and a
+                copy of tc put in the root with TC_ROOT unset.
+    @deps       _root.TcRoot; json, shutil, subprocess, sys.
+    @complexity O(1): four health runs.
+    @alloc      one TcRoot.
+    """
+
+    def test_health_names_the_mailbox_it_read_and_where_it_came_from(self):
+        """With TC_ROOT set, health's first line is `mailbox    <TC_ROOT>, from TC_ROOT` and --json gives root and root_from "TC_ROOT"; with it unset, a copy of tc in the root says the root, `TC_ROOT unset, so the folder tc is in`, and "default".
+
+        Must reject a health that never says which mailbox it read (a
+        session with the wrong TC_ROOT reads another mailbox's listeners
+        and mail as its own), and a source that says TC_ROOT whatever the
+        environment holds. The copy runs from the root, so its default is
+        the root and never this checkout's own mailbox.
+
+        @interacts  two tc health runs (words, --json) under the root's
+                    TC_ROOT; copies tc into the root and runs the copy
+                    twice with TC_ROOT unset.
+        @deps       _root.TcRoot.tc, _root.DEFAULT_TC_TIMEOUT_SECONDS;
+                    json, shutil, subprocess, sys.
+        @complexity O(1).
+        @alloc      one TcRoot and the copy of tc in it.
+        """
+        with _root.TcRoot() as root:
+            runs = {ROOT_FROM_ENV: (root.tc("health"), root.tc("health", "--json"))}
+            copy = root.path / TC.name
+            shutil.copy2(TC, copy)
+            unset = {key: value for key, value in root.env.items() if key != "TC_ROOT"}
+
+            def bare(*args):
+                done = subprocess.run([sys.executable, str(copy), *args], env=unset, capture_output=True, text=True,
+                                      stdin=subprocess.DEVNULL, timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS)
+                return done.returncode, done.stdout, done.stderr
+
+            runs[ROOT_FROM_DEFAULT] = (bare("health"), bare("health", "--json"))
+            want = {ROOT_FROM_ENV: (str(root.path), ROOT_FROM_ENV_WORDS),
+                    ROOT_FROM_DEFAULT: (str(root.path.resolve()), ROOT_FROM_DEFAULT_WORDS)}
+        for source, ((code, text, err), (jcode, out, jerr)) in runs.items():
+            path, words = want[source]
+            with self.subTest(source=source, check="exit codes"):
+                self.assertEqual((code, jcode), (0, 0), err + jerr)
+            with self.subTest(source=source, check="first line"):
+                self.assertEqual(text.splitlines()[:1], [ROOT_LINE.format(root=path, words=words)], text)
+            snap = json.loads(out) if jcode == 0 else {}
+            with self.subTest(source=source, check=ROOT_KEY):
+                self.assertEqual(snap.get(ROOT_KEY), path)
+            with self.subTest(source=source, check=ROOT_FROM_KEY):
+                self.assertEqual(snap.get(ROOT_FROM_KEY), source)
 
 
 if __name__ == "__main__":
