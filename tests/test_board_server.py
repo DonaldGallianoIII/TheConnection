@@ -4,16 +4,20 @@ GET and HEAD only, the static allow list (the fonts too), and a socket
 bound to 127.0.0.1; the whole-request deadline (a client that trickles one
 byte at a time is dropped) and the cap on connections served at once;
 every refusal with no body, http.server's own too; one stderr line, never
-a traceback, for a client that hangs up mid-answer; and `--port 80`
-refused at start.
+a traceback, for a client that hangs up mid-answer; `--port 80`
+refused at start; and an empty or whitespace-only TC_ROOT refused at
+start with tc's words and exit 9 (EMPTYROOT, Claude Opus 5.5,
+unreviewed).
 
 Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14
 Status: unreviewed
 
 The server runs in this process, on a thread, on a port the OS picks
 (port 0), so a test can swap its Board's feed for a stand-in and move
-serve.REQUEST_DEADLINE_S. tests/_root.py can start serve.py as a child
-too (start(argv=...)); no test here needs that yet.
+serve.REQUEST_DEADLINE_S. EmptyRootStartTest starts serve.py as a child
+with subprocess itself: tests/_root.py's start(argv=...) always sets
+TC_ROOT to its root and keeps the test's working folder, and this test
+needs an empty TC_ROOT and a working folder of its own.
 
 @interacts  starts one BoardServer per test on 127.0.0.1 and a free port,
             in a daemon thread, and shuts it down and closes its socket in
@@ -27,16 +31,23 @@ too (start(argv=...)); no test here needs that yet.
             server of its own. The font test reads board/fonts/ to compare
             what it is served. MainTest calls serve.main with Board and
             BoardServer swapped for stand-ins that fail if reached.
+            EmptyRootStartTest starts serve.py twice as a child from an
+            empty folder in a TcRoot's base, with TC_ROOT "" and "   ",
+            waits up to REFUSE_CEILING_S each, kills a child still
+            running by its own pid, and lists the folder after.
 @deps       python3 stdlib (contextlib, http.client, io, json,
-            pathlib, socket, struct, sys, threading, time, unittest,
-            unittest.mock); tests/_root.py (load_source loads serve.py
+            pathlib, socket, struct, subprocess, sys, threading, time,
+            unittest, unittest.mock); tests/_root.py (load_source loads serve.py
             with no bytecode cache, R30); board/serve.py; ../tc.
 @complexity O(1) per test: a handful of requests, one or two of them a
             feed() of an empty mailbox (tens of ms each); one request line
             of REQUEST_LINE_MAX bytes and one answer of BIG_FEED_BYTES.
             The two deadline tests each wait out SHORT_DEADLINE_S once.
+            EmptyRootStartTest: two children, each one compile of tc;
+            a serve.py that does not refuse costs REFUSE_CEILING_S each.
 @alloc      one TcRoot, one server socket and one thread per test, all
-            released in cleanup.
+            released in cleanup; EmptyRootStartTest's two children,
+            reaped and their pipes closed in cleanup.
 """
 
 import contextlib
@@ -46,6 +57,7 @@ import json
 import pathlib
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -107,6 +119,22 @@ LINGER_RESET = (1, 0)
 # Host). argparse's exit code for a usage error.
 HTTP_PORT = 80
 ARGPARSE_USAGE_EXIT = 2
+# EMPTYROOT (Claude Opus 5.5, unreviewed): a TC_ROOT set but naming no
+# folder. Before this, serve.py took the working folder as the mailbox and
+# served it.
+EMPTY_ROOTS = {"empty": "", "spaces": "   "}
+# tc's EXIT_USAGE (contract exit row 9), written here, not read from tc.
+TC_EXIT_USAGE = 9
+# The refusal is one compile of tc and one line, well under a second. A
+# serve.py that does not refuse serves until killed, so this is how long
+# the test waits before it calls that a failure and kills the child.
+REFUSE_CEILING_S = 5
+# How long the child gets to die after a kill by its own pid.
+REAP_CEILING_S = 5
+# Words the refusal must carry, tc's own: what is wrong, and the two ways out.
+EMPTY_ROOT_WORDS = ("TC_ROOT is set but empty", "Unset it", "the mailbox's folder")
+# The start of the line serve.py prints once it has bound its socket.
+URL_LINE_START = "board: http"
 
 
 def load_serve():
@@ -512,6 +540,80 @@ class MainTest(unittest.TestCase):
         self.assertEqual(stop.exception.code, ARGPARSE_USAGE_EXIT)
         self.assertIn(f"--port {HTTP_PORT}", err.getvalue())
         self.assertIn("Host header", err.getvalue())
+
+
+# EMPTYROOT (Claude Opus 5.5, unreviewed): teardown for a serve.py child this file starts itself.
+def stop_child(proc):
+    """Kill `proc` by its own pid if it still runs, reap it, and close its pipes.
+
+    @interacts  SIGKILL to proc.pid when proc.poll() is None; waits up to
+                REAP_CEILING_S for it; closes its stdout and stderr.
+    @deps       subprocess.
+    @complexity O(1).
+    @alloc      none retained.
+    """
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait(timeout=REAP_CEILING_S)
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe is not None:
+            pipe.close()
+
+
+# EMPTYROOT (Claude Opus 5.5, unreviewed): serve.py refuses an empty TC_ROOT as tc does.
+class EmptyRootStartTest(unittest.TestCase):
+    """`python3 board/serve.py` with TC_ROOT "" or "   " exits 9 with tc's words, binding nothing.
+
+    @interacts  starts serve.py as a child from an empty working folder in
+                a TcRoot's base, with TC_ROOT empty or spaces and --port 0,
+                waits up to REFUSE_CEILING_S, and kills it by its own pid
+                in cleanup if it still runs. Lists the folder after.
+    @deps       subprocess, sys; _root.TcRoot; SERVE_PATH, stop_child.
+    @complexity O(1): two children.
+    @alloc      one TcRoot with a working folder; two children, reaped.
+    """
+
+    def test_an_empty_tc_root_refuses_before_anything_is_bound(self):
+        """Each of "" and "   ": exit 9, tc's words in one stderr line, no URL, the working folder still empty.
+
+        Must reject a serve.py that takes the working folder (or a folder
+        named by the spaces under it) as the mailbox, binds and serves.
+
+        @interacts  two serve.py children from one empty working folder.
+        @deps       stop_child; EMPTY_ROOTS, EMPTY_ROOT_WORDS,
+                    TC_EXIT_USAGE, REFUSE_CEILING_S, URL_LINE_START.
+        @complexity O(1): two values; a child that serves costs
+                    REFUSE_CEILING_S.
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            work = root.base / "work"
+            work.mkdir()
+            for label, value in EMPTY_ROOTS.items():
+                proc = subprocess.Popen([sys.executable, str(SERVE_PATH), "--port", "0"],
+                                        env=dict(root.env, TC_ROOT=value), cwd=work,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, text=True)
+                self.addCleanup(stop_child, proc)
+                try:
+                    out, err = proc.communicate(timeout=REFUSE_CEILING_S)
+                    code = proc.returncode
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    out, err = proc.communicate(timeout=REAP_CEILING_S)
+                    code = f"still running after {REFUSE_CEILING_S} s"
+                left = sorted(str(p.relative_to(work)) for p in work.rglob("*"))
+                with self.subTest(root=label, check="exit"):
+                    self.assertEqual(code, TC_EXIT_USAGE, f"stdout: {out!r}\nstderr: {err!r}")
+                for words in EMPTY_ROOT_WORDS:
+                    with self.subTest(root=label, check=words):
+                        self.assertIn(words, err)
+                with self.subTest(root=label, check="one line"):
+                    self.assertEqual(len(err.splitlines()), 1, err)
+                with self.subTest(root=label, check="no URL"):
+                    self.assertNotIn(URL_LINE_START, out)
+                with self.subTest(root=label, check="working folder empty"):
+                    self.assertEqual(left, [], f"serve.py made {left} in the working folder")
 
 
 if __name__ == "__main__":

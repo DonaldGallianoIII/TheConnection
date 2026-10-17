@@ -7,7 +7,9 @@ All run as the same Linux user, or as users in one group once `tc init
 --shared` has run, so a shared directory is the whole transport.
 One message is one markdown file, so a human can read the mailbox with cat.
 
-Layout under ROOT (default: this script's directory, override with TC_ROOT):
+Layout under ROOT (default: this script's directory, override with TC_ROOT;
+a TC_ROOT set but empty or only whitespace makes every command refuse, exit
+9, one line on stderr, nothing made: EMPTYROOT, Claude Opus 5.5, unreviewed):
   mail/to-<name>/NNNNNN-from-<sender>.md   unread
   mail/to-<name>/read/...                  read (moved there by `tc read`)
   status/<name>.md                         latest self-reported status
@@ -425,13 +427,22 @@ ROOT = pathlib.Path(os.environ.get("TC_ROOT", pathlib.Path(__file__).resolve().p
 # R2 (Claude Opus 5.5, unreviewed): where ROOT came from, fixed at import
 # with it, so `tc health` can say which mailbox it read and why (a wrong
 # TC_ROOT is the project's loudest hazard). ROOT_FROM_ENV when TC_ROOT is
-# set, even empty (then ROOT is the working folder); ROOT_FROM_DEFAULT when
-# it is not, and ROOT is the folder this script's real file is in. Each
-# value's words, for health's first line.
+# set; ROOT_FROM_DEFAULT when it is not, and ROOT is the folder this
+# script's real file is in. Each value's words, for health's first line.
+# EMPTYROOT (Claude Opus 5.5, unreviewed): a TC_ROOT set but empty or only
+# whitespace makes ROOT the working folder (or a folder named by the spaces
+# under it) at import, but main() refuses it, exit 9, before any command
+# runs, so only a module load ever holds that ROOT (the test loaders, and
+# board/serve.py, which never calls main()).
 ROOT_FROM_ENV = "TC_ROOT"
 ROOT_FROM_DEFAULT = "default"
 ROOT_FROM = ROOT_FROM_ENV if "TC_ROOT" in os.environ else ROOT_FROM_DEFAULT
 ROOT_FROM_WORDS = {ROOT_FROM_ENV: "from TC_ROOT", ROOT_FROM_DEFAULT: "TC_ROOT unset, so the folder tc is in"}
+# EMPTYROOT (Claude Opus 5.5, unreviewed): main()'s one line for a TC_ROOT
+# set but empty or only whitespace. Before it, tc quietly made a mailbox in
+# whatever folder it ran from, which a stranger hits on day one.
+ROOT_EMPTY_WORDS = ("{tc}: TC_ROOT is set but empty or only whitespace, so it names no mailbox folder. "
+                    "Unset it to use the folder {tc} is in, or set it to the mailbox's folder.")
 MAIL = ROOT / "mail"
 STATUS = ROOT / "status"
 SEQ_FILE = MAIL / ".seq"
@@ -450,7 +461,9 @@ EXIT_ALERT = 5
 # code is 2, the same as a wait timeout, so a mistyped listener would read as
 # a timeout and re-arm the same typo in a loop of paid wakes. Row 9 also
 # covers a malformed `--origin` on `tc send` (D33 part 6; SSH fix round 1,
-# Claude Opus 5.5, unreviewed: the audit's LOW-2).
+# Claude Opus 5.5, unreviewed: the audit's LOW-2), and a TC_ROOT set but
+# empty or only whitespace, refused with one line and no usage text before
+# any command runs (EMPTYROOT, Claude Opus 5.5, unreviewed: ROOT_EMPTY_WORDS).
 EXIT_USAGE = 9
 # CARDS R1 (Claude Opus 5.5, unreviewed): mailbox names, contract C0.
 # A name becomes a folder name here and a word on a remote command line over
@@ -9638,7 +9651,12 @@ class TcParser(argparse.ArgumentParser):
 def main():
     """Parse the command line and run one command.
 
-    @interacts  reads sys.argv; a usage error exits EXIT_USAGE (TcParser);
+    @interacts  first reads TC_ROOT from the environment: set but empty
+                or only whitespace, it writes ROOT_EMPTY_WORDS (one line)
+                to stderr and exits EXIT_USAGE before the parser is built,
+                nothing made or read on disk (EMPTYROOT, Claude Opus 5.5,
+                unreviewed); unset or naming a folder, it goes on.
+                Then reads sys.argv; a usage error exits EXIT_USAGE (TcParser);
                 else sets the shared umask when ROOT/.shared exists
                 (set_shared_umask; for tc gate inside far_key_reads, so
                 its refusal names nothing of this machine: P3 fix round 2,
@@ -9646,13 +9664,19 @@ def main():
                 chosen cmd_* does.
     @deps       TcParser, set_shared_umask, far_key_reads, invoked_name
                 (the parser's prog, so usage lines say the name tc was run
-                by, NAME); every cmd_* function.
-    @complexity O(a) over a arguments to parse, plus the command.
+                by, NAME); every cmd_* function; os.environ,
+                ROOT_EMPTY_WORDS, EXIT_USAGE (EMPTYROOT).
+    @complexity O(a) over a arguments to parse, plus the command; the
+                TC_ROOT check O(r) over r characters in its value.
     @alloc      the parser and the parsed arguments, freed on exit.
     """
     # Phase fix round 1 (Claude Opus 5.5, unreviewed): agent sessions, not only Claude.
     # NAME (Claude Opus 5.5, unreviewed): usage, --help and argparse's own error line say the invoked name.
     tc = invoked_name()
+    # EMPTYROOT (Claude Opus 5.5, unreviewed): an empty TC_ROOT refuses before anything touches the disk.
+    if "TC_ROOT" in os.environ and not os.environ["TC_ROOT"].strip():
+        print(ROOT_EMPTY_WORDS.format(tc=tc), file=sys.stderr)
+        sys.exit(EXIT_USAGE)
     ap = TcParser(prog=tc, description="Mailbox between agent sessions: a Claude Code session "
                                         f"wakes when its {tc} wait exits; a Codex session runs {tc} "
                                         "join once, and then a send rings it.")
