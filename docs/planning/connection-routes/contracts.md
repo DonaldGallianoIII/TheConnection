@@ -713,9 +713,15 @@ of `tc health` is not on the board's path.
   gate's health leaves it out (D36 part 5's allow list).
 - **The pill warns only on a fresh stop** (a2 for the owner, 2026-10-17,
   F1). A box whose record says `listening` with no lock reads `down`
-  for good, with the record's age, until that name listens again. The
-  page's connection pill turns to its warning only for a `down` whose
-  record is less than `DOWN_WINDOW_S` old; older ones it still counts,
+  for good, saying how long ago it stopped, until that name listens
+  again. The
+  page's connection pill turns to its warning only for a fresh `down`:
+  one whose lock the board last saw less than `DOWN_WINDOW_S` ago (after
+  a board restart, when it has seen none, one whose record is less than
+  `DOWN_WINDOW_S` old). The record's own time is when that wait started,
+  which can be nearly two hours before a kill, so it is not the measure
+  while the board has a sighting. The feed gives each `down` node its
+  age (`down_age_s`). Older ones the pill still counts,
   in words and with their own glyph, never by color alone, as `stopped
   earlier` (for example `4 listening · 1 no listener · 3 stopped
   earlier`). So a retired session never keeps the alarm on, and nothing
