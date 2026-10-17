@@ -19,8 +19,9 @@ proves the fake is found.
             /proc/self/fd. The second test swaps the Board's snapshot
             (Board.snapshot) for a stand-in that names one new listener
             per call.
-@deps       python3 stdlib (gc, importlib, os, pathlib, sys, unittest,
-            unittest.mock); tests/_root.py; board/serve.py; ../tc.
+@deps       python3 stdlib (gc, os, pathlib, sys, unittest,
+            unittest.mock); tests/_root.py (load_source loads serve.py
+            with no bytecode cache, R30); board/serve.py; ../tc.
 @complexity first test: 1,000 feed() calls over about 23 names and 43
             messages, each O(n + m + e) plus Board.snapshot's parts of tc's
             health (no child process). Second: 1,000 feed() calls over an
@@ -29,7 +30,6 @@ proves the fake is found.
 """
 
 import gc
-import importlib.util
 import os
 import pathlib
 import sys
@@ -78,15 +78,16 @@ FAKE_EXE_MODE = 0o700
 def load_serve():
     """Load board/serve.py as a module named board_serve.
 
+    R30 (Claude Opus 5.5, unreviewed): through _root.load_source, so no
+    bytecode cache of serve.py is read or written.
+
     @interacts  executes serve.py's top level (constants and definitions).
-    @deps       importlib.
-    @complexity O(1).
+                Writes no file.
+    @deps       _root.load_source; SERVE_PATH.
+    @complexity O(s) over s bytes of serve.py: one compile.
     @alloc      one module object, returned.
     """
-    spec = importlib.util.spec_from_file_location("board_serve", SERVE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _root.load_source("board_serve", SERVE_PATH)
 
 
 serve = load_serve()

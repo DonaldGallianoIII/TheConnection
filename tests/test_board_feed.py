@@ -27,7 +27,8 @@ renamed, mail/.seq raised), and the feed reads only their names.
             Writes cards, status lines and message files in that root only.
 @deps       python3 stdlib (contextlib, fcntl, importlib, io, itertools,
             json, marshal, os, pathlib, random, shlex, shutil, stat, sys,
-            threading, time, unittest, unittest.mock); tests/_root.py;
+            threading, time, unittest, unittest.mock); tests/_root.py
+            (load_source loads serve.py with no bytecode cache, R30);
             board/serve.py; ../tc.
 @complexity O(1) per test: at most 52 message files, 9 names, two
             listeners, and a few feed() calls, each O(n + m + e) in serve.py
@@ -193,15 +194,16 @@ HISTORY_TIMES = 3
 def load_serve():
     """Load board/serve.py as a module named board_serve.
 
+    R30 (Claude Opus 5.5, unreviewed): through _root.load_source, so no
+    bytecode cache of serve.py is read or written.
+
     @interacts  executes serve.py's top level (constants and definitions).
-    @deps       importlib.
-    @complexity O(1).
+                Writes no file.
+    @deps       _root.load_source; SERVE_PATH.
+    @complexity O(s) over s bytes of serve.py: one compile.
     @alloc      one module object, returned.
     """
-    spec = importlib.util.spec_from_file_location("board_serve", SERVE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _root.load_source("board_serve", SERVE_PATH)
 
 
 serve = load_serve()

@@ -50,9 +50,10 @@ docs/planning/connection-routes/handoffs/F1.md.
             `mail`, and reads its down_age_s. Writes nothing outside the
             root's temp folder.
 @deps       python3 stdlib (argparse, collections, contextlib, datetime,
-            importlib, io, json, os, pathlib, pwd, signal, stat,
+            io, json, os, pathlib, pwd, signal, stat,
             subprocess, sys, threading, time, unittest, unittest.mock);
-            tests/_root.py; UmaskTestCase, load_tc and owner_patched_fstat
+            tests/_root.py (load_source loads serve.py with no bytecode
+            cache, R30); UmaskTestCase, load_tc and owner_patched_fstat
             from test_shared.py; ../tc; ../board/serve.py.
 @complexity O(1) per test: a handful of tc runs per root, one root per
             subtest; the killed-listener test reads /proc/locks until the
@@ -67,7 +68,6 @@ import argparse
 import collections
 import contextlib
 import datetime
-import importlib.util
 import io
 import json
 import os
@@ -972,15 +972,16 @@ class NeverAListenerTest(UmaskTestCase):
 def load_serve():
     """Load board/serve.py as a module, as the board tests do.
 
+    R30 (Claude Opus 5.5, unreviewed): through _root.load_source, so no
+    bytecode cache of serve.py is read or written.
+
     @interacts  executes serve.py's top level (constants and definitions).
-    @deps       importlib; SERVE_PATH.
-    @complexity O(1).
+                Writes no file.
+    @deps       _root.load_source; SERVE_PATH.
+    @complexity O(s) over s bytes of serve.py: one compile.
     @alloc      one module object, returned.
     """
-    spec = importlib.util.spec_from_file_location("board_serve_wait_exit", SERVE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _root.load_source("board_serve_wait_exit", SERVE_PATH)
 
 
 serve = load_serve()

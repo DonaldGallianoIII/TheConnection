@@ -24,8 +24,9 @@ Status: unreviewed
             (each tc run then has CARD_READ_CEILING_SECONDS, so a read
             that blocks fails instead of hanging).
 @deps       python3 stdlib (argparse, collections.abc, contextlib, fcntl,
-            importlib, io, json, os, pathlib, subprocess, sys, unittest,
-            unittest.mock); tests/_root.py; FINISH_CEILING_SECONDS and
+            io, json, os, pathlib, subprocess, sys, unittest,
+            unittest.mock); tests/_root.py (load_source loads tc with no
+            bytecode cache, R30); FINISH_CEILING_SECONDS and
             wait_until_blocked from test_codex_route.py; ../tc.
 @complexity O(1) per test: one to six tc runs, each under a second.
 @alloc      one TcRoot per test (or per case), removed when its context
@@ -36,8 +37,6 @@ import argparse
 import collections.abc
 import contextlib
 import fcntl
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -121,18 +120,17 @@ def load_tc(root):
     old value is put back after.
 
     @interacts  sets and restores os.environ["TC_ROOT"]; runs tc's top
-                level (constants only, no disk writes).
-    @deps       importlib, os; _root.TC.
-    @complexity O(1).
+                level (constants only, no disk writes). Reads and writes
+                no bytecode cache (_root.load_source; R30, Claude Opus
+                5.5, unreviewed).
+    @deps       os; _root.TC, _root.load_source.
+    @complexity O(s) over s bytes of tc: one compile.
     @alloc      one module object, returned.
     """
     old = os.environ.get("TC_ROOT")
     os.environ["TC_ROOT"] = str(root.path)
     try:
-        loader = importlib.machinery.SourceFileLoader("tc_cards_under_test", str(_root.TC))
-        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-        loader.exec_module(mod)
-        return mod
+        return _root.load_source("tc_cards_under_test", _root.TC)
     finally:
         if old is None:
             os.environ.pop("TC_ROOT", None)

@@ -24,8 +24,9 @@ Status: unreviewed
             itself with a stdin pipe it holds open and never writes
             (tc_with_stdin_open), and kills that child by its own pid
             if it still runs at EMPTY_TEXT_CEILING_SECONDS.
-@deps      python3 stdlib (argparse, contextlib, fcntl, importlib, io,
-            json, os, pathlib, subprocess, sys, unittest); tests/_root.py;
+@deps      python3 stdlib (argparse, contextlib, fcntl, io,
+            json, os, pathlib, subprocess, sys, unittest); tests/_root.py
+            (load_source loads tc with no bytecode cache, R30);
             FINISH_CEILING_SECONDS and wait_until_blocked from
             test_codex_route.py; ../tc. Imported by test_gate.py:
             files_under (P3 fix round 2, Claude Opus 5.5, unreviewed: the
@@ -40,8 +41,6 @@ Status: unreviewed
 import argparse
 import contextlib
 import fcntl
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -123,18 +122,17 @@ def load_tc(root):
     old value is put back after.
 
     @interacts  sets and restores os.environ["TC_ROOT"]; runs tc's top
-                level (constants only, no disk writes).
-    @deps       importlib, os; _root.TC.
-    @complexity O(1).
+                level (constants only, no disk writes). Reads and writes
+                no bytecode cache (_root.load_source; R30, Claude Opus
+                5.5, unreviewed).
+    @deps       os; _root.TC, _root.load_source.
+    @complexity O(s) over s bytes of tc: one compile.
     @alloc      one module object, returned.
     """
     old = os.environ.get("TC_ROOT")
     os.environ["TC_ROOT"] = str(root.path)
     try:
-        loader = importlib.machinery.SourceFileLoader("tc_router_under_test", str(_root.TC))
-        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-        loader.exec_module(mod)
-        return mod
+        return _root.load_source("tc_router_under_test", _root.TC)
     finally:
         if old is None:
             os.environ.pop("TC_ROOT", None)
