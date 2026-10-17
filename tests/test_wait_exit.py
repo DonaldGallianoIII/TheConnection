@@ -7,7 +7,10 @@ reader takes it only from the inbox owner's one-line regular file; and
 the record is never proof of life. F1 fix round 1 (Claude Opus 5.5,
 unreviewed): a plant at the record's names is moved aside with words; a
 down node carries how long ago it stopped; and a session that re-arms
-between a lock listing and the record read is never read as killed.
+between a lock listing and the record read is never read as killed. F1
+fix round 2 (Claude Opus 5.5, unreviewed): an earlier write's leftover
+.tmp is removed, a plant of its form moved aside once; and a down the
+window rules gave carries its age too.
 
 Model:  Claude Opus 5.5 (the F1 lane agent), 2026-10-16
 Status: unreviewed
@@ -40,8 +43,12 @@ docs/planning/connection-routes/handoffs/F1.md.
             reads each down node's down_age_s; runs cmd_watch in process
             (resource.setrlimit made a no-op, gpu_stats replaced) and
             Board.feed(), each with tc's listeners replaced so one listing
-            misses a held lock. Writes nothing outside the root's temp
-            folder.
+            misses a held lock. F1 fix round 2 (Claude Opus 5.5,
+            unreviewed): makes files and a link at an earlier write's
+            .tmp names by hand and runs two waits over them; renames a
+            killed listener's record aside, or replaces it with an old
+            `mail`, and reads its down_age_s. Writes nothing outside the
+            root's temp folder.
 @deps       python3 stdlib (argparse, collections, contextlib, datetime,
             importlib, io, json, os, pathlib, pwd, signal, stat,
             subprocess, sys, threading, time, unittest, unittest.mock);
@@ -100,6 +107,13 @@ RECORD_MODE = 0o640
 # the record's name or the old .tmp name is moved to the first aside name
 # (tc's PLANTED_ASIDE_NAME), with these words.
 RECORD_TMP_PREFIX = ".wait.exit.tmp-"
+# F1 fix round 2 (Claude Opus 5.5, unreviewed): bugs LOW-1. Two
+# names of a write's own .tmp form, the prefix and 16 lowercase hex digits
+# (tc's WAIT_EXIT_TMP_NONCE_BYTES, 8, two digits a byte), as a wait killed
+# between a record's create and its rename leaves; and a name one digit
+# short, which is not of that form and is never tc's to touch.
+LEFTOVERS = (RECORD_TMP_PREFIX + "0" * 16, RECORD_TMP_PREFIX + "0123456789abcdef")
+NOT_OF_THE_FORM = RECORD_TMP_PREFIX + "0" * 15
 FIRST_ASIDE = "{name}.planted-1"
 MOVED_RECORD_WORDS = ("tc wait: {path} was {what} owned by {owner}, not this user's own exit record; moved it "
                       "aside to {aside}")
@@ -592,6 +606,53 @@ class WriterTest(UmaskTestCase):
                                   outside.read_text()),
                                  (EXIT_TIMEOUT, said + "\n", written(TIMEOUT), None, kind, OUTSIDE_TEXT),
                                  f"what tc said: {err!r}")
+
+    # F1 fix round 2 (Claude Opus 5.5, unreviewed): bugs LOW-1.
+    def test_an_earlier_writes_leftover_tmp_is_removed_and_anything_else_of_its_form_is_moved_aside_once(self):
+        """In mail/to-b/: this user's own one-name files at both LEFTOVERS, and one at NOT_OF_THE_FORM. tc wait b exits 2 with nothing on stderr, both LEFTOVERS are gone, NOT_OF_THE_FORM is still there, and the record says timeout. Then a symlink at LEFTOVERS[0] to a file outside: tc wait b exits 2 and says in one line that it moved the link aside to <name>.planted-1, the link sits there, the file it led to keeps its text, and the record says timeout; a second tc wait b says nothing and leaves the aside name as it is.
+
+        Must reject a write that never looks at an earlier write's .tmp
+        (each wait killed between its create and its rename leaves one for
+        good, and they pile up), one that removes a name that is not of
+        the form, one that follows or removes a plant there, and one that
+        moves a plant it moved before again on every write.
+
+        @interacts  per subtest: makes the inbox and what sits at the
+                    names by hand; one or two waits; lstats the names, the
+                    aside name and the target; reads the record.
+        @deps       _root.TcRoot.tc; seen_record, mode_at; os, pwd;
+                    LEFTOVERS, NOT_OF_THE_FORM, MOVED_RECORD_WORDS.
+        @complexity O(1) per subtest.
+        @alloc      one TcRoot per subtest.
+        """
+        with self.subTest(at_tmp="this user's own leftovers"), _root.TcRoot() as root:
+            box = root.path / "mail" / f"to-{NAME}"
+            box.mkdir(parents=True)
+            for name in (*LEFTOVERS, NOT_OF_THE_FORM):
+                (box / name).write_text("listen")
+            code, out, err = root.tc("wait", NAME, "--timeout", AT_ONCE)
+            found = seen_record(box, time.time())
+            self.assertEqual((code, err, found.word, found.kind, [mode_at(box / name) is None for name in LEFTOVERS],
+                              mode_at(box / NOT_OF_THE_FORM) is None),
+                             (EXIT_TIMEOUT, "", TIMEOUT, "file", [True, True], False), f"what tc said: {err!r}")
+        with self.subTest(at_tmp="a symlink"), _root.TcRoot() as root:
+            box = root.path / "mail" / f"to-{NAME}"
+            box.mkdir(parents=True)
+            outside = root.base / "outside"
+            outside.write_text(OUTSIDE_TEXT)
+            plant = box / LEFTOVERS[0]
+            plant.symlink_to(outside)
+            kind = os.lstat(plant).st_mode
+            aside = box / FIRST_ASIDE.format(name=LEFTOVERS[0])
+            code, out, err = root.tc("wait", NAME, "--timeout", AT_ONCE)
+            word = seen_record(box, time.time()).word
+            again, _, err_again = root.tc("wait", NAME, "--timeout", AT_ONCE)
+            said = MOVED_RECORD_WORDS.format(path=plant, what="a symlink", owner=pwd.getpwuid(os.geteuid()).pw_name,
+                                             aside=aside)
+            self.assertEqual((code, err, word, mode_at(plant), mode_at(aside), outside.read_text(), again, err_again,
+                              mode_at(box / FIRST_ASIDE.format(name=aside.name))),
+                             (EXIT_TIMEOUT, said + "\n", TIMEOUT, None, kind, OUTSIDE_TEXT, EXIT_TIMEOUT, "", None),
+                             f"what tc said: {err!r} then {err_again!r}")
 
 
 class ReaderTest(UmaskTestCase):
@@ -1090,6 +1151,43 @@ class BoardTest(UmaskTestCase):
             clock["now"] += STOP_SEEN_S
             after = {n["id"]: (n["state"], n.get("down_age_s", MISSING)) for n in board.feed()["nodes"]}.get(NAME)
             self.assertEqual((made, seen, gone, after), (True, "listening", True, ("down", STOP_SEEN_S)))
+
+    # F1 fix round 2 (Claude Opus 5.5, unreviewed): bugs LOW-3, integration LOW-2.
+    def test_a_down_the_window_rules_gave_carries_the_time_since_the_lock_was_last_seen(self):
+        """A Board saw b listening (a proven listener), then b was killed by its pid and its record either moved aside (no record) or replaced by a `mail` dated LONG_WAIT_S before the sighting (older than it, so not this wait's exit). The next feed, STOP_SEEN_S later, reads b down by the window rules with down_age_s STOP_SEEN_S.
+
+        C5: "The feed gives each `down` node its age (`down_age_s`)". Must
+        reject a window `down` with no age (its box could not say how long
+        ago it stopped) and an age taken from a record that does not say
+        `listening`.
+
+        @interacts  per subtest: one proven listener, killed by its pid;
+                    its record renamed aside, or replaced by hand (a .tmp
+                    renamed over it); two feeds of one Board on a clock the
+                    test sets.
+        @deps       serve.Board, stamp, record_made, lock_gone,
+                    _root.TcRoot.listener; os, signal, time.
+        @complexity O(1) per subtest.
+        @alloc      one TcRoot and one Board per subtest.
+        """
+        for case in ("no record", "a mail record older than the sighting"):
+            with self.subTest(record=case), _root.TcRoot() as root:
+                box = root.path / "mail" / f"to-{NAME}"
+                clock = {"now": float(int(time.time()))}
+                board = serve.Board(root=root.path, clock=lambda: clock["now"])
+                with root.listener(NAME, LISTENER_SECONDS) as pid:
+                    made = record_made(box)
+                    seen = {n["id"]: n["state"] for n in board.feed()["nodes"]}.get(NAME)
+                    os.kill(pid, signal.SIGKILL)
+                    gone = lock_gone(box / WAIT_LOCK, pid)
+                if case == "no record":
+                    os.rename(box / RECORD, box / RECORD_ASIDE)
+                else:
+                    (box / RECORD_TMP).write_text(f"{MAIL} {stamp(clock['now'] - LONG_WAIT_S)}\n")
+                    os.rename(box / RECORD_TMP, box / RECORD)
+                clock["now"] += STOP_SEEN_S
+                after = {n["id"]: (n["state"], n.get("down_age_s", MISSING)) for n in board.feed()["nodes"]}.get(NAME)
+                self.assertEqual((made, seen, gone, after), (True, "listening", True, ("down", STOP_SEEN_S)))
 
 
 # F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-2 and LOW-3.

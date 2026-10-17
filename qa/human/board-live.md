@@ -9,7 +9,9 @@ Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14; fix rounds by
         step 22's restart bullet and step 23 (the wait exit record, F1)
         by Claude Opus 5.5 (the F1 lane agent), 2026-10-16; step 23's
         read before the last wait and its `stopped earlier` bullet by
-        Claude Opus 5.5 (the F1 fixer, round 1), 2026-10-17
+        Claude Opus 5.5 (the F1 fixer, round 1), 2026-10-17; step 23's
+        re-armed `c` and its pill counts by Claude Opus 5.5 (the F1
+        fixer, round 2), 2026-10-17
 Status: unreviewed. Written, not yet run by a person.
 
 What this checks: `board/serve.py` serves the live board on 127.0.0.1 only,
@@ -347,6 +349,11 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       2026-10-16, unreviewed). No other name reads `✕ no listener`.
 23. Restart after a kill (F1, C5's wait exit record). Added by the F1
     lane agent (Claude Opus 5.5), 2026-10-16. Status: unreviewed.
+    First bring `c` back, so `b` is the one name down below (F1 fix
+    round 2, Claude Opus 5.5, 2026-10-17, unreviewed): `c`'s listener
+    has been stopped since step 16, and its `still there?` is unread. In
+    terminal 3 run `./tc read c`, then `./tc wait c`. Within 3 s `c`
+    reads `● listening`.
     `b`'s listener runs in terminal 2 (step 8). In terminal 4, find its
     pid with `./tc health` and stop it hard: `kill -9 <pid>`. Stop the
     server (Ctrl+C in terminal 1), start it again with the same command,
@@ -355,14 +362,17 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       `b` reads `✕ no listener` with a dashed border, and
       `cat $TC_ROOT/mail/to-b/.wait.exit` reads `listening <time>`: its
       wait was killed before it wrote an exit.
-    - Pass (F1 fix round 1, Claude Opus 5.5, 2026-10-17, unreviewed):
-      `b`'s box says `stopped N m ago` (or `s` or `h`). A restarted
+    - Pass (F1 fix round 1, Claude Opus 5.5, 2026-10-17, unreviewed;
+      `c` and the pill's counts, round 2): `b`'s box says `stopped N m ago` (or `s` or `h`). A restarted
       board never saw `b` listen, so it counts from the record's time,
-      when that wait began. Under 10 min, the pill warns with
-      `1 no listener`; at 10 min or more it stays calm and counts `b`
-      as `⊘ 1 stopped earlier`, in that glyph and those words, while the
-      box still reads `✕ no listener`. In grayscale the pill and the
-      footer's legend still say `⊘ stopped earlier` in words.
+      when that wait began (step 8, so most likely 10 min or more ago).
+      `c` reads `● listening`. Under 10 min, the pill warns with
+      `1 listening · 1 no listener`; at 10 min or more it stays calm,
+      `live · 1 listening · ⊘ 1 stopped earlier`, in that glyph and
+      those words, while `b`'s box still reads `✕ no listener`. Open the
+      new URL again with `?gray=1` put before the `#`, as in step 16: in
+      grayscale the footer's legend still says `⊘ stopped earlier` in
+      words, and so does the pill when it counts `b` there.
     - Fail: `b` reads `○ idle`, `◔ working` or `△ woken · not read`.
 
     In terminal 2 run `./tc wait b` again. Within 3 s `b` reads

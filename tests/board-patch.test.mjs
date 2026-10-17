@@ -303,6 +303,9 @@ test('the pill warns only on a stop under 10 min old; an older one counts as sto
   assert.deepEqual(rows.o, [STATES.down.glyph, STATES.down.word, `${NOTE_WORDS.stopped} 11 m ago`]);
   for (const words of [LEGEND_WORDS.graph, LEGEND_WORDS.outline]) {
     assert.ok(words.includes(`${STOPPED_EARLIER.glyph} ${STOPPED_EARLIER.word}: `), `the legend has no stopped earlier: ${words}`);
+    // F1 fix round 2 (Claude Opus 5.5, unreviewed): a stop of exactly 10 min counts as stopped earlier, so the legend says so.
+    assert.ok(words.includes(`${STOPPED_EARLIER.word}: counted in the pill, a listener that went 10 min ago or more;`),
+      `the legend's stopped earlier is not a stop 10 min ago or more: ${words}`);
   }
 });
 

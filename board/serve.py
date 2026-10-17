@@ -52,11 +52,13 @@ query. Cards never come from tc's health:
                            read/, so mail it received, never under 0 (a
                            future mtime reads 0); None with no inbox
   nodes[].down_age_s       F1 fix round 1 (Claude Opus 5.5, unreviewed):
-                           for a node `down` because its wait exit record
-                           says `listening`, whole seconds since it stopped
+                           for a `down` node, whole seconds since it stopped
                            as this Board knows it (Board.down_age: since its
-                           lock was last seen held, else since the record's
-                           time), never under 0; None for any other node.
+                           lock was last seen held, else, for a record
+                           saying `listening`, since the record's time),
+                           never under 0; None for any other node. F1 fix
+                           round 2 (Claude Opus 5.5, unreviewed): a `down`
+                           the window rules gave carries it too.
                            The page counts a stop DOWN_WINDOW_S or more old
                            as `stopped earlier` and warns only on a fresher
                            one (C5), with no clock of its own
@@ -110,8 +112,10 @@ the board sees ends that down but the name listening again), and its
 node carries down_age_s, so the page's pill warns only while that stop
 is under DOWN_WINDOW_S old and counts older ones as `stopped earlier`
 (F1 fix round 1, Claude Opus 5.5, unreviewed: the audit's LOW-1, C5's
-"The pill warns only on a fresh stop"); a record
-saying `mail` or `timeout`, dated after the board last saw the lock
+"The pill warns only on a fresh stop"; F1 fix round 2, Claude Opus
+5.5, unreviewed: a `down` the window rules gave carries down_age_s too,
+the time since the board last saw its lock, always under DOWN_WINDOW_S);
+a record saying `mail` or `timeout`, dated after the board last saw the lock
 (tc.left_on_purpose), means it left on purpose, so it is never `down`
 (the woken and working rules above still apply, and a `down` they give
 falls to the states after it); no record, or one tc's reader would not
@@ -1146,7 +1150,9 @@ class Board:
     never proof of life: `listening` comes from a pid alone. F1 fix round
     1 (Claude Opus 5.5, unreviewed): a node `down` by its record carries
     down_age_s (down_age), from this Board's last sighting of its lock
-    when it has one, else from the record's time.
+    when it has one, else from the record's time. F1 fix round 2 (Claude
+    Opus 5.5, unreviewed): a node `down` by the window rules carries it
+    too, from the sighting.
 
     @interacts  see the module block; each poll also opens each stopped
                 name's inbox and reads its exit record (tc.wait_exits),
@@ -1388,25 +1394,33 @@ class Board:
 
     # Model: Claude Opus 5.5 (the F1 fixer, round 1), 2026-10-17. Status: unreviewed.
     def down_age(self, name, now, record):
-        """Whole seconds since `name`'s listener stopped, as this Board knows it, for a name `down` because its wait exit record `record` says `listening`; None for any other record (C5, "The pill warns only on a fresh stop"; the audit's LOW-1).
+        """Whole seconds since `name`'s listener stopped, as this Board knows it, for a name `down` (C5, "The pill warns only on a fresh stop"; the audit's LOW-1): because its wait exit record `record` says `listening`, or by the window rules (F1 fix round 2); None when this Board knows no time to count from.
 
         Counted from when this Board last saw the name's lock held, when it
         has (last_listening_at, kept within DOWN_WINDOW_S): the wait
-        stopped after that poll. Else from the record's own time: the wait
-        wrote `listening` as it took its lock, so it stopped no earlier than
-        that, and on a fresh Board a stop may read older than it is, never
-        newer. Never the record's time alone while a sighting is known: a
-        wait runs for up to DEFAULT_WAIT_SECONDS (110 min), so a kill of
-        one that started long ago is still a fresh stop. Never below 0.
+        stopped after that poll. Else, for a record saying `listening`,
+        from the record's own time: the wait wrote `listening` as it took
+        its lock, so it stopped no earlier than that, and on a fresh Board
+        a stop may read older than it is, never newer. Never the record's
+        time alone while a sighting is known: a wait runs for up to
+        DEFAULT_WAIT_SECONDS (110 min), so a kill of one that started long
+        ago is still a fresh stop. Never below 0. F1 fix round 2 (Claude
+        Opus 5.5, unreviewed): bugs LOW-3, integration LOW-2. A `down` the
+        window rules gave (no record, a `mail` or `timeout` older than the
+        sighting, or an inbox this board cannot list) always has a sighting
+        under DOWN_WINDOW_S old, so it carries the time since it, and its
+        box says how long ago it stopped, as C5's "each `down` node its
+        age" asks.
 
         @interacts  none; reads last_listening_at.
         @deps       tc.WAIT_EXIT_LISTENING.
         @complexity O(1).
         @alloc      none.
         """
-        if record is None or record.word != self.tc.WAIT_EXIT_LISTENING:
-            return None
-        return max(0, int(now - self.last_listening_at.get(name, record.at)))
+        seen = self.last_listening_at.get(name)
+        if seen is None and record is not None and record.word == self.tc.WAIT_EXIT_LISTENING:
+            seen = record.at
+        return None if seen is None else max(0, int(now - seen))
 
     # Model: Claude Opus 5.5 (the P3 fixer, round 1c), 2026-10-15. Status: unreviewed.
     def feed_from(self, now, snap, cards, messages, unreadable, exits=None):

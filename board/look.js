@@ -46,7 +46,11 @@
  *             links and r recent wires (C5: n tens; l the mail pairs plus
  *             c(c-1)/2 native lines per account shared by c Claude cards,
  *             190 for 20 on one; r <= 50), the log from the sort by name.
- *             patchBoard lays nothing out when only ages moved (drawnKey);
+ *             patchBoard lays nothing out when only ages moved (drawnKey),
+ *             but for a down node's age, which goes in as its box's words
+ *             (F1 fix round 2, Claude Opus 5.5, unreviewed: every poll in
+ *             a stop's first minute, then once a minute in the first hour,
+ *             once an hour in the first day, once a day after);
  *             else boardView adds placeLabels and routeAround's search,
  *             O(g log g) over its g = 4XY states, per routed pair when
  *             the boxes, headings, extent or tree runs changed
@@ -738,7 +742,7 @@ const WAKE_WORDS = `${STATES.working.glyph} ${STATES.working.word}: mail woke it
  */
 export const STOPPED_EARLIER = Object.freeze({ glyph: '⊘', word: 'stopped earlier' });
 const STOPPED_WORDS = `${STOPPED_EARLIER.glyph} ${STOPPED_EARLIER.word}: counted in the pill, a listener that went `
-  + `more than ${DOWN_WINDOW_MIN} min ago; its box still reads ${STATES.down.glyph} ${STATES.down.word}, with when it stopped`;
+  + `${DOWN_WINDOW_MIN} min ago or more; its box still reads ${STATES.down.glyph} ${STATES.down.word}, with when it stopped`;
 export const LEGEND_WORDS = Object.freeze({
   outline: 'outline: each session under the one it reports to, or that mail shows it works for · '
     + `traffic: newest first, arrow toward the reader · ${WAKE_WORDS} · ${STOPPED_WORDS}`,
@@ -1588,8 +1592,10 @@ function upperFirst(p, q, pos) {
  * more is counted apart, last, as `⊘ K stopped earlier` (STOPPED_EARLIER,
  * a glyph and words, never color alone), and raises nothing: with only
  * those the state stays up, `live · N listening · ⊘ K stopped earlier`.
- * A down node with no down_age_s (one the window rules called down, which
- * is always fresh) warns as before. The age comes from the feed, so the
+ * A down node with no down_age_s (a feed from before round 1) warns as
+ * before. F1 fix round 2 (Claude Opus 5.5, unreviewed): one the window
+ * rules called down carries its age since the board last saw its lock,
+ * always under DOWN_WINDOW_MIN, so it warns too. The age comes from the feed, so the
  * page never reads its own clock against the server's.
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @interacts  none; pure
@@ -2007,8 +2013,11 @@ export function createRouteCache() {
  * are left out, so two polls a few seconds apart with no news give one key.
  * F1 fix round 1 (Claude Opus 5.5, unreviewed): a down node's down_age_s
  * goes in as the words its box shows (stoppedWords), never as seconds, so
- * it lays the board out again only when those words change (each minute
- * in the first hour, then each hour).
+ * it lays the board out again only when those words change. F1 fix round
+ * 2 (Claude Opus 5.5, unreviewed): bugs LOW-2, integration LOW-3. In a stop's first
+ * minute the words count seconds, so that is every poll (each 3 s); then
+ * once a minute in the first hour, once an hour in the first day, and
+ * once a day after.
  * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
  * @complexity O(n + l + r) over n nodes, l links and r wires
  * @alloc      n + l + r + 4 short-lived objects (a copy of each node, an
