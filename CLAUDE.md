@@ -111,8 +111,8 @@ branch at `a029bda`, CORE at `f5f6923`, CARDS at `4f35efc` and BOARD at
 `a2953cb`, with the P4 phase review's fixes at `eb3e187`, and SHARED
 (wave 2) at `84b97d2`, and SSH (wave 2b) at `616b9db`, with the P3 phase
 review's fixes (D35 to D37) at `8b9b59d`, and F1, the wait exit record,
-at `f57e490`. As of 2026-10-17, next are F2 (the switch-over cleanup),
-then DOCS.
+at `f57e490`, and F2, the switch-over cleanup, at `d03fab9`. As of
+2026-10-17, next is DOCS.
 
 ### Off limits
 
@@ -150,7 +150,7 @@ mail/to-<name>/NNNNNN-from-X.md    unread messages (gitignored)
 mail/to-<name>/read/               read messages, kept as history
 mail/to-<name>/.wait.lock          the listener's lock, 0600, its owner's (D35); .watch.lock beside it for tc watch; a file planted there is moved aside as .wait.lock.planted-<k>
 mail/to-<name>/.wait.exit          the wait's exit record, 0640, its owner's: listening, mail or timeout and a time; never proof of life (C5, F1)
-mail/.wait-<name>.lock             the lock's old place: a private mailbox still reads it until every session has re-armed (the switch-over, a later cleanup)
+mail/.wait-<name>.lock             the lock's old place before D35: tc never reads it since F2; old files may remain until the owner removes them
 mail/.box-<name>.lock              the inbox lock: send's count plus write, read's glob plus rename, tc card's check plus write (D14)
 mail/.ring-pending-<name>          the codex ring's state: pending, timed out or clear; never removed (D14, D16, D20)
 cards/<name>.json                  one address card per name: kind, account, route (gitignored)
@@ -375,5 +375,6 @@ with the class proofs in `tests/test_inbox_pinned.py` and
 merged at `f57e490`: `tc watch --names` no longer calls a listener that
 mail woke down, and the board reads a killed one as down after a restart
 too, its pill warning only on a fresh stop. Nothing has run as a second
-Linux user yet. As of 2026-10-17 F2 and the docs are next.
+Linux user yet. F2 removed the switch-over at `d03fab9`: tc never reads
+the old lock place again. As of 2026-10-17 the docs are next.
 `main` stays the owner's alone.

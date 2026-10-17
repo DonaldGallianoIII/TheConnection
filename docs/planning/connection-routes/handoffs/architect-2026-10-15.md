@@ -6,6 +6,23 @@ Date:   2026-10-15
 For:    whoever picks the architect's work back up, a new session or this
         one after a restart. Read CLAUDE.md first, then this.
 
+## Update, 2026-10-17
+
+Back on the owner's word. main on GitHub was fast-forwarded to `c9427e5`
+by the relay. F1, the wait exit record, merged into dev at `f57e490`
+after its lane review and two fix rounds (the relay chose the pill rule:
+a box stays `down`, the pill warns only on a fresh stop). F2, the
+switch-over cleanup, merged at `d03fab9`. Each merge kept the relay's
+three conditions, and the listeners held each time.
+
+Left for the owner: 18 old lock files (`mail/.wait-<name>.lock`, and one
+`mail/.watch-<name>.lock`) remain in the live mailbox. tc no longer
+reads them, and nothing here deletes them (rule 3). Their exact paths
+went to the relay by mail, not into this file: they are live session
+names (rule 13).
+
+Next: the DOCS lane (P5), its brief sent to the relay before it starts.
+
 ## Update, 2026-10-16
 
 The relay said yes in the morning. P3FIX merged into dev at `8b9b59d`

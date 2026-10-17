@@ -448,7 +448,8 @@ refuses without the token; it binds nowhere but 127.0.0.1.
 ## FOLLOW-UPS (after the P3 fix, `8b9b59d`)
 
 Model: Claude Opus 5.5 (the TheConnection architect session), 2026-10-16.
-Status: drafts; each runs only after a2 approves it for Donald.
+Status: both done. F1 merged into the dev branch at `f57e490`, F2 at
+`d03fab9`, each approved by a2 for Donald.
 
 ### F1. The wait exit record (D28, D37 part 2)
 
