@@ -20,14 +20,19 @@ Status: unreviewed
             name, pointing at a file in the harness's temp folder, which
             the send must never write through; since SHARED fix round 5
             (Claude Opus 5.5, unreviewed) the send takes the next number.
-@deps       python3 stdlib (argparse, contextlib, fcntl, importlib, io,
+            DOCS-1 (Claude Opus 5.5, unreviewed): one test starts tc
+            itself with a stdin pipe it holds open and never writes
+            (tc_with_stdin_open), and kills that child by its own pid
+            if it still runs at EMPTY_TEXT_CEILING_SECONDS.
+@deps      python3 stdlib (argparse, contextlib, fcntl, importlib, io,
             json, os, pathlib, subprocess, sys, unittest); tests/_root.py;
             FINISH_CEILING_SECONDS and wait_until_blocked from
             test_codex_route.py; ../tc. Imported by test_gate.py:
             files_under (P3 fix round 2, Claude Opus 5.5, unreviewed: the
             audit's LOW-28, option A).
 @complexity O(1) per test: one to six tc runs, each under a second. The
-            size test pipes 1 MiB twice.
+            size test pipes 1 MiB twice. The DOCS-1 test waits at most
+            EMPTY_TEXT_CEILING_SECONDS per empty text when tc hangs.
 @alloc      one TcRoot per test, removed when its context exits; the size
             test holds two 1 MiB strings while it runs.
 """
@@ -75,6 +80,17 @@ NOT_BUILT_WORDS = "tc send: route {route} is not built yet; nothing sent\n"
 CARD_FIX_WORDS = ("Ask {to}'s owner to rejoin (tc join {to}, run in {to}'s own session), or, "
                   "if {to} lives on another machine, write its card with tc card {to} --ssh <target>.")
 EMPTY_WORDS = "tc send: empty message\n"
+# DOCS-1 (Claude Opus 5.5, unreviewed): an explicit text with no words.
+# Texts given on the command line that hold no words: empty, spaces only,
+# and a tab and a newline only. Each must refuse without reading stdin.
+EMPTY_TEXTS = ("", "   ", "\t\n")
+# How long a send with an empty text gets to refuse while its stdin is held
+# open. A refusal is one start of tc, under 0.1 s on a desktop; the brief
+# asks for one second. A send that reads stdin instead never ends on its
+# own: the test stops waiting here, kills it and fails on the exit code.
+EMPTY_TEXT_CEILING_SECONDS = 1
+# The body a send with no text argument reads from stdin.
+STDIN_BODY = "from stdin"
 
 
 def files_under(root):
@@ -124,6 +140,42 @@ def load_tc(root):
             os.environ.pop("TC_ROOT", None)
         else:
             os.environ["TC_ROOT"] = old
+
+
+# DOCS-1 (Claude Opus 5.5, unreviewed): a send whose stdin never closes.
+def tc_with_stdin_open(root, *args):
+    """Run `tc *args` under `root` with a stdin pipe held open and never written. Return (exit, stdout, stderr).
+
+    The exit is None when the child still runs at EMPTY_TEXT_CEILING_SECONDS,
+    which is what a send reading stdin does. It never uses communicate(),
+    which would close stdin and let such a send see the end of input.
+
+    @interacts  starts one child, [sys.executable, TC, *args], with
+                root.env; kills it by its own pid if it still runs at the
+                ceiling, reaps it and closes its three pipes before return.
+    @deps       subprocess, sys; _root.TC, _root.REAP_CEILING_SECONDS;
+                EMPTY_TEXT_CEILING_SECONDS.
+    @complexity O(1), plus the child's own work; at most
+                EMPTY_TEXT_CEILING_SECONDS + REAP_CEILING_SECONDS of waiting.
+    @alloc      one Popen and its three pipes, released before return; the
+                captured output, returned.
+    """
+    proc = subprocess.Popen([sys.executable, str(_root.TC), *args], env=root.env, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        try:
+            code = proc.wait(timeout=EMPTY_TEXT_CEILING_SECONDS)
+        except subprocess.TimeoutExpired:
+            code = None
+            proc.kill()
+            proc.wait(timeout=_root.REAP_CEILING_SECONDS)
+        return code, proc.stdout.read(), proc.stderr.read()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=_root.REAP_CEILING_SECONDS)
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            pipe.close()
 
 
 class RouterTest(unittest.TestCase):
@@ -340,6 +392,39 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, EXIT_REFUSED)
         self.assertEqual(said.getvalue(), EMPTY_WORDS)
         self.assertEqual(after, [], f"an empty message wrote {after}")
+
+    # DOCS-1 (Claude Opus 5.5, unreviewed): a2 for the owner, 2026-10-17.
+    def test_an_explicit_empty_text_refuses_at_once_and_never_reads_stdin(self):
+        """`""`, spaces, or a tab and a newline as the text: exit 1 within a second, stdin held open.
+
+        Each refuses with `tc send: empty message`, writes nothing and
+        takes no number (mail/.seq unchanged). A send with no text argument
+        still reads its body from stdin. Must reject a test of the text's
+        truthiness in read_body: `""` would then read the open stdin and
+        still be running at the ceiling.
+
+        @interacts  one send from stdin, then one send per empty text with
+                    stdin held open (tc_with_stdin_open); reads the inbox.
+        @deps       tc_with_stdin_open, files_under, seq_of; _root.TcRoot.tc.
+        @complexity O(1): four sends, each refusal under
+                    EMPTY_TEXT_CEILING_SECONDS.
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            code, out, err = root.tc("send", "--from", "a", "--to", "b", stdin=STDIN_BODY)
+            self.assertEqual(code, 0, f"a send from stdin exited {code}: {err}")
+            text = (root.path / "mail" / "to-b" / "000001-from-a.md").read_text()
+            self.assertTrue(text.endswith(f"\n\n{STDIN_BODY}\n"), f"body: {text!r}")
+            before, seq = files_under(root), seq_of(root)
+            for empty in EMPTY_TEXTS:
+                with self.subTest(text=empty):
+                    ran = tc_with_stdin_open(root, "send", "--from", "a", "--to", "b", empty)
+                    self.assertEqual(ran, (EXIT_REFUSED, "", EMPTY_WORDS),
+                                     f"an exit of None is a send still reading stdin after "
+                                     f"{EMPTY_TEXT_CEILING_SECONDS} s")
+                    after = files_under(root)
+                    self.assertEqual(after, before, f"a refused send wrote {sorted(set(after) - set(before))}")
+                    self.assertEqual(seq_of(root), seq, "a refused send took a number")
 
     # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D13, the warning reads the card file.
     def test_the_new_inbox_warning_keys_on_the_card_file(self):

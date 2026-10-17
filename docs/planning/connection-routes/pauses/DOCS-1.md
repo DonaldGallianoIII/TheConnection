@@ -2,8 +2,13 @@
 
 Model:  Claude Opus 5.5 (the DOCS lane agent), 2026-10-17
 Status: unreviewed
-Pause:  open. The docs do not depend on it: the README and both JOIN
-        files say to leave the text off for stdin, never to pass `""`.
+Pause:  settled by a2 for the owner, 2026-10-17. Option 1, with
+        whitespace named: an explicit text that is empty or only
+        whitespace refuses at once, exit 1, `tc send: empty message`,
+        nothing written, no number taken, and never reads stdin. A send
+        with no text argument still reads stdin. Built on the DOCS1
+        branch, tested in `tests/test_router.py`. The question below is
+        kept as asked.
 
 ## What happens
 
