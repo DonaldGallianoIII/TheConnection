@@ -51,6 +51,15 @@ query. Cards never come from tc's health:
                            since the newest message in the name's inbox or
                            read/, so mail it received, never under 0 (a
                            future mtime reads 0); None with no inbox
+  nodes[].down_age_s       F1 fix round 1 (Claude Opus 5.5, unreviewed):
+                           for a node `down` because its wait exit record
+                           says `listening`, whole seconds since it stopped
+                           as this Board knows it (Board.down_age: since its
+                           lock was last seen held, else since the record's
+                           time), never under 0; None for any other node.
+                           The page counts a stop DOWN_WINDOW_S or more old
+                           as `stopped earlier` and warns only on a fresher
+                           one (C5), with no clock of its own
   nodes[].kind, account,   the card, read straight from cards/<name>.json
   route, reports_to        (C1), never from a `cards` key in health. With no
                            card: kind and account None, route "local" (C1:
@@ -95,7 +104,11 @@ it through tc's one reader (tc.wait_exits). It is never proof of life;
 only a pid is. It says why a lock that is gone went (stopped_state): a
 record saying `listening` means the wait was killed or crashed, so the
 name reads `down`, after a restart too and past DOWN_WINDOW_S (nothing
-the board sees ends that down but the name listening again); a record
+the board sees ends that down but the name listening again), and its
+node carries down_age_s, so the page's pill warns only while that stop
+is under DOWN_WINDOW_S old and counts older ones as `stopped earlier`
+(F1 fix round 1, Claude Opus 5.5, unreviewed: the audit's LOW-1, C5's
+"The pill warns only on a fresh stop"); a record
 saying `mail` or `timeout`, dated after the board last saw the lock
 (tc.left_on_purpose), means it left on purpose, so it is never `down`
 (the woken and working rules above still apply, and a `down` they give
@@ -1122,12 +1135,15 @@ class Board:
     dated after this Board last saw its lock (any date on a fresh Board),
     is never `down` (stopped_state). The memory above still decides
     `woken` and `working`, and every state with no record. The record is
-    never proof of life: `listening` comes from a pid alone.
+    never proof of life: `listening` comes from a pid alone. F1 fix round
+    1 (Claude Opus 5.5, unreviewed): a node `down` by its record carries
+    down_age_s (down_age), from this Board's last sighting of its lock
+    when it has one, else from the record's time.
 
     @interacts  see the module block; each poll also opens each stopped
                 name's inbox and reads its exit record (tc.wait_exits).
     @deps       load_tc and the module's helpers; stopped_state,
-                tc.wait_exits, tc.left_on_purpose (F1).
+                down_age, tc.wait_exits, tc.left_on_purpose (F1).
     @complexity O(1) to build, plus one load of tc.
     @alloc      the tc module, last_listening_at, first_missing_at, wakes
                 and nested_cards, held for the object's life (the module
@@ -1342,6 +1358,28 @@ class Board:
             return None
         return state
 
+    # Model: Claude Opus 5.5 (the F1 fixer, round 1), 2026-10-17. Status: unreviewed.
+    def down_age(self, name, now, record):
+        """Whole seconds since `name`'s listener stopped, as this Board knows it, for a name `down` because its wait exit record `record` says `listening`; None for any other record (C5, "The pill warns only on a fresh stop"; the audit's LOW-1).
+
+        Counted from when this Board last saw the name's lock held, when it
+        has (last_listening_at, kept within DOWN_WINDOW_S): the wait
+        stopped after that poll. Else from the record's own time: the wait
+        wrote `listening` as it took its lock, so it stopped no earlier than
+        that, and on a fresh Board a stop may read older than it is, never
+        newer. Never the record's time alone while a sighting is known: a
+        wait runs for up to DEFAULT_WAIT_SECONDS (110 min), so a kill of
+        one that started long ago is still a fresh stop. Never below 0.
+
+        @interacts  none; reads last_listening_at.
+        @deps       tc.WAIT_EXIT_LISTENING.
+        @complexity O(1).
+        @alloc      none.
+        """
+        if record is None or record.word != self.tc.WAIT_EXIT_LISTENING:
+            return None
+        return max(0, int(now - self.last_listening_at.get(name, record.at)))
+
     # Model: Claude Opus 5.5 (the P3 fixer, round 1c), 2026-10-15. Status: unreviewed.
     def feed_from(self, now, snap, cards, messages, unreadable, exits=None):
         """feed()'s object from what it gathered: the time `now`, the snapshot `snap`, the `cards`, the scan's `messages` and `unreadable` names, whose folders the caller holds open while this dates them (file_age, find_wake, after_listening), and `exits`, the wait exit record of each name with no pid (tc's wait_exits; None for none).
@@ -1350,10 +1388,12 @@ class Board:
         close when this returns, on every way out; the body is feed()'s as
         it was. F1 (Claude Opus 5.5, unreviewed): a name with no pid takes
         its down, woken or working from stopped_state, with its record.
+        F1 fix round 1 (Claude Opus 5.5, unreviewed): a down node's
+        down_age_s from down_age.
 
         @interacts  see feed(); stats each dated message by its name in
                     the folder the scan holds (file_age, file_time).
-        @deps       see feed(); stopped_state.
+        @deps       see feed(); stopped_state, down_age.
         @complexity see feed().
         @alloc      see feed().
         """
@@ -1433,6 +1473,8 @@ class Board:
                 "unread": unread, "unread_problem": box.get("mail_problem") if box and unread is None else None,
                 "inbox_unreadable": name in unreadable,
                 "last_mail_age_s": None if newest is None else max(0, newest),
+                # F1 fix round 1 (Claude Opus 5.5, unreviewed): LOW-1, so the pill warns only on a fresh stop.
+                "down_age_s": self.down_age(name, now, exits.get(name)) if state == DOWN else None,
                 "status": status_preview(self.tc.STATUS, name),
                 "role": role, "role_source": role_source,
                 "reports_to": card.get("reports_to"), "level": levels[name],

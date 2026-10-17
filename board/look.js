@@ -14,6 +14,10 @@
  * canvas's color, so no other stroke shows in its gaps (drawEdge). A
  * native pair's boxes, a reports_to cycle's root and a down node whose
  * inbox the board could not list carry badge lines in words (badgesOf).
+ * F1 fix round 1 (Claude Opus 5.5, unreviewed): a down node says when it
+ * stopped (the feed's down_age_s), and pillText counts a stop
+ * DOWN_WINDOW_MIN or more old as `stopped earlier` (STOPPED_EARLIER, its
+ * own glyph and words), apart from the warning.
  * Each root's tree starts with a heading, rootsList and
  * createRoots make the list of roots at the top of the page, and on a
  * phone createFit draws outlineView's outline instead of the graph.
@@ -724,13 +728,24 @@ const WAKE_WORDS = `${STATES.working.glyph} ${STATES.working.word}: mail woke it
   + `the board cannot see a crash after reading (it looks ${STATES.working.word} for up to ${DOWN_WINDOW_MIN} min) `
   + 'or, with no board page open, when a listener went, unless its exit record says why '
   + '(without one, mail that came meanwhile counts as a wake)';
+/**
+ * F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1, a2's
+ * ruling for the owner (C5, "The pill warns only on a fresh stop"). A
+ * down node that stopped DOWN_WINDOW_MIN or more ago (the feed's
+ * down_age_s) still reads down on its box, with when it stopped, but the
+ * pill counts it apart, in its own glyph and words, and never warns for
+ * it. Not a state: the box never shows this glyph.
+ */
+export const STOPPED_EARLIER = Object.freeze({ glyph: '⊘', word: 'stopped earlier' });
+const STOPPED_WORDS = `${STOPPED_EARLIER.glyph} ${STOPPED_EARLIER.word}: counted in the pill, a listener that went `
+  + `more than ${DOWN_WINDOW_MIN} min ago; its box still reads ${STATES.down.glyph} ${STATES.down.word}, with when it stopped`;
 export const LEGEND_WORDS = Object.freeze({
   outline: 'outline: each session under the one it reports to, or that mail shows it works for · '
-    + `traffic: newest first, arrow toward the reader · ${WAKE_WORDS}`,
+    + `traffic: newest first, arrow toward the reader · ${WAKE_WORDS} · ${STOPPED_WORDS}`,
   graph: 'thin line: reports to, or inferred from mail · '
     + `thick line: mail, none in the last ${CONFIG.FLOW_AGE_S} s · `
     + 'dashes, arrow and words: mail now, arrow at the reader · dash-dot: native, not observed · dotted: no listener · '
-    + WAKE_WORDS,
+    + `${WAKE_WORDS} · ${STOPPED_WORDS}`,
   empty: 'no sessions yet · send a message or start a listener',
 });
 
@@ -752,6 +767,8 @@ export const TREE_WORDS = Object.freeze({
  */
 export const NOTE_WORDS = Object.freeze({
   lastStatus: 'last status:',
+  // F1 fix round 1 (Claude Opus 5.5, unreviewed): a down node's stop, `stopped 3 h ago`, from the feed's down_age_s.
+  stopped: 'stopped',
 });
 
 /**
@@ -1565,6 +1582,15 @@ function upperFirst(p, q, pos) {
  * counted by listener_pid (a pid tc read from /proc/locks), never by
  * state: under D15 a listener that just sent reads writing and is still
  * listening.
+ * F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1, a2's
+ * ruling (C5, "The pill warns only on a fresh stop"). A down node whose
+ * down_age_s (the feed's seconds since it stopped) is DOWN_WINDOW_MIN or
+ * more is counted apart, last, as `⊘ K stopped earlier` (STOPPED_EARLIER,
+ * a glyph and words, never color alone), and raises nothing: with only
+ * those the state stays up, `live · N listening · ⊘ K stopped earlier`.
+ * A down node with no down_age_s (one the window rules called down, which
+ * is always fresh) warns as before. The age comes from the feed, so the
+ * page never reads its own clock against the server's.
  * Model: Claude Opus 5.5 (the BOARD fixer), 2026-10-14. Status: unreviewed.
  * @interacts  none; pure
  * @complexity O(n) over n feed nodes  @alloc one object and a short list
@@ -1573,26 +1599,43 @@ function upperFirst(p, q, pos) {
 export function pillText(feed) {
   const nodes = (feed && feed.nodes) || [];
   const listening = nodes.filter((n) => n.listener_pid).length;
+  const earlier = (n) => n.state === 'down' && n.down_age_s != null && n.down_age_s >= DOWN_WINDOW_MIN * S_PER_M;
   const warnings = ['down', 'woken']
-    .map((state) => [nodes.filter((n) => n.state === state).length, STATES[state].word])
+    .map((state) => [nodes.filter((n) => n.state === state && !earlier(n)).length, STATES[state].word])
     .filter(([count]) => count > 0)
     .map(([count, word]) => `${count} ${word}`);
+  const old = nodes.filter(earlier).length;
+  const quiet = old ? [`${STOPPED_EARLIER.glyph} ${old} ${STOPPED_EARLIER.word}`] : [];
   return warnings.length
-    ? { text: [`${listening} listening`, ...warnings].join(' · '), state: 'warn', listening }
-    : { text: `live · ${listening} listening`, state: 'up', listening };
+    ? { text: [`${listening} listening`, ...warnings, ...quiet].join(' · '), state: 'warn', listening }
+    : { text: [`live · ${listening} listening`, ...quiet].join(' · '), state: 'up', listening };
 }
 
 /**
  * A node's third line: a reports_to that names no node, else its status. A
  * down or woken node's status is stale (it was written before the node
  * stopped listening), so it reads `last status: ...` and never passes for
- * the node's state now.
+ * the node's state now. F1 fix round 1 (Claude Opus 5.5, unreviewed): a
+ * down node with the feed's down_age_s leads with when it stopped,
+ * `stopped 3 h ago` (stoppedWords), before its last status.
  * @complexity O(1)  @alloc one string
  */
 function noteFor(n, known) {
   if (n.reports_to && !known.has(n.reports_to)) return `${LINK_WORDS.reports_to} ${n.reports_to} · ${LINK_WORDS.notFound}`;
-  if (!n.status) return '';
-  return n.state === 'down' || n.state === 'woken' ? `${NOTE_WORDS.lastStatus} ${n.status}` : n.status;
+  const stopped = stoppedWords(n);
+  if (!n.status) return stopped;
+  const status = n.state === 'down' || n.state === 'woken' ? `${NOTE_WORDS.lastStatus} ${n.status}` : n.status;
+  return stopped ? `${stopped} · ${status}` : status;
+}
+
+/**
+ * When a down node stopped, in words, `stopped 3 h ago`, from the feed's
+ * down_age_s; '' for any other node, or a down one with no age.
+ * F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1.
+ * @complexity O(1)  @alloc one short string
+ */
+function stoppedWords(n) {
+  return n.state === 'down' && n.down_age_s != null ? `${NOTE_WORDS.stopped} ${agoWords(n.down_age_s)}` : '';
 }
 
 // ---------- roots, headings and the phone's outline ----------
@@ -1720,7 +1763,8 @@ export function outlineView(feed) {
  * one view per node and per edge, keyed by id. Node: title (roleTitle), pos
  * and h (layoutLevels: the box's place and height), state, detail (unread
  * count, or `unread unknown`: unreadWords), note (`reports to N · not found`, else the status line, as `last
- * status: ...` on a down or woken node), problem (tc's reason an unread
+ * status: ...` on a down or woken node, led on a down node with the feed's
+ * down_age_s by `stopped 3 h ago`: F1 fix round 1), problem (tc's reason an unread
  * count is unknown, or '': problemOf), `badges` (badgesOf: `native with b · not
  * observed` on both boxes of a native pair, `reports to q · cycle` on a
  * cycle's root, `inbox unreadable` on a down node whose inbox the board
@@ -1961,6 +2005,10 @@ export function createRouteCache() {
  * each link's ends and kind, and each wire's ends, seq and whether it
  * flows (age_s at most FLOW_AGE_S). `at`, the machine and every other age
  * are left out, so two polls a few seconds apart with no news give one key.
+ * F1 fix round 1 (Claude Opus 5.5, unreviewed): a down node's down_age_s
+ * goes in as the words its box shows (stoppedWords), never as seconds, so
+ * it lays the board out again only when those words change (each minute
+ * in the first hour, then each hour).
  * Model: Claude Opus 5.5 (the P4 phase fixer), 2026-10-15. Status: unreviewed.
  * @complexity O(n + l + r) over n nodes, l links and r wires
  * @alloc      n + l + r + 4 short-lived objects (a copy of each node, an
@@ -1968,7 +2016,8 @@ export function createRouteCache() {
  *             freed on return; the key string, returned
  */
 function drawnKey(feed, width) {
-  const nodes = ((feed && feed.nodes) || []).map(({ last_mail_age_s: _age, ...rest }) => rest);
+  const nodes = ((feed && feed.nodes) || []).map(({ last_mail_age_s: _age, down_age_s: downAge, ...rest }) => (
+    { ...rest, stopped: stoppedWords({ state: rest.state, down_age_s: downAge }) }));
   const links = ((feed && feed.links) || []).map((l) => [l.from, l.to, l.kind]);
   const wires = ((feed && feed.wires) || []).map((w) => [w.from, w.to, w.seq, w.age_s != null && w.age_s <= CONFIG.FLOW_AGE_S]);
   return JSON.stringify([width, nodes, links, wires]);

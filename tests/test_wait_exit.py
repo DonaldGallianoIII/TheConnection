@@ -185,6 +185,17 @@ STALE_AGE_SECONDS = 3600
 DOWN_WINDOW_S = 600
 ALL_LISTENING = dict.fromkeys(FIVE, "listening")
 SERVE_PATH = HERE.parent / "board" / "serve.py"
+# F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1, a2's
+# ruling (C5, "The pill warns only on a fresh stop"). Made-up names for a
+# stop 9 minutes old, one 11 minutes old (either side of DOWN_WINDOW_S)
+# and a wait that left on purpose; a long wait's age when it is killed
+# (an hour: under DEFAULT_WAIT_SECONDS, 110 min); and how long after the
+# board last saw it listening the next feed runs.
+NINE, ELEVEN, LEFT = "nine", "eleven", "left"
+NINE_MIN_S = 9 * 60
+ELEVEN_MIN_S = 11 * 60
+LONG_WAIT_S = 3600
+STOP_SEEN_S = 5
 # What a file outside the mailbox holds, that a link at a record's name
 # (or its .tmp's) leads to.
 OUTSIDE_TEXT = "outside the mailbox: tc must never write or read this\n"
@@ -914,6 +925,29 @@ def stale_line():
     return f"{MAIL} {at.isoformat(timespec='seconds')}\n"
 
 
+# F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1.
+def stamp(at):
+    """The time `at` (seconds since the epoch) in a message header's form, cut to the second, with its offset.
+
+    @interacts  reads the local time zone.
+    @deps       datetime.
+    @complexity O(1).
+    @alloc      one string, returned.
+    """
+    return datetime.datetime.fromtimestamp(at).astimezone().isoformat(timespec="seconds")
+
+
+def listening_line(at):
+    """A `listening` record line dated `at` (seconds since the epoch).
+
+    @interacts  reads the local time zone (stamp).
+    @deps       stamp; LISTENING.
+    @complexity O(1).
+    @alloc      one string, returned.
+    """
+    return f"{LISTENING} {stamp(at)}\n"
+
+
 def stop_five(root, board=None):
     """Start FIVE proven listeners (TIMED's ends on its own after SHORT_WAIT_SECONDS), wait for each record, put STALE's back to a stale `mail`, let `board` (when given) see all five listening, then: WOKEN mailed, KILLED, BARE and STALE killed by their pids, TIMED left to time out; once every lock is gone, BARE's record is moved aside. (records all made, the send's exit, every lock gone, the board's states while all listened or None).
 
@@ -986,6 +1020,51 @@ class BoardTest(UmaskTestCase):
             made, sent, gone, _ = stop_five(root)
             fresh = states(serve.Board(root=root.path, clock=time.time).feed())
             self.assertEqual((made, sent, gone, fresh), (True, 0, True, restarted))
+
+    # F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-1, a2's ruling (C5).
+    def test_a_down_node_carries_how_long_ago_it_stopped_from_the_sighting_or_else_the_record(self):
+        """down_age_s, by value. On a fresh Board (a restart), names whose records say listening, dated NINE_MIN_S and ELEVEN_MIN_S before the Board's clock, each with no lock held, read down with down_age_s NINE_MIN_S and ELEVEN_MIN_S; one whose record says mail reads idle with none. On a Board that saw a listener whose record says listening dated LONG_WAIT_S ago (a long wait's start), killed by its pid, the next feed STOP_SEEN_S later reads it down with down_age_s STOP_SEEN_S, never LONG_WAIT_S and more.
+
+        The page's pill warns only on a stop under DOWN_WINDOW_S old
+        (tests/board-patch.test.mjs holds that half). Must reject a feed
+        with no age (the pill could not tell), an age from the record
+        alone (a wait runs up to 110 min, so every kill of one would read
+        as stopped earlier and never warn), and an age on a node that
+        left on purpose.
+
+        @interacts  per subtest: inboxes, unheld locks and records made by
+                    hand; or one proven listener, its record replaced by
+                    hand (a .tmp renamed over it), killed by its pid; feeds
+                    of one Board on a clock the test sets.
+        @deps       serve.Board, listening_line, record_made, lock_gone,
+                    _root.TcRoot.listener; os, signal, time.
+        @complexity O(1) per subtest.
+        @alloc      one TcRoot and one Board per subtest.
+        """
+        with self.subTest(board="restarted, records only"), _root.TcRoot() as root:
+            now = float(int(time.time()))
+            for name, line in ((NINE, listening_line(now - NINE_MIN_S)), (ELEVEN, listening_line(now - ELEVEN_MIN_S)),
+                               (LEFT, f"{MAIL} {stamp(now - NINE_MIN_S)}\n")):
+                box = root.path / "mail" / f"to-{name}"
+                box.mkdir(parents=True)
+                (box / WAIT_LOCK).touch()
+                (box / RECORD).write_text(line)
+            nodes = {n["id"]: (n["state"], n["down_age_s"]) for n in serve.Board(root=root.path, clock=lambda: now).feed()["nodes"]}
+            self.assertEqual(nodes, {NINE: ("down", NINE_MIN_S), ELEVEN: ("down", ELEVEN_MIN_S), LEFT: ("idle", None)})
+        with self.subTest(board="saw it listening"), _root.TcRoot() as root:
+            box = root.path / "mail" / f"to-{NAME}"
+            clock = {"now": float(int(time.time()))}
+            board = serve.Board(root=root.path, clock=lambda: clock["now"])
+            with root.listener(NAME, LISTENER_SECONDS) as pid:
+                made = record_made(box)
+                (box / RECORD_TMP).write_text(listening_line(clock["now"] - LONG_WAIT_S))
+                os.rename(box / RECORD_TMP, box / RECORD)
+                seen = {n["id"]: n["state"] for n in board.feed()["nodes"]}.get(NAME)
+                os.kill(pid, signal.SIGKILL)
+                gone = lock_gone(box / WAIT_LOCK, pid)
+            clock["now"] += STOP_SEEN_S
+            after = {n["id"]: (n["state"], n["down_age_s"]) for n in board.feed()["nodes"]}.get(NAME)
+            self.assertEqual((made, seen, gone, after), (True, "listening", True, ("down", STOP_SEEN_S)))
 
 
 if __name__ == "__main__":
