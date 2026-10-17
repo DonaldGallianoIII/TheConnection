@@ -576,6 +576,16 @@ its last wait ended, from the wait's exit record
 
 The exit record is never proof of life. Only a held lock is.
 
+<!-- Clearing a closed session's name: the DOCS2 lane agent (Claude Opus 5.5), 2026-10-17. Status: unreviewed. -->
+**A session closed for good** kills its wait, so its name keeps reading
+`stopped: <name> (listening, ...)` here and `✕ no listener` on the
+board. To clear it, run `tc wait <name> --timeout 1` once, as that
+name's own Linux user: it ends at its timeout and records `timeout`, so
+health lists `stopped: <name> (timeout, ...)` and the board reads
+`○ idle`. If mail is waiting for the name, it ends at once with `MAIL:`
+and records `mail` instead, and the board warns `woken · not read`
+until someone runs `tc read <name>`.
+
 Lines that appear only when something is wrong: `stuck` (ssh mail waiting
 in the outbox longer than a day), `squatted` (an outbox branch another
 member made), `held` (on a shared mailbox, a lock held by someone other
