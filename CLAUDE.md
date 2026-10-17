@@ -73,8 +73,10 @@ Two ideas carry the whole tool.
 - Every tunable is a module constant at the top of `tc` with a comment
   saying why (`DEFAULT_WAIT_SECONDS`, `WAIT_MEMORY_CAP_BYTES`,
   `CACHE_TTL_SECONDS`). The only other globals are `ROOT` and the
-  paths built from it (`MAIL`, `STATUS`, `SEQ_FILE`, `CARDS`). tc fixes
-  all five at import, from `TC_ROOT`.
+  paths built from it (`MAIL`, `STATUS`, `SEQ_FILE`, `CARDS`), plus
+  `ROOT_FROM`, which says whether `TC_ROOT` set ROOT or tc's own folder
+  did (R2; `tc health` prints it). tc fixes all six at import, from
+  `TC_ROOT`.
 - `TC_ROOT` moves the whole mailbox. Every test and every hand run uses its
   own `TC_ROOT` in a temp folder.
 - Exit codes are the interface for the waking side. The one table is
