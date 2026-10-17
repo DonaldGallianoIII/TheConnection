@@ -1359,12 +1359,11 @@ class RegularFilesOnlyTest(UmaskTestCase):
         Must reject a lock key read through the link (b would show a's
         holder, while b's own tc wait is refused). P3 fix round 1b
         (Claude Opus 5.5, unreviewed): D35 (1), the locks in their owners'
-        inboxes; and on this private mailbox the switch-over's old place
-        too, mail/.wait-c.lock a link to a's lock, which is never followed
-        either.
+        inboxes. F2 (Claude Opus 5.5, unreviewed): the switch-over's old
+        place is gone from tc, and its link case with it.
 
         @interacts  loads tc in process; makes mail/, two inboxes, one lock
-                    file and two links by hand; holds an flock on the lock
+                    file and one link by hand; holds an flock on the lock
                     while listeners() reads /proc/locks.
         @deps       load_tc; fcntl; tc.listeners.
         @complexity O(1).
@@ -1378,7 +1377,6 @@ class RegularFilesOnlyTest(UmaskTestCase):
             lock = mail / "to-a" / ".wait.lock"
             lock.write_text("")
             (mail / "to-b" / ".wait.lock").symlink_to(lock)
-            (mail / ".wait-c.lock").symlink_to(lock)
             with open(lock, "w") as held:
                 fcntl.flock(held, fcntl.LOCK_EX)
                 seen = tc.listeners("wait")

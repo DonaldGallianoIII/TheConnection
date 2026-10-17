@@ -153,11 +153,11 @@ partner is a lower relay is drawn as that relay's `worker`, marked
 
 @interacts  loads ../tc as a module from its source, compiled in memory,
             with TC_ROOT set for the load only, then calls tc.now_iso(), tc.listeners("wait") (reads
-            ROOT/.shared and /proc/locks, opens mail/ and each
-            mail/to-<name>/ by name and lstats the .wait.lock in it, its
-            owner's since D35; on a private mailbox, until every listener
-            started before has re-armed, also mail/.wait-*.lock: P3 fix
-            round 1b, Claude Opus 5.5, unreviewed) and tc.mailbox_summary()
+            /proc/locks, opens mail/ and each mail/to-<name>/ by name and
+            lstats the .wait.lock in it, its owner's since D35: P3 fix
+            round 1b, Claude Opus 5.5, unreviewed; F2, Claude Opus 5.5,
+            unreviewed: only there, never mail/.wait-*.lock and never
+            ROOT/.shared) and tc.mailbox_summary()
             (opens mail/ once and each mail/to-<name>/ and its read/ by
             name, lists each in its own descriptor and stats each message
             name there, never through a link, and lstats each name's

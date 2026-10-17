@@ -2,9 +2,10 @@
 Tests for the wake files of P3 fix round 1b (D35 (1), D36 (2); the audit's
 HIGH-2, audits/2026-10-15-1409-full): each name's wait and watch locks
 live in its owner's own inbox at 0600, a link or FIFO planted at a lock's
-name is moved aside and never followed, a listener started before the
-change still counts on a private mailbox until it re-arms and never on a
-shared one, only a name's owner listens for it on a shared mailbox, a
+name is moved aside and never followed, the locks' place before the
+change is never read (F2, Claude Opus 5.5, unreviewed: the switch-over
+that read it on a private mailbox is gone), only a name's owner listens
+for it on a shared mailbox, a
 private mailbox keeps its wait exactly, and tc wait and tc watch close
 their lock file on every way out. And D35 (3): a busy refusal names the
 holder, its user and pid, and whom to ask, and tc health lists a lock
@@ -53,10 +54,9 @@ second-user walk is qa/human/route-shared.md.
             (never a RING_BACKOFF_SECONDS sleep); it makes a link, a FIFO
             and a hard link by hand, and a fake codex first on PATH, its
             calls asserted. P3 fix round 2 (Claude Opus 5.5, unreviewed:
-            test-strategist REC-1, REC-2, REC-3 and REC-6): two children
-            hold one inbox lock shared (HOLD_SHARED_SCRIPT), one child
-            holds a lock outside mail/ that a link at the old place leads
-            to, and tc's process_uid is made to see no process, as
+            test-strategist REC-1, REC-2 and REC-3): two children
+            hold one inbox lock shared (HOLD_SHARED_SCRIPT), and tc's
+            process_uid is made to see no process, as
             hidepid does; the audit's LOW-1 test runs tc's hold_wake_lock
             twice in process, the second with tc's move_aside, name_taken
             or open_wake_lock wrapped to run the first whole, or to
@@ -118,8 +118,9 @@ NEW_NAME = "newcomer"
 # (tc's WAKE_LOCK_NAME), written here rather than read from tc.
 KINDS = ("wait", "watch")
 LOCK_NAME = ".{kind}.lock"
-# Where the locks lived before round 1b (tc's OLD_WAKE_LOCK_NAME), the
-# switch-over's old place.
+# Where the locks lived before round 1b, the switch-over's old place. F2
+# (Claude Opus 5.5, unreviewed): tc no longer names or reads it; the tests
+# plant it to prove that.
 OLD_LOCK_NAME = ".{kind}-{name}.lock"
 # A wake lock's mode: its owner's alone.
 WAKE_LOCK_MODE = 0o600
@@ -555,7 +556,7 @@ def watch_args(name, heartbeat, mem_min_pct=QUIET_ARGS["mem_min_pct"]):
 
 
 class WakeLockPlaceTest(UmaskTestCase):
-    """D35 (1): each lock in its owner's own inbox at 0600, anything else at its name moved aside, the switch-over's two halves, and (P3 fix round 2) a plant another member holds is never the owner's listener.
+    """D35 (1): each lock in its owner's own inbox at 0600, anything else at its name moved aside, the old place never read (F2, Claude Opus 5.5, unreviewed: in place of the switch-over's two halves), and (P3 fix round 2) a plant another member holds is never the owner's listener.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, listen, hold,
@@ -681,83 +682,64 @@ class WakeLockPlaceTest(UmaskTestCase):
                 self.assertEqual((stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid),
                                  (True, WAKE_LOCK_MODE, os.geteuid()), "no new lock of the owner's at its name")
 
-    def test_on_a_private_mailbox_a_listener_from_before_still_counts_until_it_rearms(self):
-        """The switch-over, private: with mail/.wait-x.lock and .watch-x.lock held by listeners from before round 1b, tc health names their pids, a new tc wait x and tc watch x exit 3 with today's words and make no inbox; once they go, a new wait runs and health names none; a FIFO at the old place stops nothing, and nor does a link there to a lock a live child holds, which health names for nobody.
+    # F2 (Claude Opus 5.5, unreviewed): the switch-over is gone, and this test replaces its two.
+    def test_on_a_private_mailbox_the_old_place_is_never_read(self):
+        """Private: with mail/.wait-x.lock and .watch-x.lock, the locks' place before round 1b, each held by a live process, listeners() and tc health name no listener and no watcher for x; then a new tc wait x and tc watch x each start and hold their own lock in mail/to-x/, and health names their pids.
 
-        Must reject a new listener that ignores the old place (two
-        listeners for one name while the dev branch's sessions re-arm),
-        and a listeners() that drops the old holder (health and the board
-        would say nobody listens while one does). The second half is in
-        test_on_a_shared_mailbox_the_old_place_is_never_read. P3 fix round
-        2 (Claude Opus 5.5, unreviewed): test-strategist REC-6. Must
-        reject an old-place check that follows a link: the link leads to
-        a lock someone holds, and the new wait would stop with exit 3.
+        The switch-over read the old place on a private mailbox until
+        every session had re-armed under the P3 fix's tc; F2 removed it.
+        Must reject a listeners() that still reads the old place (health
+        and the board would name, as x's listener, a pid that holds no
+        lock of tc's), and a wait or watch that still stops with exit 3
+        beside an old lock. A shared mailbox never read it: the class
+        proof's wait and watch rows (listener_case) hold the old place
+        while ann's command runs, which proves the start half (no exit
+        3); its listeners() snapshot is taken while ann holds her own
+        lock, so it cannot see an old-place read. That half is proved
+        here, on a private mailbox only.
 
-        @interacts  three children holding the old locks and the link's
-                    target, killed by their own pids; health, waits and
-                    watches; one FIFO and one link made by hand.
-        @deps       hold, health, listen; _root.TcRoot.tc; os.
-        @complexity O(1).
-        @alloc      one TcRoot.
+        @interacts  two children holding the old locks; loads tc and calls
+                    listeners in process; one background tc wait and then
+                    one tc watch, each proven in /proc/locks; two health
+                    runs. Every child is killed by its own pid with the
+                    root.
+        @deps       hold, health, proven, load_tc; _root.TcRoot.start,
+                    _root.flock_holders; OLD_LOCK_NAME, LOCK_NAME, KINDS,
+                    LISTEN_SECONDS, QUIET.
+        @complexity O(1): two holders, two listeners, two health runs.
+        @alloc      one TcRoot and one module.
         """
+        keys = {"wait": "listeners", "watch": "watchers"}
         with _root.TcRoot() as root:
             mail = root.path / "mail"
             mail.mkdir()
-            holders = {kind: hold(root, mail / OLD_LOCK_NAME.format(kind=kind, name="x")) for kind in KINDS}
-            seen = health(root)
-            stopped = {kind: listen(root, kind, "x") for kind in KINDS}
-            made = (mail / "to-x").exists()
-            for proc in holders.values():
-                proc.kill()
-                proc.wait(timeout=_root.REAP_CEILING_SECONDS)
-            later = listen(root, "wait", "x")
-            after = health(root)
-            os.mkfifo(mail / OLD_LOCK_NAME.format(kind="wait", name="y"))
-            # P3 fix round 2 (Claude Opus 5.5, unreviewed): REC-6, the link leads to a lock a live child holds.
-            elsewhere = root.base / "held-elsewhere.lock"
-            target_holder = hold(root, elsewhere)
-            (mail / OLD_LOCK_NAME.format(kind="wait", name="z")).symlink_to(elsewhere)
-            fifo, link = listen(root, "wait", "y"), listen(root, "wait", "z")
-            linked = health(root)
-            still_held = target_holder.pid in _root.flock_holders(elsewhere)
-        self.assertEqual((seen["listeners"].get("x"), seen["watchers"].get("x")),
-                         (holders["wait"].pid, holders["watch"].pid), "health lost a listener from before round 1b")
-        for kind in KINDS:
-            self.assertEqual(stopped[kind], (EXIT_ALREADY, ALREADY_WORDS[kind].format(name="x"), ""))
-        self.assertFalse(made, "a listener stopped by the old place made an inbox")
-        self.assertEqual(later[0], EXIT_TIMEOUT, later)
-        self.assertIsNone(after["listeners"].get("x"), after["listeners"])
-        self.assertTrue(still_held, "the link's target was not held while the waits ran, so the case proves nothing")
-        self.assertEqual((fifo[0], link[0]), (EXIT_TIMEOUT, EXIT_TIMEOUT), (fifo, link))
-        self.assertIsNone(linked["listeners"].get("z"), f"health named the link's holder for z: {linked['listeners']}")
-
-    def test_on_a_shared_mailbox_the_old_place_is_never_read(self):
-        """The switch-over, shared: with mail/.wait-ann.lock held by another process, tc health never names it for ann, and ann's own tc wait is not stopped: it holds mail/to-ann/.wait.lock, and health names its pid.
-
-        Must reject a shared mailbox that reads the old place: any member
-        may make and hold mail/.wait-ann.lock there, the hole D35 closes.
-
-        @interacts  an init and a join; one child holding the old lock;
-                    one background tc wait, proven in /proc/locks; two
-                    health runs.
-        @deps       hold, health, proven, primary_group;
-                    _root.TcRoot.tc, start.
-        @complexity O(1).
-        @alloc      one TcRoot.
-        """
-        _, group, _ = primary_group()
-        with _root.TcRoot() as root:
-            self.assertEqual(root.tc("init", "--shared", "--group", group)[0], 0)
-            self.assertEqual(root.tc("join", OWNER, env={"CLAUDECODE": "1"})[0], 0)
-            mail = root.path / "mail"
-            holder = hold(root, mail / OLD_LOCK_NAME.format(kind="wait", name=OWNER))
+            olds = {kind: mail / OLD_LOCK_NAME.format(kind=kind, name="x") for kind in KINDS}
+            holders = {kind: hold(root, olds[kind]) for kind in KINDS}
+            tc = load_tc(root)
+            listed = {kind: tc.listeners(kind) for kind in KINDS}
             before = health(root)
-            waiting = root.start("wait", OWNER, "--timeout", LISTEN_SECONDS)
-            held = proven(mail / f"to-{OWNER}" / LOCK_NAME.format(kind="wait"), waiting)
+            argv = {"wait": ("wait", "x", "--timeout", LISTEN_SECONDS),
+                    "watch": ("watch", "x", "--heartbeat", LISTEN_SECONDS, "--poll", LISTEN_SECONDS, *QUIET)}
+            started, held = {}, {}
+            for kind in KINDS:  # one after the other, so the two never race to make the inbox
+                started[kind] = root.start(*argv[kind])
+                held[kind] = proven(mail / "to-x" / LOCK_NAME.format(kind=kind), started[kind])
             during = health(root)
-        self.assertNotEqual(before["listeners"].get(OWNER), holder.pid, "a shared mailbox read the old place")
-        self.assertTrue(held, f"ann's own tc wait (pid {waiting.pid}) never held its lock in her inbox")
-        self.assertEqual(during["listeners"].get(OWNER), waiting.pid)
+            still = {kind: holders[kind].pid in _root.flock_holders(olds[kind]) for kind in KINDS}
+            for kind in KINDS:
+                with self.subTest(kind=kind, check="the old lock was held throughout"):
+                    self.assertTrue(still[kind], f"nothing held {olds[kind].name} while tc looked, so the case "
+                                                 f"proves nothing")
+                with self.subTest(kind=kind, read_by="listeners()"):
+                    self.assertIsNone(listed[kind].get("x"), f"listeners() read the old place: {listed[kind]}")
+                with self.subTest(kind=kind, read_by="tc health"):
+                    self.assertIsNone(before[keys[kind]].get("x"),
+                                      f"tc health read the old place: {before[keys[kind]]}")
+                with self.subTest(kind=kind, check="a new one holds its own lock"):
+                    self.assertTrue(held[kind], f"tc {kind} x (pid {started[kind].pid}) never held "
+                                                f"mail/to-x/{LOCK_NAME.format(kind=kind)} beside an old lock")
+                with self.subTest(kind=kind, check="health names the new one"):
+                    self.assertEqual(during[keys[kind]].get("x"), started[kind].pid, during[keys[kind]])
 
     # P3 fix round 2 (Claude Opus 5.5, unreviewed): test-strategist REC-2, the P3 review's HIGH-2 by name.
     def test_a_lock_another_member_planted_and_holds_is_never_the_owners_listener_even_when_proc_hides_its_holder(self):
