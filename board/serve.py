@@ -3,8 +3,10 @@
 serve.py: the live board's feed (C5) and its server (C6). Loads tc as a
 module and never edits it. feed() builds one JSON object from the parts
 it needs: the machine (machine_now, tc's numbers and rounding read here),
-the listeners and the mail (tc.listeners, tc.mailbox_summary), the
-address cards and the message file names, never from tc.health_snapshot().
+the listeners and the mail (tc.listeners, tc.mailbox_summary), each
+stopped name's wait exit record (tc.wait_exits; F1, Claude Opus 5.5,
+unreviewed), the address cards and the message file names, never from
+tc.health_snapshot().
 It never opens a message body. The server reads only: it answers GET and
 HEAD on 127.0.0.1, gives the feed to a request that carries the token, and
 serves an allow list of the board's own files.
@@ -1110,12 +1112,27 @@ class Board:
     fake one so windows can be crossed without waiting. feed() is not safe
     from two threads at once; BoardServer calls it under its own lock.
 
-    @interacts  see the module block.
-    @deps       load_tc and the module's helpers.
+    F1 (Claude Opus 5.5, unreviewed): C5's wait exit record. Each poll
+    reads the record of every name with no pid afresh (tc.wait_exits) and
+    keeps none of it, so a restart loses nothing the record says: a name
+    whose record says `listening` (its wait was killed or crashed) reads
+    `down` on a fresh Board and stays `down` past DOWN_WINDOW_S, until a
+    pid holds its lock again (`writing` still comes first, as C5 orders
+    it); one whose record says `mail` or `timeout`,
+    dated after this Board last saw its lock (any date on a fresh Board),
+    is never `down` (stopped_state). The memory above still decides
+    `woken` and `working`, and every state with no record. The record is
+    never proof of life: `listening` comes from a pid alone.
+
+    @interacts  see the module block; each poll also opens each stopped
+                name's inbox and reads its exit record (tc.wait_exits).
+    @deps       load_tc and the module's helpers; stopped_state,
+                tc.wait_exits, tc.left_on_purpose (F1).
     @complexity O(1) to build, plus one load of tc.
     @alloc      the tc module, last_listening_at, first_missing_at, wakes
                 and nested_cards, held for the object's life (the module
-                block bounds each).
+                block bounds each); nothing from the exit records is
+                held across polls (F1).
     """
 
     def __init__(self, root=None, clock=time.time):
