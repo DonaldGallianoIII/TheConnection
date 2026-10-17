@@ -107,8 +107,9 @@ inbox (moved aside, still pinned) holds after the act.
             process. EveryInboxActHasARowTest reads ../tc's text and
             parses it; it runs nothing.
 @deps       python3 stdlib (argparse, ast, collections, contextlib,
-            importlib, io, json, os, pathlib, resource, stat, sys, time,
-            unittest, unittest.mock); tests/_root.py; UmaskTestCase, as_member,
+            io, json, os, pathlib, resource, stat, sys, time,
+            unittest, unittest.mock); tests/_root.py (load_source loads
+            serve.py with no bytecode cache, R30); UmaskTestCase, as_member,
             load_tc and primary_group from test_shared.py; hold,
             holder_patched_stat and HOLDER_UID_STEP from
             test_wake_files.py; ../tc; ../board/serve.py.
@@ -125,7 +126,6 @@ import argparse
 import ast
 import collections
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -257,15 +257,16 @@ REAL_LSTAT = os.lstat
 def load_serve():
     """Load board/serve.py as a module, as the board tests do.
 
+    R30 (Claude Opus 5.5, unreviewed): through _root.load_source, so no
+    bytecode cache of serve.py is read or written.
+
     @interacts  executes serve.py's top level (constants and definitions).
-    @deps       importlib; SERVE_PATH.
-    @complexity O(1).
+                Writes no file.
+    @deps       _root.load_source; SERVE_PATH.
+    @complexity O(s) over s bytes of serve.py: one compile.
     @alloc      one module object, returned.
     """
-    spec = importlib.util.spec_from_file_location("board_serve_pinned", SERVE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _root.load_source("board_serve_pinned", SERVE_PATH)
 
 
 serve = load_serve()

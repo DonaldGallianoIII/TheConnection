@@ -50,9 +50,10 @@ rewrites it as `clear`, so the D14 and D16 tests read its state
             the record or its branch by hand (the mode put back), or
             patching os.lstat and os.fstat (test_shared.py's owner
             patches) so the branch reads as another user's.
-@deps       python3 stdlib (contextlib, datetime, fcntl, importlib, json,
+@deps       python3 stdlib (contextlib, datetime, fcntl, json,
             os, pathlib, pwd, shlex, signal, stat, subprocess, sys,
-            tempfile, time, unittest, unittest.mock); tests/_root.py;
+            tempfile, time, unittest, unittest.mock); tests/_root.py
+            (load_source loads tc with no bytecode cache, R30);
             owner_patched_lstat and owner_patched_fstat from
             test_shared.py (DoorbellRecordTest); ../tc. test_router.py and
             test_cards.py import FINISH_CEILING_SECONDS and
@@ -77,8 +78,6 @@ rewrites it as `clear`, so the D14 and D16 tests read its state
 import contextlib
 import datetime
 import fcntl
-import importlib.machinery
-import importlib.util
 import json
 import os
 import pathlib
@@ -449,18 +448,17 @@ def load_tc(root, where=None):
     test that needs a root with an awkward name.
 
     @interacts  sets and restores os.environ["TC_ROOT"]; runs tc's top
-                level (constants only, no disk writes).
-    @deps       importlib, os; _root.TC.
-    @complexity O(1).
+                level (constants only, no disk writes). Reads and writes
+                no bytecode cache (_root.load_source; R30, Claude Opus
+                5.5, unreviewed).
+    @deps       os; _root.TC, _root.load_source.
+    @complexity O(s) over s bytes of tc: one compile.
     @alloc      one module object, returned.
     """
     old = os.environ.get("TC_ROOT")
     os.environ["TC_ROOT"] = str(where if where is not None else root.path)
     try:
-        loader = importlib.machinery.SourceFileLoader("tc_codex_under_test", str(_root.TC))
-        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-        loader.exec_module(mod)
-        return mod
+        return _root.load_source("tc_codex_under_test", _root.TC)
     finally:
         if old is None:
             os.environ.pop("TC_ROOT", None)

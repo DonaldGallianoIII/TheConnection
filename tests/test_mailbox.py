@@ -29,9 +29,10 @@ joined will warn there (open item O1). No test depends on `tc read` or
             each test's temp folder. At import, K3's block ceiling reads
             LOCK_WAIT_SECONDS from ../tc's source (tc_constant; SHARED fix
             round 3, Claude Opus 5.5, unreviewed), which runs nothing.
-@deps       python3 stdlib (ast, builtins, contextlib, fcntl, importlib, io,
+@deps       python3 stdlib (ast, builtins, contextlib, fcntl, io,
             os, pathlib, re, shlex, subprocess, sys, time, unittest,
-            unittest.mock); tests/_root.py; ../tc; Linux only (flock,
+            unittest.mock); tests/_root.py (load_source loads tc with no
+            bytecode cache, R30); ../tc; Linux only (flock,
             /proc/locks).
 @complexity O(1) tc commands per test, except K3: S = SENDERS = 50
             children, and each poll of /proc/locks is O(k + S) over k
@@ -48,8 +49,6 @@ import ast
 import builtins
 import contextlib
 import fcntl
-import importlib.machinery
-import importlib.util
 import io
 import os
 import pathlib
@@ -277,17 +276,17 @@ def load_tc(root):
 
     @interacts  reads ../tc and runs its top level (constants and
                 function definitions only); os.environ is changed for the
-                load and restored.
-    @deps       importlib, unittest.mock; ../tc (TC).
-    @complexity O(e) over e environment variables (tens), plus tc's import.
+                load and restored. Reads and writes no bytecode cache
+                (_root.load_source; R30, Claude Opus 5.5, unreviewed).
+    @deps       unittest.mock; _root.load_source; ../tc (TC).
+    @complexity O(e) over e environment variables (tens), plus O(s) over
+                s bytes of tc: one compile.
     @alloc      one module object, returned; it is not put in sys.modules.
     """
     clean = {k: v for k, v in os.environ.items() if not k.startswith(TC_ENV_PREFIX)}
     clean["TC_ROOT"] = str(root.path)
     with mock.patch.dict(os.environ, clean, clear=True):
-        loader = importlib.machinery.SourceFileLoader(TC_MODULE_NAME, str(TC))
-        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-        loader.exec_module(module)
+        module = _root.load_source(TC_MODULE_NAME, TC)
     return module
 
 

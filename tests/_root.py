@@ -50,8 +50,15 @@ Layout inside the temporary folder:
             /proc/locks to prove a listener. Starts `tc wait` and start()
             children (tc, or the argv a test gives start()) and kills each
             by its own pid. Writes fake executables that the code under
-            test finds through PATH.
-@deps       python3 stdlib (contextlib, json, os, pathlib, re, shlex,
+            test finds through PATH. R30 (Claude Opus 5.5, unreviewed):
+            every child runs with PYTHONDONTWRITEBYTECODE=1, whatever a
+            test's env says, and load_source loads tc or board/serve.py
+            as a module in the test's own process, compiled from source,
+            reading and writing no bytecode cache. Python trusts a cache
+            by its source's size and whole-second mtime alone, so a
+            cached load could run old code after a same-size edit.
+@deps       python3 stdlib (contextlib, importlib.machinery,
+            importlib.util, json, os, pathlib, re, shlex,
             subprocess, sys, tempfile, time); /bin/sh for the stubs and the
             fakes' wrappers; Linux only (/proc/locks, flock); ../tc. No
             imports from tc itself, so a bug in tc's lock reading cannot
@@ -66,6 +73,8 @@ Layout inside the temporary folder:
             it; numbering it reads one counter, O(1) in earlier calls. Its
             reader, calls(), is O(B) over B bytes recorded, every call's
             stdin included (a few KB at planned loads).
+            load_source(): O(s) over s bytes of the source, one compile
+            (tc is about 500 KB).
             Teardown: O(h) over h children this root started, up to about
             50 (CORE K3's senders through start()). Every child gets
             SIGKILL first, then every reap shares one deadline, so h stuck
@@ -75,10 +84,13 @@ Layout inside the temporary folder:
             listener's is dropped from the child list, killed and reaped in
             its own teardown; __exit__ kills and reaps the rest, then clears
             the child list and the env copy. Nothing is retained after
-            __exit__.
+            __exit__. load_source() returns one module object, which its
+            caller holds.
 """
 
 import contextlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import pathlib
@@ -121,6 +133,11 @@ CHILD_ENV_DROP = (
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "SSH_AUTH_SOCK",
 )
+# R30 (Claude Opus 5.5, unreviewed): set in every child's environment, over
+# whatever the shell or a test's env says. Python trusts a bytecode cache
+# by its source's size and whole-second mtime alone, so a cache a child
+# wrote could run in place of a same-size edit made in the same second.
+NO_BYTECODE_ENV = ("PYTHONDONTWRITEBYTECODE", "1")
 # Tools no agent runs for real (rule 5). A refusing stub for each sits first
 # on every child's PATH, behind only the fakes a test writes.
 REFUSED_TOOLS = ("ssh", "codex")
@@ -248,6 +265,59 @@ def flock_holders(path):
     return held
 
 
+# R30 (Claude Opus 5.5, unreviewed): a loader that compiles from source every time.
+class _SourceOnlyLoader(importlib.machinery.SourceFileLoader):
+    """A SourceFileLoader whose get_code never reads or writes a bytecode cache.
+
+    The stock get_code looks in __pycache__ first and trusts a cache whose
+    header matches the source's size and whole-second mtime, then writes
+    one if it compiled. So two same-size edits in one second run the first
+    edit's code, and a cache planted with a matching header runs in place
+    of the source. This get_code reads the source and compiles it, the way
+    board/serve.py's load_tc does, and touches __pycache__ not at all.
+
+    @interacts  reads the source file. Writes no file.
+    @deps       importlib.machinery.
+    @complexity O(s) over s bytes of the source: one compile per get_code.
+    @alloc      one code object per call, returned.
+    """
+
+    def get_code(self, fullname):
+        """Compile the source at this loader's path; no cache is looked up or written.
+
+        @interacts  reads the source file (get_data). Writes no file.
+        @deps       SourceFileLoader.get_filename, get_data, source_to_code.
+        @complexity O(s) over s bytes of the source.
+        @alloc      the source bytes, freed on return; one code object,
+                    returned.
+        """
+        path = self.get_filename(fullname)
+        return self.source_to_code(self.get_data(path), path)
+
+
+# R30 (Claude Opus 5.5, unreviewed): the one loader the suites use.
+def load_source(name, path):
+    """Load the Python source at `path` as a module named `name`; no bytecode cache is read or written.
+
+    Every test that loads tc or board/serve.py as a module calls this,
+    and keeps its own steps around it (TC_ROOT set for the load and put
+    back). The module is not put in sys.modules. The module's spec and
+    loader are those of an import (a SourceFileLoader, `name`, `path` as
+    its origin); only get_code differs (_SourceOnlyLoader). An import
+    the loaded code makes itself goes through the normal machinery: tc
+    and serve.py import the standard library only.
+
+    @interacts  reads `path`; runs its top level. Writes no file.
+    @deps       importlib.util; _SourceOnlyLoader.
+    @complexity O(s) over s bytes of the source: one compile.
+    @alloc      one module object, returned; the caller holds it.
+    """
+    loader = _SourceOnlyLoader(name, str(path))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader))
+    loader.exec_module(module)
+    return module
+
+
 def _kill(proc):
     """Send SIGKILL to one child by its own pid, if it still runs. No reap.
 
@@ -320,11 +390,12 @@ class TcRoot:
     Attributes, set by __enter__: `base` (the temporary folder), `path`
     (TC_ROOT, inside base), `env` (the environment every child gets: the
     inherited one without TC_* or CHILD_ENV_DROP, TC_ROOT set to `path`,
-    PATH starting with the refusing stubs; fake_bin() puts its folder in
-    front of them).
+    PYTHONDONTWRITEBYTECODE set to 1, PATH starting with the refusing
+    stubs; fake_bin() puts its folder in front of them).
 
     @interacts  see the module block. Every command runs with TC_ROOT set
-                to `path`, whatever the caller passes.
+                to `path` and PYTHONDONTWRITEBYTECODE=1 (R30, Claude Opus
+                5.5, unreviewed), whatever the caller passes.
     @deps       tempfile, subprocess, shlex; ../tc; /bin/sh.
     @complexity O(e + p) to enter, over e environment variables and p PATH
                 entries (tens each). Exit is O(h) over h children started,
@@ -355,8 +426,10 @@ class TcRoot:
         @interacts  creates one folder under the system temp folder, with
                     root/ and refuse/ in it, and writes one refusing stub
                     per REFUSED_TOOLS entry. Reads os.environ and copies it
-                    without TC_* or CHILD_ENV_DROP variables.
-        @deps       tempfile, os, shlex.
+                    without TC_* or CHILD_ENV_DROP variables, and with
+                    PYTHONDONTWRITEBYTECODE=1 (NO_BYTECODE_ENV; R30,
+                    Claude Opus 5.5, unreviewed).
+        @deps       tempfile, os, shlex; NO_BYTECODE_ENV.
         @complexity O(e + p) over e environment variables and p PATH
                     entries (tens each), plus R = len(REFUSED_TOOLS) = 2
                     stubs written.
@@ -378,6 +451,7 @@ class TcRoot:
                     if not k.startswith(TC_ENV_PREFIX) and k not in CHILD_ENV_DROP}
         self.env["TC_ROOT"] = str(self.path)
         self.env["PATH"] = self._guard_path(self.env.get("PATH", os.defpath))
+        self.env[NO_BYTECODE_ENV[0]] = NO_BYTECODE_ENV[1]  # R30 (Claude Opus 5.5, unreviewed)
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -451,12 +525,14 @@ class TcRoot:
         """The environment one child gets: this root's env, with `env` over it.
 
         A key set to None in `env` is unset for this child only. TC_ROOT is
-        always this root's path, and PATH goes through _guard_path whatever
-        `env` says. Raises ValueError if `env` unsets PATH: with no PATH a
-        child falls back to the system's own folders, past the stubs.
+        always this root's path, PYTHONDONTWRITEBYTECODE is always 1
+        (NO_BYTECODE_ENV; R30, Claude Opus 5.5, unreviewed), and PATH goes
+        through _guard_path whatever `env` says. Raises ValueError if `env`
+        unsets PATH: with no PATH a child falls back to the system's own
+        folders, past the stubs.
 
         @interacts  none; reads this root's env.
-        @deps       _guard_path.
+        @deps       _guard_path; NO_BYTECODE_ENV.
         @complexity O(e + p) over e variables and p PATH entries (tens each).
         @alloc      one env dict, returned.
         """
@@ -471,6 +547,7 @@ class TcRoot:
                              "ssh and codex stubs live on it")
         run_env["TC_ROOT"] = str(self.path)
         run_env["PATH"] = self._guard_path(run_env["PATH"])
+        run_env[NO_BYTECODE_ENV[0]] = NO_BYTECODE_ENV[1]  # R30 (Claude Opus 5.5, unreviewed)
         return run_env
 
     def tc(self, *args, stdin=None, env=None, timeout=DEFAULT_TC_TIMEOUT_SECONDS):
@@ -479,8 +556,9 @@ class TcRoot:
         `stdin` is a string fed to tc, or /dev/null when None. `env` holds
         variables layered over this root's env for this call only (PATH, a
         TC_* setting, an identity variable). A key set to None is unset for
-        this call. TC_ROOT always stays this root, and the refusing stubs
-        stay ahead of every folder outside it (see _child_env). A run past
+        this call. TC_ROOT always stays this root, PYTHONDONTWRITEBYTECODE
+        stays 1, and the refusing stubs stay ahead of every folder outside
+        it (see _child_env). A run past
         `timeout` raises subprocess.TimeoutExpired after killing the child.
 
         @interacts  runs [sys.executable, TC, *args] as a child and waits.

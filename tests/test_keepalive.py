@@ -2,14 +2,15 @@
 Tests for `tc wait --keepalive` and the keep-alive timing.
 
 @interacts  runs ../tc as a subprocess and loads it as a module for the
-            timing math; touches only a tempdir
-@deps       python3 stdlib (unittest, subprocess, tempfile, importlib)
+            timing math, with no bytecode cache read or written
+            (tests/_root.py's load_source; R30, Claude Opus 5.5,
+            unreviewed); touches only a tempdir
+@deps       python3 stdlib (unittest, subprocess, tempfile);
+            tests/_root.py (load_source only)
 @complexity O(1) per test; the slowest waits about 3 s
 @alloc      one tempdir per test, removed in tearDown
 """
 
-import importlib.machinery
-import importlib.util
 import os
 import pathlib
 import subprocess
@@ -18,21 +19,38 @@ import tempfile
 import time
 import unittest
 
-TC = pathlib.Path(__file__).resolve().parent.parent / "tc"
+HERE = pathlib.Path(__file__).resolve().parent
+# R30 (Claude Opus 5.5, unreviewed): for _root.load_source. Run as
+# `python3 -m unittest tests.test_keepalive` from the repo root, tests/ is
+# not on sys.path; under discover it is. Add it once so both work.
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+import _root  # noqa: E402  (needs the path line above)
+
+TC = HERE.parent / "tc"
 SHORT_TTL = "3"            # keepalive_seconds() = 3 - min(300, 3/12) = 2.75 s
 SHORT_WAIT_MIN = 2.0
 SHORT_WAIT_MAX = 6.0
 
 
 def load_tc(ttl):
-    """Import tc as a module with a given TTL, without running main()."""
+    """Import tc as a module with a given TTL, without running main().
+
+    R30 (Claude Opus 5.5, unreviewed): through _root.load_source, so no
+    bytecode cache of tc is read or written.
+
+    @interacts  sets and restores os.environ["TC_CACHE_TTL_SECONDS"]; runs
+                tc's top level (constants only). TC_ROOT is left as it
+                stands. Writes no file.
+    @deps       os; _root.load_source; TC.
+    @complexity O(s) over s bytes of tc: one compile.
+    @alloc      one module object, returned.
+    """
     old = os.environ.get("TC_CACHE_TTL_SECONDS")
     os.environ["TC_CACHE_TTL_SECONDS"] = str(ttl)
     try:
-        loader = importlib.machinery.SourceFileLoader(f"tc_{ttl}", str(TC))
-        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-        loader.exec_module(mod)
-        return mod
+        return _root.load_source(f"tc_{ttl}", TC)
     finally:
         if old is None:
             os.environ.pop("TC_CACHE_TTL_SECONDS")
