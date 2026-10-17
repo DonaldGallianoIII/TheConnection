@@ -61,6 +61,46 @@ The queue, when work resumes:
    one member's trust in another's ssh card, init's member rerun exit),
    and the 18 old lock files the owner may remove.
 
+### Stopped for the night, 2026-10-17
+
+Merged since the list above: R39 (`tests/test_readme.py` runs every
+README block with a command and checks the README's exit table; it found
+and fixed two wrong message numbers) and EXIT_OK (exit code 0 is a named
+constant, settling pause R39-1). Public main was fast-forwarded once
+today to `b15b410`; a second main update follows these two.
+
+**The owner's human walks**, never yet run by a person, in the order the
+relay put them on his list:
+1. `qa/human/route-local.md`, part B first: the plan's exit test, a
+   stranger getting two sessions talking from the README alone.
+2. `qa/human/route-shared.md`: two real Linux users, the only proof of
+   every cross-member rule the tests stand one user in for.
+3. `qa/human/route-ssh.md`: real ssh between two machines (the
+   architect's under D30, or the dedicated SSH box due this week).
+4. `qa/human/route-codex.md`, `two-accounts.md` and `shapes.md`.
+
+**The later list** (from the REC and DEBT review the relay ruled on;
+none started without the relay's word):
+- First, before any shared mailbox uses the ssh route: one member's ssh
+  card can steer another member's mail (P3 review DEBT-6); a decision on
+  member trust, then a small fix.
+- Shared mailbox: the init user's commands and refusals that leave a
+  member stuck; who runs a shared mailbox after the init user leaves.
+- ssh and gate: a version on the wire; failure words that say what fixes
+  each failure; joinable records of one message on both sides; health's
+  per-target queue view; a far shell's 126 or 127 kept, not refused.
+- tc core: message bodies printed raw to a terminal (escape codes);
+  passing write failures in `tc send` and `tc status` as tracebacks;
+  decision ids in member-facing words.
+- Board, tests, structure: two missing board checks; the pin class proof
+  stopping at tc; test helper debt; tc's start cost unmeasured; tc as one
+  file of nearly ten thousand lines; the module doc block's history.
+- Never, as ruled: paths only the init user can swap (D34); the gate as
+  a message's writer when forwarding is not planned; a duplicate-body
+  warning; a wall-clock step between record and sighting.
+- For the owner's delete list: the 18 old lock files and the two stale
+  bytecode caches.
+
 ## Update, 2026-10-16
 
 The relay said yes in the morning. P3FIX merged into dev at `8b9b59d`
