@@ -451,6 +451,11 @@ POLL_SECONDS = 5
 # Claude Code caps a background Bash at 7200 s. Exit before that so the
 # session gets a clean "timeout, re-arm" instead of a killed command.
 DEFAULT_WAIT_SECONDS = 6600
+# EXITOK (Claude Opus 5.5, unreviewed): pause R39-1, a2 for the owner,
+# 2026-10-17. Row 0 of the exit table gets a name like every other row, so
+# the README test checks each code against tc. tc never passes it to
+# sys.exit: a good run returns from main() and Python exits 0 on its own.
+EXIT_OK = 0
 EXIT_TIMEOUT = 2
 EXIT_ALREADY_LISTENING = 3
 # Address-space ceiling for a listener. Measured need is about 13 MB; the cap

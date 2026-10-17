@@ -77,9 +77,9 @@ fails.
 
 The exit table test (item 2) parses the README's "Exit codes" table and
 contracts.md's: the same codes, 0 to 11, in order, each meaning holding
-the key words EXIT_KEY_WORDS gives it in both, and each code but 0 the
-value of an EXIT_ constant in tc. tc has no constant for 0 (success is
-a plain return); pause R39-1 asks whether it should.
+the key words EXIT_KEY_WORDS gives it in both, and each code the value
+of an EXIT_ constant in tc, 0 included (tc's EXIT_OK; pause R39-1,
+settled by a2 for the owner, 2026-10-17).
 
 @interacts  reads README.md, contracts.md and tc. Copies tc into each
             throwaway root and runs it there with TC_ROOT unset (its
@@ -316,8 +316,6 @@ EXIT_KEY_WORDS = {
 }
 # The exit codes the contract fixes: 0 to 11.
 EXIT_CODES = tuple(range(len(EXIT_KEY_WORDS)))
-# The one code tc defines no EXIT_ constant for (pause R39-1).
-SUCCESS_CODE = 0
 # Where each table starts, and the shape of one of its rows.
 README_EXIT_HEADING = "## Exit codes"
 CONTRACT_EXIT_LEAD = "**Exit codes.**"
@@ -938,7 +936,7 @@ class ExitTableTest(unittest.TestCase):
     """
 
     def test_the_readme_table_is_the_contracts(self):
-        """Codes 0 to 11 in both tables in order, each meaning carrying its key words in both, each code but 0 an EXIT_ value in tc.
+        """Codes 0 to 11 in both tables in order, each meaning carrying its key words in both, each code an EXIT_ value in tc.
 
         Must reject a row whose code or meaning changed in either file, a
         row added or dropped, and a code tc does not define.
@@ -969,8 +967,7 @@ class ExitTableTest(unittest.TestCase):
                 for words in EXIT_KEY_WORDS[code]:
                     self.assertIn(words, said, f"README row {code}")
                     self.assertIn(words, fixed, f"contracts.md row {code}")
-                if code != SUCCESS_CODE:
-                    self.assertIn(code, defined, f"tc defines no EXIT_ constant with the value {code}")
+                self.assertIn(code, defined, f"tc defines no EXIT_ constant with the value {code}")
 
 
 if __name__ == "__main__":
