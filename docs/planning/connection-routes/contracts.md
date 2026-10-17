@@ -352,7 +352,14 @@ deadlocks it (`ssh_capture` in `tc`, not a plain `subprocess.run`).
   and nothing retries it. A refusal retried forever helps nobody. **Any
   other far code** exits 11, refused by the far side, with the far code
   in the words and in the note (D33). tc keeps at most a named number of
-  bytes of what the far side prints.
+  bytes of what the far side prints. One far 9 to know by sight: a far
+  gate whose `authorized_keys` line sets `TC_ROOT` but leaves it empty
+  refuses every message with exit 9 (exit row 9) and the words `TC_ROOT
+  is set but empty`, which the near side files as exit 11 in `refused/`
+  with those words in the note. Fix the far line (a real folder, or no
+  `TC_ROOT=` at all), then move the file back out of `refused/` to send
+  it again. Before EMPTYROOT, such a gate delivered into the far user's
+  working folder.
 
 **`tc flush [--to <name>]`**: tries each of the running user's waiting
 outbox files in publish order (the file's time, then its number), so a

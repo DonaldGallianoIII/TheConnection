@@ -45,7 +45,18 @@ The queue, when work resumes:
    `two-accounts.md`, `shapes.md`, `route-shared.md` (two Linux users)
    and `route-ssh.md` (the architect's under D30, with the laptop).
 3. Updating main from dev when the owner asks.
-4. Not started, each needing the relay's word: the RECs and DEBTs the
+4. Later the same evening the relay's picks from the REC and DEBT list
+   merged: NAME (hints say the invoked name; link as `tconn` where the
+   system has a `tc`), R30 (no test bytecode), R2 (health names its
+   mailbox), DOCS2 (QA wording, two README gaps, clearing a retired
+   name), EMPTYROOT (an empty `TC_ROOT` refuses, in tc and the board).
+   R39 (a test of every README command) is next, after a main update.
+   A dedicated SSH box arrives this week (the relay, 2026-10-17), which
+   may make the real two-machine walk easy. For the owner's delete list:
+   two stale bytecode caches in the dev checkout from 2026-10-16
+   (`__pycache__/` beside tc and `board/__pycache__/`; the test loaders
+   never read them since R30), beside the 18 old lock files.
+5. Not started, each needing the relay's word: the RECs and DEBTs the
    reviews listed (for example a test that runs every README command,
    one member's trust in another's ssh card, init's member rerun exit),
    and the 18 old lock files the owner may remove.

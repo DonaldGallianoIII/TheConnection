@@ -114,9 +114,10 @@ branch at `a029bda`, CORE at `f5f6923`, CARDS at `4f35efc` and BOARD at
 (wave 2) at `84b97d2`, and SSH (wave 2b) at `616b9db`, with the P3 phase
 review's fixes (D35 to D37) at `8b9b59d`, and F1, the wait exit record,
 at `f57e490`, F2, the switch-over cleanup, at `d03fab9`, and DOCS (P5)
-at `4179b88`. Every lane of the plan is merged. As of 2026-10-17, next
-are the DOCS-1 fix, the owner's human walks and the owner's call on the
-name `tc`.
+at `4179b88`. Every lane of the plan is merged, and the relay's picks
+from the review backlog after it (DOCS-1, NAME, R30, R2, DOCS2,
+EMPTYROOT) are merged too. As of 2026-10-17, next are a main update, R39
+(a test of every README command) and the owner's human walks.
 
 ### Off limits
 
@@ -386,8 +387,12 @@ the old lock place again. DOCS (P5), the plan's last lane, merged at
 the human QA per route (`route-local`, `route-codex`, `two-accounts`,
 `shapes`, beside `route-ssh` and `route-shared`). The plan's exit test,
 a stranger getting two sessions talking from the README alone, waits for
-a person to walk `qa/human/route-local.md`. As of 2026-10-17 the DOCS-1
-fix (an empty text argument refuses) is next, and the owner decides
-whether `tc` keeps its name, since most Linux systems already have a
-`tc` (traffic control).
+a person to walk `qa/human/route-local.md`. After DOCS, from the review
+backlog: an empty text argument refuses (DOCS-1, `8fe7e32`); `tc` keeps
+its name and its hints say the name it was invoked by, so it can be
+linked as `tconn` where the system has a traffic-control `tc` (NAME,
+`3f2fc77`); the test loaders write no bytecode (R30, `ca0b368`); `tc
+health` names the mailbox it read (R2, `9914051`); QA wording and two
+README gaps (DOCS2, `0d96dfb`); an empty `TC_ROOT` refuses in tc and the
+board (EMPTYROOT, `7ef22e3`).
 `main` stays the owner's alone.
