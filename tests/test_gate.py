@@ -66,7 +66,10 @@ that the fake is reachable.
             tests (the audit's MEDIUM-1) run tc waits that end at once,
             one over mailbox names that hold the running login, and two
             call the gate in process with grp.getgrnam patched so the
-            mailbox's group also lists made-up members.
+            mailbox's group also lists made-up members. F2 (Claude Opus
+            5.5, unreviewed): one more rewrites .shared by hand to name
+            the running login and calls health_snapshot and the gate in
+            process with grp.getgrnam patched to answer that name.
 @deps       python3 stdlib (argparse, builtins, contextlib, errno, fcntl,
             grp, io, json, os, pathlib, pwd, re, shlex, shutil, signal,
             stat, subprocess, sys, unittest, unittest.mock); tests/_root.py;
@@ -288,6 +291,10 @@ MEMBER_NAME_TAIL = "-x"
 # inbox and wait lock, so health lists that name under listeners too.
 AT_ONCE = "0"
 EXIT_TIMEOUT = 2
+# F2 (Claude Opus 5.5, unreviewed): the name FarKeyReadsTest.share joins as
+# the running user; far_words keeps it whole, so a login spelled the same
+# skips the group test.
+SHARE_JOINED_NAME = "b"
 
 
 def filing(root, key, origin):
@@ -1432,20 +1439,24 @@ class FarKeyReadsTest(UmaskTestCase):
     Three tests show the scrub never changes a mailbox name: mailbox
     names that hold the running login, two members' names that end
     alike, and members named like health's fixed keys, the members stood
-    in by grp.getgrnam patched (members_stood_in).
+    in by grp.getgrnam patched (members_stood_in). F2 (Claude Opus 5.5,
+    unreviewed): and one shows the gate's health scrubs its string values:
+    a shared group named like the running login reads `another member`.
 
     @interacts  see the module block: per case a tc init, joins, cards,
                 fakes, a lock holder or a listener as the case needs, and
                 one or two gate runs, as a command or in process; round
                 3's tests, tc waits that end at once and grp.getgrnam
-                patched for an in-process gate.
+                patched for an in-process gate; F2's, .shared rewritten by
+                hand and grp.getgrnam patched for health_snapshot and an
+                in-process gate.
     @deps       gate, gate_in_process, failing_write, hold, load_tc,
                 owner_patched_fstat, primary_group, login, health_keys;
                 _root.TcRoot; errno, grp, json, os, re, unittest.mock.
     @complexity O(c) over c = 20 cases, each a few tc runs; the busy case
                 waits out tc's lock bound (3 s), and the size case pipes
                 1 MiB. Round 3's tests: O(1) each, two to five tc runs per
-                root.
+                root; F2's, two tc runs and one gate in process.
     @alloc      one TcRoot per case, and its children, removed with it.
     """
 
@@ -1466,16 +1477,16 @@ class FarKeyReadsTest(UmaskTestCase):
         return mock.patch.object(grp, "getgrnam", getgrnam)
 
     def share(self, root):
-        """Share `root` with the running user's primary group and join b as the running user.
+        """Share `root` with the running user's primary group and join b (SHARE_JOINED_NAME) as the running user.
 
         @interacts  two tc runs.
-        @deps       primary_group; _root.TcRoot.tc.
+        @deps       primary_group; _root.TcRoot.tc; SHARE_JOINED_NAME.
         @complexity O(1).
         @alloc      the mailbox's folders and b's card and inbox.
         """
         _, group, _ = primary_group()
         self.assertEqual(root.tc("init", "--shared", "--group", group)[0], 0)
-        self.assertEqual(root.tc("join", "b")[0], 0)
+        self.assertEqual(root.tc("join", SHARE_JOINED_NAME)[0], 0)
 
     def codex_c(self, root, code, stderr=""):
         """A fake codex exiting `code` (saying `stderr`), and c joined as codex: the fake's record file.
@@ -1919,6 +1930,58 @@ class FarKeyReadsTest(UmaskTestCase):
             self.assertEqual(health_keys(json.loads(out)), (GATE_HEALTH_TOP_KEYS, GATE_HEALTH_MACHINE_KEYS,
                                                             GATE_HEALTH_SESSION_KEYS, {"b": GATE_HEALTH_MAIL_KEYS}),
                              "a login named like a fixed key rewrote it")
+
+    # F2 (Claude Opus 5.5, unreviewed): the test the P3 fix round left out, the gate's health values scrubbed.
+    def test_a_shared_group_named_like_the_running_login_reaches_the_far_key_as_another_member(self):
+        """Shared, b joined, the mailbox's group named like the running login (one user stands in: .shared rewritten to the login, and grp.getgrnam answering that name with the running user's own group): tc's own health gives the login as shared_group, and the gate's health --json gives `another member` there and names the login nowhere.
+
+        P3 fix round 3 scrubbed the gate's health as data (far_data: each
+        string value through far_words, the audit's MEDIUM-1) with no
+        test of a value; today the group's name is the one string value a
+        login can reach. Must reject a far_data that returns string values
+        unscrubbed: the far key would read this machine's login as the
+        group's name.
+
+        @interacts  one TcRoot: tc init --shared and one join (share);
+                    rewrites .shared by hand; loads tc; health_snapshot
+                    and one gate call in process with grp.getgrnam
+                    patched.
+        @deps       share, gate_in_process, load_tc, login, primary_group;
+                    _root.TcRoot; grp, json, os, unittest.mock;
+                    MEMBER_WORDS, SHARE_JOINED_NAME.
+        @complexity O(1): two tc runs, one health_snapshot and one gate in
+                    process.
+        @alloc      one TcRoot and one module.
+        """
+        mine = login()
+        if mine in (str(os.geteuid()), SHARE_JOINED_NAME):
+            self.skipTest("the running login has no user database entry, or is the joined mailbox name, which "
+                          "far_words keeps whole")
+        _, group, _ = primary_group()
+        real = grp.getgrnam
+
+        def getgrnam(name):
+            if name != mine:
+                return real(name)
+            entry = real(group)
+            return grp.struct_group((mine, entry.gr_passwd, entry.gr_gid, list(entry.gr_mem)))
+        with _root.TcRoot() as root:
+            self.share(root)
+            (root.path / ".shared").write_text(f"{mine}\n")
+            tc = load_tc(root)
+            with mock.patch.object(grp, "getgrnam", getgrnam):
+                here = tc.health_snapshot(cards=False, gpu=False, branches=False)["shared_group"]
+                code, out, err = gate_in_process(tc, "/x/tc health --json")
+            with self.subTest(check="tc's own health names the login as the group"):
+                self.assertEqual(here, mine, "the stand-in group is not named like the login, so the case proves "
+                                             "nothing")
+            with self.subTest(check="the gate's health ran"):
+                self.assertEqual(code, 0, err)
+            with self.subTest(check="the gate's shared_group"):
+                self.assertEqual(json.loads(out).get("shared_group") if code == 0 else None, MEMBER_WORDS,
+                                 "the gate's health gave the group's name unscrubbed")
+            with self.subTest(check="no login anywhere in the gate's health"):
+                self.assertNotIn(mine, out, "the gate's health named the running login")
 
 
 if __name__ == "__main__":
