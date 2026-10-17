@@ -206,6 +206,9 @@ NINE_MIN_S = 9 * 60
 ELEVEN_MIN_S = 11 * 60
 LONG_WAIT_S = 3600
 STOP_SEEN_S = 5
+# What a node without the down_age_s key reads as, so a feed that lacks it
+# fails on the test's assertion, never on a KeyError.
+MISSING = "no down_age_s key"
 # F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-2 and
 # LOW-3. An in-process watch's heartbeat and poll (a few polls, the first
 # fed the stale listing), and thresholds no real machine reaches.
@@ -1070,7 +1073,8 @@ class BoardTest(UmaskTestCase):
                 box.mkdir(parents=True)
                 (box / WAIT_LOCK).touch()
                 (box / RECORD).write_text(line)
-            nodes = {n["id"]: (n["state"], n["down_age_s"]) for n in serve.Board(root=root.path, clock=lambda: now).feed()["nodes"]}
+            feed = serve.Board(root=root.path, clock=lambda: now).feed()
+            nodes = {n["id"]: (n["state"], n.get("down_age_s", MISSING)) for n in feed["nodes"]}
             self.assertEqual(nodes, {NINE: ("down", NINE_MIN_S), ELEVEN: ("down", ELEVEN_MIN_S), LEFT: ("idle", None)})
         with self.subTest(board="saw it listening"), _root.TcRoot() as root:
             box = root.path / "mail" / f"to-{NAME}"
@@ -1084,7 +1088,7 @@ class BoardTest(UmaskTestCase):
                 os.kill(pid, signal.SIGKILL)
                 gone = lock_gone(box / WAIT_LOCK, pid)
             clock["now"] += STOP_SEEN_S
-            after = {n["id"]: (n["state"], n["down_age_s"]) for n in board.feed()["nodes"]}.get(NAME)
+            after = {n["id"]: (n["state"], n.get("down_age_s", MISSING)) for n in board.feed()["nodes"]}.get(NAME)
             self.assertEqual((made, seen, gone, after), (True, "listening", True, ("down", STOP_SEEN_S)))
 
 

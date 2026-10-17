@@ -3,6 +3,15 @@
 What this checks: `tc health` reports the machine, sessions, listeners and mail,
 and `tc watch` wakes a session with a heartbeat or an alert.
 
+Run every step in a throwaway mailbox, never the checkout's own `mail/`,
+which live sessions use: a step here leaves an exit record saying
+`listening` behind, and the live board would read `b` down for good.
+Before step 1, run `export TC_ROOT=$(mktemp -d)` in the first terminal,
+then `echo $TC_ROOT` and run `export TC_ROOT=<that path>` in a second
+and a third terminal. Run everything from the repo root. Names here are
+made up. (F1 fix round 1, Claude Opus 5.5, 2026-10-17. Status:
+unreviewed.)
+
 1. Run `./tc health`.
    - `machine` shows load over your core count, free memory as a percent, and your
      GPU temperature and use (or `GPU none` without an NVIDIA card).
@@ -28,8 +37,7 @@ and `tc watch` wakes a session with a heartbeat or an alert.
    - The second prints `ALREADY WATCHING` and exits 3.
 9. A wake is not a lost listener (F1, C5's wait exit record). Added by the
    F1 lane agent (Claude Opus 5.5), 2026-10-16. Status: unreviewed.
-   Use a throwaway mailbox: run `export TC_ROOT=$(mktemp -d)` in the
-   first terminal and the same `export TC_ROOT=<that path>` in two more.
+   All three terminals use the throwaway mailbox set at the top.
    In the second, start `./tc wait b`. In the first, run
    `./tc watch a --names b --heartbeat 20 --poll 2`. In the third, mail b:
    `./tc send --from c --to b "task"`.
@@ -40,6 +48,11 @@ and `tc watch` wakes a session with a heartbeat or an alert.
      `stopped: b (mail, Ns ago)`.
    - Fail: the watch prints `ALERT ... LISTENER DOWN: b` and exits 5.
 
+   In the third terminal run `./tc read b`, so the `task` is read and the
+   next wait has nothing waiting: a wait started over unread mail exits
+   at once with `MAIL:` and holds no lock to kill. (F1 fix round 1, Claude
+   Opus 5.5, 2026-10-17. Status: unreviewed.)
+
    Now start `./tc wait b` again in the second terminal, run the same
    watch in the first, and in the third stop the wait hard with
    `kill -9 <pid>`, the pid `./tc health` names for `b`.
@@ -49,4 +62,5 @@ and `tc watch` wakes a session with a heartbeat or an alert.
    - Fail: the watch runs on to its heartbeat, or the record reads `mail`
      or `timeout`.
 
-   Run `unset TC_ROOT` in each terminal when done.
+10. Run `unset TC_ROOT` in each terminal. The throwaway mailbox is under
+    the system temp folder.

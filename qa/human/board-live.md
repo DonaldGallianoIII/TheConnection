@@ -7,7 +7,9 @@ Model:  Claude Opus 5.5 (the BOARD lane agent), 2026-10-14; fix rounds by
         peers, an unreadable inbox, a damaged token, the jump under the
         stale line) by Claude Opus 5.5 (the P4 phase fixer), 2026-10-15;
         step 22's restart bullet and step 23 (the wait exit record, F1)
-        by Claude Opus 5.5 (the F1 lane agent), 2026-10-16
+        by Claude Opus 5.5 (the F1 lane agent), 2026-10-16; step 23's
+        read before the last wait and its `stopped earlier` bullet by
+        Claude Opus 5.5 (the F1 fixer, round 1), 2026-10-17
 Status: unreviewed. Written, not yet run by a person.
 
 What this checks: `board/serve.py` serves the live board on 127.0.0.1 only,
@@ -353,6 +355,14 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       `b` reads `✕ no listener` with a dashed border, and
       `cat $TC_ROOT/mail/to-b/.wait.exit` reads `listening <time>`: its
       wait was killed before it wrote an exit.
+    - Pass (F1 fix round 1, Claude Opus 5.5, 2026-10-17, unreviewed):
+      `b`'s box says `stopped N m ago` (or `s` or `h`). A restarted
+      board never saw `b` listen, so it counts from the record's time,
+      when that wait began. Under 10 min, the pill warns with
+      `1 no listener`; at 10 min or more it stays calm and counts `b`
+      as `⊘ 1 stopped earlier`, in that glyph and those words, while the
+      box still reads `✕ no listener`. In grayscale the pill and the
+      footer's legend still say `⊘ stopped earlier` in words.
     - Fail: `b` reads `○ idle`, `◔ working` or `△ woken · not read`.
 
     In terminal 2 run `./tc wait b` again. Within 3 s `b` reads
@@ -364,7 +374,11 @@ their cards route mail to `codex` and `ssh`, which this script never runs.
       mail woke it, so it left on purpose.
     - Fail: `b` reads `✕ no listener`.
 
-    Then run `./tc wait b` again in terminal 2, as before this step.
+    In terminal 4 run `./tc read b`, so the `one more` is read: a wait
+    started over unread mail exits at once with `MAIL:` and is not
+    listening. Then run `./tc wait b` again in terminal 2, as before this
+    step, and within 3 s `b` reads `● listening`. (F1 fix round 1, Claude
+    Opus 5.5, 2026-10-17. Status: unreviewed.)
 24. A reports_to cycle. Write two cards that report to each other:
     ```
     echo '{"version": 1, "name": "p", "kind": "claude", "account": "lab", "route": "local", "reports_to": "q"}' > $TC_ROOT/cards/p.json
