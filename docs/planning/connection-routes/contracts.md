@@ -711,6 +711,15 @@ of `tc health` is not on the board's path.
   `listening` (known bug `liveness-gap-by-design-read-as-down`). `tc
   health` shows each stopped name's last exit word and its age. The
   gate's health leaves it out (D36 part 5's allow list).
+- **The pill warns only on a fresh stop** (a2 for the owner, 2026-10-17,
+  F1). A box whose record says `listening` with no lock reads `down`
+  for good, with the record's age, until that name listens again. The
+  page's connection pill turns to its warning only for a `down` whose
+  record is less than `DOWN_WINDOW_S` old; older ones it still counts,
+  in words and with their own glyph, never by color alone, as `stopped
+  earlier` (for example `4 listening · 1 no listener · 3 stopped
+  earlier`). So a retired session never keeps the alarm on, and nothing
+  is hidden.
 - `idle`: a card or inbox, no listener, not codex or ssh, not down,
   woken or working.
 - `unread` is a count, or `null` when tc could not see into the inbox
