@@ -4058,10 +4058,16 @@ def cmd_send(args):
     exit 0, nothing written. A bad id shape is a usage error, exit 9
     (origin_argument).
 
+    DOCS-1 (Claude Opus 5.5, unreviewed): a text argument that is empty
+    or only whitespace refuses at once as an empty message, exit 1,
+    without reading stdin; only a send with no text argument reads stdin.
+
     @interacts  checks both names first (C0, exit 6, nothing written); reads
-                the body (stdin when no text is given) and refuses one over
+                the body (stdin only when no text argument is given; an
+                empty text is a text, DOCS-1) and refuses one over
                 SEND_BODY_MAX_BYTES (exit 8), not UTF-8 (exit 1, SSH fix
-                round 1) or empty (exit 1) before any number is taken; a
+                round 1) or empty or only whitespace (exit 1) before any
+                number is taken; a
                 malformed --origin is a usage error before that (exit 9,
                 row 9); then deliver_once (the origin's filing,
                 when given; route_and_deliver: the card, the inbox lock
@@ -5723,11 +5729,18 @@ def card_route(to):
 
 
 def read_body(message):
-    """The message body: `message` when given, else stdin. Over the limit exits 8; not UTF-8 exits 1.
+    """The message body: `message` when given, even empty, else stdin. Over the limit exits 8; not UTF-8 exits 1.
 
     Reads at most SEND_BODY_MAX_BYTES + 1 bytes from stdin. A text
     argument is measured in the bytes it came in as. Runs before
     next_seq(), so a refusal uses no number (C0).
+
+    DOCS-1 (Claude Opus 5.5, unreviewed; a2 for the owner, 2026-10-17):
+    only None (no text argument) reads stdin. An explicit text that is
+    empty or only whitespace is returned as it is, so cmd_send refuses it
+    at once as an empty message (exit 1). Before, `""` was falsy and fell
+    through to stdin, and a send whose stdin stayed open waited until it
+    closed.
 
     SSH fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-3.
     The bytes are decoded as strict UTF-8, whatever error handler
@@ -5738,7 +5751,7 @@ def read_body(message):
     number taken. Before, the gate under surrogateescape took a number,
     left an empty .tmp in the inbox and ended in a traceback.
 
-    @interacts  reads stdin when `message` is empty; on a body over the
+    @interacts  reads stdin only when `message` is None; on a body over the
                 limit, writes SEND_TOO_LARGE_WORDS to stderr and exits 8;
                 on one that is not UTF-8, SEND_NOT_UTF8_WORDS and exit 1.
     @deps       refuse; sys; SEND_BODY_MAX_BYTES, SEND_TOO_LARGE_WORDS,
@@ -5751,7 +5764,7 @@ def read_body(message):
                 5 x SEND_BODY_MAX_BYTES at once (about 2 x when every
                 character is below U+0100).
     """
-    if message:
+    if message is not None:  # DOCS-1 (Claude Opus 5.5, unreviewed): `""` is a text, never a read of stdin
         try:
             size = len(message.encode("utf-8"))  # SSH fix round 1 (Claude Opus 5.5, unreviewed): MEDIUM-3, strict
         except UnicodeEncodeError:
