@@ -422,6 +422,16 @@ import traceback
 # is folded, so tc uses the folder the kernel finds at TC_ROOT, and init's
 # walk still checks the path as given as well as the real one.
 ROOT = pathlib.Path(os.environ.get("TC_ROOT", pathlib.Path(__file__).resolve().parent)).absolute()
+# R2 (Claude Opus 5.5, unreviewed): where ROOT came from, fixed at import
+# with it, so `tc health` can say which mailbox it read and why (a wrong
+# TC_ROOT is the project's loudest hazard). ROOT_FROM_ENV when TC_ROOT is
+# set, even empty (then ROOT is the working folder); ROOT_FROM_DEFAULT when
+# it is not, and ROOT is the folder this script's real file is in. Each
+# value's words, for health's first line.
+ROOT_FROM_ENV = "TC_ROOT"
+ROOT_FROM_DEFAULT = "default"
+ROOT_FROM = ROOT_FROM_ENV if "TC_ROOT" in os.environ else ROOT_FROM_DEFAULT
+ROOT_FROM_WORDS = {ROOT_FROM_ENV: "from TC_ROOT", ROOT_FROM_DEFAULT: "TC_ROOT unset, so the folder tc is in"}
 MAIL = ROOT / "mail"
 STATUS = ROOT / "status"
 SEQ_FILE = MAIL / ".seq"
@@ -4569,7 +4579,11 @@ def move_aside(box_fd, name, path, kind):
     only, never through a link, never blocking, ENTRY_FLAGS, closed at
     once). One its owner made unopenable (mode 000, say) is moved aside
     with words, as before round 2, so the wait runs instead of exiting 1
-    with words about moves that never happened.
+    with words about moves that never happened. R2 (Claude Opus 5.5,
+    unreviewed): the words say what it is, `was this user's own <kind>
+    lock, which tc could not open (<why>)`, never `not this user's own`;
+    and so does a refusal when its rename fails. When the rename took
+    something else (samestat fails), the words describe what it took.
 
     @interacts  lstats `name` and each aside name tried, by name in
                 `box_fd`; when it is this user's own lock, opens it there
@@ -4588,11 +4602,12 @@ def move_aside(box_fd, name, path, kind):
         st = os.lstat(name, dir_fd=box_fd)
     except FileNotFoundError:
         return None
+    unopened = None  # R2 (Claude Opus 5.5, unreviewed): why this user's own lock would not open, for the words
     if own_wake_lock(st):  # P3 fix round 2 (Claude Opus 5.5, unreviewed): LOW-1, this user's own lock is never moved
         try:  # P3 fix round 3 (Claude Opus 5.5, unreviewed): LOW-4, only one tc can open
             os.close(os.open(name, ENTRY_FLAGS, dir_fd=box_fd))
-        except OSError:
-            pass  # this user's own file, but one tc cannot open (its owner set it to 000): moved aside as before
+        except OSError as err:
+            unopened = err.strerror  # this user's own file, but one tc cannot open (its owner set it to 000): moved aside
         else:
             return None
     k = 1
@@ -4604,6 +4619,9 @@ def move_aside(box_fd, name, path, kind):
     except FileNotFoundError:
         return None
     except OSError as err:
+        if unopened is not None:  # R2 (Claude Opus 5.5, unreviewed): this user's own, said so
+            refuse(f"tc {kind}: {path} is this user's own {kind} lock, which tc could not open ({unopened}), and "
+                   f"tc could not move it aside ({err.strerror}); nothing made", EXIT_REFUSED)
         refuse(f"tc {kind}: {path} is {entry_words(st)} owned by {user_name(st.st_uid)}, not this user's own {kind} "
                f"lock, and tc could not move it aside ({err.strerror}); nothing made", EXIT_REFUSED)
     try:
@@ -4615,6 +4633,9 @@ def move_aside(box_fd, name, path, kind):
             os.link(aside, name, src_dir_fd=box_fd, dst_dir_fd=box_fd, follow_symlinks=False)
             os.unlink(aside, dir_fd=box_fd)  # tc's own move undone: the lock keeps its name
         return None
+    if unopened is not None and os.path.samestat(st, moved):  # R2 (Claude Opus 5.5, unreviewed): this user's own, said so
+        return (f"tc {kind}: {path} was this user's own {kind} lock, which tc could not open ({unopened}); moved it "
+                f"aside to {path.with_name(aside)} and made a new one")
     return (f"tc {kind}: {path} was {entry_words(moved)} owned by {user_name(moved.st_uid)}, not this user's own "
             f"{kind} lock; moved it aside to {path.with_name(aside)} and made a new one")
 
@@ -5140,10 +5161,15 @@ def cmd_log(args):
     """`tc log [--last N]`: every message, unread and read, in number order.
 
     SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19. Only real
-    inbox folders are entered (lstat): a symlink at mail/to-<name> or at
-    its read/ is named on stderr and never entered. Only regular files
-    print (message_files, then show); anything else is named. Either makes
-    log exit 1 after it prints the rest.
+    inbox folders are entered: a symlink at mail/to-<name> or at its
+    read/ is named on stderr and never entered. Only regular files print
+    (message_files, then show); anything else is named. Either makes log
+    exit 1 after it prints the rest. R2 (Claude Opus 5.5, unreviewed):
+    reworded, since D35 (below) no folder is judged by an lstat first.
+    Each is opened by its name, never through a link (open_inbox), and
+    only when that open fails does an lstat by name say what is there:
+    a link is named; any other entry that is not a folder is passed by
+    with no words.
 
     SHARED fix round 3 (Claude Opus 5.5, unreviewed): the audit's REC-1.
     A folder tc cannot list (message_files gives a problem and nothing
@@ -9276,6 +9302,13 @@ def health_snapshot(cards=True, gpu=True, branches=True):
     look at an inbox. The gate's list leaves it out (GATE_HEALTH_KEYS does
     not name it).
 
+    R2 (Claude Opus 5.5, unreviewed): `root` is ROOT's absolute path, the
+    mailbox this snapshot read, and `root_from` says where it came from:
+    "TC_ROOT" when that was set, "default" when ROOT is the folder tc is
+    in (ROOT_FROM, fixed at import). The gate's list leaves both out
+    (GATE_HEALTH_KEYS does not name them; D36 part 5, D37): no path on
+    this machine reaches a far key.
+
     @interacts  reads /proc, mail/ and each inbox in it, status/, cards/ (only when `cards`)
                 and ROOT/.shared; lists outbox/ and mail/.origins/, and
                 each outbox branch and queue this user can open, reading
@@ -9290,7 +9323,7 @@ def health_snapshot(cards=True, gpu=True, branches=True):
     @deps       now_iso, machine_stats, session_counts, listeners,
                 mailbox_summary, cards_summary, squatted_branches,
                 stuck_outbox, held_by_others, shared_group, wait_exits,
-                wall_clock.
+                wall_clock; ROOT, ROOT_FROM (R2).
     @complexity O(p + k + n log n + M + m log m + c + e + h + W log W
                 + s log s): p processes, k lines in /proc/locks, n mailbox
                 names, M names in every inbox and read/ and the m message
@@ -9310,7 +9343,9 @@ def health_snapshot(cards=True, gpu=True, branches=True):
     except ValueError as err:
         group, problem = None, str(err)
     shared = group is not None or problem is not None  # P3 fix round 1b (Claude Opus 5.5, unreviewed): unreadable counts as shared
-    snap = {"time": now_iso(), "machine": machine_stats(gpu), "sessions": session_counts(),
+    # R2 (Claude Opus 5.5, unreviewed): the mailbox read and where it came from; never the gate's (not in GATE_HEALTH_KEYS).
+    snap = {"root": str(ROOT), "root_from": ROOT_FROM,
+            "time": now_iso(), "machine": machine_stats(gpu), "sessions": session_counts(),
             "listeners": listeners("wait"), "watchers": listeners("watch"),
             "mail": mailbox_summary()}
     if cards:  # SSH S3 (Claude Opus 5.5, unreviewed): D16, never for the gate
@@ -9395,9 +9430,15 @@ def cmd_health(args):
     carries `wait_exits` as health_snapshot builds it. Who is listening
     still comes from the locks alone.
 
+    R2 (Claude Opus 5.5, unreviewed): the first line names the mailbox
+    read, ROOT's absolute path through printable(), and where it came
+    from (ROOT_FROM_WORDS): `mailbox    /home/you/TheConnection, TC_ROOT
+    unset, so the folder tc is in`, or `mailbox    <path>, from TC_ROOT`.
+    --json carries the two as `root` and `root_from`.
+
     @interacts  see health_snapshot; prints to stdout.
     @deps       health_snapshot, describe_card, printable, _who, _age,
-                _gpu_text; json.
+                _gpu_text; json; ROOT_FROM_WORDS (R2).
     @complexity as health_snapshot.
     @alloc      the snapshot and the printed text, freed on exit.
     """
@@ -9406,6 +9447,7 @@ def cmd_health(args):
         print(json.dumps(snap, indent=2))
         return
     m, s = snap["machine"], snap["sessions"]
+    print(f"mailbox    {printable(snap['root'])}, {ROOT_FROM_WORDS[snap['root_from']]}")  # R2 (Claude Opus 5.5, unreviewed)
     print(f"machine    load {m['load1']} / {m['cores']} cores · mem free {m['mem_avail_pct']}% · {_gpu_text(m['gpus'])}")
     print(f"sessions   {s['claude']} Claude Code · {s['codex']} Codex")
     print(f"listeners  {_who(snap['listeners'], snap['wait_exits'])}")  # F1 (Claude Opus 5.5, unreviewed): each stopped one's exit

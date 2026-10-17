@@ -215,6 +215,11 @@ GATE_HEALTH_TOP_KEYS = {"time", "machine", "sessions", "listeners", "watchers", 
 GATE_HEALTH_MACHINE_KEYS = {"load1", "cores", "mem_avail_pct", "gpus"}
 GATE_HEALTH_SESSION_KEYS = {"claude", "codex"}
 GATE_HEALTH_MAIL_KEYS = {"unread", "newest_mail_age_s", "status_age_s"}
+# R2 (Claude Opus 5.5, unreviewed): the keys tc health names its mailbox
+# and that mailbox's source by, and the source a run under TcRoot gives.
+# The gate's health gives neither (D36 part 5, D37).
+HEALTH_ROOT_KEYS = ("root", "root_from")
+ROOT_FROM_ENV = "TC_ROOT"
 # The key the in-process test adds to health_snapshot at every level,
 # which the gate must never print. Made up for the test.
 NEW_HEALTH_KEY = "added_later"
@@ -644,7 +649,9 @@ class GateTest(unittest.TestCase):
 
         Must reject a gate that hands a far key the snapshot less a few
         keys: mail_problem and shared_problem carry ROOT's path, and every
-        key health gains later would pass with them.
+        key health gains later would pass with them. R2 (Claude Opus 5.5,
+        unreviewed): the local health's `root` and `root_from` name the
+        mailbox and TC_ROOT, and the gate's has neither key.
 
         @interacts  two sends; c's inbox mode set to UNLISTABLE_MODE and put
                     back; one gate run, one tc health --json.
@@ -670,6 +677,11 @@ class GateTest(unittest.TestCase):
                           {"b": GATE_HEALTH_MAIL_KEYS, "c": GATE_HEALTH_MAIL_KEYS}))
         self.assertNotIn(path, out, "the gate's health handed a far key this mailbox's path")
         self.assertIn(path, local["mail"]["c"]["mail_problem"] or "", "the local health lost c's mail_problem")
+        with self.subTest(check="root keys"):  # R2 (Claude Opus 5.5, unreviewed): the mailbox's path stays home
+            self.assertEqual(([key in json.loads(out) for key in HEALTH_ROOT_KEYS],
+                              [local.get(key) for key in HEALTH_ROOT_KEYS]),
+                             ([False, False], [path, ROOT_FROM_ENV]),
+                             "the gate's health named the mailbox or its source, or the local health did not")
 
     def test_a_gated_send_to_a_name_with_an_ssh_card_is_refused_and_ssh_never_runs(self):
         """x's card says ssh: a gated send to x exits 7 with the not-a-local-name words, writes no outbox, and runs no ssh (D18); a plain tc send to x does reach the fake.

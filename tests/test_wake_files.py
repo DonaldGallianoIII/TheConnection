@@ -64,7 +64,7 @@ second-user walk is qa/human/route-shared.md.
             P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's
             LOW-4 test sets the owner's own lock to mode 000 by hand.
             Writes nothing outside the root's temp folder.
-@deps       python3 stdlib (argparse, contextlib, fcntl, gc, io, json, os,
+@deps       python3 stdlib (argparse, contextlib, errno, fcntl, gc, io, json, os,
             pathlib, pwd, stat, subprocess, sys, time, unittest,
             unittest.mock, warnings); tests/_root.py; UmaskTestCase,
             load_tc, owner_patched_lstat, owner_patched_fstat,
@@ -84,6 +84,7 @@ second-user walk is qa/human/route-shared.md.
 
 import argparse
 import contextlib
+import errno  # R2 (Claude Opus 5.5, unreviewed): the mode 000 open's reason
 import fcntl
 import gc
 import io
@@ -306,6 +307,12 @@ DISPLACED_SUFFIX = ".moved-by-another-wait"
 # owner, cannot open it; and the superuser's id, who opens it anyway.
 LOCKED_OUT_MODE = 0o000
 SUPERUSER_UID = 0
+# R2 (Claude Opus 5.5, unreviewed): what tc says when it moved the owner's
+# own lock at LOCKED_OUT_MODE aside, and the words it must not say of it.
+OWN_MOVED_WORDS = ("tc {kind}: {path} was this user's own {kind} lock, which tc could not open ({why}); moved it "
+                   "aside to {aside} and made a new one")
+LOCKED_OUT_WHY = os.strerror(errno.EACCES)
+NOT_OWN_WORDS = "not this user's own"
 
 
 def login(uid):
@@ -652,12 +659,15 @@ class WakeLockPlaceTest(UmaskTestCase):
         The audit's LOW-4 (bugs-reviewer): move_aside left any own lock in
         place, open_wake_lock could not open it, and tc wait exited 1 with
         words claiming three moves that never happened. Must reject a
-        move_aside that leaves an own lock tc cannot open.
+        move_aside that leaves an own lock tc cannot open. R2 (Claude
+        Opus 5.5, unreviewed): and words that call it `not this user's
+        own` (OWN_MOVED_WORDS, NOT_OWN_WORDS).
 
         @interacts  per kind: one wait or watch that makes the lock, a
                     chmod by hand, one more wait or watch.
         @deps       listen, identity, login; _root.TcRoot; os, stat;
-                    LOCK_NAME, FIRST_ASIDE, MOVED_WORDS, WAKE_LOCK_MODE,
+                    LOCK_NAME, FIRST_ASIDE, OWN_MOVED_WORDS, LOCKED_OUT_WHY,
+                    NOT_OWN_WORDS, WAKE_LOCK_MODE,
                     LOCKED_OUT_MODE, SUPERUSER_UID.
         @complexity O(1) per kind, two kinds.
         @alloc      one TcRoot per kind.
@@ -676,8 +686,11 @@ class WakeLockPlaceTest(UmaskTestCase):
                 st = os.lstat(lock)
                 self.assertEqual(code, EXIT_TIMEOUT if kind == "wait" else 0,
                                  f"tc {kind} did not run over its owner's own lock at mode 000: {out}{err}")
-                self.assertIn(MOVED_WORDS.format(kind=kind, path=lock, what="a file", owner=login(os.geteuid()),
-                                                 aside=aside), err)
+                # R2 (Claude Opus 5.5, unreviewed): the words say it is this user's own lock.
+                with self.subTest(check="own lock's words"):
+                    self.assertIn(OWN_MOVED_WORDS.format(kind=kind, path=lock, why=LOCKED_OUT_WHY, aside=aside), err)
+                with self.subTest(check="never not this user's own"):
+                    self.assertNotIn(NOT_OWN_WORDS, err)
                 self.assertEqual(moved, found, f"the lock at mode 000 is not what sits at {aside}")
                 self.assertEqual((stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid),
                                  (True, WAKE_LOCK_MODE, os.geteuid()), "no new lock of the owner's at its name")

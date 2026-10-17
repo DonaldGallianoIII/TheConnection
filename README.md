@@ -6,6 +6,7 @@ machine over ssh. The tool is `tc`, one Python file. One message is one
 Markdown file, so you can read any inbox with `cat`.
 
 <!-- Rewritten for the routing plan by Claude Opus 5.5 (the DOCS lane agent), 2026-10-17. Status: unreviewed. -->
+<!-- The mailbox line in both tc health samples added by Claude Opus 5.5 (the R2 lane agent), 2026-10-17. Status: unreviewed. -->
 
 ## Which way to use
 
@@ -148,6 +149,7 @@ own messaging serves that case.
 3. **Check both are listening**, from any terminal:
    ```
    $ ~/TheConnection/tc health
+   mailbox    /home/you/TheConnection, TC_ROOT unset, so the folder tc is in
    ...
    listeners  a (pid 213593) · b (pid 213592)
    ...
@@ -528,6 +530,7 @@ their account is `work`.
 
 ```
 $ tc health
+mailbox    /home/you/TheConnection, TC_ROOT unset, so the folder tc is in
 machine    load 3.01 / 32 cores · mem free 85.6% · GPU 39C 3%
 sessions   8 Claude Code · 0 Codex
 listeners  b (pid 213592) · stopped: a (mail, 9s ago)
