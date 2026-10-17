@@ -118,6 +118,6 @@ rather than a card. Look for those words, never a color.
 
 ## Afterward
 
-14. Run `unset TC_ROOT` in both terminals. The three throwaway mailboxes are under the
-    system temp folder.
+14. Run `unset TC_ROOT` in both terminals. The three throwaway
+    mailboxes are under the system temp folder.
 15. Record what you saw in `qa/results/shapes.md`.

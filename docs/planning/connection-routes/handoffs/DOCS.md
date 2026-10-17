@@ -208,10 +208,11 @@ unset: 357 run, OK. `node --test tests/*.test.mjs`: 68 pass, 0 fail.
    once in this lane's own session until killed. With stdin at
    `/dev/null` it refuses, exit 1, as documented. Not fixed (no code in
    this lane); the docs never pass `""`.
-2. **`CLAUDE.md`'s Layout is stale since F2.** It still lists
-   `mail/.wait-<name>.lock` as a place a private mailbox reads until
-   every session re-arms. tc reads it nowhere now (F2's handoff says
-   the same). `CLAUDE.md` is the architect's; not changed.
+2. **Withdrawn in round 1.** This item said `CLAUDE.md`'s Layout still
+   lists `mail/.wait-<name>.lock` as read by a private mailbox. It does
+   not: at the lane's base `f160bbc`, `CLAUDE.md:153` already says tc
+   never reads it since F2. Nothing for the architect to fix here
+   (integration LOW-4).
 3. **The old README**, against the code, in every place the P3 review's
    and the P3 fix re-reviews' DOCS lists name: one machine, one Linux
    user, no auth; the mailbox as `mail/` and `status/` only; a command
@@ -262,3 +263,132 @@ unset: 357 run, OK. `node --test tests/*.test.mjs`: 68 pass, 0 fail.
   person who has never seen it can show that; route-local part B is the
   closest walk.
 - The drawn board for shapes.md and the README's board section.
+
+## Round 1: the fix round
+
+Model:  Claude Opus 5.5 (the DOCS fixer, round 1), 2026-10-17
+Status: unreviewed
+Review: `~/TheConnection-lanes/docs/audits/2026-10-17-1457-custom/agents/`,
+        `integration-reviewer.md` and `ux-reviewer.md` (ids are theirs)
+
+Commits: `8ce0b30` (the docs and QA scripts), then the commit that adds
+this section (this file and one line wrap in `shapes.md`). No code
+changed. Line numbers below are at `8ce0b30`.
+
+### What changed, by finding
+
+Each finding was checked against the code first; every one held.
+
+| Id | Checked against | Fix |
+|---|---|---|
+| integration MEDIUM-1 | `tc` `cmd_join`: kind is `codex` only with `--kind` or a thread; the refusal runs only for kind `codex` | `--kind codex` on the Codex join: `JOIN-CODEX.md:29`, `README.md:235`, `qa/human/route-codex.md:52`; route-codex's Fail line names a `route local` card (`:56`) |
+| integration REC-2 | the same | `JOIN-CODEX.md:35`: check the line says `route codex`; on `route local`, stop and tell your user |
+| integration LOW-1 | `print_delivery`: words to stdout, warnings to stderr; a TTY run shows `sent` first | order swapped, with a line on pipes: `README.md:210` to `:214`, `qa/human/route-local.md:69`, `qa/human/route-codex.md:114` |
+| integration LOW-2 | `rang_long_ago`, `RING_BACKOFF_SECONDS` 300 | `README.md:259`: one doorbell holds for 5 minutes after your last ring |
+| integration LOW-3 | `board/look.js` `pillText` counts `down` (fresh) and `woken` | `README.md:630`: the pill also warns on a woken box |
+| integration LOW-4 | `CLAUDE.md:153` at `f160bbc` already says tc never reads the old place | item 2 of "Where the docs and the code disagreed" above, withdrawn |
+| integration LOW-5 | `describe_card`, `account_label` | cards sample `README.md:496` to `:502` and health sample `:514`: a's account `unknown` (its prompt names none), cx with `, reports to a`; the worker and Codex prompts now say `your account is work` (`:111`, `:233`) so the shown `--account work` is what they run |
+| integration LOW-6 | `board/look.js` `nativeAllowed` | `README.md:639`: two `unknown` cards get no badge |
+| integration LOW-7 | `account_label` reads `CLAUDE_CONFIG_DIR` | `unset CLAUDECODE CLAUDE_CONFIG_DIR` in `qa/human/route-codex.md:26` (with why) and `qa/human/shapes.md:21` |
+| ux LOW-1 | `board/live.html:91` to `:97`: `gray` comes from `location.search`, the token from the fragment | `README.md:642` to `:645`: `?gray=1` before the `#`, with the full URL, and what happens if it lands after |
+| ux LOW-2 | the same as integration LOW-5 | the Codex prompt gives the account, and the shown join line matches (`README.md:233` to `:239`) |
+| ux LOW-3 | `tc` refuses a send to an unjoined name on a shared mailbox (exit 1); `tc status` needs no recipient | `README.md:434` (relay first), `JOIN.md:50` and `:84`, `JOIN-CODEX.md:48` and `:83`: post the refusal as status |
+| ux LOW-4 | shapes step 2 runs the server in terminal 1 | `qa/human/shapes.md:90` echoes the root; step 11 (`:103`) sends from terminal 2 |
+| ux LOW-5 | README ssh steps 1 to 6 | the walk is now 8 steps: make the key (`README.md:283`), the gate line on farbox (`:290`), the alias with `User you`, matching the gate line's `/home/you` (`:300`), then meet the host |
+| ux REC-1 | `command -v tc` here prints `/usr/sbin/tc` | Install links `tc` into `~/.local/bin` (`README.md:84`) and says how to check it; `JOIN-CODEX.md:79` uses the full path |
+| ux REC-6 | the ssh section | the route chart's ssh line points at "ssh, outbound" and names its four parts (`README.md:30`) |
+
+### A finding beyond the reviews
+
+**Most Linux systems already have a `tc`.** iproute2's traffic control
+sits at `/usr/sbin/tc` here, and a bare `tc health` answers
+`Object "health" is unknown, try "tc help".` and exits 255. Every bare
+`tc` in the README, and tc's own hints (`Run: tc read b`), reach it
+unless the `~/.local/bin` link comes first on `PATH`. The README's
+Install now says so. A rename is a code question, not this lane's.
+
+### Commands run, and what they printed
+
+All under throwaway roots in this session's scratchpad (`docsfix1-*`),
+`TC_ROOT` set on every run, never a live mailbox. No real `ssh` or
+`codex` ran.
+
+- The Codex join, `tc join cx --kind codex --account work --reports-to
+  a`: without `CODEX_THREAD_ID`, `tc join: kind codex needs
+  CODEX_THREAD_ID, the thread the codex route rings, and it is not set.
+  Run tc join inside the Codex session.`, exit 1, no card. With it set
+  to a made-up id: `joined as cx (codex, account work, route codex),
+  reports to a`, exit 0. With no `--account`: `account unknown`. The
+  old command with no `--kind` and no thread: `joined as cy (other,
+  account work, route local), reports to a`, exit 0 (the bug).
+- The new-inbox order, under `script` for a real TTY: `sent #1 to
+  newname: ...` then `new inbox: ...`. Piped with `2>&1`, the warning
+  comes first.
+- The cards and health samples: `tc join a` and `tc join b --account
+  work --reports-to a` with `CLAUDECODE=1`, the Codex join above, and
+  `tc card far-b --ssh farbox-tc --remote-tc '~/TheConnection/tc'`;
+  `tc cards` and health's `cards` lines print what the README shows.
+- The shared mailbox: `tc init --shared --group <my own group>`, `tc
+  join b --reports-to a`, then `tc send --from b --to a ...`: `tc send:
+  nobody has joined as a on this shared mailbox`, exit 1; `tc status b
+  "..."`: `status posted for b`, exit 0, and `tc status` shows it; after
+  `tc join a` the same send exits 0.
+- The board, `python3 board/serve.py --port 8768`: the printed URL's
+  form; `/feed` with the token 200, with `?gray=1` glued onto the token
+  401; `live.html?gray=1` 200. The server was stopped by its own pid.
+  The gray filter itself was not seen drawn.
+- route-codex steps 2 and 10 to 13 under `script`, with a fake `codex`
+  on `PATH` that records its argv and exits 1: every line as the script
+  says, the marker's first line `failed`, and the fake called twice
+  (`queue --thread not-a-live-thread --message MAIL: ...`).
+- route-local step 10 under `script`: `sent #2 ...`, then the warning,
+  then `0`.
+- shapes steps 6, 9 and 11: the four join lines with `account unknown`;
+  step 11's send from a second, clean shell with the echoed root:
+  `sent #11 to o2: ...`.
+- The ssh key step, with `HOME` pointed at a scratch folder: `ssh-keygen
+  -q -t ed25519 -f <scratch>/.ssh/tc_ed25519 -N '' -C homebox-a`, exit
+  0, both halves written. `ssh-keygen` makes a file and opens no
+  connection; `ssh` itself never ran.
+- The Install link, with `HOME` pointed at a scratch folder holding a
+  copy of `tc`: `mkdir -p ~/.local/bin && ln -s ~/TheConnection/tc
+  ~/.local/bin/tc`, exit 0; with that folder first on `PATH`, `command
+  -v tc` names the link and `tc join b --account work --reports-to a`
+  prints its line. The real `~/.local/bin` was not touched.
+
+### Not done
+
+- integration REC-1 (test the README's shown output) and DEBT-1 (the
+  second copy of the exit table): a test is code, and the table was the
+  brief's ask.
+- ux REC-2 (pre-approve tc in Claude Code's settings): its rule format
+  for a `~/` path or a `TC_ROOT=` prefix is unverified; the owner should
+  test one wake first.
+- ux REC-3 (`TC_ROOT` set once for a session), REC-4 (a `RELAY.md`),
+  REC-5 (an ssh tunnel for the board), REC-7 (where the second user's
+  tc comes from, and the shared prompt), REC-8 (a TTY note when send
+  reads stdin; code, beside pause DOCS-1).
+- ux REC-9 (a) "the same number" in route-local step 2 and (b) its
+  nested backticks in step 3. Its (c) is covered by the LOW-7 fix.
+- integration's blast-radius lines are `CLAUDE.md`, `contracts.md` and
+  `phases.md`, outside this work set: `CLAUDE.md`'s Layout lacks
+  `JOIN-CODEX.md`, its "the docs are next" line goes stale at the merge,
+  the ring marker's states in `CLAUDE.md` and C2 miss `ringing`,
+  `failed` and `joined with unread mail`, and phases.md D4 calls
+  route-ssh and route-shared new. For the architect.
+
+### Checks
+
+`check_voice.py` and `check_american.py` on every file changed in this
+round (`README.md`, `JOIN.md`, `JOIN-CODEX.md`, `qa/human/route-codex.md`,
+`route-local.md`, `shapes.md`, this file): each exits 0. The leak scan
+(the pattern list outside the repo, case-insensitive) over those files
+whole and both commit messages: no hits.
+
+### Not verified
+
+- Anything in a real Claude or Codex session, real `ssh`, a real sshd
+  taking the new key and gate line, or a second Linux user.
+- That `~/.local/bin` joins `PATH` at login on Ubuntu and Debian: read
+  from this machine's `~/.profile`, not seen at a fresh login.
+- The drawn board in grayscale.
