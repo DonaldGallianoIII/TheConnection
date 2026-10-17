@@ -7,6 +7,7 @@ Markdown file, so you can read any inbox with `cat`.
 
 <!-- Rewritten for the routing plan by Claude Opus 5.5 (the DOCS lane agent), 2026-10-17. Status: unreviewed. -->
 <!-- The mailbox line in both tc health samples added by Claude Opus 5.5 (the R2 lane agent), 2026-10-17. Status: unreviewed. -->
+<!-- Every fenced block below is run or listed by tests/test_readme.py; a new block goes in one of its tables (R39, Claude Opus 5.5, 2026-10-17). Status: unreviewed. -->
 
 ## Which way to use
 
@@ -230,7 +231,7 @@ Mail to a name nobody has joined still lands, with a warning:
 
 ```
 $ tc send --from a --to newname "first mail"
-sent #3 to newname: .../mail/to-newname/000003-from-a.md
+sent #2 to newname: .../mail/to-newname/000002-from-a.md
 new inbox: nobody has joined as newname
 ```
 
@@ -270,7 +271,7 @@ dies when its command returns. So it has no listener. Instead it runs
 3. **Send to it** from any session:
    ```
    $ tc send --from a --to cx "please review the parser"
-   sent #4 to cx: .../mail/to-cx/000004-from-a.md
+   sent #3 to cx: .../mail/to-cx/000003-from-a.md
    rang codex cx (queued; delivered when its turn ends or the session is resumed)
    ```
    The ring is `codex queue --thread <its thread> --message "MAIL: 1 unread
