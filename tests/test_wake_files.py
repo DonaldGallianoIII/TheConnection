@@ -13,7 +13,9 @@ never does. And item 6, a2's class proof for the wake files
 (WakeFilesAreTheirOwnersTest): no member who is not a name's owner holds
 or redirects its wait lock, watch lock, inbox lock or ring marker, and a
 file planted at the owner's lock name is moved aside with words. Its
-mutations, and the lines each turned red, are in handoffs/P3FIX.md.
+mutations, and the lines each turned red, are in handoffs/P3FIX.md. F1
+fix round 1 (Claude Opus 5.5, unreviewed): the wait exit record is a row
+too; its mutation is in handoffs/F1.md.
 
 Model:  Claude Opus 5.5 (the P3 fixer, round 1b), 2026-10-15
 Status: unreviewed
@@ -42,7 +44,10 @@ second-user walk is qa/human/route-shared.md.
             The class proof starts one-shot member children
             (MEMBER_SCRIPT) that make, hold or rewrite a file in place,
             and runs the owner's command, or a send, in process with
-            os.lstat, os.fstat and os.stat patched (members_patched),
+            os.lstat, os.fstat and os.stat patched (members_patched; F1
+            fix round 1, Claude Opus 5.5, unreviewed: also the owner's tc
+            wait over plants at its exit record's names, reading the
+            record with tc's wait_exits),
             tc's unread, machine_stats or read_regular_file wrapped to
             call a member while the command runs, and wall_clock replaced
             (never a RING_BACKOFF_SECONDS sleep); it makes a link, a FIFO
@@ -71,7 +76,8 @@ second-user walk is qa/human/route-shared.md.
             per root, each wait or watch run under a second or two; the
             private pin test waits out one of tc's polls (POLL_SECONDS),
             and each refused command one LOCK_WAIT_SECONDS. The class
-            proof: 5 subtests and 8 planted cases, each a fresh root.
+            proof: 6 subtests (the exit record's since F1 fix round 1)
+            and 8 planted cases, each a fresh root.
 @alloc      one TcRoot per test or case, removed when its context exits,
             with every child it started.
 """
@@ -274,6 +280,17 @@ THREAD = "t1"
 RANG_LINE = "rang codex {to} (queued; delivered when its turn ends or the session is resumed)"
 # The kinds of entry a member plants at the owner's lock name.
 PLANTS = ("a file", "a symlink", "a FIFO", "a file with another name too (a hard link)")
+# F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1 and
+# REC-1. The wait exit record's name and its old fixed .tmp name (tc's
+# WAIT_EXIT_NAME and WAIT_EXIT_OLD_TMP_NAME), the words tc says when it
+# moves a plant aside from either, a wait's exit on mail (contracts.md),
+# and the two words the owner's record must say.
+RECORD_NAME = ".wait.exit"
+RECORD_OLD_TMP_NAME = ".wait.exit.tmp"
+RECORD_MOVED_WORDS = ("tc wait: {path} was a file owned by {owner}, not this user's own exit record; moved it aside "
+                      "to {aside}")
+EXIT_MAIL = 0
+RECORD_LISTENING, RECORD_MAIL = "listening", "mail"
 # P3 fix round 2 (Claude Opus 5.5, unreviewed): the audit's LOW-1. The
 # moments a second of the owner's own waits is interrupted at, the second
 # aside name (tc's PLANTED_ASIDE_NAME with k 2), and the ending the flock
@@ -1153,15 +1170,19 @@ class WakeFilesAreTheirOwnersTest(UmaskTestCase):
     families are; a wake file added later is not covered until someone
     adds its subtest. P3 fix round 2 (Claude Opus 5.5, unreviewed): and
     two of the owner's own waits over one plant never both hold a lock
-    (the audit's LOW-1), at three moments.
+    (the audit's LOW-1), at three moments. F1 fix round 1 (Claude Opus
+    5.5, unreviewed): the wait exit record is a row (the F1 audit's
+    MEDIUM-1 and REC-1): a member's file at the record's name or its old
+    fixed .tmp name, before and while ann's wait runs, is moved aside
+    with words, and ann's record still says `listening`, then `mail`.
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, load_tc,
                 member, identity, members_patched, run_in_process, login,
                 contents from test_shared.py.
-    @complexity O(f) subtests over f = 5 (four files, the marker twice),
-                plus eight for the planted entries and three for the
-                owner's two waits.
+    @complexity O(f) subtests over f = 6 (five files, the marker twice;
+                the exit record since F1 fix round 1), plus eight for the
+                planted entries and three for the owner's two waits.
     @alloc      one TcRoot per subtest.
     """
 
@@ -1281,6 +1302,46 @@ class WakeFilesAreTheirOwnersTest(UmaskTestCase):
         return {"ran": ran, "setup": state_after_setup, "rewrites": rewrites,
                 "calls": calls() if record.exists() else None}
 
+    # F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, REC-1.
+    def record_case(self, root):
+        """The wait exit record: the member plants and holds a file at the record's name and at its old fixed .tmp name before ann's tc wait; at its first poll, ann's record is read (tc's wait_exits), the member plants at the old .tmp name again, and ben mails ann. What was seen.
+
+        @interacts  three member children; one send; one owner's tc wait
+                    in process with tc's unread wrapped to look at its
+                    first poll and resource.setrlimit made a no-op;
+                    wait_exits in process, during the wait and after.
+        @deps       member, identity, members_patched, run_in_process,
+                    load_tc; unittest.mock; OWNER, RECORD_NAME,
+                    RECORD_OLD_TMP_NAME, CLASS_LISTEN_SECONDS.
+        @complexity O(1): one wait that ends at its first poll.
+        @alloc      one module.
+        """
+        box = root.path / "mail" / f"to-{OWNER}"
+        record, old_tmp = box / RECORD_NAME, box / RECORD_OLD_TMP_NAME
+        at_record, record_said = member(root, record, "hold")
+        at_tmp, tmp_said = member(root, old_tmp, "hold")
+        planted, pids = {identity(record), identity(old_tmp)}, {at_record.pid, at_tmp.pid}
+        tc = load_tc(root)
+        seen = {}
+        real_unread = tc.unread
+
+        def first_poll(*args, **kwargs):
+            if not seen:
+                seen["listening"] = (tc.wait_exits([OWNER]).get(OWNER) or (None,))[0]
+                again, seen["while"] = member(root, old_tmp, "hold")
+                pids.add(again.pid)
+                if os.path.lexists(old_tmp):
+                    planted.add(identity(old_tmp))
+                seen["sent"] = root.tc("send", "--from", "ben", "--to", OWNER, "hi")[0]
+            return real_unread(*args, **kwargs)
+        with members_patched(root.path, planted, pids), \
+                mock.patch.object(tc.resource, "setrlimit", lambda *args: None), \
+                mock.patch.object(tc, "unread", first_poll):
+            ran = run_in_process(lambda: tc.cmd_wait(wait_args(OWNER, CLASS_LISTEN_SECONDS)))
+            after = (tc.wait_exits([OWNER]).get(OWNER) or (None,))[0]
+        return {"ran": ran, "seen": seen, "before": (record_said, tmp_said), "after": after,
+                "record": record, "old_tmp": old_tmp}
+
     def test_no_member_holds_or_redirects_another_members_wake_file(self):
         """For each wake file, a member who is not ann tries to hold or rewrite it before and while ann's command runs (or a send to ann, for the marker): ann's listener holds its own lock and health names ann's pid, never the member's; her read on a held inbox lock fails within the bound, writes nothing, and names the member; and a send after the sender's own backoff rings her Codex thread whatever the member wrote.
 
@@ -1288,13 +1349,19 @@ class WakeFilesAreTheirOwnersTest(UmaskTestCase):
         REC-3, REC-4). Must reject a wait or watch lock the group can open
         (the member's open succeeds, or its plant is taken as the lock),
         busy words that do not name the holder, and a ring decision that
-        trusts the marker's words or its time.
+        trusts the marker's words or its time. F1 fix round 1 (Claude Opus
+        5.5, unreviewed): and the wait exit record, whose plants (a
+        member's file at its name or its old fixed .tmp name, before and
+        while ann's wait runs) are moved aside with words while ann's
+        record still says `listening`, then `mail`. Must reject a plant
+        that stops ann's record (refused instead of moved aside or worked
+        around): the F1 audit's MEDIUM-1.
 
         @interacts  per subtest: a shared mailbox with ann joined, then
-                    listener_case, inbox_case or marker_case.
+                    listener_case, inbox_case, marker_case or record_case.
         @deps       shared_with_ann, listener_case, inbox_case,
-                    marker_case, login; os.
-        @complexity O(f): f = 5 subtests.
+                    marker_case, record_case, login; os.
+        @complexity O(f): f = 6 subtests.
         @alloc      one TcRoot per subtest.
         """
         mine, other, init = login(os.geteuid()), login(os.geteuid() + HOLDER_UID_STEP), login(os.geteuid() + 1)
@@ -1338,6 +1405,21 @@ class WakeFilesAreTheirOwnersTest(UmaskTestCase):
                                  f"{state}: {got['calls']}")
                 self.assertEqual(code, 0, err)
                 self.assertIn(RANG_LINE.format(to=OWNER), out)
+        # F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, REC-1.
+        with self.subTest(wake_file="the wait exit record"), _root.TcRoot() as root:
+            self.shared_with_ann(root)
+            got = self.record_case(root)
+            code, out, err = got["ran"]
+            record, old_tmp = got["record"], got["old_tmp"]
+            # Allowed by C4: a member may make a name in the group-writable inbox; the owner's tc moves it aside.
+            self.assertEqual((got["seen"].get("listening"), got["after"]), (RECORD_LISTENING, RECORD_MAIL),
+                             f"ann's record did not say listening, then mail, over the member's plants: {err}")
+            self.assertEqual((code, got["seen"].get("sent")), (EXIT_MAIL, 0), f"ann's wait did not end on mail: {out}{err}")
+            self.assertEqual((got["before"], got["seen"].get("while")), ((MEMBER_HELD, MEMBER_HELD), MEMBER_HELD),
+                             "the member could not plant")
+            for path, k in ((record, 1), (old_tmp, 1), (old_tmp, 2)):
+                self.assertIn(RECORD_MOVED_WORDS.format(path=path, owner=other,
+                                                        aside=path.with_name(f"{path.name}.planted-{k}")), err)
 
     def test_a_file_planted_at_the_owners_lock_name_is_moved_aside_with_words_and_the_owners_lock_made(self):
         """Another member's file (held), a symlink to a file outside the mailbox, a FIFO, or a file with a second name, planted at ann's wait or watch lock's name: ann's command moves it aside to the first aside name with one line naming what it was and whose, makes her own lock at 0600, and runs to its end; the planted entry itself sits at the aside name, and the link's target is unchanged.

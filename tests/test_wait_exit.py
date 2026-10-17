@@ -34,8 +34,8 @@ docs/planning/connection-routes/handoffs/F1.md.
             renamed over it) and moves one aside. Writes nothing outside
             the root's temp folder.
 @deps       python3 stdlib (argparse, collections, contextlib, datetime,
-            importlib, io, json, os, pathlib, signal, stat, subprocess,
-            sys, threading, time, unittest, unittest.mock);
+            importlib, io, json, os, pathlib, pwd, signal, stat,
+            subprocess, sys, threading, time, unittest, unittest.mock);
             tests/_root.py; UmaskTestCase, load_tc and owner_patched_fstat
             from test_shared.py; ../tc; ../board/serve.py.
 @complexity O(1) per test: a handful of tc runs per root, one root per
@@ -55,6 +55,7 @@ import io
 import json
 import os
 import pathlib
+import pwd
 import signal
 import stat
 import subprocess
@@ -76,12 +77,22 @@ from test_shared import UmaskTestCase, load_tc, owner_patched_fstat  # noqa: E40
 # The listener's name and a sender's, made up.
 NAME = "b"
 SENDER = "a"
-# The record's name, its .tmp's, its mode and its three words (tc's
-# WAIT_EXIT_NAME, WAIT_EXIT_TMP_NAME, WAIT_EXIT_MODE, WAIT_EXIT_WORDS),
+# The record's name, its old fixed .tmp's, its mode and its three words
+# (tc's WAIT_EXIT_NAME, WAIT_EXIT_OLD_TMP_NAME since F1 fix round 1,
+# WAIT_EXIT_MODE, WAIT_EXIT_WORDS),
 # written here rather than read from tc, so a changed constant fails a test.
 RECORD = ".wait.exit"
 RECORD_TMP = ".wait.exit.tmp"
 RECORD_MODE = 0o640
+# F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1.
+# RECORD_TMP is now only the old fixed .tmp name; each write's own .tmp
+# starts with this (tc's WAIT_EXIT_TMP_NAME before its nonce). A plant at
+# the record's name or the old .tmp name is moved to the first aside name
+# (tc's PLANTED_ASIDE_NAME), with these words.
+RECORD_TMP_PREFIX = ".wait.exit.tmp-"
+FIRST_ASIDE = "{name}.planted-1"
+MOVED_RECORD_WORDS = ("tc wait: {path} was {what} owned by {owner}, not this user's own exit record; moved it "
+                      "aside to {aside}")
 LISTENING, MAIL, TIMEOUT = "listening", "mail", "timeout"
 # The most of a record the reader takes (tc's WAIT_EXIT_MAX_BYTES).
 RECORD_MAX_BYTES = 64
@@ -188,14 +199,20 @@ Seen = collections.namedtuple("Seen", "word kind mode uid tmp_left one_line fres
 def seen_record(box, now):
     """What sits at the record's name in the inbox `box`, as a Seen; never raises (each field None for what is not there), so a test fails on its assertion, never here.
 
-    @interacts  lstats the record and its .tmp's name; reads the record
-                when it is a regular file.
-    @deps       datetime, os, stat; RECORD, RECORD_TMP, TIME_SLACK_SECONDS.
-    @complexity O(1): one short file.
-    @alloc      one Seen, returned.
+    @interacts  lstats the record and the old .tmp's name, and lists the
+                inbox for any write's own .tmp (F1 fix round 1); reads the
+                record when it is a regular file.
+    @deps       datetime, os, stat; RECORD, RECORD_TMP, RECORD_TMP_PREFIX,
+                TIME_SLACK_SECONDS.
+    @complexity O(e) over e names in the inbox (a handful); one short file.
+    @alloc      one Seen and the inbox's name list, freed on return.
     """
     path = box / RECORD
-    tmp_left = os.path.lexists(box / RECORD_TMP)
+    try:
+        own_tmp = any(entry.startswith(RECORD_TMP_PREFIX) for entry in os.listdir(box))
+    except OSError:
+        own_tmp = False
+    tmp_left = os.path.lexists(box / RECORD_TMP) or own_tmp
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -441,16 +458,19 @@ class WriterTest(UmaskTestCase):
             found = seen_record(root.path / "mail" / f"to-{NAME}", time.time())
             self.assertEqual((code, err, found), (EXIT_TIMEOUT, "", written(TIMEOUT)))
 
-    def test_a_link_at_the_records_name_is_replaced_and_its_target_unchanged(self):
-        """A symlink at mail/to-b/.wait.exit to a file outside the mailbox: tc wait b exits 2, the record is a regular file of its own saying timeout, and the file the link led to keeps its text and its time.
+    def test_a_link_at_the_records_name_is_moved_aside_and_its_target_unchanged(self):
+        """A symlink at mail/to-b/.wait.exit to a file outside the mailbox: tc wait b exits 2 and says in one line that it moved the link aside to .wait.exit.planted-1, the link sits there, the record is a regular file of its own saying timeout, and the file the link led to keeps its text and its time.
 
         Must reject a record written through a link (an open by path,
         which follows it): a member could aim the owner's record at any
-        file the owner may write.
+        file the owner may write. F1 fix round 1 (Claude Opus 5.5,
+        unreviewed): the audit's MEDIUM-1, a link at the record's name is
+        moved aside with words, as a wake lock's plant is.
 
         @interacts  makes the inbox, the outside file and the link by hand;
-                    one wait; lstats and reads the record and the target.
-        @deps       _root.TcRoot.tc; seen_record, written.
+                    one wait; lstats and reads the record, the aside name
+                    and the target.
+        @deps       _root.TcRoot.tc; seen_record, written, mode_at; os, pwd.
         @complexity O(1).
         @alloc      one TcRoot.
         """
@@ -461,10 +481,14 @@ class WriterTest(UmaskTestCase):
             outside.write_text(OUTSIDE_TEXT)
             before = os.stat(outside).st_mtime_ns
             (box / RECORD).symlink_to(outside)
+            kind = os.lstat(box / RECORD).st_mode
+            aside = box / FIRST_ASIDE.format(name=RECORD)
             code, out, err = root.tc("wait", NAME, "--timeout", AT_ONCE)
             found = seen_record(box, time.time())
-            self.assertEqual((code, err, found, outside.read_text(), os.stat(outside).st_mtime_ns),
-                             (EXIT_TIMEOUT, "", written(TIMEOUT), OUTSIDE_TEXT, before))
+            said = MOVED_RECORD_WORDS.format(path=box / RECORD, what="a symlink", owner=pwd.getpwuid(os.geteuid()).pw_name,
+                                             aside=aside)
+            self.assertEqual((code, err, found, mode_at(aside), outside.read_text(), os.stat(outside).st_mtime_ns),
+                             (EXIT_TIMEOUT, said + "\n", written(TIMEOUT), kind, OUTSIDE_TEXT, before))
 
     def test_a_wait_killed_by_its_pid_leaves_listening(self):
         """A proven listener killed by its own pid (SIGKILL): once its lock is gone, the record still says listening.
@@ -489,18 +513,22 @@ class WriterTest(UmaskTestCase):
                 found = seen_record(box, time.time())
             self.assertEqual((gone, found.word, found.kind), (True, LISTENING, "file"))
 
-    def test_a_tmp_left_by_a_killed_wait_is_removed_and_one_anything_else_put_there_stops_only_the_record(self):
-        """At mail/to-b/.wait.exit.tmp: this user's own leftover file is removed and the record written (exit 2, nothing on stderr); a symlink to a file outside, or a FIFO, is left as it is, the record is not written, tc says so on stderr in one line per write it could not make (two: the start and the exit), each naming the .tmp, and the wait still exits 2, within WAKE_CEILING_SECONDS.
+    def test_a_tmp_left_by_a_killed_wait_is_removed_and_anything_else_at_the_old_tmp_name_is_moved_aside(self):
+        """At mail/to-b/.wait.exit.tmp, the old fixed .tmp name: this user's own leftover file is removed and the record written (exit 2, nothing on stderr); a symlink to a file outside, or a FIFO, is moved aside to .wait.exit.tmp.planted-1 with one line of words naming what it was and whose, never followed or waited on, the record is still written (timeout), and the wait exits 2, within WAKE_CEILING_SECONDS.
 
         Must reject a leftover .tmp that stops every later record (a wait
         killed between its create and its rename would end the record for
-        good), a planted .tmp followed or waited on, and a failed write
-        that changes the wait's exit code or says nothing.
+        good), a planted .tmp followed or waited on, and a plant that
+        stops the record or is left with nothing said. F1 fix round 1
+        (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1; before it, a
+        plant there stopped the record, with two lines of words.
 
         @interacts  per subtest: makes the inbox and what sits at the
                     .tmp's name by hand; one wait (under a time limit);
-                    lstats the record, the .tmp's name and the target.
-        @deps       _root.TcRoot.tc; seen_record, written, mode_at; os.
+                    lstats the record, the .tmp's name, its aside name and
+                    the target.
+        @deps       _root.TcRoot.tc; seen_record, written, mode_at; os,
+                    pwd.
         @complexity O(1) per subtest.
         @alloc      one TcRoot per subtest.
         """
@@ -521,12 +549,13 @@ class WriterTest(UmaskTestCase):
                 else:
                     os.mkfifo(box / RECORD_TMP)
                 kind = os.lstat(box / RECORD_TMP).st_mode
+                aside = box / FIRST_ASIDE.format(name=RECORD_TMP)
                 code, out, err = root.tc("wait", NAME, "--timeout", AT_ONCE, timeout=WAKE_CEILING_SECONDS)
-                lines = err.splitlines()
-                self.assertEqual((code, len(lines), all(str(box / RECORD_TMP) in line for line in lines),
-                                  seen_record(box, time.time()).word, mode_at(box / RECORD_TMP),
+                said = MOVED_RECORD_WORDS.format(path=box / RECORD_TMP, what=planted,
+                                                 owner=pwd.getpwuid(os.geteuid()).pw_name, aside=aside)
+                self.assertEqual((code, err, seen_record(box, time.time()), mode_at(box / RECORD_TMP), mode_at(aside),
                                   outside.read_text()),
-                                 (EXIT_TIMEOUT, 2, True, None, kind, OUTSIDE_TEXT),
+                                 (EXIT_TIMEOUT, said + "\n", written(TIMEOUT), None, kind, OUTSIDE_TEXT),
                                  f"what tc said: {err!r}")
 
 

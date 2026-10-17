@@ -15,8 +15,11 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
   mail/to-<name>/.wait.lock                held by `tc wait <name>` while it runs; its owner's alone, 0600 (D35)
   mail/to-<name>/.watch.lock               held by `tc watch <name>` while it runs; its owner's alone, 0600 (D35)
   mail/to-<name>/.wait.exit                `tc wait <name>`'s exit record, one line: listening, mail or timeout,
-                                           and a time; its owner's, 0640, replaced whole via .wait.exit.tmp (F1)
-  mail/to-<name>/.wait.lock.planted-<k>    what someone else had put at a lock's name, moved aside by the owner's tc
+                                           and a time; its owner's, 0640, replaced whole via a .wait.exit.tmp-<nonce>
+                                           of each write's own (F1; F1 fix round 1)
+  mail/to-<name>/.wait.lock.planted-<k>    what someone else had put at a lock's name, moved aside by the owner's tc;
+                                           .wait.exit.planted-<k> and .wait.exit.tmp.planted-<k> the same for the
+                                           exit record's name and its old fixed .tmp name (F1 fix round 1)
   mail/.wait-<name>.lock, .watch-<name>.lock  the locks' place before D35, read only on a private mailbox, and only
                                            until every listener started before has re-armed (the switch-over)
   mail/.box-<name>.lock                    the inbox lock: send, read, card, codex join (D14)
@@ -233,10 +236,13 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             mail/to-<name>/.wait.exit by name in the folder its lock is
             in, `listening` once it holds the lock and `mail` or
             `timeout` before it lets go on exit 0 or 2, a .tmp renamed
-            over it, never followed (a .tmp of this user's own that a
-            killed wait left is removed first; anything else there is
-            left alone); one line to stderr when it cannot, and its exit
-            code is unchanged. One reader (read_wait_exit)
+            over it, never followed (F1 fix round 1, Claude Opus 5.5,
+            unreviewed: the audit's MEDIUM-1. Each write's .tmp has a
+            random name of its own, and anything another user, a link,
+            a FIFO or a folder has at the record's name or at the old
+            fixed .wait.exit.tmp is moved aside with one line of words,
+            as a wake lock's plant is); one line to stderr when it
+            cannot, and its exit code is unchanged. One reader (read_wait_exit)
             takes it only from a regular file with one name, the inbox
             owner's, of at most WAIT_EXIT_MAX_BYTES, holding a word and a
             time, never through a link and never blocking; it is never
@@ -353,14 +359,21 @@ Layout under ROOT (default: this script's directory, override with TC_ROOT):
             .planted-<k> file per entry moved aside from a lock's name,
             kept. F1 (Claude Opus 5.5, unreviewed): one exit record per
             name that ever waited, kept in its inbox and replaced whole on
-            each write; its .tmp lives only between a create and a rename
-            (one left by a killed wait is removed by the next).
+            each write; each write's .tmp lives only between a create and
+            a rename (F1 fix round 1, Claude Opus 5.5, unreviewed: one
+            left by a wait killed between the two keeps its random name,
+            kept; one at the old fixed name is removed by the next write),
+            and one .planted-<k> file per entry moved aside from the
+            record's name or the old .tmp name, kept.
 @rng        SSH S1 and SSH fix round 1 (Claude Opus 5.5, unreviewed):
             os.urandom(ORIGIN_TOKEN_BYTES) once per mailbox, for its
             origin token (origin_token, D25); secrets.token_hex
             (ORIGIN_NONCE_BYTES) once per ssh message published, for its
             origin id's random part (origin_nonce, D33 part 4), never on
-            a retry. Nothing else draws randomness.
+            a retry. F1 fix round 1 (Claude Opus 5.5, unreviewed):
+            secrets.token_hex(WAIT_EXIT_TMP_NONCE_BYTES) once per try of
+            each wait exit record write, for its .tmp's name
+            (write_wait_exit). Nothing else draws randomness.
 """
 
 import argparse
@@ -1094,11 +1107,22 @@ RANG_RECORD_MODE = 0o600
 # start with a dot and never end in MESSAGE_SUFFIX, so no listing of
 # messages, tc's or the board's, reads either as mail.
 WAIT_EXIT_NAME = ".wait.exit"
-# The record is written whole to this .tmp beside it (write_new_file:
+# The record is written whole to a .tmp beside it (write_new_file:
 # O_CREAT | O_EXCL | O_NOFOLLOW) and renamed over it, so a reader never
 # sees half a line and a link at the record's name is replaced, never
-# followed.
-WAIT_EXIT_TMP_NAME = ".wait.exit.tmp"
+# followed. F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's
+# MEDIUM-1. Each write takes a .tmp name of its own, {nonce} a fresh
+# random hex of WAIT_EXIT_TMP_NONCE_BYTES, so no member can plant a file
+# at the name before the owner's tc makes it: a fixed name let one plant
+# stop every later record.
+WAIT_EXIT_TMP_NAME = ".wait.exit.tmp-{nonce}"
+# Random bytes in each .tmp name: 64 bits, which nobody guesses ahead.
+WAIT_EXIT_TMP_NONCE_BYTES = 8
+# The one fixed .tmp name tc used before round 1. Anything another user,
+# a link or a FIFO has at it is moved aside with words, as at the record's
+# own name; this user's own one-name file there, left by a wait killed
+# before round 1, is removed.
+WAIT_EXIT_OLD_TMP_NAME = ".wait.exit.tmp"
 # Its mode: the owner writes it; the group reads it, so every member's tc
 # health, tc watch and board can tell how the owner's listener went.
 WAIT_EXIT_MODE = 0o640
@@ -1121,9 +1145,9 @@ WAIT_EXIT_MAX_BYTES = 64
 # one second for the cut, and one more for that moment, which takes
 # milliseconds. An older record is from an earlier wait.
 WAIT_EXIT_TIME_STEP_SECONDS = 2
-# How many times a write makes its .tmp: a second try only after the first
-# found this user's own .tmp left by a wait killed between its create and
-# its rename, which it removes first.
+# How many times a write makes a .tmp and renames it: a second try only
+# after the first found its fresh name taken, or its rename refused (a
+# folder put at the record's name in between), each moved aside first.
 WAIT_EXIT_TRIES = 2
 # What a reader hands back: the word and the time as seconds since the
 # epoch, on the same scale as wall_clock().
@@ -4424,6 +4448,28 @@ def own_wake_lock(st):
     return stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.geteuid()
 
 
+# F1 fix round 1 (Claude Opus 5.5, unreviewed): lifted out of move_aside, unchanged, for move_record_aside too.
+def entry_words(found):
+    """What the stat result `found` is, in the words move_aside and move_record_aside print: a symlink, a FIFO, a folder, not a regular file, a file with another name too, or a file.
+
+    @interacts  none.
+    @deps       stat.
+    @complexity O(1).
+    @alloc      none: one of six fixed strings.
+    """
+    if stat.S_ISLNK(found.st_mode):
+        return "a symlink"
+    if stat.S_ISFIFO(found.st_mode):
+        return "a FIFO"
+    if stat.S_ISDIR(found.st_mode):
+        return "a folder"
+    if not stat.S_ISREG(found.st_mode):
+        return "not a regular file"
+    if found.st_nlink > 1:
+        return "a file with another name too (a hard link)"
+    return "a file"
+
+
 # P3 fix round 1b (Claude Opus 5.5, unreviewed): D35 (1) and D36 (2), each
 # member's listener is theirs alone, and only a name's owner listens for it.
 def move_aside(box_fd, name, path, kind):
@@ -4476,24 +4522,12 @@ def move_aside(box_fd, name, path, kind):
                 lock back to `name` and remove the aside name; reads this
                 process's user id and the user database for the words; on
                 a failed rename one line to stderr and exit 1.
-    @deps       own_wake_lock, name_taken, refuse, user_name; contextlib,
-                os, stat; ENTRY_FLAGS, PLANTED_ASIDE_NAME, EXIT_REFUSED.
+    @deps       own_wake_lock, name_taken, entry_words, refuse, user_name;
+                contextlib, os; ENTRY_FLAGS, PLANTED_ASIDE_NAME,
+                EXIT_REFUSED.
     @complexity O(k) over k aside names already taken (none in practice).
     @alloc      the words, returned.
     """
-    def described(found):
-        if stat.S_ISLNK(found.st_mode):
-            return "a symlink"
-        if stat.S_ISFIFO(found.st_mode):
-            return "a FIFO"
-        if stat.S_ISDIR(found.st_mode):
-            return "a folder"
-        if not stat.S_ISREG(found.st_mode):
-            return "not a regular file"
-        if found.st_nlink > 1:
-            return "a file with another name too (a hard link)"
-        return "a file"
-
     try:
         st = os.lstat(name, dir_fd=box_fd)
     except FileNotFoundError:
@@ -4514,7 +4548,7 @@ def move_aside(box_fd, name, path, kind):
     except FileNotFoundError:
         return None
     except OSError as err:
-        refuse(f"tc {kind}: {path} is {described(st)} owned by {user_name(st.st_uid)}, not this user's own {kind} "
+        refuse(f"tc {kind}: {path} is {entry_words(st)} owned by {user_name(st.st_uid)}, not this user's own {kind} "
                f"lock, and tc could not move it aside ({err.strerror}); nothing made", EXIT_REFUSED)
     try:
         moved = os.lstat(aside, dir_fd=box_fd)
@@ -4525,7 +4559,7 @@ def move_aside(box_fd, name, path, kind):
             os.link(aside, name, src_dir_fd=box_fd, dst_dir_fd=box_fd, follow_symlinks=False)
             os.unlink(aside, dir_fd=box_fd)  # tc's own move undone: the lock keeps its name
         return None
-    return (f"tc {kind}: {path} was {described(moved)} owned by {user_name(moved.st_uid)}, not this user's own "
+    return (f"tc {kind}: {path} was {entry_words(moved)} owned by {user_name(moved.st_uid)}, not this user's own "
             f"{kind} lock; moved it aside to {path.with_name(aside)} and made a new one")
 
 
@@ -4766,69 +4800,126 @@ def hold_wake_lock(name, kind, share, keep_inbox=False):
            f"({WAKE_LOCK_TRIES + 1} times); nothing held", EXIT_REFUSED)
 
 
+# F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, a plant at the record's names moved aside.
+def move_record_aside(box_fd, box, name):
+    """Move what another user, a link, a FIFO, a folder or a second name has at `name` (WAIT_EXIT_NAME or WAIT_EXIT_OLD_TMP_NAME) in the inbox open at `box_fd` (its path `box`, for the words) to the first free PLANTED_ASIDE_NAME there: one line of words naming what it was, whose, and where it went; None when nothing was moved.
+
+    As move_aside does at a wake lock's name, but it never exits: a
+    record write must never change the wait's exit (write_wait_exit). The
+    owner owns the inbox, so sticky lets its tc rename what another member
+    made in it. This user's own regular file with one name (own_wake_lock's
+    test) is left at the record's name, where it is the record; at the old
+    fixed .tmp name, a wait killed before round 1 left it, and it is
+    removed. lstat by name says what it is; the rename, by name in the
+    same descriptor, moves a link as itself, so what a link leads to is
+    never touched. A rename that fails gives words, and the write goes on.
+
+    @interacts  lstats `name` and each aside name tried, by name in
+                `box_fd`; renames one entry there, or removes this user's
+                own old .tmp; lstats it at its aside name; reads this
+                process's user id and the user database for the words.
+    @deps       own_wake_lock, name_taken, entry_words, user_name;
+                contextlib, os; WAIT_EXIT_NAME, PLANTED_ASIDE_NAME.
+    @complexity O(k) over k aside names already taken (none in practice).
+    @alloc      the words, returned.
+    """
+    try:
+        st = os.lstat(name, dir_fd=box_fd)
+    except OSError:
+        return None
+    if own_wake_lock(st):
+        if name != WAIT_EXIT_NAME:
+            with contextlib.suppress(OSError):
+                os.unlink(name, dir_fd=box_fd)  # this user's own .tmp, left by a wait killed before round 1
+        return None
+    k = 1
+    while name_taken(PLANTED_ASIDE_NAME.format(lock=name, k=k), box_fd):
+        k += 1
+    aside = PLANTED_ASIDE_NAME.format(lock=name, k=k)
+    try:
+        os.rename(name, aside, src_dir_fd=box_fd, dst_dir_fd=box_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        return (f"tc wait: {box / name} is {entry_words(st)} owned by {user_name(st.st_uid)}, not this user's own "
+                f"exit record, and tc could not move it aside ({err.strerror})")
+    try:
+        moved = os.lstat(aside, dir_fd=box_fd)
+    except OSError:
+        moved = st
+    return (f"tc wait: {box / name} was {entry_words(moved)} owned by {user_name(moved.st_uid)}, not this user's own "
+            f"exit record; moved it aside to {box / aside}")
+
+
 # F1 (Claude Opus 5.5, unreviewed): the wait exit record (C5, D28, D37 part 2).
 def write_wait_exit(box_fd, box, word):
-    """Replace the wait exit record in the inbox open at `box_fd` (its path `box`, for the words) with `word` and the time now: None when written, else one line of words for stderr.
+    """Replace the wait exit record in the inbox open at `box_fd` (its path `box`, for the words) with `word` and the time now: None when written with nothing to say, else words for stderr, one line each.
 
     By name in the open inbox, never by a path: the line is written whole
-    to WAIT_EXIT_TMP_NAME (write_new_file: O_CREAT | O_EXCL | O_NOFOLLOW,
-    at WAIT_EXIT_MODE, the umask applied) and renamed over
-    WAIT_EXIT_NAME, so a reader never sees half a line and a link at the
-    record's name is replaced, never followed. A .tmp already there that
-    is this user's own regular file with one name was left by a wait
-    killed between its create and its rename (only the lock's holder
-    writes, so no other of this user's waits is writing it): it is
-    removed and the write tried once more. Anything else there (another
-    user's file, a link, a FIFO, a folder) is never opened or removed,
-    and the write fails. A failed write leaves the record's old line, so
-    a failed `mail` or `timeout` after this wait's own `listening` reads
-    as a wait killed (a false `down`, never a false `listening`: the
-    record is never proof of life). A failure never raises: the caller
-    prints the words, and the wait's exit code and wake stay as they
-    were.
+    to a .tmp of this write's own (WAIT_EXIT_TMP_NAME with a fresh random
+    nonce; write_new_file: O_CREAT | O_EXCL | O_NOFOLLOW, at
+    WAIT_EXIT_MODE, the umask applied) and renamed over WAIT_EXIT_NAME,
+    so a reader never sees half a line and a link at the record's name is
+    never followed. F1 fix round 1 (Claude Opus 5.5, unreviewed): the
+    audit's MEDIUM-1. Before round 1 every write used one fixed .tmp name,
+    and a file another member planted there stopped every later record of
+    the owner's for good. Now no member can know the name ahead, and
+    before each try anything at the record's own name or the old fixed
+    name that is not this user's own one-name file (another user's file, a
+    link, a FIFO, a folder, a file with a second name) is moved aside with
+    one line of words (move_record_aside), as a wake lock's plant is; this
+    user's own leftover at the old name is removed. A fresh name already
+    taken, or a rename refused, tries once more with a new name. A failed
+    write leaves the record's old line, so a failed `mail` or `timeout`
+    after this wait's own `listening` reads as a wait killed (a false
+    `down`, never a false `listening`: the record is never proof of
+    life). A failure never raises: the caller prints the words, and the
+    wait's exit code and wake stay as they were.
 
-    @interacts  creates, writes and renames one file by name in `box_fd`
-                (write_new_file); on a .tmp already there, lstats it by
-                name and may remove this user's own; on a failed rename,
-                removes its own .tmp; reads the clock (now_iso) and this
-                process's user id. Writes nothing else.
-    @deps       write_new_file, now_iso; contextlib, os, stat;
-                WAIT_EXIT_NAME, WAIT_EXIT_TMP_NAME, WAIT_EXIT_MODE,
-                WAIT_EXIT_TRIES.
-    @complexity O(1): at most WAIT_EXIT_TRIES creates of one short line,
-                one rename.
+    @interacts  lstats, and may move aside, what has WAIT_EXIT_NAME or
+                WAIT_EXIT_OLD_TMP_NAME in `box_fd`, or remove this user's
+                own old .tmp (move_record_aside); creates, writes and
+                renames one file by name in `box_fd` (write_new_file); on
+                a failed rename, removes its own .tmp; reads the clock
+                (now_iso), this process's user id and the user database
+                (for words), and the OS's randomness (secrets).
+    @deps       move_record_aside, write_new_file, now_iso; contextlib,
+                os, secrets; WAIT_EXIT_NAME, WAIT_EXIT_OLD_TMP_NAME,
+                WAIT_EXIT_TMP_NAME, WAIT_EXIT_TMP_NONCE_BYTES,
+                WAIT_EXIT_MODE, WAIT_EXIT_TRIES.
+    @complexity O(1): at most WAIT_EXIT_TRIES tries of two looks (and
+                moves), one create of one short line and one rename.
     @alloc      the line; one .tmp at a time, renamed into the record or
-                removed; the record, kept and replaced on the next write;
-                the words, on a failure.
+                removed (a wait killed between the two leaves its own .tmp,
+                kept); the record, kept and replaced on the next write;
+                each plant moved aside, kept; the words.
+    @rng        secrets.token_hex(WAIT_EXIT_TMP_NONCE_BYTES) once per try,
+                for the .tmp's name.
     """
     record = box / WAIT_EXIT_NAME
-    for tries in range(WAIT_EXIT_TRIES):
+    said, why = [], ""
+    for _ in range(WAIT_EXIT_TRIES):
+        for name in (WAIT_EXIT_NAME, WAIT_EXIT_OLD_TMP_NAME):
+            moved = move_record_aside(box_fd, box, name)
+            if moved is not None:
+                said.append(moved)
+        tmp = WAIT_EXIT_TMP_NAME.format(nonce=secrets.token_hex(WAIT_EXIT_TMP_NONCE_BYTES))
         try:
-            write_new_file(WAIT_EXIT_TMP_NAME, f"{word} {now_iso()}\n", WAIT_EXIT_MODE, dir_fd=box_fd)
+            write_new_file(tmp, f"{word} {now_iso()}\n", WAIT_EXIT_MODE, dir_fd=box_fd)
         except FileExistsError:
-            try:
-                st = os.lstat(WAIT_EXIT_TMP_NAME, dir_fd=box_fd)
-            except FileNotFoundError:
-                continue  # gone between the create and the look: try again
-            except OSError as err:
-                return f"tc wait: could not write {record} ({err.strerror}); the wait goes on as before"
-            own = stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.geteuid()
-            if not own or tries + 1 == WAIT_EXIT_TRIES:
-                return (f"tc wait: could not write {record}: something this user's tc did not leave has the name "
-                        f"{box / WAIT_EXIT_TMP_NAME}; the wait goes on as before")
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(WAIT_EXIT_TMP_NAME, dir_fd=box_fd)  # this user's own .tmp, left by a killed wait
-            continue
+            why = f" (its fresh name {box / tmp} was taken)"
+            continue  # someone had this fresh name already: a new one
         except OSError as err:
-            return f"tc wait: could not write {record} ({err.strerror}); the wait goes on as before"
+            return "\n".join(said + [f"tc wait: could not write {record} ({err.strerror}); the wait goes on as before"])
         try:
-            os.rename(WAIT_EXIT_TMP_NAME, WAIT_EXIT_NAME, src_dir_fd=box_fd, dst_dir_fd=box_fd)
+            os.rename(tmp, WAIT_EXIT_NAME, src_dir_fd=box_fd, dst_dir_fd=box_fd)
         except OSError as err:
             with contextlib.suppress(OSError):
-                os.unlink(WAIT_EXIT_TMP_NAME, dir_fd=box_fd)  # this call's own .tmp, made just above
-            return f"tc wait: could not write {record} ({err.strerror}); the wait goes on as before"
-        return None
-    return f"tc wait: could not write {record}; the wait goes on as before"
+                os.unlink(tmp, dir_fd=box_fd)  # this call's own .tmp, made just above
+            why = f" ({err.strerror})"
+            continue  # a folder put at the record's name in between: moved aside on the next try
+        return "\n".join(said) or None
+    return "\n".join(said + [f"tc wait: could not write {record}{why}; the wait goes on as before"])
 
 
 def cmd_wait(args):
@@ -4856,7 +4947,9 @@ def cmd_wait(args):
     writes no record and leaves the old one as it was; one killed,
     crashed, refused while it polls (exit 1) or stopped by an exception
     leaves `listening`. A record that cannot be written is one
-    line to stderr; the exit code and the wake are unchanged. The kept
+    line to stderr; the exit code and the wake are unchanged. F1 fix
+    round 1 (Claude Opus 5.5, unreviewed): so is each plant a write moves
+    aside from the record's names (write_wait_exit). The kept
     descriptor is closed on every way out with the lock.
 
     @interacts  checks the name first (C0, exit 6, nothing written); caps
@@ -4877,7 +4970,8 @@ def cmd_wait(args):
                 inbox_messages, SHARED fix round 3); prints one line. F1:
                 writes the exit record in the lock's folder at the start
                 and on exit 0 or 2 (write_wait_exit), with one line to
-                stderr if a write fails.
+                stderr if a write fails, and one per plant it moves aside
+                from the record's names (F1 fix round 1).
     @deps       require_names, mailbox_share, hold_wake_lock, unread,
                 keepalive_seconds, write_wait_exit; contextlib, os,
                 resource, sys, time; MAIL, WAIT_EXIT_LISTENING,
@@ -4892,7 +4986,10 @@ def cmd_wait(args):
                 its lifetime, both closed on every way out, and two
                 descriptors for each poll; flat at about 13 MB. F1: the
                 record, one short file per name that ever waited, replaced
-                whole on each write and kept.
+                whole on each write and kept; each plant moved aside from
+                its names, kept (F1 fix round 1).
+    @rng        F1 fix round 1: write_wait_exit's, a random .tmp name per
+                try of each of its two record writes.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     resource.setrlimit(resource.RLIMIT_AS, (WAIT_MEMORY_CAP_BYTES, WAIT_MEMORY_CAP_BYTES))
