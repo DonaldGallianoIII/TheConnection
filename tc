@@ -8637,7 +8637,7 @@ def _lock_key(st):
 
 
 def listeners(kind="wait"):
-    """Each name that ever ran `tc <kind>`, with the pid holding its lock or None, in name order.
+    """Each name whose inbox holds a `tc <kind>` lock file (made by any tc since P3 fix round 1b), with the pid holding it or None, in name order.
 
     Reads /proc/locks instead of trying the lock, so probing never races a
     listener that is starting up. SHARED fix round 1 (Claude Opus 5.5,

@@ -693,7 +693,10 @@ class WakeLockPlaceTest(UmaskTestCase):
         lock of tc's), and a wait or watch that still stops with exit 3
         beside an old lock. A shared mailbox never read it: the class
         proof's wait and watch rows (listener_case) hold the old place
-        while ann's command runs.
+        while ann's command runs, which proves the start half (no exit
+        3); its listeners() snapshot is taken while ann holds her own
+        lock, so it cannot see an old-place read. That half is proved
+        here, on a private mailbox only.
 
         @interacts  two children holding the old locks; loads tc and calls
                     listeners in process; one background tc wait and then
