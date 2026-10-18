@@ -134,6 +134,45 @@ only), `board/report.py` as one 1500-line file, no time window on a
 large mailbox, a class-proof row for `tc report`, and a counted growth
 test.
 
+### After midnight, 2026-10-18
+
+On the owner's word that work goes on, the relay sent two more, each
+shaped and approved before any build:
+
+1. R10, member trust in ssh cards (D43, C4) at `3a4a113`. Under a shared
+   mailbox, one member's ssh card could send another member's mail over
+   the sender's own keys to a target the card's writer chose. The ssh
+   route now follows only a regular one-name card owned by the sender or
+   the init user, whose name field is its file's name; the rest refuse
+   with words, and flush keeps such mail queued. A standard review
+   (SHIP), a fix round, and a re-review that found a HIGH the fix round
+   itself had made: a printed `mv` line without `-T`, which a member
+   could have turned against the init user's own files. Fixed, with a
+   test that runs the printed line. Lesson kept: a fix line an agent
+   will paste is code.
+2. The report's time window (D44, C7) at `ec60fc1`: `--from` and `--to`,
+   everything recomputed inside the window, and a scrubbed date window
+   that reads in whole days so a daylight-time change day gives nothing
+   away. A quick review (one MEDIUM, that change-day leak) and a fix
+   round.
+
+**A leak caught before it went out.** The WINDOW and DASH briefs asked
+the lanes to write a local scratch path into a handoff. The relay found
+it in WINDOW's; the leak pattern list had no line for the login or that
+path shape. Both are on the list now, every scan covers each new
+commit's content as well as the tips and messages, WINDOW was squashed
+so its early commit never reached dev, and lane branches stay local.
+The relay has put the older matches in public main's history (from
+before the 2026-10-14 scrub) on the owner's list; rewriting public
+history is his call.
+
+**Added to the owner's walks:** `route-shared.md` steps 45d to 45i (ssh
+card trust between two users, 45i walking the printed `mv -T` line) and
+`report.md` step 13a (a window).
+
+**Added to the later list:** the board's own card reader shows no D43
+mark.
+
 ## Update, 2026-10-16
 
 The relay said yes in the morning. P3FIX merged into dev at `8b9b59d`

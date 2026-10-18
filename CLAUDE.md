@@ -121,7 +121,10 @@ from the review backlog after it (DOCS-1, NAME, R30, R2, DOCS2,
 EMPTYROOT, R39, EXITOK) are merged too. On the owner's ask the same
 evening: read times (READTIME, D41) at `db142f9`, the README's
 record-of-work section (RECORD) at `e2be34f`, and `tc report` (DASH v1,
-D42) at `7b77092`. Next are a main update and the owner's human walks.
+D42) at `7b77092`. After midnight, on the owner's word that work goes
+on: R10, member trust in ssh cards (D43), at `3a4a113`, and the report's
+time window (D44), squashed at `ec60fc1`. Next are a main update and the
+owner's human walks.
 
 ### Off limits
 
@@ -152,6 +155,7 @@ tests/test_wake_files.py           the class proof that no member holds or redir
 tests/test_wait_exit.py            the wait exit record: writer, reader, tc watch, tc health and the board (F1)
 tests/test_read_times.py           the read-time record: tc read writes it, tc log shows it, tc peek leaves it (D41)
 tests/test_report.py               tc report: the facts, the scrub, each chart, the refusals, the same bytes twice (C7, D42)
+tests/test_ssh_card_trust.py       the ssh route follows only the sender's own or the init user's card (D43)
 tests/*.test.mjs                   node --test suites for the board
 tests/board-browser-check.mjs      headless check of the live board (needs a Playwright install)
 tests/_root.py                     shared harness: throwaway TC_ROOT, proven listener, fake ssh and codex
@@ -408,5 +412,8 @@ read in `read/.read-times`, and `tc log` shows it (READTIME, D41,
 `db142f9`); the README says the mailbox is a record of the work
 (RECORD, `e2be34f`); `tc report OUT.html [--scrub]` draws the mailbox
 as one static HTML page, safe to share when scrubbed (DASH v1, D42,
-`7b77092`; `qa/human/report.md` not yet walked by a person).
+`7b77092`; `qa/human/report.md` not yet walked by a person). Under a
+shared mailbox the ssh route follows only the sender's own or the init
+user's card (R10, D43, `3a4a113`; route-shared steps 45d to 45i not yet
+walked); `tc report --from --to` covers one span (D44, `ec60fc1`).
 `main` stays the owner's alone.
