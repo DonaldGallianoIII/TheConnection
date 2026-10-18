@@ -23,7 +23,7 @@ pause; no lane reuses a number for a new meaning.
 | Code | Meaning | Who exits with it | Since |
 |---|---|---|---|
 | 0 | ok (`wait`: mail; `watch`: heartbeat) | every command | today |
-| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force`, a body that is not UTF-8 text, an outbox branch another user owns or that is a link (D33); also a link or FIFO planted where tc opens a file (at a wait or watch lock's name it is moved aside instead and the command runs, D35), an inbox that is a link, not a folder, or one tc cannot list, a `.shared` tc cannot read, a wait or watch lock that something else took again each time tc moved one aside, and on a shared mailbox an inbox not its owner's and `wait` or `watch` on a name the running user does not own (C4, D36) | `send`, `join`, `card`, router, `gate` (empty message), `flush` (a refused branch), `wait`, `watch`, `read`, `peek`, `log`, `status`, `init`, `report` (its output file exists, sits inside the mailbox, or cannot be written, C7) | today (empty message), this plan (D17 to D21, D33, D36) |
+| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force`, a body that is not UTF-8 text, an outbox branch another user owns or that is a link (D33); also a link or FIFO planted where tc opens a file (at a wait or watch lock's name it is moved aside instead and the command runs, D35), an inbox that is a link, not a folder, or one tc cannot list, an ssh card the sender may not follow under a shared mailbox (D43), a `.shared` tc cannot read, a wait or watch lock that something else took again each time tc moved one aside, and on a shared mailbox an inbox not its owner's and `wait` or `watch` on a name the running user does not own (C4, D36) | `send`, `join`, `card`, router, `gate` (empty message), `flush` (a refused branch), `wait`, `watch`, `read`, `peek`, `log`, `status`, `init`, `report` (its output file exists, sits inside the mailbox, or cannot be written, C7) | today (empty message), this plan (D17 to D21, D33, D36) |
 | 2 | `wait` timed out or hit its keepalive | `wait` | today |
 | 3 | another listener or watcher already holds this name's lock | `wait`, `watch` | today |
 | 4 | kept in the outbox: ssh could not reach the target, the target already has a queue, or another tc holds this member's send lock or it would not open | `send` (ssh route), `flush` | this plan (C3, D33) |
@@ -639,6 +639,26 @@ For a separate Linux user per account on one machine.
      everyone's tc uses.
   The two-user cases are Donald's human QA (`qa/human/route-shared.md`),
   including a member trying to rewrite `.shared` and being refused.
+- **Only your own or the init user's ssh card** (D43, R10). Under a
+  shared mailbox the first member to write `cards/<name>.json` owns that
+  name's card, and an ssh card names where a send goes and what program
+  its ssh runs there. So the ssh route, in `tc send` and in `tc flush`,
+  follows a card only when the card file tc opened (`O_NOFOLLOW`, then
+  `fstat` on that open file) is a regular file with one name, owned by
+  the sending user or by the init user (the owner of `ROOT/.shared`),
+  and its `name` field is its file's name. Anything else refuses, exit
+  1, nothing queued and no ssh run, with words naming the card's writer
+  and the init user, who can write it for everyone: a link (even one to
+  the init user's card), a second name (a hard link to another card),
+  another member's card, or a card that names another name. In `tc
+  flush`, a queued file whose card fails stays queued with those words,
+  never sent and never filed as refused, and goes once the card is
+  fixed. `tc health` and `tc cards` mark such a card, so nobody learns
+  of it from a failed send. A private mailbox is unchanged. Left as it
+  is, and said here: a codex card a member plants for an unclaimed name
+  rings the sender's own codex with a thread id that store does not
+  hold, so the ring fails with words and the mail stays in its local
+  inbox; nothing is redirected.
 - **A branch is its member's alone** (D33). `outbox/<user>/` and every
   folder under it are group-readable and not group-writable (`2750`), so
   no member can plant a folder or file inside another's branch, and the
