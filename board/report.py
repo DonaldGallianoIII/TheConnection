@@ -88,6 +88,16 @@ READ_FOLDER = "read"
 CARD_SUFFIX = ".json"
 # Opening a message: never through a link, never blocking on a FIFO.
 HEAD_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+# The tags a scrubbed page keeps as they are (C7). The project's own
+# working words, none of which names a person, a project or a machine;
+# any other tag reads OTHER_TAG.
+SCRUB_TAGS = frozenset(("ANSWER", "FYI", "QUESTION", "PLAN", "PLAN-READY", "PLAN-CHECK", "PLAN-EDIT",
+                        "PLAN-EDITED", "PLAN-REVIEWED", "CORRECTION", "HEADS-UP", "MERGE", "REVIEW",
+                        "STATUS", "BLOCKED", "DONE", "BREACH"))
+OTHER_TAG = "other"
+# What a scrubbed name is called when C5 gives it no role (C7): a name
+# with no inbox and no card.
+NO_ROLE_LABEL = "session"
 
 # One message, closed (C7): exactly these eight facts. sent and read are
 # aware datetimes on a real page, whole seconds since the first message on
@@ -100,6 +110,10 @@ Session = collections.namedtuple("Session", "name role source level")
 # mail order, how many headers did not parse, and words for stderr (why a
 # folder or record was not read), which never reach the page.
 Mailbox = collections.namedtuple("Mailbox", "records sessions unparsed words")
+# What the renderer draws, and all it ever sees: the records and sessions,
+# the count of headers that did not parse, whether the page is scrubbed,
+# and its "as of" (a time, as the records' times are, or None).
+Page = collections.namedtuple("Page", "records sessions unparsed scrubbed as_of")
 
 
 def load_board_module():
@@ -380,3 +394,69 @@ def extract(tc):
                 sessions[name] = Session(name, role, source, levels.get(name))
     unparsed = sum(1 for record in records if record.sent is None)
     return Mailbox(tuple(records), tuple(sessions.values()), unparsed, tuple(words))
+
+
+def page_of(mailbox, at):
+    """The unscrubbed Page of `mailbox`, as of `at` (an aware datetime, `--at`) or, when None, the last message's sent time.
+
+    @interacts  none; pure.
+    @deps       Page.
+    @complexity O(t) over t records, for the last sent time.
+    @alloc      one Page, returned; it shares the mailbox's tuples.
+    """
+    sent = [record.sent for record in mailbox.records if record.sent is not None]
+    as_of = at if at is not None else (max(sent, key=lambda when: when.timestamp()) if sent else None)
+    return Page(mailbox.records, mailbox.sessions, mailbox.unparsed, False, as_of)
+
+
+def scrub(page):
+    """`page` made safe to share (C7): a Page whose records hold no real name, time, number or off-list tag.
+
+    - Names become role labels from C5's roles, numbered per role in
+      order of first mail (the order of page.sessions, which extract
+      builds in sent order): orchestrator-1, worker-1, peer-1, and
+      session-1 for a name C5 gives no role.
+    - A tag not in SCRUB_TAGS becomes OTHER_TAG.
+    - Every time becomes whole seconds since the first sent time (None
+      when no message has one), the "as of" too.
+    - Numbers become ranks from 1 in sent order (the records' order), and
+      each #N reference the rank of the first message numbered N; a
+      reference to no message here is dropped.
+
+    @interacts  none; pure.
+    @deps       datetime; Page, Record, Session, SCRUB_TAGS, OTHER_TAG,
+                NO_ROLE_LABEL.
+    @complexity O(t + r + s) over t records, r references and s sessions.
+    @alloc      one new Page, its records and sessions, and three maps
+                (labels, ranks, counters), freed on return.
+    """
+    counters, labels, sessions = {}, {}, []
+    for session in page.sessions:
+        role = session.role or NO_ROLE_LABEL
+        counters[role] = counters.get(role, 0) + 1
+        labels[session.name] = f"{role}-{counters[role]}"
+        sessions.append(Session(labels[session.name], session.role, session.source, session.level))
+    sent = [record.sent.timestamp() for record in page.records if record.sent is not None]
+    first = min(sent) if sent else None
+
+    def elapsed(when):
+        """`when` as whole seconds since `first`; None when either is None.
+
+        @interacts  none.
+        @deps       none.
+        @complexity O(1).
+        @alloc      none.
+        """
+        if when is None or first is None:
+            return None
+        return round(when.timestamp() - first)
+
+    ranks = {}
+    for rank, record in enumerate(page.records, 1):
+        ranks.setdefault(record.number, rank)
+    records = tuple(
+        Record(rank, labels[record.sender], labels[record.recipient], elapsed(record.sent), elapsed(record.read),
+               record.size, record.tag if record.tag is None or record.tag in SCRUB_TAGS else OTHER_TAG,
+               tuple(ranks[ref] for ref in record.refs if ref in ranks))
+        for rank, record in enumerate(page.records, 1))
+    return Page(records, tuple(sessions), page.unparsed, True, elapsed(page.as_of))

@@ -196,5 +196,73 @@ class ExtractTest(unittest.TestCase):
             self.assertEqual(box.unparsed, 2)
 
 
+class ScrubTest(unittest.TestCase):
+    """scrub() turns names, tags, times and numbers into C7's safe forms, on the records, before any rendering.
+
+    @interacts  builds the fixture under a TcRoot; loads tc and report.py.
+    @deps       modules_for, fixture.build; _root.TcRoot.
+    @complexity O(12) messages.
+    @alloc      one TcRoot, removed on exit.
+    """
+
+    # The fixture's numbers as ranks in sent order: 10's header does not
+    # parse, so it ranks last.
+    RANKS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 11: 10, 12: 11, 10: 12}
+    LABELS = {"annika": "orchestrator-1", "bertil": "worker-1", "corwin": "worker-2", "dagny": "session-1"}
+
+    def test_the_allow_list_is_c7s(self):
+        """SCRUB_TAGS holds exactly C7's seventeen tags.
+
+        @interacts  loads report.py.
+        @deps       report.SCRUB_TAGS.
+        @complexity O(1).
+        @alloc      none.
+        """
+        report = _root.load_source("board_report", REPORT_PATH)
+        self.assertEqual(set(report.SCRUB_TAGS), {
+            "ANSWER", "FYI", "QUESTION", "PLAN", "PLAN-READY", "PLAN-CHECK", "PLAN-EDIT", "PLAN-EDITED",
+            "PLAN-REVIEWED", "CORRECTION", "HEADS-UP", "MERGE", "REVIEW", "STATUS", "BLOCKED", "DONE", "BREACH"})
+
+    def test_names_tags_times_and_numbers_become_labels_other_elapsed_and_ranks(self):
+        """Every scrubbed record: rank, role label by first mail, elapsed seconds, the size, an allow-listed tag or `other`, refs as ranks.
+
+        @interacts  see the class.
+        @deps       report.extract, report.page_of, report.scrub.
+        @complexity O(12).
+        @alloc      the records.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            tc, report = modules_for(root)
+            page = report.scrub(report.page_of(report.extract(tc), None))
+            self.assertTrue(page.scrubbed)
+            want = []
+            for spec in fixture.MESSAGES:
+                folder = root.path / "mail" / f"to-{spec.to}" / ("read" if spec.read is not None else "")
+                size = (folder / f"{spec.number:06d}-from-{spec.sender}.md").stat().st_size
+                tag, refs = report.first_line_facts(spec.body.split("\n")[0])
+                tag = tag if tag in report.SCRUB_TAGS or tag is None else "other"
+                want.append(report.Record(self.RANKS[spec.number], self.LABELS[spec.sender], self.LABELS[spec.to],
+                                          spec.sent, spec.read, size, tag, tuple(self.RANKS[r] for r in refs)))
+            want.sort(key=lambda r: r.number)
+            self.assertEqual(list(page.records), want)
+            self.assertEqual([s.name for s in page.sessions], list(self.LABELS.values()))
+            self.assertEqual(page.as_of, 17 * fixture.HOUR)
+
+    def test_a_reference_to_no_message_in_the_mailbox_is_dropped(self):
+        """A #N naming no message here has no rank, so the scrubbed record drops it, never keeps the real number.
+
+        @interacts  loads report.py.
+        @deps       report.scrub, report.Page, report.Record, report.Session.
+        @complexity O(1).
+        @alloc      one small page.
+        """
+        report = _root.load_source("board_report", REPORT_PATH)
+        record = report.Record(41, "ann", "ben", fixture.BASE, None, 10, "ANSWER", (7, 41))
+        page = report.Page((record,), (report.Session("ann", None, None, None), report.Session("ben", None, None, None)),
+                           0, False, None)
+        self.assertEqual(report.scrub(page).records[0].refs, (1,))
+
+
 if __name__ == "__main__":
     unittest.main()
