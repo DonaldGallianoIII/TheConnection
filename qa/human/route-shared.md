@@ -35,7 +35,7 @@ Walking both files, walk them as ann, so route-ssh.md's `you` is ann:
 1. route-ssh.md, steps 1 to 22.
 2. This file, steps 1 to 45, then 45a to 45c (read times, added after
    the numbers below were set, so nothing after them moved), then 45d
-   to 45h (ssh cards, D43, added the same way). Steps 38 to 44 and 45h
+   to 45i (ssh cards, D43, added the same way). Steps 38 to 44 and 45h
    reuse route-ssh.md's alias `farbox-tc` and its far name `far-b`, so
    their setup is done.
 3. This file's cleanup, steps 46 to 50.
@@ -43,7 +43,7 @@ Walking both files, walk them as ann, so route-ssh.md's `you` is ann:
 
 Walking this file alone: before step 38, as ann, do route-ssh.md's steps
 2 to 7, and at the end its cleanup for what those steps made. Steps 45d
-to 45h need step 38's card and route-ssh.md's alias.
+to 45i need step 38's card, and 45d to 45h route-ssh.md's alias.
 
 ## What this checks
 
@@ -808,8 +808,9 @@ program ssh runs there. So a send over ssh follows only a card the
 sender wrote or the init user (ann here) wrote. Anyone else's card is
 refused before ssh runs, and `tc cards` and `tc health` mark it. These
 steps use the same throwaway mailbox, `TC_ROOT=/srv/tc-shared`. `far-d`
-is a name nobody has claimed, here or on farbox; it is made up. Only
-step 45h runs ssh, to route-ssh.md's alias `farbox-tc`, as step 41 does.
+and `far-l` are names nobody has claimed, here or on farbox; they are
+made up. Only step 45h runs ssh, to route-ssh.md's alias `farbox-tc`,
+as step 41 does.
 
 45d. ben writes an ssh card for the unclaimed name. As ben: `tc card
     far-d --ssh farbox-tc --remote-tc '~/tc-qa/tc'`, then `ls -l
@@ -864,6 +865,43 @@ step 45h runs ssh, to route-ssh.md's alias `farbox-tc`, as step 41 does.
     - Put it back. As ben: `mv /srv/tc-shared/outbox/ben/to-far-d
       ~/tc-qa-aside/step45h-ben-queue` (ben's own queue, so nothing of
       his waits for far-d).
+<!-- Step 45i: the R10 lane agent (Claude Opus 5.5), fix round 2, the re-review's REC-2 and HIGH-1, 2026-10-18. Status: unreviewed. -->
+45i. A linked card, and the printed `mv -T` line walked by hand. No
+    ssh runs here. As ben: `ln -s far-b.json
+    /srv/tc-shared/cards/far-l.json`. As ann: `tc send --from ann --to
+    far-l "via a link"; echo "exit $?"`.
+    - It prints on stderr `tc send: /srv/tc-shared/cards/far-l.json is
+      a symlink ben made, and tc follows no card through a link, even
+      one to a card of the user who ran init (ann). Nothing sent and no
+      ssh run. Its writer (ben) or the user who ran init (ann) moves it
+      aside: mv -T /srv/tc-shared/cards/far-l.json
+      /srv/tc-shared/cards/.squatted-far-l.json-1. Then far-l's owner
+      rejoins in that session (tc join far-l), or, if far-l lives on
+      another machine, the user who ran init writes its card: tc card
+      far-l --ssh <target>.`, then `exit 1`. The line says `mv -T`.
+    - `tc cards`, as ann, has the line `far-l.json: unreadable card; a
+      symlink by ben: no send follows it`.
+    - Now the race the `-T` is for: a member points the printed aside
+      name at a folder the init user can write. As ann: `mkdir -m 0700
+      ~/step45i-folder` (ann's own; ben cannot see into it). As ben,
+      before ann runs the line: `ln -s /home/ann/step45i-folder
+      /srv/tc-shared/cards/.squatted-far-l.json-1`, with ann's real home
+      folder in place of `/home/ann` (a link needs no access to what it
+      names).
+    - As ann: run the printed `mv -T` line exactly as printed.
+    - As ann: `ls -l /srv/tc-shared/cards/far-l.json
+      /srv/tc-shared/cards/.squatted-far-l.json-1`. The first is gone;
+      the second is the link to `far-b.json` (owner `ben`, the link ben
+      made), never the link to ann's folder. As ann: `ls -A
+      ~/step45i-folder` prints nothing.
+    - Pass: the `mv -T` words, exit 1, the mark, and after the move an
+      empty folder and the card link at the aside name. Fail: a line
+      without `-T`, or a `far-l.json` inside ann's `~/step45i-folder`
+      (mv followed ben's link into ann's own folder, where a file of
+      that name would have been replaced).
+    - Put it back. As ben: `mv /srv/tc-shared/cards/.squatted-far-l.json-1
+      ~/tc-qa-aside/step45i-link` (ben's own link). As ann: `mv
+      ~/step45i-folder ~/tc-qa-aside/`.
 
 ## Cleanup
 
@@ -923,7 +961,8 @@ references to them, in P3 fix round 2 by the P3 fixer, Claude Opus 5.5,
 marked, the init user's followed) added by the R10 lane agent, Claude
 Opus 5.5, 2026-10-17, numbered after 45c so no step moved; step 45f's
 words and the "What you need" wrap changed in R10 fix round 1 by the
-same agent, 2026-10-18.
+same agent, 2026-10-18; step 45i (a linked card, and its printed `mv
+-T` line walked by hand) added in R10 fix round 2, the same day.
 
 **The outbox section (D22).** Added by the SSH lane agent (Claude Opus
 5.5), 2026-10-15; rewritten for D32 and D33 in fix round 1 by the SSH

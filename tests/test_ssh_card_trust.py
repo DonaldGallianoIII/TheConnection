@@ -67,6 +67,7 @@ import os
 import pathlib
 import pwd
 import stat
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -110,12 +111,20 @@ FIX_WORDS = ("The user who ran init ({init}) can write it for everyone: tc card 
              "your own card under a name of your own: tc card <your-name> --ssh <target>; the mail then goes to "
              "<your-name> on that machine, so a session there must join as that name.")
 # R10 fix round 1 (Claude Opus 5.5, unreviewed): the review's LOW-3. A
-# link's own fix: moved aside ({aside}, tc's first .squatted name in
+# link's own fix: moved aside ({aside}, tc's first free .squatted name in
 # cards/), then the name's owner rejoins, or its ssh card is written.
-LINK_FIX_WORDS = ("Its writer ({writer}) or the user who ran init ({init}) moves it aside: mv {path} {aside}. Then "
-                  "{name}'s owner rejoins in that session (tc join {name}), or, if {name} lives on another machine, "
-                  "the user who ran init writes its card: tc card {name} --ssh <target>.")
+# R10 fix round 2 (Claude Opus 5.5, unreviewed): the re-review's HIGH-1,
+# `mv -T`, so a link a member plants at the aside name is replaced, never
+# followed into the folder it points at.
+LINK_FIX_WORDS = ("Its writer ({writer}) or the user who ran init ({init}) moves it aside: mv -T {path} {aside}. "
+                  "Then {name}'s owner rejoins in that session (tc join {name}), or, if {name} lives on another "
+                  "machine, the user who ran init writes its card: tc card {name} --ssh <target>.")
 ASIDE_NAME = ".squatted-{name}.json-1"
+ASIDE_NAME_K = ".squatted-{name}.json-{k}"
+# The re-review's bugs LOW-1 (fix round 2): tc flush's words for a name
+# whose card is a symlink, never "an ssh card", in `--to` with nothing
+# waiting.
+NOTHING_LINK_WORDS = "nothing waiting for {name}: {name}'s card is a symlink, which no send follows (D43): {card}\n"
 # The review's LOW-5: what a card with no name field, or a null one, names.
 NO_NAME = "no name"
 # The review's LOW-1 and LOW-2: tc flush's words for a name whose card is
@@ -383,6 +392,59 @@ class SshCardTrustTest(SharedCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(len(seen), 1)
 
+    # R10 fix round 2 (Claude Opus 5.5, unreviewed): the re-review's REC-1.
+    def test_the_init_user_is_the_owner_of_the_shared_read_never_a_second_look(self):
+        """ann sends to the init user's card while, right after tc's first read of .shared, a new .shared (the running user's own, same group) is swapped in at its name: the send still goes, the fake ssh called once.
+
+        Must reject an init user taken from a second open of .shared by
+        path: that open would find the swapped file, whose owner is the
+        running user, so the init user's card would read as nobody's it
+        trusts. Only the owner in the fstat of the read that named the
+        group (shared_group_seen) keeps it trusted.
+
+        @interacts  init, one tc card; .shared renamed aside and written
+                    again by hand inside tc's read; one send in process.
+        @deps       SharedCase.shared, SharedCase.card, load_tc, in_process,
+                    send, assert_called; os, unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            folder, calls = self.shared(root)
+            path = self.card(root, FAR_X)
+            shared = root.path / ".shared"
+            tc = load_tc(root)
+            real_read, swapped = tc.read_regular_file_seen, []
+
+            def read_then_swap(where, *args, **kwargs):
+                got = real_read(where, *args, **kwargs)
+                if pathlib.Path(where) == shared and not swapped:
+                    text = shared.read_text()
+                    os.rename(shared, shared.with_name(".shared-read-first"))
+                    shared.write_text(text)
+                    swapped.append(where)
+                return got
+            with mock.patch.object(tc, "read_regular_file_seen", read_then_swap):
+                code, out, err = in_process(root, tc, send(tc, FAR_X), init=[path])
+            seen = assert_called(self, folder, calls)
+        self.assertEqual(swapped, [shared], "tc never read .shared, so nothing was swapped")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(seen), 1)
+
+    # R10 fix round 2 (Claude Opus 5.5, unreviewed): the re-review's LOW-3.
+    def test_card_route_has_no_unchecked_default(self):
+        """card_route called with the card's name alone raises TypeError: no caller skips D43 by leaving the frame out.
+
+        @interacts  loads tc; one call in process.
+        @deps       load_tc.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            tc = load_tc(root)
+            with self.assertRaises(TypeError):
+                tc.card_route(FAR_Y)
+
     def test_another_members_card_is_refused_with_words_and_the_senders_own_goes(self):
         """ben wrote the ssh card for far-y: ann's send exits 1 with C4's words naming ben and the init user, queues nothing and runs no ssh; then, in the same root, her send to her own far-x calls the fake.
 
@@ -579,9 +641,52 @@ class SshCardTrustTest(SharedCase):
             link.symlink_to(card_path(root, "b"))
             refused = root.tc("send", "--from", SENDER, "--to", "c", "hi")
             listed = root.tc("cards")
+            flushed = root.tc("flush", "--to", "c")  # R10 fix round 2: the re-review's bugs LOW-1
+        aside = link.with_name(ASIDE_NAME.format(name="c"))
         self.assertEqual(refused, (EXIT_REFUSED, "", words(SEND_WORDS, WHY_LINK, path=link, writer=me, init=me,
-                                                           name="c", aside=link.with_name(ASIDE_NAME.format(name="c")))))
+                                                           name="c", aside=aside)))
         self.assertIn(f"c.json: unreadable card{MARK_JOIN}{MARK_LINK.format(writer=me)}\n", listed[1])
+        card = words("{path} {why}. {fix}", WHY_LINK, path=link, writer=me, init=me, name="c", aside=aside)
+        self.assertEqual(flushed, (0, NOTHING_LINK_WORDS.format(name="c", card=card), ""))
+
+    # R10 fix round 2 (Claude Opus 5.5, unreviewed): the re-review's HIGH-1.
+    def test_a_links_fix_line_says_mv_T_and_a_folder_link_planted_at_its_aside_name_is_replaced_never_followed(self):
+        """As a command: c.json a symlink to b's card. The send's fix line says `mv -T <link> <aside>`; a member then plants a link to a folder outside the mailbox at that aside name (the race between print and paste), and a second send names the next free aside, again with `mv -T`. The first line run as printed replaces the planted link with the card link, and the folder stays empty.
+
+        Must reject a fix line without -T: GNU mv follows a link at its
+        destination and moves the card link into that folder, over any
+        file there of the same name.
+
+        @interacts  init, one tc join, two symlinks and one folder by
+                    hand, two sends, one mv -T of the printed line.
+        @deps       SharedCase.shared, words, card_path; os, subprocess.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        me = own_login()
+        with _root.TcRoot() as root:
+            self.shared(root)
+            self.assertEqual(root.tc("join", "b", env={"CLAUDECODE": "1"})[0], 0)
+            link = card_path(root, "c")
+            link.symlink_to(card_path(root, "b"))
+            first = root.tc("send", "--from", SENDER, "--to", "c", "hi")
+            outside = root.base / "outside-folder"
+            outside.mkdir()
+            planted = link.with_name(ASIDE_NAME_K.format(name="c", k=1))
+            planted.symlink_to(outside, target_is_directory=True)
+            second = root.tc("send", "--from", SENDER, "--to", "c", "hi")
+            pasted = subprocess.run(["mv", "-T", str(link), str(planted)], capture_output=True, text=True)
+            inside = sorted(p.name for p in outside.iterdir())
+            now = os.readlink(planted)
+        for got, k in ((first, 1), (second, 2)):
+            with self.subTest(send=k):
+                aside = link.with_name(ASIDE_NAME_K.format(name="c", k=k))
+                self.assertEqual(got, (EXIT_REFUSED, "", words(SEND_WORDS, WHY_LINK, path=link, writer=me, init=me,
+                                                               name="c", aside=aside)))
+                self.assertIn(f": mv -T {link} {aside}. ", got[2])
+        self.assertEqual(pasted.returncode, 0, pasted.stderr)
+        self.assertEqual(inside, [], "the pasted mv moved the card link into the planted folder")
+        self.assertEqual(now, str(card_path(root, "b")), "the aside name does not hold the card link")
 
 
 class FlushTrustTest(SharedCase):
