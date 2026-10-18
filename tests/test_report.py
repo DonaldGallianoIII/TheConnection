@@ -844,14 +844,16 @@ class CommandTest(unittest.TestCase):
             proc = root.start(argv=[sys.executable, str(lone / "tc"), "report", str(out)])
             stdout, stderr = proc.communicate(timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS)
             self.assertEqual(proc.returncode, EXIT_REFUSED, stderr)
-            self.assertIn(str(lone / "board" / "report.py"), stderr)
+            self.assertIn(f"no renderer at {lone / 'board' / 'report.py'}", stderr)
+            self.assertNotIn("Traceback", stderr)
             self.assertFalse(out.exists())
             (lone / "board").mkdir()
             (lone / "board" / "report.py").write_bytes(REPORT_PATH.read_bytes())
             proc = root.start(argv=[sys.executable, str(lone / "tc"), "report", str(out)])
             stdout, stderr = proc.communicate(timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS)
             self.assertEqual(proc.returncode, EXIT_REFUSED, stderr)
-            self.assertIn(str(lone / "board" / "serve.py"), stderr)
+            self.assertIn(f"no renderer at {lone / 'board' / 'serve.py'}", stderr)
+            self.assertNotIn("Traceback", stderr)
             self.assertFalse(out.exists())
 
     def test_a_page_that_cannot_be_written_refuses_with_words(self):
@@ -868,6 +870,7 @@ class CommandTest(unittest.TestCase):
             code, _, stderr = root.tc("report", str(out))
             self.assertEqual(code, EXIT_REFUSED, stderr)
             self.assertIn(f"could not write {out}", stderr)
+            self.assertNotIn("Traceback", stderr)
             self.assertFalse(out.parent.exists())
 
     def test_usage_errors_exit_9(self):
