@@ -25,7 +25,11 @@ docs/planning/connection-routes/handoffs/READTIME.md.
             test_shared.load_tc) and runs cmd_read and cmd_log in process
             with os.write, os.rename or os.fstat patched, or tc's
             READ_TIMES_MAX_BYTES set low, stdout and stderr captured.
-            Writes nothing outside the root's temp folder.
+            Fix round 2 (Claude Opus 5.5, unreviewed): appends a second
+            line for one name to a record by hand, sets
+            READ_TIMES_MAX_BYTES to a window inside a three-line record,
+            and calls tc's move_record_aside in process on a read/ it
+            opens. Writes nothing outside the root's temp folder.
 @deps       python3 stdlib (argparse, datetime, errno, json, os, pathlib,
             pwd, re, stat, sys, time, unittest, unittest.mock);
             tests/_root.py; UmaskTestCase, load_tc and
@@ -91,6 +95,12 @@ NOT_OWNER_WORDS = ("tc read: read times for {name} are kept by {owner}, who owns
 COUNT_WORDS = {1: "1 message", 2: "2 messages"}
 # The start of tc log's line on stderr for a record it would not read.
 LOG_UNREAD_RECORD_START = "tc log: {path} not read ("
+# Fix round 2 (Claude Opus 5.5, unreviewed): the start of tc log's line on
+# stderr for a record past the cap, read from its tail (tc's
+# READ_TIMES_TAIL_WORDS), and a read time later than any a test makes,
+# for a second line written by hand.
+LOG_TAIL_START = "tc log: {path} is over {limit} bytes; only its newest {limit} bytes were read"
+LATER_TIME = "2099-01-01T00:00:00-05:00"
 # The header line tc writes at the top of every message.
 HEADER = re.compile(r"^# #(\d+) from ")
 # A message name not of MESSAGE_NAME_PATTERN's form, made by hand in the
@@ -104,8 +114,6 @@ TORN = b'{"name": "0000'
 # What a file outside the mailbox holds, that a link at the record's name
 # leads to.
 OUTSIDE_TEXT = "outside the mailbox: tc must never write or read this\n"
-# A byte limit below any real record, for the over-the-limit case.
-LOW_LIMIT_BYTES = 8
 # The exit codes (contracts.md): done, and refused with words (a message
 # tc could not move).
 EXIT_OK = 0
@@ -477,6 +485,37 @@ class WriterTest(UmaskTestCase):
                              [message_name(1), message_name(3)])
 
 
+    # Fix round 2 (Claude Opus 5.5, unreviewed): the review's REC-1, a forgotten record is an error, never a removal.
+    def test_move_record_aside_without_its_record_raises_and_removes_nothing(self):
+        """tc's move_record_aside called in process on the read-time record's name with no record spec raises TypeError, and the record keeps its bytes.
+
+        Must reject a default spec: the wait exit record's would take
+        .read-times for an earlier write's leftover .tmp, this user's own,
+        and remove it.
+
+        @interacts  one send and a read; opens read/ and calls
+                    move_record_aside in process; reads the record.
+        @deps       send, paths, load_tc; os.
+        @complexity O(1).
+        @alloc      one TcRoot, one module and one descriptor, closed.
+        """
+        with _root.TcRoot() as root:
+            send(self, root, 1)
+            self.assertEqual(root.tc("read", NAME)[0], EXIT_OK)
+            _, read, record = paths(root)
+            self.assertTrue(os.path.lexists(record), "tc read wrote no record to keep")
+            before = record.read_bytes()
+            tc = load_tc(root)
+            read_fd = os.open(read, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaises(TypeError):
+                    tc.move_record_aside(read_fd, read, RECORD)
+            finally:
+                os.close(read_fd)
+            self.assertEqual(record.read_bytes() if os.path.lexists(record) else None, before,
+                             "the record is gone or changed")
+
+
 class LogTest(UmaskTestCase):
     """tc log shows sent and read times: the line after each header, and a record it passes by or will not read.
 
@@ -543,36 +582,95 @@ class LogTest(UmaskTestCase):
                                             f"{record.read_bytes()!r}")
             self.assertEqual((code, err, after_header(out).get(3)), (EXIT_OK, "", READ_LINE.format(time=later[0]["read"])))
 
-    def test_a_record_over_the_limit_or_not_the_owners_reads_as_not_recorded_with_one_line_why(self):
-        """tc log in process with READ_TIMES_MAX_BYTES set to LOW_LIMIT_BYTES, and again with the record reported as another user's: each message in that read/ says `read, time not recorded`, stderr is one line naming the record, and the exit is 0.
+    def test_a_record_not_the_owners_reads_as_not_recorded_with_one_line_why(self):
+        """tc log in process with the record reported as another user's: each message in that read/ says `read, time not recorded`, stderr is one line naming the record, and the exit is 0.
 
-        Must reject an unbounded read of the record, a record a member
-        planted in a shared read/ believed, and a log that fails over it.
+        Must reject a record a member planted in a shared read/ believed,
+        and a log that fails over it. Fix round 2 (Claude Opus 5.5,
+        unreviewed): the over-the-limit case moved to its own test, since
+        a record past the cap is now read from its tail.
 
-        @interacts  two sends and a read; tc log in process with tc's
-                    READ_TIMES_MAX_BYTES patched or os.fstat patched.
+        @interacts  two sends and a read; tc log in process with os.fstat
+                    patched.
         @deps       send, paths, load_tc, owner_patched_fstat,
                     log_in_process, after_header; unittest.mock.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        with _root.TcRoot() as root:
+            send(self, root, 2)
+            self.assertEqual(root.tc("read", NAME)[0], EXIT_OK)
+            _, _, record = paths(root)
+            self.assertTrue(os.path.lexists(record), "tc read wrote no record for the log to read")
+            tc = load_tc(root)
+            with mock.patch.object(os, "fstat", owner_patched_fstat(record)):
+                code, out, err = log_in_process(tc)
+            self.assertEqual(code, EXIT_OK, err)
+            self.assertEqual(after_header(out), {1: NOT_RECORDED_LINE, 2: NOT_RECORDED_LINE}, out)
+            self.assertEqual(err.count("\n"), 1, err)
+            self.assertTrue(err.startswith(LOG_UNREAD_RECORD_START.format(path=record)), err)
+
+    # Fix round 2 (Claude Opus 5.5, unreviewed): the review's LOW-1, the last line for a name wins.
+    def test_when_a_name_has_two_lines_the_last_one_shows(self):
+        """One message read, then a second line for its name appended by hand with LATER_TIME: tc log shows `read LATER_TIME`, exit 0, nothing on stderr.
+
+        A name can take a second line honestly: once a read message's file
+        has left read/ and mail/.seq is set back, tc moves a new message in
+        under the same name. Must reject a log that shows the older read.
+
+        @interacts  one send and a read; appends to the record by hand; a
+                    log.
+        @deps       send, paths, after_header, message_name; json.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            send(self, root, 1)
+            self.assertEqual(root.tc("read", NAME)[0], EXIT_OK)
+            _, _, record = paths(root)
+            self.assertTrue(os.path.lexists(record), "tc read wrote no record to append to")
+            with open(record, "a") as f:
+                f.write(json.dumps({"name": message_name(1), "number": 1, "read": LATER_TIME}) + "\n")
+            code, out, err = root.tc("log")
+            self.assertEqual((code, err), (EXIT_OK, ""), out)
+            self.assertEqual(after_header(out), {1: READ_LINE.format(time=LATER_TIME)}, out)
+
+    # Fix round 2 (Claude Opus 5.5, unreviewed): the review's DEBT-1, a record past the cap is read from its tail.
+    def test_a_record_over_the_limit_shows_its_newest_times_and_says_only_they_were_read(self):
+        """Three reads of one message each make three lines of one length L; tc log in process with READ_TIMES_MAX_BYTES at L + L // 2 shows #3's time and `read, time not recorded` for #1 and #2 (the partial line at the window's start is dropped); at exactly 2 L it shows #2's and #3's (a window starting on a line's first byte keeps that line). Each run: exit 0 and one stderr line saying only the newest part was read.
+
+        Must reject a record refused whole past the cap (every time lost
+        at once, for good), an unbounded read, a partial first line
+        believed, and a whole first line dropped.
+
+        @interacts  three sends and three reads; tc log in process with
+                    tc's READ_TIMES_MAX_BYTES patched.
+        @deps       send, paths, load_tc, log_in_process, after_header,
+                    record_lines; unittest.mock.
         @complexity O(1) per subtest.
         @alloc      one TcRoot and one module per subtest.
         """
-        # create=True: before READTIME, tc had no such constant, and the red run must fail on an assertion.
-        cases = {"over the limit": lambda tc, record: mock.patch.object(tc, "READ_TIMES_MAX_BYTES", LOW_LIMIT_BYTES,
-                                                                         create=True),
-                 "another user's": lambda tc, record: mock.patch.object(os, "fstat", owner_patched_fstat(record))}
-        for label, patch in cases.items():
-            with self.subTest(record=label), _root.TcRoot() as root:
-                send(self, root, 2)
-                self.assertEqual(root.tc("read", NAME)[0], EXIT_OK)
+        for label, shown in (("mid-line", (3,)), ("on a line's start", (2, 3))):
+            with self.subTest(window=label), _root.TcRoot() as root:
+                for _ in range(3):
+                    send(self, root, 1)
+                    self.assertEqual(root.tc("read", NAME)[0], EXIT_OK)
                 _, _, record = paths(root)
-                self.assertTrue(os.path.lexists(record), "tc read wrote no record for the log to read")
+                lines = [line for line in record_lines(record) or [] if isinstance(line, dict)]
+                self.assertEqual(len(lines), 3, f"three reads did not write three lines: {lines}")
+                sizes = {len(raw) + 1 for raw in record.read_bytes().split(b"\n")[:-1]}
+                self.assertEqual(len(sizes), 1, f"the three lines differ in length: {sizes}")
+                size = sizes.pop()
+                limit = size + size // 2 if len(shown) == 1 else 2 * size
                 tc = load_tc(root)
-                with patch(tc, record):
+                with mock.patch.object(tc, "READ_TIMES_MAX_BYTES", limit):
                     code, out, err = log_in_process(tc)
+                times = {line["number"]: line["read"] for line in lines}
+                want = {n: READ_LINE.format(time=times[n]) if n in shown else NOT_RECORDED_LINE for n in (1, 2, 3)}
                 self.assertEqual(code, EXIT_OK, err)
-                self.assertEqual(after_header(out), {1: NOT_RECORDED_LINE, 2: NOT_RECORDED_LINE}, out)
+                self.assertEqual(after_header(out), want, out)
                 self.assertEqual(err.count("\n"), 1, err)
-                self.assertTrue(err.startswith(LOG_UNREAD_RECORD_START.format(path=record)), err)
+                self.assertTrue(err.startswith(LOG_TAIL_START.format(path=record, limit=limit)), err)
 
 
 if __name__ == "__main__":

@@ -32,8 +32,10 @@ mailbox `/srv/tc-shared`. Use your own. Record what you saw in
 Walking both files, walk them as ann, so route-ssh.md's `you` is ann:
 
 1. route-ssh.md, steps 1 to 22.
-2. This file, steps 1 to 45. Steps 38 to 44 reuse route-ssh.md's alias
-   `farbox-tc` and its far name `far-b`, so their setup is done.
+2. This file, steps 1 to 45, then 45a to 45c (read times, added after
+   the numbers below were set, so nothing after them moved). Steps 38 to
+   44 reuse route-ssh.md's alias `farbox-tc` and its far name `far-b`,
+   so their setup is done.
 3. This file's cleanup, steps 46 to 50.
 4. route-ssh.md's cleanup, steps 23 to 28, once, last.
 
@@ -739,6 +741,60 @@ machine. Both are made up; use yours.
     /srv/tc-shared/outbox/.squatted-ann-1 ~/tc-qa-aside/step40-squatted`
     (the folder ben made in step 40, which ann moved aside).
     route-ssh.md's cleanup comes later, once (the order at the top).
+
+## Read times are the owner's (READTIME)
+
+<!-- Steps 45a to 45c: the READTIME lane agent (Claude Opus 5.5), fix round 2, the review's REC-3, 2026-10-17. Status: unreviewed. -->
+`tc read` appends one line per message it moves to `read/.read-times`,
+and only the owner of `read/` records. These three steps run in the
+same throwaway mailbox, `TC_ROOT=/srv/tc-shared`, and need no ssh.
+`<n>` is the number a send prints.
+
+45a. ben's `tc log` shows ann's read times. As ben: `tc log`, then `ls -l
+    /srv/tc-shared/mail/to-ann/read/.read-times`.
+    - Under the header of ben's step 10 message (`# #1 from ben to ann,
+      ...`) the next line is `read <time>`, the time of ann's step 11
+      read, with its offset, a moment after the header's sent time.
+    - `ls -l` shows `-rw-r-----`, owner `ann`, group `tcshare` (0640).
+    - Pass: `read <time>` under that header, and no `tc log:` line on
+      stderr about `.read-times`. Fail: `read, time not recorded` under
+      it, a `tc log: ... .read-times not read` line, or a record ben owns.
+45b. ben's `tc read ann` records nothing. As ann first: `tc read ann`, so
+    nothing of ann's waits in her inbox. As ben: `tc send --from ben
+    --to ann "ben reads this himself"`, then `sha256sum
+    /srv/tc-shared/mail/to-ann/read/.read-times`, then `tc read ann`,
+    then the same `sha256sum` again.
+    - `tc read ann` prints ben's message, moves it into ann's `read/`
+      (ben owns that file, so he may), exits 0, and prints one line on
+      stderr: `tc read: read times for ann are kept by ann, who owns
+      /srv/tc-shared/mail/to-ann/read; none recorded for 1 message`.
+    - Both `sha256sum` lines are the same.
+    - As ann: `tc log`. Under that message's header: `read, time not
+      recorded`.
+    - Pass: the not-owner line, exit 0, the record unchanged. Fail: no
+      line, a non-zero exit, a changed hash, or a time under that header.
+45c. ann's first read moves ben's planted record aside. As ann: `tc join
+    ann2` (a fresh name, so its `read/` has no record yet). As ben: `tc
+    send --from ben --to ann2 "for ann2"`, which prints the message's
+    file name, `<name>` here; then `echo '{"name": "<name>", "read":
+    "2000-01-01T00:00:00+00:00"}' >
+    /srv/tc-shared/mail/to-ann2/read/.read-times` (any member may make a
+    file in `read/`). As ann: `tc read ann2`, then `ls -l
+    /srv/tc-shared/mail/to-ann2/read/`, then `tc log`.
+    - `tc read ann2` prints ben's message, exits 0, and prints on stderr
+      `tc read: /srv/tc-shared/mail/to-ann2/read/.read-times was a file
+      owned by ben, not this user's own read-time record; moved it aside
+      to /srv/tc-shared/mail/to-ann2/read/.read-times.planted-1`.
+    - `ls -l` shows `.read-times` owned by `ann`, `-rw-r-----`, and
+      `.read-times.planted-1` owned by `ben`, its text unchanged.
+    - In `tc log`, under the header of that message: `read <time>`, today's
+      time from ann's read, never `read 2000-01-01T00:00:00+00:00`.
+    - Pass: the words, both files as above, and ann's own time. Fail: no
+      words, ben's line believed, ann's read exiting non-zero, or the
+      plant gone.
+    - Put it back. As ben: `mv
+      /srv/tc-shared/mail/to-ann2/read/.read-times.planted-1
+      ~/tc-qa-aside/step45c-planted` (ben's own file).
 
 ## Cleanup
 

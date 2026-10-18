@@ -88,6 +88,9 @@ The ring only says mail is waiting. It never carries the message. Read it with
 - **10**, busy: run it again.
 - **1** after printing: it printed what it could and named a file it would not show.
   Leave that file alone and tell the relay.
+- **0** with a `tc read:` line about read times: it moved a file aside where your read
+  times go, or a read time was not recorded. Your mail was still read. Act on it as
+  usual, don't stop, and send the relay the exact line. <!-- READTIME fix round 2, Claude Opus 5.5, unreviewed -->
 
 **An ssh send can take about two minutes.** If the name you send to lives on another
 machine (`tc cards` says `route ssh`), let the command run that long.
