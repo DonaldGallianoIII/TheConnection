@@ -210,6 +210,10 @@ DOT_OFFSETS = (0, -7, 7)
 MEDIAN_REACH = 15
 DELAY_SCALE_MIN_SECONDS = 60
 DELAY_TICKS_SECONDS = (0, 60, 600, 3600, 6 * 3600, 24 * 3600, 7 * 24 * 3600, 30 * 24 * 3600)
+# The far end of the delay axis is labeled with the longest delay drawn;
+# a tick label nearer it than this is left off (its grid line stays), so
+# the two labels, each about five characters, never overlap.
+DELAY_END_GAP = 48
 
 # Chart 4. A gap of this long or more between two of a session's
 # messages, sent or received, is quiet: hatched and labeled. Three hours:
@@ -234,12 +238,14 @@ SERIES_DASHES = ("none", "3 2", "1 2", "6 2 1 2")
 SERIES_COLORS = ("s1", "s2", "s3", "s4")
 SHAPE_GLYPHS = {"triangle-up": "▲", "circle": "●", "square": "■", "diamond": "◆"}
 
-# Chart 5. The tags that mark a message as an ask, for the count of asks
-# no answer names. C7 says such asks are counted in words and never
-# guessed, but not what an ask is; pause DASH-1 asks, and recommends this:
-# a message tagged QUESTION. Any message an answer names is drawn as an
-# ask whatever its tag.
-ASK_TAGS = ("QUESTION",)
+# Chart 5 (C7, pause DASH-1 as a2 settled it). An ask is a message tagged
+# one of these, or any message an answer names, whatever its tag. Asks
+# with no reply that names them are counted in words, never called
+# unanswered: a session that does not put #N on its first line answers
+# without naming, and ASK_CAVEAT says so under the chart.
+ASK_TAGS = ("QUESTION", "PLAN-READY", "PLAN-CHECK", "MERGE", "BLOCKED")
+ASK_CAVEAT = ("A session that does not put #N on its first line answers without naming the ask, so this count "
+              "can include asks that were answered.")
 
 # The page's look. Colors are tokens, light and dark; every token pair of
 # text on its surface holds its contrast in grayscale too, and no meaning
@@ -1152,13 +1158,16 @@ def median_of(values):
     return ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
 
 
-def delay_strips(key, rows, heading, desc, footer=None):
+def delay_strips(key, rows, heading, desc, footer=()):
     """The SVG of charts 3 and 5: one strip per row, one dot per delay on a log scale, the median as a labeled tick.
 
     `rows` is a list of (name, detail words, [(delay seconds, title)]). A
     strip is its own plot with one series, labeled at its left; a row with
-    no delays draws its words and no median. `footer`, when given, is one
-    line of words under the axis.
+    no delays draws its words and no median. `footer` is lines of words
+    under the axis. The axis has a grid line at each of
+    DELAY_TICKS_SECONDS the data reaches, each labeled, and the longest
+    delay drawn labeled at its far end; a tick label closer to that end
+    than DELAY_END_GAP is left off, so the two never overlap.
 
     @interacts  none; pure.
     @deps       math; element, text_at, titled, svg_chart, row_label,
@@ -1184,10 +1193,13 @@ def delay_strips(key, rows, heading, desc, footer=None):
     bottom = CHART_TOP + STRIP_HEIGHT * len(rows)
     body = []
     for tick in (t for t in DELAY_TICKS_SECONDS if t <= longest):
+        label = ([] if tick == longest or x_of(longest) - x_of(tick) < DELAY_END_GAP else
+                 [text_at(x_of(tick), bottom + LINE_GAP, span_text(tick), "small", "middle")])
         body.append(element("g", (("class", "delay-tick"),), [
             element("line", (("class", "grid"), ("x1", num(x_of(tick))), ("y1", num(CHART_TOP)),
-                             ("x2", num(x_of(tick))), ("y2", num(bottom)))),
-            text_at(x_of(tick), bottom + LINE_GAP, span_text(tick), "small", "middle")]))
+                             ("x2", num(x_of(tick))), ("y2", num(bottom)))), *label]))
+    body.append(element("g", (("class", "delay-tick"),), [
+        text_at(x_of(longest), bottom + LINE_GAP, span_text(longest), "small", "end")]))
     for line, (name, detail, dots) in enumerate(rows):
         middle = CHART_TOP + STRIP_HEIGHT * line + STRIP_HEIGHT / 2
         marks = [element("line", (("class", "axis"), ("x1", num(LABEL_GUTTER)), ("y1", num(middle)),
@@ -1207,8 +1219,8 @@ def delay_strips(key, rows, heading, desc, footer=None):
             element("g", (("class", "series"), ("data-label", name), ("data-shape", "circle"), ("data-dash", "none")),
                     row_label(middle, name, detail) + marks)]))
     height = bottom + AXIS_HEIGHT
-    if footer is not None:
-        body.append(text_at(LABEL_GAP, height, footer, "small"))
+    for words in footer:
+        body.append(text_at(LABEL_GAP, height, words, "small"))
         height += LINE_GAP
     return svg_chart(key, CHART_WIDTH, height, heading, desc, body)
 
@@ -1429,7 +1441,7 @@ def answer_pairs(records):
 
 
 def chart_answers(page):
-    """Chart 5, ask to answer: per answerer, one dot per pair at the time from the ask's sent time to the answer's, in chart 3's form, and in words how many answers paired and how many asks no answer names.
+    """Chart 5, ask to answer: per answerer, one dot per pair at the time from the ask's sent time to the answer's, in chart 3's form, and in words how many answers paired, how many asks have no reply that names them (an ask with no sent time is left out of that count, and counted apart), and ASK_CAVEAT.
 
     @interacts  none; pure.
     @deps       answer_pairs, delay_strips, figure, empty_chart, element,
@@ -1451,20 +1463,24 @@ def chart_answers(page):
     rows = [(s.name, plural(len(by_answerer[s.name]), "answer"), by_answerer[s.name])
             for s in page.sessions if s.name in by_answerer]
     paired = {id(ask) for ask, _ in pairs}
-    open_asks = [r for r in page.records if r.tag in ASK_TAGS and id(r) not in paired]
-    tags = " or ".join(ASK_TAGS)
-    it = "it" if len(open_asks) == 1 else "them"
-    has = "has" if len(open_asks) == 1 else "have"
+    asks = [r for r in page.records if r.tag in ASK_TAGS and id(r) not in paired]
+    open_asks = [r for r in asks if r.sent is not None]
+    untimed = len(asks) - len(open_asks)
     named = ("1 answer names the message it answers." if len(pairs) == 1 else
              f"{len(pairs)} answers name the message they answer.")
-    counts = f"{named} {plural(len(open_asks), f'{tags} message')} {has} no answer naming {it}."
+    lines = [named + " " + ("1 ask has no reply that names it." if len(open_asks) == 1 else
+                            f"{len(open_asks)} asks have no reply that names them.")]
+    if untimed:
+        lines.append("1 ask has no sent time and is left out of this count." if untimed == 1 else
+                     f"{untimed} asks have no sent time and are left out of this count.")
+    lines.append(ASK_CAVEAT)
     desc = ("One strip per session that answered; each dot is one ask and its first answer, placed by the time "
-            "between them, the median marked and named. " + counts)
+            "between them, the median marked and named. " + " ".join(lines))
     how = ("A message answers an earlier one when its first line names that message's number (#N, whatever its "
            "tag, as in ANSWER re #N or Re #N:) and it goes back from that message's recipient to its sender. "
            "Each dot is the time from the ask to its first answer, on a log scale, per answerer. Nothing is "
            "paired by guess: a reply that names no number is not drawn.")
-    svg = delay_strips("answers", rows, heading, desc, counts)
+    svg = delay_strips("answers", rows, heading, desc, lines)
     return figure(5, heading, how, svg)
 
 

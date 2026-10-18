@@ -341,6 +341,10 @@ def title_of(element):
     return None if title is None else title.text
 
 
+# C7, pause DASH-1: the line under chart 5 that says what its count cannot see.
+ASK_CAVEAT = ("A session that does not put #N on its first line answers without naming the ask, so this count "
+              "can include asks that were answered.")
+
 # The fixture's graph: one arrow per sender and recipient, with its count.
 # Message 10's header does not parse, but its file name still counts here.
 GRAPH_EDGES = {("annika", "bertil", 3), ("bertil", "annika", 3), ("corwin", "annika", 2),
@@ -606,6 +610,22 @@ class ReadTest(unittest.TestCase):
                    [(6, None, "annika", 4 * fixture.HOUR, "30m")]),
     }
 
+    def test_the_delay_axis_labels_its_far_end_and_each_tick_the_data_reaches(self):
+        """Chart 3's axis: 0s, 1m and 10m (each tick under the longest wait), then the longest wait itself, 40m, at its far end; chart 5's ends at 1h40m.
+
+        @interacts  renders the fixture.
+        @deps       rendered, charts, groups.
+        @complexity one render.
+        @alloc      the page.
+        """
+        _, page = rendered()
+        found = charts(page)
+        read = [t.text for g in groups(found["read"], "delay-tick") for t in g.iter("text")]
+        self.assertEqual(read, ["0s", "1m", "10m", "40m"])
+        answers = [t.text for g in groups(found["answers"], "delay-tick") for t in g.iter("text")]
+        self.assertEqual(answers[-1], "1h40m")
+        self.assertEqual(answers[:3], ["0s", "1m", "10m"])
+
     def test_each_strip_has_its_dots_its_median_and_its_count_in_words(self):
         """Exact dots, median and words per recipient, real and scrubbed; dagny, who got no mail, has no strip.
 
@@ -724,7 +744,65 @@ class AnswersTest(unittest.TestCase):
                                     f"#{answer}{' ' + answer_tag if answer_tag else ''}: {after}")
                     self.assertEqual(mark_titles(series), want)
                 self.assertIn("4 answers name the message they answer.", words(chart))
-                self.assertIn("1 QUESTION message has no answer naming it.", words(chart))
+                self.assertIn("1 ask has no reply that names it.", words(chart))
+                self.assertIn(ASK_CAVEAT, words(chart))
+                self.assertNotIn("nobody answered", page)
+                self.assertNotIn("unanswered", page)
+
+    def ask_words(self, records):
+        """Chart 5's words for a hand-made page of `records` among ann and ben.
+
+        @interacts  loads report.py; renders one chart.
+        @deps       report.chart_answers, report.Page, report.Session.
+        @complexity O(r) over r records.
+        @alloc      one chart's text.
+        """
+        report = _root.load_source("board_report", REPORT_PATH)
+        sessions = (report.Session("ann", None, None, None), report.Session("ben", None, None, None))
+        return words(charts(report.chart_answers(report.Page(tuple(records), sessions, 0, False, None)))["answers"])
+
+    def test_each_ask_tag_counts_and_other_tags_do_not(self):
+        """Each of C7's five ask tags, alone and unreplied, is one ask with no reply; FYI is none; all five are five.
+
+        @interacts  loads report.py.
+        @deps       ask_words; report.ASK_TAGS, report.Record.
+        @complexity O(1) per tag.
+        @alloc      the pages.
+        """
+        report = _root.load_source("board_report", REPORT_PATH)
+        self.assertEqual(report.ASK_TAGS, ("QUESTION", "PLAN-READY", "PLAN-CHECK", "MERGE", "BLOCKED"))
+
+        def one(number, tag, sent=0):
+            """One message from ann to ben tagged `tag`, `sent` seconds after the fixture's base (None: no time).
+
+            @interacts  none.
+            @deps       report.Record, fixture_time.
+            @complexity O(1).
+            @alloc      one record.
+            """
+            return report.Record(number, "ann", "ben", fixture_time(sent), None, 10, tag, ())
+
+        for tag in report.ASK_TAGS:
+            with self.subTest(tag=tag):
+                self.assertIn("1 ask has no reply that names it.", self.ask_words([one(1, tag)]))
+        self.assertIn("0 asks have no reply that names them.", self.ask_words([one(1, "FYI")]))
+        every = [one(n, tag) for n, tag in enumerate(report.ASK_TAGS, 1)]
+        self.assertIn("5 asks have no reply that names them.", self.ask_words(every))
+
+    def test_an_ask_with_no_sent_time_is_left_out_of_the_count_and_said(self):
+        """A QUESTION whose header did not parse is not counted as having no reply, and the words say one was left out.
+
+        @interacts  loads report.py.
+        @deps       ask_words; report.Record.
+        @complexity O(1).
+        @alloc      the page.
+        """
+        report = _root.load_source("board_report", REPORT_PATH)
+        records = [report.Record(1, "ann", "ben", fixture_time(0), None, 10, "FYI", ()),
+                   report.Record(2, "ann", "ben", None, None, 10, "QUESTION", ())]
+        text = self.ask_words(records)
+        self.assertIn("0 asks have no reply that names them.", text)
+        self.assertIn("1 ask has no sent time and is left out of this count.", text)
 
 
 def run_report(root, *args, out=None):
@@ -844,7 +922,7 @@ class CommandTest(unittest.TestCase):
             proc = root.start(argv=[sys.executable, str(lone / "tc"), "report", str(out)])
             stdout, stderr = proc.communicate(timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS)
             self.assertEqual(proc.returncode, EXIT_REFUSED, stderr)
-            self.assertIn(f"no renderer at {lone / 'board' / 'report.py'}", stderr)
+            self.assertIn(f"tc report: no renderer at {lone / 'board' / 'report.py'}", stderr)
             self.assertNotIn("Traceback", stderr)
             self.assertFalse(out.exists())
             (lone / "board").mkdir()
@@ -852,7 +930,7 @@ class CommandTest(unittest.TestCase):
             proc = root.start(argv=[sys.executable, str(lone / "tc"), "report", str(out)])
             stdout, stderr = proc.communicate(timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS)
             self.assertEqual(proc.returncode, EXIT_REFUSED, stderr)
-            self.assertIn(f"no renderer at {lone / 'board' / 'serve.py'}", stderr)
+            self.assertIn(f"tc report: no board/serve.py at {lone / 'board' / 'serve.py'}", stderr)
             self.assertNotIn("Traceback", stderr)
             self.assertFalse(out.exists())
 
@@ -872,6 +950,25 @@ class CommandTest(unittest.TestCase):
             self.assertIn(f"could not write {out}", stderr)
             self.assertNotIn("Traceback", stderr)
             self.assertFalse(out.parent.exists())
+
+    def test_refusals_open_with_tc_report_under_any_invoked_name(self):
+        """Run through a link named tconn, a refusal still opens `tc report:` (NAME's rule for prefixes).
+
+        @interacts  see the class; makes one link in the root's temp folder.
+        @deps       root.start; _root.TC.
+        @complexity one child.
+        @alloc      the link.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            link = root.base / "tconn"
+            link.symlink_to(_root.TC)
+            out = root.base / "taken.html"
+            out.write_text("keep me", encoding="utf-8")
+            proc = root.start(argv=[sys.executable, str(link), "report", str(out)])
+            _, stderr = proc.communicate(timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS)
+            self.assertEqual(proc.returncode, EXIT_REFUSED, stderr)
+            self.assertTrue(stderr.startswith("tc report: "), stderr)
 
     def test_usage_errors_exit_9(self):
         """No OUT, an unknown flag, and an --at that is not a time with its offset each exit 9.

@@ -5738,12 +5738,19 @@ REPORT_FILE_MODE = 0o600
 REPORT_TMP_NONCE_BYTES = 8
 # The .tmp is made new (never one already there, never through a link).
 REPORT_TMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-REPORT_EXISTS_WORDS = ("{tc} report: {out} already exists; nothing was written. Pass --force to replace it, "
+# Each opens `tc report:` under any invoked name, as NAME rules for the
+# words that open a refusal (fix round 1, LOW-13).
+REPORT_EXISTS_WORDS = ("tc report: {out} already exists; nothing was written. Pass --force to replace it, "
                        "or name another file.")
-REPORT_MISSING_WORDS = ("{tc} report: no renderer at {source} ({why}). tc report needs the board/ folder beside "
+REPORT_MISSING_WORDS = ("tc report: no renderer at {source} ({why}). tc report needs the board/ folder beside "
                         "tc, as a full checkout has it; a one-file copy of tc cannot draw a report. Nothing was "
                         "written.")
-REPORT_WRITE_WORDS = "{tc} report: could not write {out} ({why}); nothing was written there."
+# Fix round 1, LOW-7: serve.py is not the renderer; report.py takes C5's roles from it.
+REPORT_BOARD_MISSING_WORDS = ("tc report: no board/serve.py at {source} ({why}). The report takes each session's "
+                              "role from it, so tc report needs the board/ folder beside tc, as a full checkout "
+                              "has it. Nothing was written.")
+# C7's words, exactly (pause DASH-2, settled).
+REPORT_WRITE_WORDS = "tc report: could not write {out} ({why}); nothing was written there."
 
 
 def report_time(text):
@@ -5804,28 +5811,28 @@ def cmd_report(args):
     tc = invoked_name()
     out = pathlib.Path(args.out)
     if not args.force and os.path.lexists(out):
-        refuse(REPORT_EXISTS_WORDS.format(tc=tc, out=printable(out)), EXIT_REFUSED)
+        refuse(REPORT_EXISTS_WORDS.format(out=printable(out)), EXIT_REFUSED)
     source = pathlib.Path(__file__).resolve().parent / REPORT_SOURCE
     try:
         code = compile(source.read_bytes(), str(source), "exec", dont_inherit=True)
     except OSError as err:
-        refuse(REPORT_MISSING_WORDS.format(tc=tc, source=printable(source), why=err.strerror), EXIT_REFUSED)
+        refuse(REPORT_MISSING_WORDS.format(source=printable(source), why=err.strerror), EXIT_REFUSED)
     renderer = type(sys)("tc_report")  # a fresh module: type(sys) is the module type, and needs no import
     renderer.__file__ = str(source)
     exec(code, renderer.__dict__)
     try:
         board = renderer.load_board_module()
     except OSError as err:
-        refuse(REPORT_MISSING_WORDS.format(tc=tc, source=printable(renderer.SERVE_PATH), why=err.strerror),
+        refuse(REPORT_BOARD_MISSING_WORDS.format(source=printable(renderer.SERVE_PATH), why=err.strerror),
                EXIT_REFUSED)
     page, summary, words = renderer.report(sys.modules[__name__], board, args.scrub, args.at)
     for line in words:
-        print(f"{tc} report: {printable(line)}", file=sys.stderr)
+        print(f"tc report: {printable(line)}", file=sys.stderr)
     tmp = out.parent / f".{out.name}.{secrets.token_hex(REPORT_TMP_NONCE_BYTES)}.tmp"
     try:
         fd = os.open(tmp, REPORT_TMP_FLAGS, REPORT_FILE_MODE)
     except OSError as err:
-        refuse(REPORT_WRITE_WORDS.format(tc=tc, out=printable(out), why=err.strerror), EXIT_REFUSED)
+        refuse(REPORT_WRITE_WORDS.format(out=printable(out), why=err.strerror), EXIT_REFUSED)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(page.encode("utf-8"))
@@ -5833,12 +5840,12 @@ def cmd_report(args):
             os.fsync(f.fileno())
         if not args.force and os.path.lexists(out):
             os.unlink(tmp)  # this run's own .tmp, made above; the file made meanwhile stays
-            refuse(REPORT_EXISTS_WORDS.format(tc=tc, out=printable(out)), EXIT_REFUSED)
+            refuse(REPORT_EXISTS_WORDS.format(out=printable(out)), EXIT_REFUSED)
         os.rename(tmp, out)
     except OSError as err:
         with contextlib.suppress(OSError):
             os.unlink(tmp)  # this run's own .tmp, made above
-        refuse(REPORT_WRITE_WORDS.format(tc=tc, out=printable(out), why=err.strerror), EXIT_REFUSED)
+        refuse(REPORT_WRITE_WORDS.format(out=printable(out), why=err.strerror), EXIT_REFUSED)
     print(f"wrote {printable(args.out)}: {summary}")
 
 
