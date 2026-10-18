@@ -118,8 +118,10 @@ review's fixes (D35 to D37) at `8b9b59d`, and F1, the wait exit record,
 at `f57e490`, F2, the switch-over cleanup, at `d03fab9`, and DOCS (P5)
 at `4179b88`. Every lane of the plan is merged, and the relay's picks
 from the review backlog after it (DOCS-1, NAME, R30, R2, DOCS2,
-EMPTYROOT) are merged too. As of 2026-10-17, next are a main update, R39
-(a test of every README command) and the owner's human walks.
+EMPTYROOT, R39, EXITOK) are merged too. On the owner's ask the same
+evening: read times (READTIME, D41) at `db142f9`, the README's
+record-of-work section (RECORD) at `e2be34f`, and `tc report` (DASH v1,
+D42) at `7b77092`. Next are a main update and the owner's human walks.
 
 ### Off limits
 
@@ -356,8 +358,9 @@ The tool runs today: send, read, peek, wait (with
 `--keepalive`), status, log, health and watch; join, card and cards for
 address cards; a router in send with the `local`, `codex` and `ssh`
 routes, with `flush` for queued ssh mail and `gate` for inbound ssh;
-`init --shared` for a mailbox several Linux users share; plus the live
-board (`python3 board/serve.py`).
+`init --shared` for a mailbox several Linux users share; `report` for a
+static HTML page of the mailbox; plus the live board (`python3
+board/serve.py`).
 `tests/test_mailbox.py` (CORE, K1 to K8) tests send, read, peek, wait,
 log, status and the counter, each test proven by a hand mutation of
 `tc`.
@@ -399,5 +402,11 @@ linked as `tconn` where the system has a traffic-control `tc` (NAME,
 `3f2fc77`); the test loaders write no bytecode (R30, `ca0b368`); `tc
 health` names the mailbox it read (R2, `9914051`); QA wording and two
 README gaps (DOCS2, `0d96dfb`); an empty `TC_ROOT` refuses in tc and the
-board (EMPTYROOT, `7ef22e3`).
+board (EMPTYROOT, `7ef22e3`); every README command and the exit table are
+tested (R39, with `EXIT_OK`). `tc read` records when each message was
+read in `read/.read-times`, and `tc log` shows it (READTIME, D41,
+`db142f9`); the README says the mailbox is a record of the work
+(RECORD, `e2be34f`); `tc report OUT.html [--scrub]` draws the mailbox
+as one static HTML page, safe to share when scrubbed (DASH v1, D42,
+`7b77092`; `qa/human/report.md` not yet walked by a person).
 `main` stays the owner's alone.
