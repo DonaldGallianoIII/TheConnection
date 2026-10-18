@@ -589,5 +589,44 @@ class ReadTest(unittest.TestCase):
                     self.assertEqual(mark_titles(series), want)
 
 
+class QuietTest(unittest.TestCase):
+    """Chart 4: one lane per session, ticks for mail sent and received, and every gap of QUIET_GAP_SECONDS or more hatched and labeled.
+
+    @interacts  renders the fixture.
+    @deps       rendered, charts, plots_by_label, series_of, groups.
+    @complexity two renders.
+    @alloc      the pages.
+    """
+
+    # Per name: (sent ticks, received ticks, each quiet gap's label).
+    LANES = {"annika": (5, 5, ["quiet 11h00m"]), "bertil": (3, 4, ["quiet 3h00m", "quiet 10h00m"]),
+             "corwin": (2, 2, ["quiet 12h50m"]), "dagny": (1, 0, [])}
+
+    def test_each_lane_has_its_ticks_and_its_quiet_gaps(self):
+        """Exact tick counts per series and exact gap labels per lane, real and scrubbed; each gap is hatched.
+
+        @interacts  see the class.
+        @deps       see the class; report.QUIET_GAP_SECONDS.
+        @complexity two renders.
+        @alloc      the pages.
+        """
+        for scrub, names in ((False, {n: n for n in fixture.NAMES}), (True, ScrubTest.LABELS)):
+            with self.subTest(scrub=scrub):
+                report, page = rendered(scrub)
+                self.assertEqual(report.QUIET_GAP_SECONDS, 3 * fixture.HOUR)
+                plots = plots_by_label(charts(page)["quiet"])
+                self.assertEqual(list(plots), [names[n] for n in self.LANES])
+                for name, (sent, received, gaps) in self.LANES.items():
+                    plot = plots[names[name]]
+                    series = {s.get("data-label"): s for s in series_of(plot)}
+                    self.assertEqual(list(series), ["sent", "received"])
+                    self.assertEqual(len(groups(series["sent"], "tick")), sent)
+                    self.assertEqual(len(groups(series["received"], "tick")), received)
+                    quiet = groups(plot, "quiet")
+                    self.assertEqual([t.text for q in quiet for t in q.iter("text")], gaps)
+                    for gap in quiet:
+                        self.assertIn("hatch", [p.get("class") for p in gap.iter("path")])
+
+
 if __name__ == "__main__":
     unittest.main()

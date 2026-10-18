@@ -185,14 +185,39 @@ MEDIAN_REACH = 15
 DELAY_SCALE_MIN_SECONDS = 60
 DELAY_TICKS_SECONDS = (0, 60, 600, 3600, 6 * 3600, 24 * 3600, 7 * 24 * 3600, 30 * 24 * 3600)
 
+# Chart 4. A gap of this long or more between two of a session's
+# messages, sent or received, is quiet: hatched and labeled. Three hours:
+# longer than a listener's wait (tc's DEFAULT_WAIT_SECONDS, 110 minutes),
+# so a quiet stretch is one where nobody mailed, not one wait ending.
+QUIET_GAP_SECONDS = 3 * 60 * 60
+# A lane is this tall; a tick reaches this far from its middle line, a
+# marker is this big either side of its point, and hatch lines run this
+# far apart. A lane's own words end this far left of the plot, leaving
+# room for its series' labels between them.
+LANE_HEIGHT = 64
+TICK_LENGTH = 14
+MARKER_SIZE = 4
+HATCH_STEP = 7
+SERIES_LABEL_ROOM = 92
+# The two fixed lists every series takes its look from (rule 9): series i
+# in a plot gets SERIES_SHAPES[i], SERIES_DASHES[i] and SERIES_COLORS[i],
+# so series that share a plot differ in marker shape and in dash, as well
+# as color. Each shape's glyph labels the series in words beside it.
+SERIES_SHAPES = ("triangle-up", "circle", "square", "diamond")
+SERIES_DASHES = ("none", "3 2", "1 2", "6 2 1 2")
+SERIES_COLORS = ("s1", "s2", "s3", "s4")
+SHAPE_GLYPHS = {"triangle-up": "▲", "circle": "●", "square": "■", "diamond": "◆"}
+
 # The page's look. Colors are tokens, light and dark; every token pair of
 # text on its surface holds its contrast in grayscale too, and no meaning
 # rides on a color alone (shape, dash, position and words carry it).
 PAGE_CSS = """
 :root{--surface:#ffffff;--panel:#f6f8fa;--ink:#1f2328;--ink-2:#57606a;--rule:#d0d7de;
---node:#ffffff;--s1:#2f5fb3;--s2:#b8541a;--quiet:#8c959f;--warn:#fff4d6;--warn-ink:#4d3800}
+--node:#ffffff;--s1:#2f5fb3;--s2:#b8541a;--s3:#2e7d4f;--s4:#7b3fa0;--quiet:#8c959f;--warn:#fff4d6;
+--warn-ink:#4d3800}
 @media (prefers-color-scheme: dark){:root{--surface:#16191d;--panel:#1e2228;--ink:#e6e8eb;
---ink-2:#a3aab2;--rule:#3a4048;--node:#1e2228;--s1:#7aa7f0;--s2:#f0a060;--quiet:#7d8590;
+--ink-2:#a3aab2;--rule:#3a4048;--node:#1e2228;--s1:#7aa7f0;--s2:#f0a060;--s3:#6cc58f;--s4:#c39be0;
+--quiet:#7d8590;
 --warn:#3a2f12;--warn-ink:#f5e2b0}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--surface);color:var(--ink);
@@ -221,6 +246,11 @@ svg .halo{paint-order:stroke;stroke:var(--panel);stroke-width:4px;stroke-linejoi
 .grid{stroke:var(--rule);stroke-width:1;stroke-dasharray:2 3}
 .dot{fill:var(--s1);stroke:var(--panel);stroke-width:1.5}
 .median{stroke:var(--ink);stroke-width:2.5}
+.s1{fill:var(--s1);stroke:var(--s1)}.s2{fill:var(--s2);stroke:var(--s2)}
+.s3{fill:var(--s3);stroke:var(--s3)}.s4{fill:var(--s4);stroke:var(--s4)}
+.tick-line{fill:none;stroke-width:1.5}
+.quiet-box{fill:none;stroke:var(--quiet);stroke-width:1;stroke-dasharray:4 2}
+.hatch{fill:none;stroke:var(--quiet);stroke-width:1}
 footer{margin-top:40px;color:var(--ink-2);font-size:13px}
 """
 
@@ -992,15 +1022,15 @@ def empty_chart(key, number, heading, words):
     return figure(number, heading, words, svg)
 
 
-def row_label(y, name, detail):
-    """A row's words at its left: the name, bold, and one line of detail under it, both ending at the gutter's edge.
+def row_label(y, name, detail, edge=None):
+    """A row's words at its left: the name, bold, and one line of detail under it, both ending at `edge` (the gutter's edge less LABEL_GAP when None).
 
     @interacts  none.
     @deps       text_at; LABEL_GUTTER, LABEL_GAP, LINE_GAP.
     @complexity O(1).
     @alloc      two strings.
     """
-    edge = LABEL_GUTTER - LABEL_GAP
+    edge = LABEL_GUTTER - LABEL_GAP if edge is None else edge
     return [text_at(edge, y - LINE_GAP / 2, name, "label", "end"), text_at(edge, y + LINE_GAP / 2, detail, "small", "end")]
 
 
@@ -1184,8 +1214,138 @@ def chart_read(page):
     return figure(3, heading, how, delay_strips("read", rows, heading, desc))
 
 
+def marker(shape, x, y, css):
+    """A series marker of `shape` (one of SERIES_SHAPES) centered at (x, y), MARKER_SIZE either side.
+
+    @interacts  none.
+    @deps       element, num; MARKER_SIZE.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    size = MARKER_SIZE
+    if shape == "circle":
+        return element("circle", (("class", css), ("cx", num(x)), ("cy", num(y)), ("r", num(size))))
+    if shape == "square":
+        return element("rect", (("class", css), ("x", num(x - size)), ("y", num(y - size)), ("width", num(2 * size)),
+                                ("height", num(2 * size))))
+    corners = (((x, y - size), (x + size, y + size), (x - size, y + size)) if shape == "triangle-up" else
+               ((x, y - size), (x + size, y), (x, y + size), (x - size, y)))
+    return element("polygon", (("class", css), ("points", " ".join(f"{num(a)},{num(b)}" for a, b in corners))))
+
+
+def hatch(x0, y0, x1, y1):
+    """Diagonal hatch lines filling the box (x0, y0) to (x1, y1), as one path: the quiet fill, drawn, never a fill color alone.
+
+    The lines are worked out here, each clipped to the box, so the page
+    needs no SVG pattern (which a fill reaches only through url()).
+
+    @interacts  none.
+    @deps       element, num; HATCH_STEP.
+    @complexity O((w + h) / HATCH_STEP) over the box's width w and height h.
+    @alloc      one string.
+    """
+    moves, k = [], x0 + y0 + HATCH_STEP
+    while k < x1 + y1:
+        start, end = max(x0, k - y1), min(x1, k - y0)
+        if start < end:
+            moves.append(f"M{num(start)},{num(k - start)} L{num(end)},{num(k - end)}")
+        k += HATCH_STEP
+    return element("path", (("class", "hatch"), ("d", " ".join(moves) or f"M{num(x0)},{num(y0)}")))
+
+
+def chart_quiet(page):
+    """Chart 4, busy and quiet stretches: one lane per session, a tick up for each message it sent and down for each it received, and each gap of QUIET_GAP_SECONDS or more hatched and labeled with its length.
+
+    Each lane is a plot with two series that share it, sent and received;
+    series i takes SERIES_SHAPES[i], SERIES_DASHES[i] and SERIES_COLORS[i],
+    and its label (glyph and word) sits beside its ticks. A received tick
+    is at the message's sent time: when it landed, not when it was read.
+    A message with no sent time is left out.
+
+    @interacts  none; pure.
+    @deps       element, text_at, titled, svg_chart, figure, empty_chart,
+                row_label, marker, hatch, time_axis, time_span, dot_name,
+                seconds_of, time_text, span_text, plural, plot_right, num;
+                the chart 4 constants.
+    @complexity O(t + s + g x (w + h) / HATCH_STEP) over t records, s
+                sessions and g quiet gaps, each hatched in its box.
+    @alloc      the SVG text, returned; one event list per session.
+    """
+    heading = "Busy and quiet stretches"
+    first, last = time_span(page.records)
+    if first is None:
+        return empty_chart("quiet", 4, heading, "No messages yet." if not page.records else
+                           "No message has a sent time.")
+    start, span = seconds_of(first), seconds_of(last) - seconds_of(first)
+    reach = plot_right() - LABEL_GUTTER
+
+    def x_of(when):
+        """The x of a time on the lanes' shared scale; the middle when the span is 0.
+
+        @interacts  none.
+        @deps       seconds_of.
+        @complexity O(1).
+        @alloc      none.
+        """
+        return LABEL_GUTTER + (reach * (seconds_of(when) - start) / span if span else reach / 2)
+
+    lanes = []
+    for session in page.sessions:
+        sent = [r for r in page.records if r.sent is not None and r.sender == session.name]
+        got = [r for r in page.records if r.sent is not None and r.recipient == session.name]
+        if sent or got:
+            lanes.append((session.name, sent, got))
+    body = []
+    for line, (name, sent, got) in enumerate(lanes):
+        middle = CHART_TOP + LANE_HEIGHT * line + LANE_HEIGHT / 2
+        top, bottom = middle - LANE_HEIGHT / 2 + MARKER_SIZE, middle + LANE_HEIGHT / 2 - MARKER_SIZE
+        parts = row_label(middle, name, f"{len(sent)} sent · {len(got)} received", LABEL_GUTTER - SERIES_LABEL_ROOM)
+        parts.append(element("line", (("class", "axis"), ("x1", num(LABEL_GUTTER)), ("y1", num(middle)),
+                                      ("x2", num(plot_right())), ("y2", num(middle)))))
+        times = sorted({seconds_of(r.sent) for r in sent + got})
+        for before, after in zip(times, times[1:]):
+            if after - before < QUIET_GAP_SECONDS:
+                continue
+            x0, x1 = x_of(later(first, before - start)), x_of(later(first, after - start))
+            parts.append(element("g", (("class", "quiet"),), [
+                titled(f"quiet from {time_text(later(first, before - start))} to "
+                       f"{time_text(later(first, after - start))}: {span_text(after - before)}"),
+                element("rect", (("class", "quiet-box"), ("x", num(x0)), ("y", num(top)), ("width", num(x1 - x0)),
+                                 ("height", num(bottom - top)))),
+                hatch(x0, top, x1, bottom),
+                text_at((x0 + x1) / 2, middle - TICK_LENGTH - MARKER_SIZE, f"quiet {span_text(after - before)}",
+                        "small halo", "middle")]))
+        for index, (word, records, way) in enumerate((("sent", sent, -1), ("received", got, 1))):
+            shape, dash, css = SERIES_SHAPES[index], SERIES_DASHES[index], SERIES_COLORS[index]
+            end = middle + way * TICK_LENGTH
+            marks = [text_at(LABEL_GUTTER - LABEL_GAP, end + way * MARKER_SIZE + (MARKER_SIZE if way > 0 else 0),
+                             f"{SHAPE_GLYPHS[shape]} {word}", "small", "end")]
+            for record in records:
+                x = x_of(record.sent)
+                other = f"to {record.recipient}" if way < 0 else f"from {record.sender}"
+                line_attrs = [("class", f"tick-line {css}"), ("x1", num(x)), ("y1", num(middle)), ("x2", num(x)),
+                              ("y2", num(end))]
+                if dash != "none":
+                    line_attrs.append(("stroke-dasharray", dash))
+                marks.append(element("g", (("class", "tick"),), [
+                    titled(f"{dot_name(record)} {other}, {time_text(record.sent)}"),
+                    element("line", tuple(line_attrs)), marker(shape, x, end, css)]))
+            parts.append(element("g", (("class", "series"), ("data-label", word), ("data-shape", shape),
+                                        ("data-dash", dash)), marks))
+        body.append(element("g", (("class", "plot"), ("data-plot", name)), parts))
+    bottom_line = CHART_TOP + LANE_HEIGHT * len(lanes)
+    body.append(time_axis(first, last, bottom_line + LABEL_GAP))
+    how = (f"One lane per session. A solid tick up, tipped with {SHAPE_GLYPHS[SERIES_SHAPES[0]]}, is a message it "
+           f"sent; a dashed tick down, tipped with {SHAPE_GLYPHS[SERIES_SHAPES[1]]}, one it received, when it "
+           f"landed. A hatched box is a quiet stretch: {span_text(QUIET_GAP_SECONDS)} or more with no mail either "
+           "way, its length written in it. Hover a tick for its message.")
+    desc = ("One lane per session with ticks up for mail sent and down for mail received, and every gap of "
+            f"{span_text(QUIET_GAP_SECONDS)} or more hatched and labeled with its length.")
+    return figure(4, heading, how, svg_chart("quiet", CHART_WIDTH, bottom_line + AXIS_HEIGHT, heading, desc, body))
+
+
 # The charts, in page order. Each takes the Page and returns its section.
-CHARTS = (chart_graph, chart_senders, chart_read)
+CHARTS = (chart_graph, chart_senders, chart_read, chart_quiet)
 
 
 def render(page):
