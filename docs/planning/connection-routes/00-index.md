@@ -167,6 +167,7 @@ writes a pause, never edits the contract.
 | C5 | The board feed | BOARD |
 | C6 | The board server | BOARD |
 | C7 | The report, `tc report` (D42) | DASH |
+| C8 | QA streaming, `tc qa` (D45) | QA |
 
 ## 6. Review at every lane's done point
 
@@ -346,7 +347,7 @@ verified with the command and its output, and nothing you did not.
 | File | What |
 |---|---|
 | `00-index.md` | This file |
-| `contracts.md` | C0 to C7 |
+| `contracts.md` | C0 to C8 |
 | `phases.md` | Every task, by lane |
 | `decisions.md` | What was decided, by whom, when |
 | `handoffs/` | One per lane, written by the lane agent |
