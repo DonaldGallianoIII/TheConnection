@@ -457,5 +457,96 @@ class GraphTest(unittest.TestCase):
                 self.assertEqual(len(set(shapes.values())), len(shapes), shapes)
 
 
+def series_of(plot):
+    """The series groups inside one plot group.
+
+    @interacts  none.
+    @deps       groups.
+    @complexity O(n) over n nodes under it.
+    @alloc      one list.
+    """
+    return groups(plot, "series")
+
+
+def plots_by_label(chart):
+    """{the label of a plot's first series: that plot} for every plot in `chart`.
+
+    @interacts  none.
+    @deps       groups, series_of.
+    @complexity O(n) over n nodes in the chart.
+    @alloc      one dict.
+    """
+    return {plot.get("data-plot"): plot for plot in groups(chart, "plot")}
+
+
+def mark_titles(series):
+    """The <title> text of every mark (a shape with a title) in a series, in order.
+
+    @interacts  none.
+    @deps       title_of.
+    @complexity O(n) over n nodes under it.
+    @alloc      one list.
+    """
+    return [title_of(mark) for mark in series.iter() if mark.tag in ("rect", "path", "circle", "g")
+            and mark is not series and title_of(mark) is not None]
+
+
+class SendersTest(unittest.TestCase):
+    """Chart 2: messages over time per sender, one row each, hour or day buckets by a named rule.
+
+    @interacts  renders the fixture.
+    @deps       rendered, charts, plots_by_label, series_of, mark_titles.
+    @complexity two renders.
+    @alloc      the pages.
+    """
+
+    # The fixture's sent times, by sender, as (hour bucket, count); 10 has no time.
+    BARS = {"annika": [(0, 2), (3, 1), (4, 1), (16, 1)], "bertil": [(0, 1), (2, 1), (5, 1)],
+            "corwin": [(3, 1), (17, 1)], "dagny": [(6, 1)]}
+    PEAKS = {"annika": 2, "bertil": 1, "corwin": 1, "dagny": 1}
+
+    def test_the_bucket_is_an_hour_up_to_a_week_and_a_day_past_it(self):
+        """bucket_seconds(span): an hour for a span of HOURLY_UP_TO_SECONDS or less, a day past it.
+
+        @interacts  loads report.py.
+        @deps       report.bucket_seconds, report.HOURLY_UP_TO_SECONDS.
+        @complexity O(1).
+        @alloc      none.
+        """
+        report = _root.load_source("board_report", REPORT_PATH)
+        self.assertEqual(report.HOURLY_UP_TO_SECONDS, 7 * 24 * fixture.HOUR)
+        self.assertEqual(report.bucket_seconds(0), fixture.HOUR)
+        self.assertEqual(report.bucket_seconds(report.HOURLY_UP_TO_SECONDS), fixture.HOUR)
+        self.assertEqual(report.bucket_seconds(report.HOURLY_UP_TO_SECONDS + 1), 24 * fixture.HOUR)
+
+    def test_one_row_per_sender_with_a_bar_per_busy_hour(self):
+        """Each sender's row: its label at its left, its count and peak, and one titled bar per hour it sent in.
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity two renders.
+        @alloc      the pages.
+        """
+        for scrub, names in ((False, {n: n for n in fixture.NAMES}), (True, ScrubTest.LABELS)):
+            with self.subTest(scrub=scrub):
+                _, page = rendered(scrub)
+                chart = charts(page)["senders"]
+                plots = plots_by_label(chart)
+                self.assertEqual(list(plots), [names[n] for n in self.BARS])
+                for sender, bars in self.BARS.items():
+                    (series,) = series_of(plots[names[sender]])
+                    self.assertEqual(series.get("data-label"), names[sender])
+                    texts = [t.text for t in series.iter("text")]
+                    total = sum(count for _, count in bars)
+                    self.assertEqual(texts, [names[sender], f"{total} sent · peak {self.PEAKS[sender]} in an hour"])
+                    want = []
+                    for bucket, count in bars:
+                        start = (f"T+{bucket}h00m" if bucket else "T+0") if scrub else \
+                            fixture_time(bucket * fixture.HOUR).isoformat(sep=" ", timespec="minutes")
+                        want.append(f"{start}: {count} sent")
+                    self.assertEqual(mark_titles(series), want)
+                self.assertIn("one hour", words(chart))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -147,6 +147,31 @@ ORCHESTRATOR, WORKER, PEER = "orchestrator", "worker", "peer"
 NODE_DASH = "5 3"
 NODE_CORNER = 4
 
+# The row charts (2 to 5). Each row's words sit in a gutter this wide at
+# the left (a name of up to C0's 64 characters is cut by nothing: the
+# words run left from the plot's edge); the plot runs from there to this
+# far short of the right edge. The charts keep this much room above the
+# first row and this much below the last for the time axis.
+LABEL_GUTTER = 230
+PLOT_RIGHT_PAD = 24
+CHART_TOP = 16
+AXIS_HEIGHT = 40
+# The gap between a row's words and its plot, and between a word line
+# and the next.
+LABEL_GAP = 10
+LINE_GAP = 15
+# Chart 2. A row is this tall and its tallest bar this tall; a bar is
+# this much narrower than its bucket, so neighbors stay apart.
+SENDER_ROW_HEIGHT = 46
+BAR_MAX_HEIGHT = 30
+BAR_GAP = 1
+# Chart 2's bucket rule (C7): one hour per bar while the report spans a
+# week or less (at most 169 bars, about 4 units wide each in the plot),
+# one day per bar past that, so a long history stays readable.
+HOURLY_UP_TO_SECONDS = 7 * 24 * 60 * 60
+# The words for each bucket.
+BUCKET_WORDS = {"hour": "an hour", "day": "a day"}
+
 # The page's look. Colors are tokens, light and dark; every token pair of
 # text on its surface holds its contrast in grayscale too, and no meaning
 # rides on a color alone (shape, dash, position and words carry it).
@@ -178,6 +203,8 @@ svg .halo{paint-order:stroke;stroke:var(--panel);stroke-width:4px;stroke-linejoi
 .edge-line{fill:none;stroke:var(--ink-2);stroke-width:1.5}
 .edge-head{fill:var(--ink-2)}
 .edge-count{font-weight:700}
+.axis{stroke:var(--rule);stroke-width:1}
+.bar{fill:var(--s1)}
 footer{margin-top:40px;color:var(--ink-2);font-size:13px}
 """
 
@@ -870,8 +897,161 @@ def summary_lines(page):
     return lines
 
 
+def later(origin, seconds):
+    """The time `seconds` after `origin`, in `origin`'s own kind: a datetime (with its offset) or a scrubbed number.
+
+    @interacts  none.
+    @deps       datetime.
+    @complexity O(1).
+    @alloc      one value.
+    """
+    if isinstance(origin, datetime.datetime):
+        return origin + datetime.timedelta(seconds=seconds)
+    return origin + seconds
+
+
+def bucket_seconds(span):
+    """Chart 2's bucket for a report spanning `span` seconds: an hour up to HOURLY_UP_TO_SECONDS, a day past it.
+
+    @interacts  none.
+    @deps       HOURLY_UP_TO_SECONDS, SECONDS_PER_HOUR, SECONDS_PER_DAY.
+    @complexity O(1).
+    @alloc      none.
+    """
+    return SECONDS_PER_HOUR if span <= HOURLY_UP_TO_SECONDS else SECONDS_PER_DAY
+
+
+def plot_right():
+    """Where every row chart's plot ends, on the right.
+
+    @interacts  none.
+    @deps       CHART_WIDTH, PLOT_RIGHT_PAD.
+    @complexity O(1).
+    @alloc      none.
+    """
+    return CHART_WIDTH - PLOT_RIGHT_PAD
+
+
+def time_span(records):
+    """(first sent, last sent) over `records` with a sent time, in the records' own kind; (None, None) when none has one.
+
+    @interacts  none.
+    @deps       seconds_of.
+    @complexity O(t) over t records.
+    @alloc      one tuple.
+    """
+    sent = [r.sent for r in records if r.sent is not None]
+    if not sent:
+        return None, None
+    return min(sent, key=seconds_of), max(sent, key=seconds_of)
+
+
+def time_axis(first, last, y):
+    """A time axis under a row chart at height `y`: a line across the plot, the first time at its left end and the last at its right.
+
+    @interacts  none.
+    @deps       element, text_at, num, time_text, plot_right; LABEL_GUTTER,
+                LINE_GAP.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    return element("g", (("class", "time-axis"),), [
+        element("line", (("class", "axis"), ("x1", num(LABEL_GUTTER)), ("y1", num(y)), ("x2", num(plot_right())),
+                         ("y2", num(y)))),
+        text_at(LABEL_GUTTER, y + LINE_GAP, time_text(first), "small", "start"),
+        text_at(plot_right(), y + LINE_GAP, time_text(last), "small", "end")])
+
+
+def empty_chart(key, number, heading, words):
+    """A chart's section when it has nothing to draw: the same heading and SVG, with `words` in place of marks.
+
+    @interacts  none.
+    @deps       svg_chart, figure, text_at; CHART_WIDTH, CHART_TOP,
+                LINE_GAP, LABEL_GAP.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    svg = svg_chart(key, CHART_WIDTH, CHART_TOP + 2 * LINE_GAP, heading, words,
+                    [text_at(LABEL_GAP, CHART_TOP + LINE_GAP, words)])
+    return figure(number, heading, words, svg)
+
+
+def row_label(y, name, detail):
+    """A row's words at its left: the name, bold, and one line of detail under it, both ending at the gutter's edge.
+
+    @interacts  none.
+    @deps       text_at; LABEL_GUTTER, LABEL_GAP, LINE_GAP.
+    @complexity O(1).
+    @alloc      two strings.
+    """
+    edge = LABEL_GUTTER - LABEL_GAP
+    return [text_at(edge, y - LINE_GAP / 2, name, "label", "end"), text_at(edge, y + LINE_GAP / 2, detail, "small", "end")]
+
+
+def chart_senders(page):
+    """Chart 2, messages over time per sender: small multiples, one row per sender labeled at its left, one bar per bucket it sent in.
+
+    The bucket is bucket_seconds(span) over the report's sent times, and
+    bucket k covers [first + k x bucket, first + (k + 1) x bucket), from
+    the first sent time, so a real and a scrubbed page draw the same bars.
+    One height scale for every row: the busiest bucket anywhere is
+    BAR_MAX_HEIGHT. A message with no sent time is left out.
+
+    @interacts  none; pure.
+    @deps       math; element, text_at, titled, svg_chart, figure,
+                row_label, time_axis, time_span, bucket_seconds, later,
+                seconds_of, plot_right, empty_chart, num, plural; the
+                chart 2 constants.
+    @complexity O(t + s x b) over t records, s senders and b buckets
+                (at most 169 hours, or the span in days).
+    @alloc      the SVG text, returned; one count map per sender.
+    """
+    heading = "Messages over time, per sender"
+    first, last = time_span(page.records)
+    if first is None:
+        return empty_chart("senders", 2, heading, "No messages yet." if not page.records else
+                           "No message has a sent time.")
+    span = seconds_of(last) - seconds_of(first)
+    bucket = bucket_seconds(span)
+    unit = "hour" if bucket == SECONDS_PER_HOUR else "day"
+    buckets = int(span // bucket) + 1
+    counts = {}
+    for record in page.records:
+        if record.sent is not None:
+            row = counts.setdefault(record.sender, {})
+            index = int((seconds_of(record.sent) - seconds_of(first)) // bucket)
+            row[index] = row.get(index, 0) + 1
+    senders = [s.name for s in page.sessions if s.name in counts]
+    tallest = max(max(row.values()) for row in counts.values())
+    width = (plot_right() - LABEL_GUTTER) / buckets
+    body = []
+    for line, sender in enumerate(senders):
+        base = CHART_TOP + SENDER_ROW_HEIGHT * (line + 1)
+        row = counts[sender]
+        marks = [element("line", (("class", "axis"), ("x1", num(LABEL_GUTTER)), ("y1", num(base)),
+                                  ("x2", num(plot_right())), ("y2", num(base))))]
+        for index in sorted(row):
+            tall = BAR_MAX_HEIGHT * row[index] / tallest
+            marks.append(element("rect", (("class", "bar"), ("x", num(LABEL_GUTTER + width * index)),
+                                          ("y", num(base - tall)), ("width", num(max(width - BAR_GAP, BAR_GAP))),
+                                          ("height", num(tall))),
+                                 [titled(f"{time_text(later(first, index * bucket))}: {row[index]} sent")]))
+        words = row_label(base - BAR_MAX_HEIGHT / 2, sender,
+                          f"{sum(row.values())} sent · peak {max(row.values())} in {BUCKET_WORDS[unit]}")
+        body.append(element("g", (("class", "plot"), ("data-plot", sender)), [
+            element("g", (("class", "series"), ("data-label", sender), ("data-shape", "bar"), ("data-dash", "none")),
+                    words + marks)]))
+    height = CHART_TOP + SENDER_ROW_HEIGHT * len(senders) + AXIS_HEIGHT
+    body.append(time_axis(first, last, CHART_TOP + SENDER_ROW_HEIGHT * len(senders) + LABEL_GAP))
+    desc = (f"One row per sender; each bar is one {unit} of mail it sent, its height the count, on one scale for "
+            f"every row. The bar is an hour when the report spans 7 days or less, else a day.")
+    how = (f"Each bar is one {unit} of mail sent; taller is more, on one scale for every row. A report that spans "
+           "7 days or less draws hours, a longer one days. Hover a bar for its time and count.")
+    return figure(2, heading, how, svg_chart("senders", CHART_WIDTH, height, heading, desc, body))
+
+
 # The charts, in page order. Each takes the Page and returns its section.
-CHARTS = (chart_graph,)
+CHARTS = (chart_graph, chart_senders)
 
 
 def render(page):
