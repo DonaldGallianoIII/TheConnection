@@ -74,8 +74,10 @@ Walking it with `qa/human/route-shared.md` too, walk both as the same
 Linux user, the one route-shared.md calls ann, so `you` here is ann:
 
 1. This file, steps 1 to 22.
-2. route-shared.md, steps 1 to 45. Its steps 38 to 44 reuse this file's
-   alias `farbox-tc` and far name `far-b`.
+<!-- The step range made 1 to 45h by the R10 lane agent (Claude Opus 5.5), fix round 1, then 1 to 45i in fix round 2, 2026-10-18. Status: unreviewed. -->
+2. route-shared.md, steps 1 to 45i (45a to 45i come after 45). Its
+   steps 38 to 44 and 45h reuse this file's alias `farbox-tc`, and 38
+   to 44 its far name `far-b`.
 3. route-shared.md's cleanup, its steps 46 to 50.
 4. This file's cleanup, steps 23 to 28, once, last. Doing it earlier
    takes away the far setup route-shared.md's steps 38 to 44 need.

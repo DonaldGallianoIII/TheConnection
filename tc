@@ -294,6 +294,27 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             by name in it, hard-linked to OUT's name (renamed over it with
             --force) and the .tmp's name removed (fix round 1). It writes
             nothing in the mailbox.
+            R10 (Claude Opus 5.5, unreviewed): D43, C4's "Only your own
+            or the init user's ssh card". Under a shared mailbox the ssh
+            route, in send and in flush, follows a card only when the
+            file tc opened for it (O_NOFOLLOW, then fstat on that same
+            descriptor, never a second look by path) is a regular file
+            with one name, owned by this user or by the init user (the
+            owner of ROOT/.shared, by the fstat of the read of it),
+            and its name field is its file's name (ssh_card_distrust).
+            R10 fix round 1 (Claude Opus 5.5, unreviewed): the init
+            user is the owner in the fstat of the read that named the
+            group, never a second open by path.
+            Anything else, a link included, refuses the send, exit 1,
+            nothing queued and no ssh run, with words naming the card's
+            writer and the init user; flush leaves such a queued file
+            where it waits, never sent and never filed as refused, until
+            the card is fixed. For a link's words it opens the link
+            itself (O_PATH) to fstat its owner. `cards` and `health` mark
+            such a card in words (health's JSON: `ssh_trust`, which the
+            gate's health never carries: it has no cards). The gate's
+            reads skip the check (an ssh card there is exit 7, as
+            before), and a private mailbox is unchanged.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
             grp, hashlib, io, json, pathlib, pwd, re, resource, secrets,
             selectors, shlex, shutil, signal, stat, subprocess, time,
@@ -378,7 +399,14 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             or wait that makes an inbox or its read/ adds none: since P3
             fix round 1a (Claude Opus 5.5, unreviewed) they are made by
             name in an open folder (pin_folder), and only a missing mail/
-            goes through make_folder. Each read is one small file, O(1),
+            goes through make_folder. R10 (Claude Opus 5.5, unreviewed):
+            D43 adds one read of .shared per command to send
+            (route_and_deliver), flush (cmd_flush), cards and health
+            (all_cards), the init user taken from that read's own fstat
+            (shared_group_seen; R10 fix round 1, Claude Opus 5.5,
+            unreviewed: the review's REC-8 and DEBT-1); a send's queue
+            check reuses the Share its branch check read.
+            Each read is one small file, O(1),
             and each make_folder call one group lookup when shared.
 @alloc      one file per message, kept forever (read/ is the history), and
             one read-time record per read/ that its owner's tc read moved
@@ -1327,6 +1355,93 @@ NOT_RECORDED_LINE = "read, time not recorded"
 RecordSpec = collections.namedtuple("RecordSpec", "name kind what")
 WAIT_EXIT_RECORD = RecordSpec(WAIT_EXIT_NAME, "wait", "exit record")
 READ_TIMES_RECORD = RecordSpec(READ_TIMES_NAME, "read", "read-time record")
+# R10 (Claude Opus 5.5, unreviewed): D43, C4's "Only your own or the init
+# user's ssh card". Under a shared mailbox the ssh route (tc send, tc
+# flush) follows a card only when the file tc opened for it is a regular
+# file with one name, owned by the sender or by the init user, whose name
+# field is its file's name (ssh_card_distrust). The kinds of card it will
+# not follow; for each, the clause after the card's path that says why
+# (DISTRUST_WHY, several joined by DISTRUST_WHY_JOIN), and the mark tc
+# health and tc cards print after its line (DISTRUST_MARK, several joined
+# by DISTRUST_MARK_JOIN, and the mark after the line by the same).
+# {writer} is the login that owns what the name leads to (for a link, the
+# link itself), {init} the init user's login, {said} the name the card
+# names, {name} the name it was read for.
+DISTRUST_LINK = "a link"
+DISTRUST_SECOND_NAME = "a second name"
+DISTRUST_NOT_OWN = "another member's card"
+DISTRUST_OTHER_NAME = "a card naming another name"
+DISTRUST_WHY = {
+    DISTRUST_LINK: ("is a symlink {writer} made, and tc follows no card through a link, even one to a card of the "
+                    "user who ran init ({init})"),
+    DISTRUST_SECOND_NAME: ("is a card {writer} owns with a second name (a hard link), and tc follows only a card "
+                           "with one name"),
+    DISTRUST_NOT_OWN: ("is an ssh card {writer} wrote, and only {writer} and the user who ran init ({init}) send "
+                       "over it"),
+    DISTRUST_OTHER_NAME: ("names {said}, not {name} (written by {writer}), and tc follows a card only for the name "
+                          "it names"),
+}
+DISTRUST_MARK = {
+    DISTRUST_LINK: "a symlink by {writer}: no send follows it",  # R10 fix round 1: no send of any kind (LOW-3)
+    DISTRUST_SECOND_NAME: "a card by {writer} with a second name (a hard link): no ssh send follows it",
+    DISTRUST_NOT_OWN: "ssh card by {writer}: only its writer and {init} send over it",
+    DISTRUST_OTHER_NAME: "names {said}, not {name}: no ssh send follows it",
+}
+DISTRUST_WHY_JOIN = "; it "
+DISTRUST_MARK_JOIN = "; "
+# R10 fix round 1 (Claude Opus 5.5, unreviewed): the review's LOW-5. What
+# {said} reads as for a card with no name field, or a null one.
+DISTRUST_NO_NAME_WORDS = "no name"
+# What fixes it, and the whole refusal tc send and tc flush say ({path}
+# the card's path, {tc} the invoked name). tc flush's goes after `tc
+# flush: left <file>: `. R10 fix round 1 (Claude Opus 5.5, unreviewed):
+# the review's LOW-4, the second way out says what it costs (the far
+# command's --to is the card's name); and LOW-3, a link gets its own fix
+# ({aside} the first free .squatted name beside it, aside_path), since tc
+# cannot read past it to know whether its name is local or far.
+DISTRUST_FIX_WORDS = ("The user who ran init ({init}) can write it for everyone: {tc} card {name} --ssh <target>. "
+                      "Or write your own card under a name of your own: {tc} card <your-name> --ssh <target>; the "
+                      "mail then goes to <your-name> on that machine, so a session there must join as that name.")
+# R10 fix round 2 (Claude Opus 5.5, unreviewed): the re-review's HIGH-1.
+# `mv -T`, as every aside line tc prints (branch_problem): without it, a
+# link a member plants at {aside} between the print and the paste leads
+# mv into the folder it points at, over a file there of the card's name.
+DISTRUST_LINK_FIX_WORDS = ("Its writer ({writer}) or the user who ran init ({init}) moves it aside: mv -T {path} "
+                           "{aside}. Then {name}'s owner rejoins in that session ({tc} join {name}), or, if {name} "
+                           "lives on another machine, the user who ran init writes its card: {tc} card {name} --ssh "
+                           "<target>.")
+DISTRUST_CARD_WORDS = "{path} {why}. {fix}"
+DISTRUST_SEND_WORDS = "tc send: {path} {why}. Nothing sent and no ssh run. {fix}"
+DISTRUST_FLUSH_WORDS = ("{path} {why}. It stays queued, never sent and never filed as refused, and goes on the "
+                        "next {tc} flush once the card is fixed. {fix}")
+# R10 fix round 1 (Claude Opus 5.5, unreviewed): the review's LOW-1, LOW-2
+# and LOW-7. Why tc flush holds a name's mail (SshWhere.held's kind): its
+# card is one D43 will not follow, or .shared would not read, so no card
+# was judged. And what flush says of such a name where no file of this
+# user's waits: in its count of other members' files ({name} in place of
+# a target, so the line reads `<k> waiting for <words> from other
+# members`), and for `--to <name>` with nothing waiting ({card} is
+# DISTRUST_CARD_WORDS, {why} the .shared words).
+# R10 fix round 2 (Claude Opus 5.5, unreviewed): the re-review's bugs
+# LOW-1. HELD_LINK for a symlink at the card's name: tc never reads past
+# it, so it never calls it an ssh card.
+HELD_DISTRUST = "distrust"
+HELD_LINK = "link"
+HELD_UNJUDGED = "unjudged"
+HELD_COUNT_WORDS = {
+    HELD_DISTRUST: "{name}, an ssh card you do not send over (D43),",
+    HELD_LINK: "{name}, a symlink no send follows (D43),",
+    HELD_UNJUDGED: "{name}, whose card tc could not judge ({why}),",
+}
+HELD_NOTHING_WORDS = {
+    HELD_DISTRUST: "{name}'s card is an ssh card you do not send over (D43): {card}",
+    HELD_LINK: "{name}'s card is a symlink, which no send follows (D43): {card}",
+    HELD_UNJUDGED: "{name}'s card could not be judged: {why}",
+}
+# Who the words name when tc cannot say: the init user when ROOT/.shared
+# would not read, a link's writer when the link would not open.
+UNKNOWN_INIT_WORDS = "the owner of .shared"
+UNKNOWN_WRITER_WORDS = "someone"
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -1438,26 +1553,45 @@ def shared_group():
     when it names no group on one line. tc never guesses which group a
     mailbox is shared with: main() refuses every command but init on it
     (set_shared_umask), and an in-process caller sees the ValueError.
+    R10 fix round 1 (Claude Opus 5.5, unreviewed): shared_group_seen's
+    group, without the fstat.
 
-    @interacts  reads ROOT/.shared through read_regular_file. Writes
-                nothing.
-    @deps       read_regular_file; SHARED_MARKER_NAME,
-                SHARED_MARKER_READ_MAX_BYTES.
+    @interacts  reads ROOT/.shared (shared_group_seen). Writes nothing.
+    @deps       shared_group_seen.
     @complexity O(r) over r bytes read, at most
                 SHARED_MARKER_READ_MAX_BYTES + 1.
     @alloc      the file's text and the group string, which is returned.
     """
+    return shared_group_seen()[0]
+
+
+# R10 fix round 1 (Claude Opus 5.5, unreviewed): the review's LOW-9 and DEBT-1, the init user from this one read.
+def shared_group_seen():
+    """(group, st): shared_group's group and the fstat of the descriptor ROOT/.shared was read through, or (None, None) when there is no .shared. Raises as shared_group says.
+
+    The owner in `st` is the init user (C4, D34) as D43 judges it: the
+    file whose bytes named the group, never a second open by path.
+
+    @interacts  opens, fstats and reads ROOT/.shared once
+                (read_regular_file_seen). Writes nothing.
+    @deps       read_regular_file_seen; SHARED_MARKER_NAME,
+                SHARED_MARKER_READ_MAX_BYTES.
+    @complexity O(r) over r bytes read, at most
+                SHARED_MARKER_READ_MAX_BYTES + 1.
+    @alloc      the file's text, the group string and one stat result,
+                returned.
+    """
     path = ROOT / SHARED_MARKER_NAME
     try:
-        text = read_regular_file(path, SHARED_MARKER_READ_MAX_BYTES)
+        text, st = read_regular_file_seen(path, SHARED_MARKER_READ_MAX_BYTES)
     except FileNotFoundError:
-        return None
+        return None, None
     except (OSError, ValueError) as err:
         raise ValueError(f"{path} is unreadable ({err})") from err
     group = text.strip()
     if not group or "\n" in group:
         raise ValueError(f"{path} names no group on one line")
-    return group
+    return group, st
 
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): the audit's LOW-7.
@@ -1511,32 +1645,36 @@ def set_shared_umask(fn):
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D20, what a command
 # needs to know about sharing, and whose a file is.
 # A shared mailbox's group, by name and number. A private mailbox has none.
-Share = collections.namedtuple("Share", "group gid")
+# R10 fix round 1 (Claude Opus 5.5, unreviewed): `owner`, the user id that
+# owns ROOT/.shared, from the fstat of the very read that named the group
+# (shared_group_seen): the init user, whom D43 trusts.
+Share = collections.namedtuple("Share", "group gid owner")
 
 
 def mailbox_share():
-    """Share(group, gid) when ROOT/.shared names a group, None when the mailbox is private.
+    """Share(group, gid, owner) when ROOT/.shared names a group, None when the mailbox is private.
 
     Refuses (exit 1, words) a .shared that is unreadable or names a group
     this machine lacks: tc never guesses which group a mailbox is shared
     with, and nothing is written before the refusal.
 
-    @interacts  reads ROOT/.shared (shared_group) and, when it names a
-                group, the group database; on a refusal one line to stderr
-                and exit 1.
-    @deps       shared_group, shared_problem_words, refuse, printable; grp;
+    @interacts  reads ROOT/.shared and fstats the descriptor it read
+                through (shared_group_seen) and, when it names a group,
+                the group database; on a refusal one line to stderr and
+                exit 1.
+    @deps       shared_group_seen, shared_problem_words, refuse, printable; grp;
                 SHARED_MARKER_NAME, EXIT_REFUSED.
     @complexity O(1): one small file and one group lookup.
     @alloc      one Share, returned.
     """
     try:
-        group = shared_group()
+        group, st = shared_group_seen()  # R10 fix round 1 (Claude Opus 5.5, unreviewed): its owner too
     except ValueError as problem:
         refuse(shared_problem_words(problem), EXIT_REFUSED)
     if group is None:
         return None
     try:
-        return Share(group, grp.getgrnam(group).gr_gid)
+        return Share(group, grp.getgrnam(group).gr_gid, st.st_uid)
     except KeyError:
         refuse(f"tc: {ROOT / SHARED_MARKER_NAME} names group {printable(group)}, which this "
                f"machine does not have; nothing written", EXIT_REFUSED)
@@ -1551,21 +1689,22 @@ def share_or_raise():
     origin id after the message landed, the outbox after ssh answered):
     it catches OSError and says why.
 
-    @interacts  reads ROOT/.shared (shared_group) and, when it names a
-                group, the group database. Writes nothing.
-    @deps       shared_group, shared_problem_words, printable; grp, errno;
+    @interacts  reads ROOT/.shared and fstats the descriptor it read
+                through (shared_group_seen) and, when it names a group,
+                the group database. Writes nothing.
+    @deps       shared_group_seen, shared_problem_words, printable; grp, errno;
                 ROOT, SHARED_MARKER_NAME.
     @complexity O(1): one small file and one group lookup.
     @alloc      one Share, returned, or the words, raised.
     """
     try:
-        group = shared_group()
+        group, st = shared_group_seen()  # R10 fix round 1 (Claude Opus 5.5, unreviewed): its owner too
     except ValueError as problem:
         raise OSError(errno.EINVAL, shared_problem_words(problem)) from problem
     if group is None:
         return None
     try:
-        return Share(group, grp.getgrnam(group).gr_gid)
+        return Share(group, grp.getgrnam(group).gr_gid, st.st_uid)
     except KeyError:
         raise OSError(errno.EINVAL, f"{ROOT / SHARED_MARKER_NAME} names group {printable(group)}, which this "
                                     f"machine does not have") from None
@@ -3829,7 +3968,13 @@ def route_and_deliver(sender, to, body, header_note=None, *, forward=True, on_la
     gate's: a card that says ssh, at the read that picks the route, is
     Delivery exit 7, GATE_NO_FORWARD_WORDS, before ssh could run and
     with nothing written, so a far key never sends mail on to a third
-    machine.
+    machine. R10 (Claude Opus 5.5, unreviewed): D43. With `forward`, a
+    TrustFrame is built once (trust_frame of mailbox_share, R10 fix round
+    1) and given to card_route both times it reads the card: under a
+    shared mailbox, an ssh card the sender may not follow (not the
+    sender's or the init user's, a second name, a link, another name's
+    card) refuses there, exit 1, before any route runs; the gate's reads
+    get none, skip that check and answer an ssh card with 7, as before.
 
     Busy leaves two ways (D23). A lock held past the deadline exits 10
     through sys.exit inside inbox_lock or next_seq, so nothing after this
@@ -3855,26 +4000,30 @@ def route_and_deliver(sender, to, body, header_note=None, *, forward=True, on_la
     written.
 
     @interacts  reads cards/<to>.json (card_route) and refuses (exit 1,
-                nothing written) a card it cannot route; for a local
+                nothing written) a card it cannot route, or, with
+                `forward` under a shared mailbox, an ssh card D43 will not
+                follow (with `forward`, ROOT/.shared is read once here,
+                mailbox_share and trust_frame); for a local
                 delivery holds mail/.box-<to>.lock shared (inbox_lock;
                 held past the deadline by another process, or, for the
                 gate, a passing write failure making it, exit 10,
                 nothing written) and reads the card again; calls one
                 ROUTES function, which writes the message (and calls
                 `on_landed`, local and codex only).
-    @deps       card_route, lock_deadline, inbox_lock, deliver_local,
-                deliver_codex, deliver_ssh, Delivery; fcntl;
-                EXIT_GATE_REFUSED, GATE_NO_FORWARD_WORDS.
+    @deps       card_route, mailbox_share, trust_frame, lock_deadline,
+                inbox_lock, deliver_local, deliver_codex, deliver_ssh,
+                Delivery; fcntl; EXIT_GATE_REFUSED, GATE_NO_FORWARD_WORDS.
     @complexity O(1) here, plus the route's own work; the inbox lock and
                 every mail/.seq wait take at most LOCK_WAIT_SECONDS in all.
     @alloc      the card dict, freed on return; whatever the route keeps.
     """
-    card, deliver = card_route(to)
+    frame = trust_frame(mailbox_share()) if forward else None  # R10 fix round 1: D43's frame, once per send
+    card, deliver = card_route(to, frame)  # R10 (Claude Opus 5.5, unreviewed): D43 only for tc send's
     deadline = lock_deadline()  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): LOW-2, one per command
     if deliver is deliver_local:
         # CARDS fix round 1 (Claude Opus 5.5, unreviewed): the card read again under the shared lock.
         with inbox_lock(to, fcntl.LOCK_SH, deadline, busy_on_passing=not forward):  # P3 fix round 2: LOW-3
-            card, deliver = card_route(to)
+            card, deliver = card_route(to, frame)
             if deliver is deliver_local:  # P3 fix round 1c (Claude Opus 5.5, unreviewed): D36 (4), the gate's 10
                 return deliver_local(card, sender, to, body, header_note, deadline=deadline, on_landed=on_landed,
                                      busy_on_passing=not forward)
@@ -4272,7 +4421,9 @@ def cmd_send(args):
                 when given; route_and_deliver: the card, the inbox lock
                 for a local delivery, one lock_deadline for every lock
                 wait, the route, which writes the message); prints
-                (print_delivery).
+                (print_delivery). R10 (Claude Opus 5.5, unreviewed): under
+                a shared mailbox an ssh card D43 will not follow refuses
+                there, exit 1, nothing written (card_route).
     @deps       require_names, read_body, refuse, deliver_once,
                 print_delivery.
     @complexity O(b) over b bytes of body, at most SEND_BODY_MAX_BYTES,
@@ -6189,10 +6340,12 @@ def describe_card(card, file_name=None):
     is the `name` field. An ssh card's route reads `route ssh to
     <target>`. A field missing from a hand-made card shows as `?`. Every
     field goes through printable(), so no control character in a card
-    reaches the terminal raw.
+    reaches the terminal raw. R10 fix round 1 (Claude Opus 5.5,
+    unreviewed): the review's LOW-5. A `name` field that is null ends
+    `, card says no name` (DISTRUST_NO_NAME_WORDS), never `None`.
 
     @interacts  none; string work only.
-    @deps       printable; pathlib.
+    @deps       printable; pathlib; DISTRUST_NO_NAME_WORDS.
     @complexity O(f) over f characters in the card's fields (a few
                 hundred).
     @alloc      one string, returned.
@@ -6206,8 +6359,15 @@ def describe_card(card, file_name=None):
     if card.get("reports_to"):
         text += f", reports to {printable(card['reports_to'])}"
     if file_name is not None and "name" in card and card["name"] != name:
-        text += f", card says name {printable(card['name'])}"
+        # R10 fix round 1 (Claude Opus 5.5, unreviewed): LOW-5, a null name says so, never None.
+        text += (f", card says {DISTRUST_NO_NAME_WORDS}" if card["name"] is None
+                 else f", card says name {printable(card['name'])}")
     return text
+
+
+# R10 (Claude Opus 5.5, unreviewed): D43, a symlink told from any other refusal.
+class LinkRefused(ValueError):
+    """Raised by read_regular_file_seen for a symlink at the name it opens: a ValueError, so every caller that catches one still does, and one a caller can tell apart (D43's words for a linked card)."""
 
 
 # Phase fix round 1 (Claude Opus 5.5, unreviewed): every card file, and the
@@ -6226,22 +6386,46 @@ def read_regular_file(path, limit, dir_fd=None):
     unreadable card. P3 fix round 1a (Claude Opus 5.5, unreviewed): D35.
     `dir_fd`, when given, is the open folder `path` is a name in (a
     message, by its name in the pinned inbox or read/, show), so no
-    folder on the way is resolved by name.
+    folder on the way is resolved by name. R10 (Claude Opus 5.5,
+    unreviewed): the work is read_regular_file_seen's, which also hands
+    back the fstat; this keeps the text alone, and every refusal as it
+    was (a symlink's ValueError is now its LinkRefused).
 
-    @interacts  opens, fstats and reads one file, and closes it.
-    @deps       os, stat, errno.
+    @interacts  opens, fstats and reads one file, and closes it
+                (read_regular_file_seen).
+    @deps       read_regular_file_seen.
     @complexity O(r) over r bytes read, at most `limit` + 1.
     @alloc      the bytes read and the decoded text, which is returned;
                 one descriptor, closed on return.
+    """
+    return read_regular_file_seen(path, limit, dir_fd)[0]
+
+
+# R10 (Claude Opus 5.5, unreviewed): D43, a card judged from the one open it is read through.
+def read_regular_file_seen(path, limit, dir_fd=None):
+    """(text, st): read_regular_file's text and the fstat of the very descriptor it was read through.
+
+    One open (O_RDONLY, O_NONBLOCK, O_NOFOLLOW), one fstat on it, the
+    read, the close: so what a caller judges (owner, link count, a
+    regular file) is the file whose bytes it read, never a second look
+    by path. Raises as read_regular_file says; a symlink at the name
+    raises LinkRefused, a ValueError.
+
+    @interacts  opens, fstats and reads one file, and closes it.
+    @deps       LinkRefused; os, stat, errno.
+    @complexity O(r) over r bytes read, at most `limit` + 1.
+    @alloc      the bytes read, the decoded text and one stat result,
+                returned; one descriptor, closed on return.
     """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=dir_fd)
     except OSError as err:
         if err.errno == errno.ELOOP:
-            raise ValueError("it is a symlink, which tc never follows") from err
+            raise LinkRefused("it is a symlink, which tc never follows") from err
         raise
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
             raise ValueError("it is not a regular file")
         chunks, left = [], limit + 1
         while left > 0:
@@ -6255,11 +6439,11 @@ def read_regular_file(path, limit, dir_fd=None):
     data = b"".join(chunks)
     if len(data) > limit:
         raise ValueError(f"it is over {limit} bytes")
-    return data.decode("utf-8")
+    return data.decode("utf-8"), st
 
 
 def all_cards():
-    """Every card under cards/, by name: a list of (file name, card or None).
+    """Every card under cards/, by name: a list of (file name, card or None, mark or None).
 
     None stands for a file that is not a JSON object (hand-edited or cut
     short, or nested too deep for the parser, which raises RecursionError)
@@ -6267,19 +6451,54 @@ def all_cards():
     but a regular file, or one over CARD_READ_MAX_BYTES); the caller says
     so instead of guessing.
 
-    @interacts  globs cards/*.json and reads each through
-                read_regular_file. Writes nothing.
-    @deps       read_regular_file, CARD_READ_MAX_BYTES; json, pathlib.
+    R10 (Claude Opus 5.5, unreviewed): D43. Under a shared mailbox the
+    mark says, in words, why no ssh send follows the card, or follows it
+    only for its writer and the init user, so nobody learns of it from a
+    failed send: for a symlink (whatever its card says) and for an ssh
+    card that fails ssh_card_distrust with only the init user trusted
+    (one by any other member is marked, the reader's own too, since
+    other members' sends will not follow it). Each card is judged from
+    the one open it is read through (read_regular_file_seen). None on a
+    private mailbox, for any other card, and when .shared cannot be read
+    (tc health says that on a line of its own). R10 fix round 1 (Claude
+    Opus 5.5, unreviewed): a symlink's mark says no send of any kind
+    follows it (the review's LOW-3), and the user database is read only
+    for a card that is marked, once per reason, plus the init user's
+    login once (LOW-9).
+
+    @interacts  reads ROOT/.shared and fstats the descriptor it read
+                through (command_trust_frame, once); globs cards/*.json
+                and reads and fstats each through read_regular_file_seen;
+                for a symlink, opens the link itself to fstat it for its
+                writer (link_distrust); for each marked card, reads the
+                user database. Writes nothing.
+    @deps       read_regular_file_seen, LinkRefused, command_trust_frame,
+                ssh_card_distrust, link_distrust, distrust_marks,
+                CARD_READ_MAX_BYTES; json, pathlib.
     @complexity O(c) over c cards (a few dozen).
-    @alloc      one list of c dicts, returned.
+    @alloc      one list of c tuples, each a dict and a short string,
+                returned.
     """
+    frame = command_trust_frame()  # R10 (Claude Opus 5.5, unreviewed): D43, who the marks trust, once
+    if frame is not None and frame.problem is not None:
+        frame = None  # .shared would not read: no marks (tc health says why on a line of its own)
     out = []
     for path in sorted(CARDS.glob("*.json")) if CARDS.exists() else []:
+        mark = None
         try:
-            card = json.loads(read_regular_file(path, CARD_READ_MAX_BYTES))
+            text, seen = read_regular_file_seen(path, CARD_READ_MAX_BYTES)  # R10: judged from its one open
+            card = json.loads(text)
+        except LinkRefused:  # R10 (Claude Opus 5.5, unreviewed): D43, a link is marked
+            card = None
+            if frame is not None:
+                mark = distrust_marks(path.stem, [link_distrust(path)], frame)
         except (OSError, ValueError, RecursionError):  # Phase fix round 1 (Claude Opus 5.5, unreviewed)
             card = None
-        out.append((path.name, card if isinstance(card, dict) else None))
+        else:
+            if frame is not None and isinstance(card, dict) and card.get("route") == "ssh":  # R10: D43
+                found = ssh_card_distrust(path.stem, card, seen, frame.init_only)
+                mark = distrust_marks(path.stem, found, frame) if found else None
+        out.append((path.name, card if isinstance(card, dict) else None, mark))
     return out
 
 
@@ -6464,20 +6683,24 @@ def cmd_cards(args):
     """`tc cards`: every card, one line each, in words.
 
     Each card is named by its file, as the router names it. Every field
-    and file name it prints goes through printable().
+    and file name it prints goes through printable(). R10 (Claude Opus
+    5.5, unreviewed): D43. A card all_cards marks ends with
+    DISTRUST_MARK_JOIN and its mark: `far-y (other, ..., route ssh to
+    u@h); ssh card by ben: only its writer and ann send over it`.
 
-    @interacts  reads cards/*.json through all_cards; prints to stdout.
-    @deps       all_cards, describe_card, printable.
+    @interacts  reads cards/*.json through all_cards (and, for the marks,
+                ROOT/.shared and the user database); prints to stdout.
+    @deps       all_cards, describe_card, printable; DISTRUST_MARK_JOIN.
     @complexity O(c) over c cards (a few dozen).
     @alloc      the list of cards, freed on exit.
     """
     cards = all_cards()
     if not cards:
         print("no cards")
-    for file_name, card in cards:
+    for file_name, card, mark in cards:
         # Phase fix round 1 (Claude Opus 5.5, unreviewed): named by its file, escaped.
-        print(describe_card(card, file_name) if card is not None
-              else f"{printable(file_name)}: unreadable card")
+        line = describe_card(card, file_name) if card is not None else f"{printable(file_name)}: unreadable card"
+        print(line + (DISTRUST_MARK_JOIN + printable(mark) if mark else ""))  # R10 (Claude Opus 5.5, unreviewed): D43
 
 
 # ---------- router: tc send delivers by the recipient's card (C2) ----------
@@ -6497,29 +6720,214 @@ def read_card(name):
     (RecursionError), and for one read_regular_file will not read (a
     FIFO, a symlink, anything but a regular file, one over
     CARD_READ_MAX_BYTES): the router refuses rather than guess a route.
-    Only nothing at the name is no card.
+    Only nothing at the name is no card. R10 (Claude Opus 5.5,
+    unreviewed): read_card_seen's card, without the fstat.
 
-    @interacts  reads cards/<name>.json through read_regular_file. Writes
-                nothing.
-    @deps       read_regular_file, CARD_READ_MAX_BYTES; json, pathlib.
+    @interacts  reads cards/<name>.json (read_card_seen). Writes nothing.
+    @deps       read_card_seen.
     @complexity O(1): one small file.
     @alloc      one dict, returned.
     """
+    return read_card_seen(name)[0]
+
+
+# R10 (Claude Opus 5.5, unreviewed): D43, the card and the fstat of the one open it was read through.
+def read_card_seen(name):
+    """(card, st) for `name`: its card as a dict and the fstat of the descriptor it was read through, or (None, None) when it has none.
+
+    Raises as read_card says, the same words; for a symlink the
+    ValueError's __cause__ is LinkRefused, so a caller can tell a link
+    from any other unreadable card.
+
+    @interacts  opens, fstats and reads cards/<name>.json once
+                (read_regular_file_seen). Writes nothing.
+    @deps       read_regular_file_seen, CARD_READ_MAX_BYTES; json,
+                pathlib.
+    @complexity O(1): one small file.
+    @alloc      one dict and one stat result, returned.
+    """
     path = CARDS / f"{name}.json"
     try:
-        card = json.loads(read_regular_file(path, CARD_READ_MAX_BYTES))  # Phase fix round 1 (Claude Opus 5.5, unreviewed)
+        text, seen = read_regular_file_seen(path, CARD_READ_MAX_BYTES)
+        card = json.loads(text)  # Phase fix round 1 (Claude Opus 5.5, unreviewed)
     except FileNotFoundError:
-        return None
+        return None, None
     except (OSError, ValueError, RecursionError) as err:  # Phase fix round 1 (Claude Opus 5.5, unreviewed)
         raise ValueError(f"the card {path} is unreadable ({err})") from err
     if not isinstance(card, dict):
         raise ValueError(f"the card {path} is not a JSON object")
-    return card
+    return card, seen
+
+
+# ---------- D43: only your own or the init user's ssh card (C4) ----------
+# R10 (Claude Opus 5.5, unreviewed). The one check the ssh route makes
+# under a shared mailbox, in tc send (card_route) and tc flush
+# (queue_route), and the marks tc health and tc cards print (all_cards).
+
+# Who a check trusts, for one command, built once and passed in (R10 fix
+# round 1, Claude Opus 5.5, unreviewed: the review's LOW-9 and REC-8):
+# `followed` the user ids whose ssh card tc send and tc flush follow
+# (this user's and the init user's), `init_only` the one the marks trust
+# (the init user's), `init` the init user's id, `init_name` that user's
+# login for the words, looked up once, and `problem` the words when
+# .shared would not read (then nothing is trusted and nothing judged).
+TrustFrame = collections.namedtuple("TrustFrame", "followed init_only init init_name problem")
+# One reason a card fails, for the words: its kind (DISTRUST_WHY's keys),
+# the user id that owns what the name leads to (None when unknown), and
+# the name the card names. The id becomes a login only when words are
+# made (R10 fix round 1: the review's LOW-9).
+Distrust = collections.namedtuple("Distrust", "kind writer said")
+# Why tc flush holds a name's mail (SshWhere.held): its kind (HELD_DISTRUST,
+# HELD_LINK since R10 fix round 2, or HELD_UNJUDGED) and the words for a
+# count or `--to` (HELD_NOTHING_WORDS filled in), R10 fix round 1 (Claude
+# Opus 5.5, unreviewed): LOW-7.
+Held = collections.namedtuple("Held", "kind words")
+
+
+def trust_frame(share):
+    """The TrustFrame for this command under `share` (mailbox_share's or share_or_raise's), or None on a private mailbox, where D43 checks nothing.
+
+    R10 fix round 1 (Claude Opus 5.5, unreviewed): the review's DEBT-1.
+    The init user is `share.owner`, the owner of ROOT/.shared taken from
+    the fstat of the very read that named the group (shared_group_seen),
+    never a second open by path; its login is looked up here, once.
+
+    @interacts  reads this process's effective user id and the user
+                database (once).
+    @deps       TrustFrame, user_name; os.
+    @complexity O(1).
+    @alloc      one TrustFrame, returned.
+    """
+    if share is None:
+        return None
+    return TrustFrame(followed=(os.geteuid(), share.owner), init_only=(share.owner,), init=share.owner,
+                      init_name=user_name(share.owner), problem=None)
+
+
+def command_trust_frame():
+    """trust_frame for a command that must never exit midway (tc flush, tc cards, tc health): a .shared that would not read gives a TrustFrame that trusts nobody, its words in `problem`.
+
+    @interacts  reads ROOT/.shared and fstats the descriptor it read
+                through (share_or_raise), and the group and user
+                databases.
+    @deps       share_or_raise, trust_frame, TrustFrame;
+                UNKNOWN_INIT_WORDS.
+    @complexity O(1).
+    @alloc      one TrustFrame, returned.
+    """
+    try:
+        return trust_frame(share_or_raise())
+    except OSError as err:
+        return TrustFrame(followed=(), init_only=(), init=None, init_name=UNKNOWN_INIT_WORDS, problem=err.strerror)
+
+
+def ssh_card_distrust(name, card, st, trusted):
+    """Every reason the ssh route under a shared mailbox may not follow `card`, read for `name` through the descriptor whose fstat is `st`, as a list of Distrust; [] when it may (D43, C4).
+
+    The one check, for tc send, tc flush and the marks. `card` and `st`
+    come from one open (read_card_seen, read_regular_file_seen), which
+    never follows a link and has already refused anything but a regular
+    file; so what is judged here is the file whose bytes were read. A
+    reason for each of: a second name (st_nlink past 1: a hard link,
+    perhaps to another name's card, or to a group-writable file such as
+    a lock rewritten as a card), an owner not in `trusted` (a
+    TrustFrame's `followed` for a send, `init_only` for a mark), and a
+    `name` field that is not `name` (a copy of another name's card, or
+    no name at all). Several may hold, and each is said. R10 fix round 1
+    (Claude Opus 5.5, unreviewed): the review's LOW-9, no login is looked
+    up here; a Distrust carries the user id.
+
+    @interacts  none; reads the stat result and the card dict.
+    @deps       Distrust; DISTRUST_SECOND_NAME, DISTRUST_NOT_OWN,
+                DISTRUST_OTHER_NAME.
+    @complexity O(1).
+    @alloc      one short list, returned.
+    """
+    found = []
+    if st.st_nlink != 1:
+        found.append(Distrust(DISTRUST_SECOND_NAME, st.st_uid, None))
+    if st.st_uid not in trusted:
+        found.append(Distrust(DISTRUST_NOT_OWN, st.st_uid, None))
+    if card.get("name") != name:
+        found.append(Distrust(DISTRUST_OTHER_NAME, st.st_uid, card.get("name")))
+    return found
+
+
+def link_distrust(path):
+    """The Distrust for a symlink at the card `path`, its writer the link's own owner: fstat on a descriptor of the link itself (O_PATH, O_NOFOLLOW), for the words only; the refusal was already made by the no-follow open that met it.
+
+    @interacts  opens the link itself (never what it points at), fstats
+                it and closes it.
+    @deps       Distrust; os; DISTRUST_LINK.
+    @complexity O(1).
+    @alloc      one Distrust, returned; one descriptor, closed on return.
+    """
+    try:
+        fd = os.open(path, os.O_PATH | os.O_NOFOLLOW)
+    except OSError:
+        return Distrust(DISTRUST_LINK, None, None)
+    try:
+        return Distrust(DISTRUST_LINK, os.fstat(fd).st_uid, None)
+    finally:
+        os.close(fd)
+
+
+def distrust_fields(name, d, frame):
+    """The words' fields for one reason `d` about `name`'s card under `frame`: writer (a login, looked up now), init, said and name.
+
+    R10 fix round 1 (Claude Opus 5.5, unreviewed): the review's LOW-5 and
+    LOW-9. A card with no name field, or a null one, `said` reads
+    DISTRUST_NO_NAME_WORDS, never None; the writer's login is looked up
+    only here, for a card that failed.
+
+    @interacts  reads the user database once.
+    @deps       user_name, printable; DISTRUST_NO_NAME_WORDS,
+                UNKNOWN_WRITER_WORDS.
+    @complexity O(1).
+    @alloc      one dict, returned.
+    """
+    writer = UNKNOWN_WRITER_WORDS if d.writer is None else printable(user_name(d.writer))
+    said = DISTRUST_NO_NAME_WORDS if d.said is None else printable(d.said)
+    return {"writer": writer, "init": printable(frame.init_name), "said": said, "name": name}
+
+
+def distrust_words(template, name, found, frame):
+    """D43's refusal for `name`'s card in `template` (DISTRUST_SEND_WORDS, DISTRUST_FLUSH_WORDS or DISTRUST_CARD_WORDS): its path, each reason in `found` said by DISTRUST_WHY, and what fixes it (DISTRUST_LINK_FIX_WORDS for a link, else DISTRUST_FIX_WORDS), one line.
+
+    @interacts  reads sys.argv[0] (invoked_name), the user database once
+                per reason, and lstats the link's folder for a free aside
+                name (aside_path, a link only).
+    @deps       distrust_fields, aside_path, invoked_name, printable;
+                CARDS, DISTRUST_WHY, DISTRUST_WHY_JOIN, DISTRUST_FIX_WORDS,
+                DISTRUST_LINK_FIX_WORDS, DISTRUST_LINK.
+    @complexity O(f) over f reasons (at most three).
+    @alloc      one string, returned.
+    """
+    path, tc = CARDS / f"{name}.json", invoked_name()
+    fields = [distrust_fields(name, d, frame) for d in found]
+    why = DISTRUST_WHY_JOIN.join(DISTRUST_WHY[d.kind].format(**f) for d, f in zip(found, fields))
+    if [d.kind for d in found] == [DISTRUST_LINK]:  # R10 fix round 1 (Claude Opus 5.5, unreviewed): LOW-3
+        fix = DISTRUST_LINK_FIX_WORDS.format(**fields[0], tc=tc, path=printable(path),
+                                             aside=printable(aside_path(path)))
+    else:
+        fix = DISTRUST_FIX_WORDS.format(init=printable(frame.init_name), tc=tc, name=name)
+    return template.format(path=printable(path), why=why, tc=tc, fix=fix)
+
+
+def distrust_marks(name, found, frame):
+    """The mark tc health and tc cards print for `name`'s card: each reason in `found` said by DISTRUST_MARK, joined.
+
+    @interacts  reads the user database once per reason.
+    @deps       distrust_fields; DISTRUST_MARK, DISTRUST_MARK_JOIN.
+    @complexity O(f) over f reasons (at most three).
+    @alloc      one string, returned.
+    """
+    return DISTRUST_MARK_JOIN.join(DISTRUST_MARK[d.kind].format(**distrust_fields(name, d, frame)) for d in found)
 
 
 # CARDS fix round 1 (Claude Opus 5.5, unreviewed): one place picks the route,
 # so cmd_send can ask again under the inbox lock.
-def card_route(to):
+def card_route(to, frame):
     """The card for `to` and the ROUTES function its route names. Refuses what it cannot route.
 
     No card is route local. Each refusal is words on stderr, exit 1,
@@ -6530,9 +6938,32 @@ def card_route(to):
     Never `tc join` run by the sender, which would write the sender's own
     identity into the card.
 
-    @interacts  reads cards/<to>.json (read_card); on a refusal writes one
-                line to stderr and exits.
-    @deps       read_card, refuse, invoked_name, ROUTES, deliver_local, CARDS.
+    R10 (Claude Opus 5.5, unreviewed): D43. `frame` is tc send's
+    TrustFrame under a shared mailbox (route_and_deliver builds it once
+    per command); None on a private mailbox and for the gate, which
+    answers any ssh card with exit 7, as before. R10 fix round 2 (Claude
+    Opus 5.5, unreviewed): the re-review's LOW-3. `frame` has no
+    default, so no caller skips D43 by leaving it out: a call without it
+    is a TypeError, and None is always said on purpose. With a frame, an ssh
+    card is followed only when ssh_card_distrust finds nothing, judged
+    from the one open the card was read through (read_card_seen), the
+    sender and the init user trusted; else exit 1, DISTRUST_SEND_WORDS
+    naming each reason, the card's writer and the init user, before
+    anything is written or ssh runs. A symlink at the card's name refuses
+    in the same words (its writer the link's own owner) whatever it
+    points at, with its own fix: move it aside, then rejoin, or write its
+    ssh card (R10 fix round 1, the review's LOW-3). A private mailbox is
+    refused and routed as before.
+
+    @interacts  reads cards/<to>.json once (read_card_seen); for a link
+                under a frame, opens the link itself (link_distrust) and
+                lstats names beside it for the aside (aside_path); on a
+                refusal reads the user database and writes one line to
+                stderr and exits.
+    @deps       read_card_seen, LinkRefused, ssh_card_distrust,
+                link_distrust, distrust_words, refuse, invoked_name,
+                ROUTES, deliver_local, deliver_ssh, CARDS;
+                DISTRUST_SEND_WORDS.
     @complexity O(1): one small file.
     @alloc      the card dict, returned.
     """
@@ -6540,8 +6971,11 @@ def card_route(to):
     fix = (f"Ask {to}'s owner to rejoin ({tc} join {to}, run in {to}'s own session), or, "
            f"if {to} lives on another machine, write its card with {tc} card {to} --ssh <target>.")
     try:
-        card = read_card(to)
+        card, seen = read_card_seen(to)  # R10 (Claude Opus 5.5, unreviewed): D43, judged from this one open
     except ValueError as problem:
+        if frame is not None and isinstance(problem.__cause__, LinkRefused):  # R10 (Claude Opus 5.5, unreviewed): D43
+            refuse(distrust_words(DISTRUST_SEND_WORDS, to, [link_distrust(CARDS / f"{to}.json")], frame),
+                   EXIT_REFUSED)
         refuse(f"tc send: {problem}; nothing sent. {fix}", EXIT_REFUSED)
     if card is None:
         return None, deliver_local
@@ -6552,6 +6986,10 @@ def card_route(to):
     deliver = ROUTES.get(route)
     if deliver is None:
         refuse(f"tc send: route {route} is not built yet; nothing sent", EXIT_REFUSED)
+    if frame is not None and deliver is deliver_ssh:  # R10 (Claude Opus 5.5, unreviewed): D43, the one check
+        found = ssh_card_distrust(to, card, seen, frame.followed)
+        if found:
+            refuse(distrust_words(DISTRUST_SEND_WORDS, to, found, frame), EXIT_REFUSED)
     return card, deliver
 
 
@@ -7513,7 +7951,15 @@ def ring_codex(card, sender, to, count):
 # Where an ssh card sends: its target (user@host or host), the far tc's
 # path as the first word of the remote command (C3's quoting), and why the
 # card cannot be used (None when it can; then the other two are None).
-SshWhere = collections.namedtuple("SshWhere", "target remote why")
+# R10 (Claude Opus 5.5, unreviewed): D43. R10 fix round 1 (Claude Opus
+# 5.5, unreviewed): the review's LOW-7, option B. `held` is None, the
+# default, for every card judged as before; a Held when tc flush holds
+# the name's mail and says `why` as it is on each file's line: kind
+# HELD_DISTRUST when `why` is D43's whole refusal (DISTRUST_FLUSH_WORDS),
+# HELD_LINK the same for a symlink at the card's name (R10 fix round 2),
+# HELD_UNJUDGED when .shared would not read, so no card was judged. Its
+# `words` are what a count or `--to` says of the name.
+SshWhere = collections.namedtuple("SshWhere", "target remote why held", defaults=(None,))
 # How one ssh run came out (ssh_run): kind is SSH_SENT, SSH_KEPT or
 # SSH_REFUSED; code the exit code (None when ssh never finished); out and
 # err the far side's stdout and stderr; reason, for a kept message, why in
@@ -7792,7 +8238,7 @@ def ssh_where(card):
     return SshWhere(target, remote, None)
 
 
-def queue_route(to):
+def queue_route(to, frame):
     """The SshWhere for `to`'s card as it stands now: where tc flush and the queue check send `to`'s outbox mail.
 
     The queue is keyed by target (C3), and a file's target is its `to`'s
@@ -7800,20 +8246,54 @@ def queue_route(to):
     or not route ssh gives why in words, so its mail stays in the outbox
     and is never sent another way.
 
-    @interacts  reads cards/<to>.json (read_card). Writes nothing.
-    @deps       read_card, ssh_where, printable; SshWhere.
+    R10 (Claude Opus 5.5, unreviewed): D43, the same check as tc send's
+    (ssh_card_distrust, the sender and the init user trusted, judged
+    from the one open the card was read through: read_card_seen), under
+    `frame`, the command's TrustFrame (None on a private mailbox), built
+    once by the caller (R10 fix round 1: the review's REC-8). A card that
+    fails it, or a symlink at its name, gives no target, so no file of
+    it ever joins a queue that reaches ssh, DISTRUST_FLUSH_WORDS as why,
+    and `held` of kind HELD_DISTRUST (HELD_LINK for a link, which tc
+    never calls an ssh card: R10 fix round 2): the file stays queued, never sent
+    and never filed as refused, and goes once the card is fixed. A frame
+    whose .shared would not read gives no target either, its words as
+    why, `held` of kind HELD_UNJUDGED (R10 fix round 1: LOW-7, its own
+    kind). A private mailbox is as before.
+
+    @interacts  reads and fstats cards/<to>.json once (read_card_seen);
+                for a link, opens the link itself (link_distrust) and
+                lstats names beside it (aside_path); for a card that
+                fails, reads the user database. Writes nothing.
+    @deps       read_card_seen, LinkRefused, ssh_card_distrust,
+                link_distrust, distrust_words, ssh_where, printable;
+                SshWhere, Held, CARDS, DISTRUST_FLUSH_WORDS,
+                DISTRUST_CARD_WORDS, DISTRUST_LINK, HELD_DISTRUST,
+                HELD_LINK, HELD_UNJUDGED, HELD_NOTHING_WORDS.
     @complexity O(1): one small file.
     @alloc      one SshWhere, returned.
     """
+    if frame is not None and frame.problem is not None:  # R10 fix round 1 (Claude Opus 5.5, unreviewed): LOW-7
+        return SshWhere(None, None, frame.problem,
+                        Held(HELD_UNJUDGED, HELD_NOTHING_WORDS[HELD_UNJUDGED].format(name=to, why=frame.problem)))
+    found = None
     try:
-        card = read_card(to)
+        card, seen = read_card_seen(to)
     except ValueError as problem:
-        return SshWhere(None, None, f"its card is unreadable ({problem})")
-    if card is None:
-        return SshWhere(None, None, f"{to} has no card now")
-    if card.get("route") != "ssh":
-        return SshWhere(None, None, f"{to}'s card no longer says ssh (it says route "
-                                    f"{printable(card.get('route'))})")
+        if frame is None or not isinstance(problem.__cause__, LinkRefused):
+            return SshWhere(None, None, f"its card is unreadable ({problem})")
+        found = [link_distrust(CARDS / f"{to}.json")]  # R10: D43, a link
+    if found is None:
+        if card is None:
+            return SshWhere(None, None, f"{to} has no card now")
+        if card.get("route") != "ssh":
+            return SshWhere(None, None, f"{to}'s card no longer says ssh (it says route "
+                                        f"{printable(card.get('route'))})")
+        found = ssh_card_distrust(to, card, seen, frame.followed) if frame is not None else []  # R10: the one check
+    if found:
+        card_words = distrust_words(DISTRUST_CARD_WORDS, to, found, frame)
+        kind = HELD_LINK if [d.kind for d in found] == [DISTRUST_LINK] else HELD_DISTRUST  # R10 fix round 2: bugs LOW-1
+        return SshWhere(None, None, distrust_words(DISTRUST_FLUSH_WORDS, to, found, frame),
+                        Held(kind, HELD_NOTHING_WORDS[kind].format(name=to, card=card_words)))
     return ssh_where(card)
 
 
@@ -7966,7 +8446,7 @@ def other_branches():
             os.close(fd)
 
 
-def queue_ahead(target, path):
+def queue_ahead(target, path, frame):
     """How many of this user's own outbox messages for `target` wait ahead of the one just published at `path` ("queue order first", C3, D22).
 
     A file counts when this user owns it (owned_by_me), it is not `path`,
@@ -7981,9 +8461,15 @@ def queue_ahead(target, path):
     holds the send lock and has published, so nothing it counts is sent
     meanwhile.
 
+    R10 (Claude Opus 5.5, unreviewed): D43. Each card is judged under
+    `frame`, the send's TrustFrame (None on a private mailbox), which
+    deliver_ssh builds once from the Share its branch check read (R10 fix
+    round 1: the review's REC-8): a card D43 will not follow points
+    nowhere, so its files never count.
+
     @interacts  lists this user's outbox branch (outbox_files) and reads
-                the card of each name with a file that could count.
-                Writes nothing.
+                the card of each name with a file that could count
+                (queue_route). Writes nothing.
     @deps       outbox_files, outbox_branch, owned_by_me, queue_route.
     @complexity O(q + w log w) as outbox_files, plus one card read per
                 name among the files counted.
@@ -7994,7 +8480,7 @@ def queue_ahead(target, path):
         if f.path == path or not owned_by_me(f.st):
             continue
         if f.to not in routes:
-            routes[f.to] = queue_route(f.to)
+            routes[f.to] = queue_route(f.to, frame)
         ahead += routes[f.to].target == target
     return ahead
 
@@ -8631,7 +9117,7 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
     @deps       ssh_where, outbox_queue, claim_branch, origin_token,
                 origin_nonce, origin_id, lock_deadline, next_seq,
                 pin_folder, publish_message, send_lock, queue_ahead,
-                ssh_run, file_outcome, file_away, outbox_text, Delivery,
+                ssh_run, file_outcome, file_away, outbox_text, trust_frame, Delivery,
                 invoked_name; os; CARDS, SEQ_FILE, SEQ_WIDTH, FOLDER_FLAGS, OUTBOX_SENT,
                 OUTBOX_REFUSED, ORIGIN_HEADER_NOTE, ORIGIN_SEQ_MAX_DIGITS,
                 SEQ_TOO_LONG_WORDS, SHARED_OWNED_FILE_MODE, NEW_FILE_MODE,
@@ -8708,7 +9194,7 @@ def deliver_ssh(card, sender, to, body, header_note=None, *, deadline=None):
             busy = why if why is not None else "another tc is sending to it right now (a send or a tc flush)"
             return Delivery(EXIT_QUEUED, f"{where.target} was not tried: {busy}; kept in outbox: {path}. "
                                          f"Run: {invoked_name()} flush", warnings)  # NAME (Claude Opus 5.5, unreviewed)
-        ahead = queue_ahead(where.target, path)
+        ahead = queue_ahead(where.target, path, trust_frame(share))  # R10 fix round 1: D43's frame, once
         if ahead:
             return Delivery(EXIT_QUEUED, f"{where.target} has {ahead} waiting in the outbox; queued behind them. "
                                          f"Run: {invoked_name()} flush", warnings)  # NAME (Claude Opus 5.5, unreviewed)
@@ -8787,6 +9273,27 @@ def cmd_flush(args):
     for <name>, only outbox/<user>/to-<name>/ is looked at, and its
     files are left.
 
+    R10 (Claude Opus 5.5, unreviewed): D43, per target. Under a shared
+    mailbox a waiting file whose card tc send would refuse (queue_route:
+    not this user's or the init user's, a second name, a link, another
+    name's card) is left where it waits, never sent and never moved to
+    refused/, with D43's words on its `left` line, and the exit is 4; a
+    later flush sends it once the card is fixed. R10 fix round 1 (Claude
+    Opus 5.5, unreviewed): the review's LOW-1, LOW-2 and REC-8. The
+    TrustFrame is built once per run (command_trust_frame) and every card
+    judged under it. A name whose mail is held (SshWhere.held) is said in
+    the other members' count by HELD_COUNT_WORDS (`far-y, an ssh card you
+    do not send over (D43),`), never `a name with no ssh card`, and by
+    `--to <name>` with nothing waiting by its held words, never the
+    `left` line's `It stays queued`. `--to` still picks files by this
+    user's own judgment of each card. R10 fix round 2 (Claude Opus 5.5,
+    unreviewed): the re-review's bugs LOW-2, said plainly. With `--to
+    <name>`, another member's file to that same name is counted under
+    it; another member's file to a different name whose card this user
+    does not follow is not counted at all, since tc does not read that
+    card's target, even when it is the target <name>'s card points at.
+    Run without `--to`, every such file is counted under its own name.
+
     SSH fix round 1 (Claude Opus 5.5, unreviewed): D32 and D33 part 1.
     This user's mail waits in this user's own branch, outbox/<user>/,
     and only that branch is listed in the loop. A branch that is not
@@ -8801,8 +9308,10 @@ def cmd_flush(args):
 
     @interacts  checks --to (C0, exit 6); lstats this user's branch and
                 each level of it (claim_branch, exit 1 on a refusal);
-                lists it (outbox_files) and reads each waiting name's card
-                once (queue_route); opens each other member's branch once
+                lists it (outbox_files); reads ROOT/.shared once
+                (command_trust_frame) and each waiting name's card once,
+                judged by D43 under a shared mailbox (queue_route); opens
+                each other member's branch once
                 and lists it and each queue in it by name in its
                 descriptor, never by a path (other_branches, outbox_files;
                 P3 fix round 1a, Claude Opus 5.5, unreviewed: D35, the
@@ -8815,7 +9324,8 @@ def cmd_flush(args):
                 note beside it when kept (file_outcome); reads the user
                 database for other members' names; prints.
     @deps       require_names, outbox_branch, outbox_queue, claim_branch,
-                outbox_files, other_branches, queue_route, owned_by_me,
+                outbox_files, other_branches, queue_route,
+                command_trust_frame, HELD_COUNT_WORDS, owned_by_me,
                 send_lock, outbox_message, outbox_text, ssh_run,
                 file_outcome, printable, user_name, refuse, invoked_name;
                 os, sys; SSH_SENT, SSH_KEPT, EXIT_QUEUED, EXIT_REFUSED,
@@ -8837,10 +9347,11 @@ def cmd_flush(args):
     require_names(args.to)
     tc = invoked_name()  # NAME (Claude Opus 5.5, unreviewed): the commands to run say the invoked name
     routes = {}
+    frame = command_trust_frame()  # R10 fix round 1 (Claude Opus 5.5, unreviewed): D43's frame, once per run (REC-8)
 
     def route(name):  # SSH fix round 1 (Claude Opus 5.5, unreviewed): LOW-8, each card once per run
         if name not in routes:
-            routes[name] = queue_route(name)
+            routes[name] = queue_route(name, frame)
         return routes[name]
 
     pick = route(args.to) if args.to is not None else None
@@ -8865,7 +9376,9 @@ def cmd_flush(args):
     left, said, targets = [], set(), []  # left: (file, why); said: every file this run tried
     for f in mine:
         where = route(f.to)
-        if where.target is None:
+        if where.held is not None:  # R10 (Claude Opus 5.5, unreviewed): D43, its card's words as they are; it stays queued
+            left.append((f, where.why))
+        elif where.target is None:
             left.append((f, f"{where.why}; it is never sent another way. To send it over ssh, write the card again "
                             f"with {tc} card {printable(f.to)} --ssh <target>, then run {tc} flush"))
         elif where.target not in targets:
@@ -8914,15 +9427,20 @@ def cmd_flush(args):
             print(f"tc flush: left {printable(f.path)}: {why}", file=sys.stderr)
     owners = {}
     for f in theirs:
-        target = route(f.to).target or "a name with no ssh card"
+        where = route(f.to)
+        if where.held is not None:  # R10 fix round 1 (Claude Opus 5.5, unreviewed): LOW-1, never "no ssh card"
+            target = HELD_COUNT_WORDS[where.held.kind].format(name=printable(f.to), why=where.why)
+        else:
+            target = where.target or "a name with no ssh card"
         owners.setdefault(target, []).append(user_name(f.st.st_uid))
     for target, names in owners.items():  # P3 fix round 1c (Claude Opus 5.5, unreviewed): LOW-16, reads for 1 and many
         print(f"{len(names)} waiting for {target} from other members ({', '.join(sorted(set(names)))}); "
               f"each member sends their own with {tc} flush", flush=True)
     selection = "in the outbox" if args.to is None else f"for {printable(args.to)}"  # SSH fix round 1 (Claude Opus 5.5, unreviewed): LOW-14
     if not mine and not theirs:
-        print(f"nothing waiting {selection}" + (f": {pick.why}" if pick is not None and pick.why else ""),
-              flush=True)
+        # R10 fix round 2 (Claude Opus 5.5, unreviewed): the re-review's LOW-4, a name of its own, never `said`.
+        why_none = pick.held.words if pick is not None and pick.held is not None else pick.why if pick is not None else None
+        print(f"nothing waiting {selection}" + (f": {why_none}" if why_none else ""), flush=True)  # R10 fix round 1: LOW-2
     elif not mine:
         print(f"nothing of yours waiting {selection}", flush=True)
     if left:
@@ -9969,27 +10487,36 @@ def mailbox_summary():
 
 # CARDS R5 (Claude Opus 5.5, unreviewed): the cards tc health shows.
 def cards_summary():
-    """Every card's name, kind, account, route, reports_to and ssh_target, in name order.
+    """Every card's name, kind, account, route, reports_to, ssh_target and ssh_trust, in name order.
 
     The name is the file's (cards/<name>.json), the one the router reads.
     ssh_target is an ssh card's target (`u@h`), so `tc health` can say
     what `tc cards` says; null for any other route. A card that is
-    not a JSON object keeps its name with the other five fields null, so
-    it still shows.
+    not a JSON object keeps its name with kind, account, route,
+    reports_to and ssh_target null, so it still shows, and ssh_trust as
+    all_cards gives it: a symlink's mark under a shared mailbox, else
+    null (R10 fix round 1, Claude Opus 5.5, unreviewed: the review's
+    LOW-6). R10 (Claude Opus 5.5, unreviewed): D43. ssh_trust is
+    all_cards' mark in words (why no ssh send follows the card, or only
+    its writer's and the init user's), null when it has none; always
+    null on a private mailbox. The gate never reads it: its health has no
+    `cards` key (D16, GATE_HEALTH_KEYS).
 
-    @interacts  reads cards/*.json through all_cards. Writes nothing.
+    @interacts  reads cards/*.json through all_cards (and, for the marks,
+                ROOT/.shared and the user database). Writes nothing.
     @deps       all_cards; pathlib.
     @complexity O(c) over c cards (a few dozen).
     @alloc      one list of c small dicts, returned.
     """
     out = []
-    for file_name, card in all_cards():
+    for file_name, card, mark in all_cards():
         card = card or {}
         ssh = card.get("ssh")  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): ssh_target
         target = ssh.get("target") if card.get("route") == "ssh" and isinstance(ssh, dict) else None
         out.append({"name": pathlib.Path(file_name).stem, "kind": card.get("kind"),
                     "account": card.get("account"), "route": card.get("route"),
-                    "reports_to": card.get("reports_to"), "ssh_target": target})
+                    "reports_to": card.get("reports_to"), "ssh_target": target,
+                    "ssh_trust": mark})  # R10 (Claude Opus 5.5, unreviewed): D43
     return out
 
 
@@ -10180,6 +10707,10 @@ def cmd_health(args):
     carries `wait_exits` as health_snapshot builds it. Who is listening
     still comes from the locks alone.
 
+    R10 (Claude Opus 5.5, unreviewed): D43. A card whose `ssh_trust`
+    holds a mark ends its `cards` line with DISTRUST_MARK_JOIN and the
+    mark, as tc cards prints it.
+
     R2 (Claude Opus 5.5, unreviewed): the first line names the mailbox
     read, ROOT's absolute path through printable(), and where it came
     from (ROOT_FROM_WORDS): `mailbox    /home/you/TheConnection, TC_ROOT
@@ -10188,7 +10719,8 @@ def cmd_health(args):
 
     @interacts  see health_snapshot; prints to stdout.
     @deps       health_snapshot, describe_card, printable, _who, _age,
-                _gpu_text; json; ROOT_FROM_WORDS (R2).
+                _gpu_text; json; ROOT_FROM_WORDS (R2); DISTRUST_MARK_JOIN
+                (R10).
     @complexity as health_snapshot.
     @alloc      the snapshot and the printed text, freed on exit.
     """
@@ -10208,7 +10740,8 @@ def cmd_health(args):
         shown = {k: ("?" if v is None and k != "reports_to" else v) for k, v in c.items()}
         if c["ssh_target"] is not None:  # CARDS fix round 1 (Claude Opus 5.5, unreviewed): `route ssh to <target>`
             shown["ssh"] = {"target": c["ssh_target"]}
-        cards.append(describe_card(shown))
+        mark = DISTRUST_MARK_JOIN + printable(c["ssh_trust"]) if c["ssh_trust"] else ""  # R10 (Claude Opus 5.5, unreviewed): D43
+        cards.append(describe_card(shown) + mark)
     print("cards      " + ("\n           ".join(cards) if cards else "none"))
     rows = []
     for name, b in snap["mail"].items():
