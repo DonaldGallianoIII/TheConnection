@@ -53,6 +53,10 @@ How a command runs:
 - The board block runs `python3 board/serve.py --port 0`: the README's
   next line allows `--port`, and port 0 cannot collide with a live board
   on 8780. The port its line prints must answer live.html with 200.
+- The report block (DASH, Claude Opus 5.5, unreviewed) runs with
+  board/report.py and board/serve.py copied beside the copy of tc, as a
+  clone has them, in the root's temp folder as its working folder, so
+  the page it names lands there, outside the mailbox and the checkout.
 
 The mapping rule, from the README's text to a match (expected_pattern).
 Everything not named here is literal: a changed word, digit or space
@@ -82,8 +86,9 @@ of an EXIT_ constant in tc, 0 included (tc's EXIT_OK; pause R39-1,
 settled by a2 for the owner, 2026-10-17).
 
 @interacts  reads README.md, contracts.md and tc. Copies tc into each
-            throwaway root and runs it there with TC_ROOT unset (its
-            mailbox is that root); runs ../tc through tests/_root.py
+            throwaway root (and, for the report chain, board/report.py
+            and board/serve.py beside it) and runs it there with TC_ROOT
+            unset (its mailbox is that root); runs ../tc through tests/_root.py
             under a TC_ROOT of its own for background waits and the far
             side's gate; starts board/serve.py on 127.0.0.1, port 0, and
             asks it for live.html. Writes a fake nvidia-smi, a loopback
@@ -102,9 +107,9 @@ settled by a2 for the owner, 2026-10-17).
             per test. Matching one command: one regex over its output,
             O(o * e) at worst over o output bytes and e expected lines
             (a dozen each). A chain runs c commands (10 in the quick
-            start chain, 4 in the ssh chain, 1 for the board) plus at
-            most 5 setup steps, each one child; the quick start chain
-            waits one tc wait poll (5 s) for a wake.
+            start chain, 4 in the ssh chain, 1 for the board, 1 for the
+            report) plus at most 5 setup steps, each one child; the
+            quick start chain waits one tc wait poll (5 s) for a wake.
 @alloc      one TcRoot per chain (two for the ssh chain), each removed
             with everything in it on exit; the parsed blocks and each
             command's captured output, freed when the test returns.
@@ -187,6 +192,14 @@ READ_TIME_LINE = r"\Aread \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\Z"
 QUICK_START = "quick start, local, codex, cards and health"
 SSH_OUTBOUND = "ssh outbound"
 BOARD = "the live board"
+# DASH (Claude Opus 5.5, unreviewed): the record-of-work section's report block.
+REPORT = "the report"
+# What the report chain copies beside the copy of tc, as a clone has them:
+# tc report loads board/report.py, and it loads board/serve.py.
+REPORT_FILES = ("board/report.py", "board/serve.py")
+# The words a scrubbed page carries, and the warning only a real one does (C7).
+SCRUBBED_MARK = "Scrubbed:"
+REAL_WARNING = "Holds real session names and times."
 
 # Every command block a chain runs, and which chain.
 RUN = {
@@ -202,6 +215,7 @@ RUN = {
     '$ tc send --from homebox-a --to far-b "hello far"': SSH_OUTBOUND,
     '$ tc send --from homebox-a --to far-c "first"': SSH_OUTBOUND,
     "$ python3 board/serve.py": BOARD,
+    "$ tc report history.html --scrub": REPORT,  # DASH (Claude Opus 5.5, unreviewed)
 }
 
 # Every command block no test can run, with the reason.
@@ -549,6 +563,7 @@ class Story:
         self.pids = {}
         self.front = [fake_gpu(root)]
         self.ran = set()
+        self.cwd = None  # DASH (Claude Opus 5.5, unreviewed): the folder a command runs in; None is the test's own
 
     def exe(self, head):
         """The file to run for a command's first word: the copy, or a `tconn` link to it.
@@ -599,7 +614,7 @@ class Story:
         @alloc      the captured output, returned.
         """
         done = subprocess.run([sys.executable, str(self.exe(words[0])), *words[1:]], env=self.env(env),
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, cwd=self.cwd,
                               timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS)
         return done.returncode, done.stdout, done.stderr
 
@@ -904,6 +919,44 @@ class ReadmeBlocksTest(unittest.TestCase):
                     finally:
                         conn.close()
             self.assert_ran_all(story, BOARD)
+
+
+    # DASH (Claude Opus 5.5, unreviewed): the record-of-work section's report block.
+    def test_the_report_block_writes_a_scrubbed_page(self):
+        """`tc report history.html --scrub` prints the README's line and writes a scrubbed page in the folder it ran in.
+
+        board/report.py and board/serve.py are copied beside the copy of
+        tc, as a clone has them. The mailbox holds two messages (setup: b
+        joins and sends a the quick start's hello, a reads it and answers).
+        The command runs in the root's temp folder, outside the mailbox,
+        so its relative history.html lands there and never in the
+        checkout.
+
+        Must reject other words, a missing page, and a page that is not
+        scrubbed.
+
+        @interacts  one TcRoot; copies two board files; 5 tc children.
+        @deps       Story, shown, setup_step, assert_ran_all; shutil;
+                    REPORT_FILES, SCRUBBED_MARK, REAL_WARNING.
+        @complexity 5 children.
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            story = Story(root)
+            for name in REPORT_FILES:
+                (root.path / name).parent.mkdir(exist_ok=True)
+                shutil.copyfile(REPO / name, root.path / name)
+            self.setup_step(story, ["tc", "join", "b", "--account", "work", "--reports-to", "a"], CLAUDE_ENV)
+            self.setup_step(story, ["tc", "send", "--from", "b", "--to", "a", "joined. working on the parser"])
+            self.setup_step(story, ["tc", "read", "a"])
+            self.setup_step(story, ["tc", "send", "--from", "a", "--to", "b", "ANSWER re #1: thanks"])
+            story.cwd = root.base
+            self.shown(story, "$ tc report history.html --scrub")
+            with self.subTest(claim="the page is in the folder the command ran in, and scrubbed"):
+                page = (root.base / "history.html").read_text(encoding="utf-8")
+                self.assertIn(SCRUBBED_MARK, page)
+                self.assertNotIn(REAL_WARNING, page)
+            self.assert_ran_all(story, REPORT)
 
 
 def exit_table(text, lead):
