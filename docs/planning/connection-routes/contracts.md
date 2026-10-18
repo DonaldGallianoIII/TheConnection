@@ -923,7 +923,8 @@ show. Built by a new `board/report.py`; `tc report` is a thin
 subcommand that loads it from tc's own folder, the way `serve.py` loads
 tc (C5: from source, in memory, no bytecode beside it).
 
-**Command.** `tc report OUT.html [--scrub] [--force] [--at TIME]`.
+**Command.** `tc report OUT.html [--scrub] [--force] [--at TIME]
+[--from TIME] [--to TIME]`.
 Writes one self-contained HTML file: inline SVG and inline CSS, no
 script, no font or image fetched, no link to any host (D26). An existing
 `OUT.html` is refused, exit 1, with words, nothing written, unless
@@ -1008,6 +1009,28 @@ one plot share both. Quiet is hatched, never a fill color alone.
 Unscrubbed, times are absolute with their offset, and the page says so
 on its face: `Holds real session names and times. Share only a --scrub
 copy.`
+
+**A time window** (D44). `--from TIME` and `--to TIME` limit the report
+to messages sent from `--from` (inclusive) up to `--to` (exclusive), so
+reports by day never count a message twice; either may be given alone.
+TIME is ISO 8601: a date (local midnight) or a date and time, with or
+without an offset (none means local time). A TIME that does not parse,
+or a `--from` not before `--to`, is a usage error, exit 9, nothing
+written. A message whose header did not parse has no sent time and is
+outside any window, counted in words as before. Inside a window
+everything is computed from the window's messages only: chart 1's
+counts, C5's mail-inferred roles and levels (cards' `reports_to` still
+count), the scrub's first-mail numbering, `T+0` (the first message
+inside the window), and the quiet stretches, bounded by the window. A
+message sent inside the window keeps its read time even when it was read
+after `--to`. Ask to answer pairs only when both messages are inside the
+window; a reply naming a message before `--from` is counted in words,
+`<n> replies name a message before this window`, never drawn. With no
+`--at`, "as of" is the last message inside the window. The page states
+the window on its face: unscrubbed, `From <from> to <to>`, each bound
+with its offset, so a date-only `--from` read in another zone is never
+ambiguous; scrubbed, `A window of this mailbox, <length> long`, never a
+date or clock time.
 
 **Determinism.** No wall-clock read in the renderer. The report's span
 comes from its data; its "as of" is the last message's time, or `--at`.
