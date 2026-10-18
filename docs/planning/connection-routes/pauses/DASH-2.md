@@ -2,7 +2,7 @@
 
 Model:  Claude Opus 5.5 (the DASH lane agent), 2026-10-17
 Status: unreviewed
-Pause:  open. The lane built (a) as recommended and left (b) out.
+Pause:  settled by a2 for the owner, 2026-10-17: (a) accepted as built, C7's words exactly; (b) an OUT whose resolved folder is inside mail/, status/, cards/ or outbox/ refuses, exit 1 (C7, built in fix round 1)
 
 The brief: "Any other refusal is a pause, not a guess." C7 and row 1 of
 the exit table name one refusal for `report`: its output file exists.

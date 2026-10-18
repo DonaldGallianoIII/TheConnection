@@ -2,7 +2,7 @@
 
 Model:  Claude Opus 5.5 (the DASH lane agent), 2026-10-17
 Status: unreviewed
-Pause:  open. The lane carries on with option 1, one constant to change.
+Pause:  settled by a2 for the owner, 2026-10-17: ASK_TAGS = QUESTION, PLAN-READY, PLAN-CHECK, MERGE, BLOCKED; the count reads `<n> asks have no reply that names them`, with a line saying why it can include answered asks (C7, built in fix round 1)
 
 ## The question
 
