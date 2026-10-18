@@ -436,3 +436,60 @@ tests/*.test.mjs`: `# tests 68`, `# pass 68`, `# fail 0`.
 **Not taken this round:** REC-1 (bind mounts) and REC-2 (a cycle made
 only of names with no mail still breaks by name order: one bit about two
 undrawn names, recorded here beside the hand-made-twin residual).
+
+## Fix round 3 (the relay's look at 390 px)
+
+<!-- Fix round 3 section added by Claude Opus 5.5 (the DASH lane agent), 2026-10-17. Status: unreviewed. -->
+
+One code commit, `85c56bc`, and this section's commit.
+
+1. **Chart 1 opens on its graph.** The drawing is as wide as its widest
+   line of boxes plus `GRAPH_MARGIN` each side, no longer centered in a
+   960-unit canvas (`chart_graph`, the `width = slot * widest + ...`
+   line), so the leftmost box starts `GRAPH_MARGIN + NODE_GAP / 2` in.
+   The width floor still holds: it is computed from the new width.
+   - **The test asks more than the brief's sentence.** As written ("the
+     leftmost node's box starts inside the first 390 px") it passed on
+     the old code: the box started at about 245 px. The relay's
+     complaint was a box cut at the first view's edge, so
+     `LegibleTest.test_on_a_phone_chart_1_shows_its_leftmost_node_in_the_first_view`
+     asks both that and that the whole leftmost box fits the first view.
+   - **How it computes the view:** the SVG draws at max(F, min(W,
+     column)) px, with W its width attribute, F its min-width and column
+     390 less two 16 px gutters (358). One unit is that width / W px.
+   - Red on the old code: `395.08 not less than or equal to 358`.
+2. **Chart 5's notes are page text.** The count lines and the caveat are
+   `<p class="note">` lines under the SVG (`figure`'s new `notes`), out
+   of the SVG and out of its `<desc>` (the desc says the counts are in
+   the page text under the chart), so a phone wraps them.
+   - **The other charts:** the only other SVG text past 28 characters is
+     chart 3's per-strip `n of m messages have a read time`. C7 puts it
+     on the strip, and it sits in the left gutter, inside a phone's
+     first view, so it stays. The empty charts' `No messages yet.` and
+     `No message has a sent time.` fit the first view and stay too.
+   - The AnswersTest checks now read the page outside every `<svg>`
+     (`text_outside_svg`) and assert the lines are in no SVG's text.
+3. **A scroll line on phones.** `<p class="scroll-hint">Each chart
+   scrolls sideways.</p>` sits above the first chart. It is hidden by
+   `.scroll-hint{display:none}` and shown by `@media
+   (max-width:700px){.scroll-hint{display:block}}`
+   (`SCROLL_HINT_MAX_WIDTH`). The test checks the line, its place and
+   both rules. A headless Chromium run of the fixture page read its
+   computed `display` as `block` at 390 px and `none` at 1100 px.
+
+**Mutations** (`git archive` copies, `PYTHONDONTWRITEBYTECODE=1`):
+
+| Mutation | Result |
+|---|---|
+| 1: the graph centered in 960 units again | `FAILED (failures=2)`: `395.08 not less than or equal to 358` |
+| 2: chart 5's notes drawn inside the SVG | `FAILED (failures=13)`: `'4 answers name the message they answer.' not found` outside the SVG |
+
+**Runs at `85c56bc`.** `python3 -m unittest discover -s tests -p
+'test_*.py'`: `Ran 443 tests in 273.188s`, `OK`. `node --test
+tests/*.test.mjs`: `# tests 68`, `# pass 68`, `# fail 0`.
+
+**Seen at 390 px**, headless: chart 1 shows `bertil · worker` whole in
+the first view, with the rest a sideways scroll; chart 5's notes wrap.
+Charts 2 to 5 still open on their row labels with the data to the right,
+which is the sideways scroll the line now names. A person has not looked
+on a phone.
