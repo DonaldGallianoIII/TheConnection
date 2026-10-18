@@ -282,7 +282,7 @@ class ExtractTest(unittest.TestCase):
             self.assertLessEqual(max(counts) - before, 6, counts)
 
     def test_a_message_tc_read_moves_mid_walk_is_read_from_read(self):
-        """A message renamed into read/ between the listing and its read is read from read/, with its read time, not counted as a header that did not parse (LOW-9).
+        """A message renamed into read/ between the listing and its read is read from read/, not counted as a header that did not parse (LOW-9), and gets its read time though tc read writes the record after the move (fix round 2, LOW-1).
 
         @interacts  builds the fixture; moves one message mid-walk.
         @deps       report.extract, report.read_head.
@@ -297,16 +297,18 @@ class ExtractTest(unittest.TestCase):
             real, moved = report.read_head, []
 
             def moving(entry, folder_fd, limit):
-                """Move message 12 into read/ (and record its read time) just before its first read, as tc read would.
+                """In tc read's own order: move message 12 into read/ just before its first read here, and append its read-time line only at the next other message read, after the report has looked for it (fix round 2, LOW-1).
 
                 @interacts  renames one file; appends one line to read/.read-times.
-                @deps       os.
+                @deps       os, json.
                 @complexity O(1).
                 @alloc      none.
                 """
                 if entry == name and not moved:
                     moved.append(entry)
                     os.rename(box / name, box / "read" / name)
+                elif moved == [name] and entry != name:
+                    moved.append("recorded")
                     with open(box / "read" / ".read-times", "a", encoding="utf-8") as record:
                         line = {"name": name, "number": 12, "read": fixture.at(18 * fixture.HOUR)}
                         record.write(json.dumps(line) + "\n")
@@ -314,7 +316,7 @@ class ExtractTest(unittest.TestCase):
 
             report.read_head = moving
             box_facts = report.extract(tc)
-            self.assertTrue(moved)
+            self.assertEqual(moved, [name, "recorded"])
             twelve = [r for r in box_facts.records if r.number == 12]
             self.assertEqual(len(twelve), 1)
             self.assertEqual((twelve[0].sent, twelve[0].read, twelve[0].tag),
@@ -920,6 +922,58 @@ class ReadTest(unittest.TestCase):
         self.assertEqual(answers[-1], "1h40m")
         self.assertEqual(answers[:3], ["0s", "1m", "10m"])
 
+    def axis_labels(self, longest):
+        """The delay axis's labels, in order, and their estimated extents, for one strip whose longest wait is `longest` seconds.
+
+        @interacts  loads report.py; draws one strip.
+        @deps       report.delay_strips, report.char_width; charts, groups.
+        @complexity O(1).
+        @alloc      one SVG.
+        """
+        report = _root.load_source("board_report", REPORT_PATH)
+        svg = report.delay_strips("read", [("ann", "1 of 1 message has a read time", [(longest, "t")])], "h", "d")
+        texts = [t for g in groups(ElementTree.fromstring(svg), "delay-tick") for t in g.iter("text")]
+        spans = [(text_start(t, report), text_start(t, report) + len(t.text) * report.char_width(t.get("class")))
+                 for t in texts]
+        return [t.text for t in texts], spans
+
+    def test_the_end_label_never_overlaps_or_repeats_a_tick_label(self):
+        """A 13h30m longest wait: no two labels overlap and the end reads 13h30m. A 100 s one: no label repeats (fix round 2, LOW-2).
+
+        @interacts  see axis_labels.
+        @deps       axis_labels.
+        @complexity O(1).
+        @alloc      none.
+        """
+        for longest, end in ((13 * 3600 + 30 * 60, "13h30m"), (100, None)):
+            with self.subTest(longest=longest):
+                words, spans = self.axis_labels(longest)
+                self.assertEqual(len(set(words)), len(words), words)
+                for (_, right), (left, _) in zip(spans, spans[1:]):
+                    self.assertLess(right, left, (words, spans))
+                if end:
+                    self.assertEqual(words[-1], end)
+
+    def test_a_count_line_is_never_cut_so_that_its_count_is_lost(self):
+        """A session with 12345 messages: chart 3's and chart 4's count lines open with the whole count (fix round 2, LOW-3).
+
+        @interacts  loads report.py; draws charts 3 and 4 for 12345 hand-made records.
+        @deps       report.chart_read, report.chart_quiet, report.Page, report.Record, report.Session.
+        @complexity O(t) over t = 12345 records.
+        @alloc      the two charts' text.
+        """
+        report = _root.load_source("board_report", REPORT_PATH)
+        many = 12345
+        records = tuple(report.Record(n, "ann", "ben", fixture_time(n), fixture_time(n + 60), 10, None, ())
+                        for n in range(1, many + 1))
+        sessions = (report.Session("ann", None, None, None), report.Session("ben", None, None, None))
+        page = report.Page(records, sessions, 0, False, None)
+        read = [t.text for t in charts(report.chart_read(page))["read"].iter("text")]
+        quiet = [t.text for t in charts(report.chart_quiet(page))["quiet"].iter("text")]
+        self.assertTrue(any(line.startswith(f"{many} of {many}") for line in read), read[:4])
+        self.assertTrue(any(line.startswith(f"{many} sent") for line in quiet), quiet[:4])
+        self.assertTrue(any(line.startswith(f"0 sent · {many}") or line.startswith(f"0 sent") for line in quiet))
+
     def test_each_strip_has_its_dots_its_median_and_its_count_in_words(self):
         """Exact dots, median and words per recipient, real and scrubbed; dagny, who got no mail, has no strip.
 
@@ -1275,6 +1329,41 @@ class CommandTest(unittest.TestCase):
             code, _, stderr = root.tc("report", str(root.path / "top.html"))
             self.assertEqual(code, EXIT_OK, stderr)
             self.assertTrue((root.path / "top.html").read_text(encoding="utf-8").startswith("<!doctype html>"))
+
+    def test_a_page_named_after_one_of_tcs_own_entries_at_root_is_refused_even_with_force(self):
+        """At ROOT's top level: .shared with --force, a missing mail entry, and a link at ROOT to .shared each refuse (exit 1, words, nothing changed); history.html is written (C7, fix round 2, LOW-4).
+
+        @interacts  see the class; writes .shared and one link under the root.
+        @deps       see the class.
+        @complexity four children.
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            (root.path / ".shared").write_text("somegroup\n", encoding="utf-8")
+            (root.path / "alias.html").symlink_to(root.path / ".shared")
+            (root.base / "elsewhere").mkdir()
+            (root.base / "elsewhere" / "shared.html").symlink_to(root.path / ".shared")
+            cases = {".shared --force": (root.path / ".shared", "--force"),
+                     "missing mail": (None, None),
+                     "link at ROOT to .shared, --force": (root.path / "alias.html", "--force"),
+                     "link elsewhere to .shared, --force": (root.base / "elsewhere" / "shared.html", "--force")}
+            for case, (out, flag) in cases.items():
+                with self.subTest(case=case):
+                    if out is None:
+                        (root.path / "mail").rename(root.base / "mail-aside")
+                        out = root.path / "mail"
+                    before = tree(root.path)
+                    code, _, stderr = root.tc("report", str(out), *([flag] if flag else []))
+                    self.assertEqual(code, EXIT_REFUSED, stderr)
+                    self.assertTrue(stderr.startswith("tc report: "), stderr)
+                    self.assertIn("one of tc's own", stderr)
+                    self.assertEqual(tree(root.path), before)
+                    if case == "missing mail":
+                        (root.base / "mail-aside").rename(root.path / "mail")
+            self.assertEqual((root.path / ".shared").read_text(encoding="utf-8"), "somegroup\n")
+            code, _, stderr = root.tc("report", str(root.path / "history.html"))
+            self.assertEqual(code, EXIT_OK, stderr)
 
     def test_a_file_made_at_out_between_the_check_and_the_publish_is_kept(self):
         """In process: a file appears at OUT after the existence check and before the publish; without --force it stays, the run refuses, and no .tmp is left.

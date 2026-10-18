@@ -288,7 +288,9 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             TAG_READ_MAX_BYTES of each file), each read/'s read-time
             record and each card's reports_to; and writes one page, OUT:
             its folder opened once and judged from that descriptor (one
-            inside mail/, status/, cards/ or outbox/ refuses), then a .tmp
+            inside mail/, status/, cards/ or outbox/ refuses, and so does
+            a name at ROOT's top level that is one of tc's own or starts
+            with a dot, even with --force, fix round 2), then a .tmp
             by name in it, hard-linked to OUT's name (renamed over it with
             --force) and the .tmp's name removed (fix round 1). It writes
             nothing in the mailbox.
@@ -5763,6 +5765,15 @@ REPORT_BOARD_MISSING_WORDS = ("tc report: no board/serve.py at {source} ({why}).
 # C7, pause DASH-2 as a2 settled it: a page never lands in the mailbox.
 REPORT_INSIDE_WORDS = ("tc report: {folder} is inside the mailbox ({top}), and tc report writes nothing in the "
                        "mailbox. Name a file outside mail/, status/, cards/ and outbox/; ROOT's own folder is fine.")
+# Fix round 2 (Claude Opus 5.5, unreviewed): LOW-4, as the relay ruled it
+# into C7. tc's own entries at ROOT's top level, which a page must never
+# replace, even with --force: the shared-mailbox marker, the four mailbox
+# folders, tc itself and the board's folder, and any name starting with a
+# dot (REPORT_HIDDEN_LEAD), so a later entry of tc's is covered too.
+REPORT_RESERVED_NAMES = (SHARED_MARKER_NAME, MAIL.name, STATUS.name, CARDS.name, OUTBOX_NAME, "tc", "board")
+REPORT_HIDDEN_LEAD = "."
+REPORT_RESERVED_WORDS = ("tc report: {out} would land on {entry}, one of tc's own entries at the mailbox's top level "
+                         "({root}); tc report never writes there, even with --force. Name another file.")
 # C7's words, exactly (pause DASH-2, settled).
 REPORT_WRITE_WORDS = "tc report: could not write {out} ({why}); nothing was written there."
 
@@ -5785,8 +5796,24 @@ def report_time(text):
     return when
 
 
+def report_inside(folder):
+    """The resolved mail/, status/, cards/ or outbox/ that the resolved folder `folder` is, or is under; None when it is none of them (C7).
+
+    @interacts  resolves MAIL, STATUS, CARDS and ROOT/outbox
+                (os.path.realpath).
+    @deps       os; MAIL, STATUS, CARDS, ROOT, OUTBOX_NAME.
+    @complexity O(1): four realpaths.
+    @alloc      four short strings, freed on return.
+    """
+    for top in (MAIL, STATUS, CARDS, ROOT / OUTBOX_NAME):
+        inside = os.path.realpath(top)
+        if folder == inside or folder.startswith(inside.rstrip(os.sep) + os.sep):
+            return inside
+    return None
+
+
 def report_folder(out):
-    """OUT's folder, opened once: (descriptor, its resolved path). Refuses, exit 1, a folder tc cannot open (REPORT_WRITE_WORDS) and one inside the mailbox (REPORT_INSIDE_WORDS).
+    """OUT's folder, opened once: (descriptor, its resolved path). Refuses, exit 1, a folder tc cannot open (REPORT_WRITE_WORDS), one inside the mailbox (REPORT_INSIDE_WORDS), and an OUT that lands on one of tc's own entries at ROOT's top level (REPORT_RESERVED_WORDS), even with --force.
 
     The folder is opened by its path once (links on the way are followed,
     as a person naming it expects), then resolved from the open
@@ -5795,16 +5822,32 @@ def report_folder(out):
     round 1, DEBT-1): a folder swapped on OUT's path after the open leads
     the write nowhere. The folder is inside the mailbox when it is, or is
     under, the resolved mail/, status/, cards/ or outbox/ (C7, pause
-    DASH-2 as a2 settled it); ROOT's own top level is allowed.
+    DASH-2 as a2 settled it).
 
-    @interacts  opens one folder; reads its /proc/self/fd link; resolves
-                MAIL, STATUS, CARDS and ROOT/outbox (os.path.realpath);
-                on a refusal closes the folder, writes one line to
-                stderr and exits 1.
-    @deps       refuse, printable; os; MAIL, STATUS, CARDS, ROOT,
-                OUTBOX_NAME, REPORT_FOLDER_FLAGS, REPORT_WRITE_WORDS,
-                REPORT_INSIDE_WORDS, EXIT_REFUSED.
-    @complexity O(1): one open, one readlink, four realpaths.
+    Fix round 2 (Claude Opus 5.5, unreviewed): LOW-4, as the relay ruled
+    it into C7. ROOT's own top level is allowed, but not an OUT there
+    named one of REPORT_RESERVED_NAMES or any name starting with a dot,
+    whether or not it is there now (a missing mail/ is still mail's
+    name). Judged after resolving: the folder as its descriptor resolves,
+    and, when OUT's own name in that folder is a link (lstat by name in
+    the descriptor), where the link leads too, read by name in the
+    descriptor (os.readlink) and resolved from there. A link that leads
+    into the mailbox's folders or onto a reserved entry is refused,
+    though tc would never write through it (publish_report links or
+    renames by name, replacing a link, never following it): C7 refuses
+    it all the same.
+
+    @interacts  opens one folder; reads its /proc/self/fd link; lstats
+                OUT's name in it and, for a link, reads the link by name
+                there; resolves ROOT and the four tops (report_inside); on
+                a refusal closes the folder, writes one line to stderr
+                and exits 1.
+    @deps       report_inside, refuse, printable; os, stat; ROOT,
+                REPORT_FOLDER_FLAGS, REPORT_RESERVED_NAMES,
+                REPORT_HIDDEN_LEAD, REPORT_WRITE_WORDS, REPORT_INSIDE_WORDS,
+                REPORT_RESERVED_WORDS, EXIT_REFUSED.
+    @complexity O(1): one open, two readlinks, one lstat and at most ten
+                realpaths.
     @alloc      one descriptor, returned (the caller closes it).
     """
     try:
@@ -5812,11 +5855,23 @@ def report_folder(out):
     except OSError as err:
         refuse(REPORT_WRITE_WORDS.format(out=printable(out), why=err.strerror), EXIT_REFUSED)
     real = os.readlink(f"/proc/self/fd/{fd}")
-    for top in (MAIL, STATUS, CARDS, ROOT / OUTBOX_NAME):
-        inside = os.path.realpath(top)
-        if real == inside or real.startswith(inside.rstrip(os.sep) + os.sep):
+    places = [(real, out.name)]
+    try:
+        if out.name and stat.S_ISLNK(os.lstat(out.name, dir_fd=fd).st_mode):
+            led = os.path.realpath(os.path.join(real, os.readlink(out.name, dir_fd=fd)))
+            places.append(os.path.split(led))
+    except OSError:
+        pass  # nothing at the name yet, or nothing to follow: judged by the folder and the name alone
+    root = os.path.realpath(ROOT)
+    for folder, name in places:
+        inside = report_inside(folder)
+        if inside is not None:
             os.close(fd)
-            refuse(REPORT_INSIDE_WORDS.format(folder=printable(real), top=printable(inside)), EXIT_REFUSED)
+            refuse(REPORT_INSIDE_WORDS.format(folder=printable(folder), top=printable(inside)), EXIT_REFUSED)
+        if folder == root and (name in REPORT_RESERVED_NAMES or name.startswith(REPORT_HIDDEN_LEAD)):
+            os.close(fd)
+            refuse(REPORT_RESERVED_WORDS.format(out=printable(out), entry=printable(name), root=printable(root)),
+                   EXIT_REFUSED)
     return fd, real
 
 
@@ -5872,8 +5927,9 @@ def cmd_report(args):
     """`tc report OUT.html [--scrub] [--force] [--at TIME]`: the mailbox drawn as one self-contained HTML page (C7, D42).
 
     Thin. OUT's folder is opened once and judged from that descriptor
-    (report_folder): one inside the mailbox, or one tc cannot open,
-    refuses, exit 1, with words. An existing OUT (anything at its name in
+    (report_folder): one inside the mailbox, one tc cannot open, or an OUT
+    landing on one of tc's own entries at ROOT's top level (fix round 2,
+    LOW-4) refuses, exit 1, with words. An existing OUT (anything at its name in
     that folder, a link included) refuses, exit 1, unless --force.
     board/report.py is read from the folder tc's own file is in and run
     in memory, in a fresh module, so no bytecode is read or written

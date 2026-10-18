@@ -228,8 +228,11 @@ wrote .../history.html: ... messages, scrubbed. Mailbox /home/you/TheConnection,
 
 It needs the `board/` folder beside `tc`, as a clone has it. The line it
 prints names the page and the mailbox it read. An existing file is
-refused unless you add `--force`, and so is a page named inside the
-mailbox (`mail/`, `status/`, `cards/` or `outbox/`). `--at TIME` sets
+refused unless you add `--force`. A page named inside the mailbox
+(`mail/`, `status/`, `cards/` or `outbox/`) is refused, and so is one
+named after one of tc's own entries beside `tc` (`.shared`, `mail`,
+`status`, `cards`, `outbox`, `tc`, `board`, or any name starting with a
+dot), even with `--force`. `--at TIME` sets
 the page's "as of" (a time with its offset); by default it is the last
 message's.
 

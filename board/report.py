@@ -245,10 +245,13 @@ DOT_OFFSETS = (0, -7, 7)
 MEDIAN_REACH = 15
 DELAY_SCALE_MIN_SECONDS = 60
 DELAY_TICKS_SECONDS = (0, 60, 600, 3600, 6 * 3600, 24 * 3600, 7 * 24 * 3600, 30 * 24 * 3600)
-# The far end of the delay axis is labeled with the longest delay drawn;
-# a tick label nearer it than this is left off (its grid line stays), so
-# the two labels, each about five characters, never overlap.
-DELAY_END_GAP = 48
+# The far end of the delay axis is labeled with the longest delay drawn.
+# A tick label whose estimated right edge (char_width) comes within this
+# many units of that label's left edge is left off, its grid line kept;
+# and when the end's words equal a tick's (100 s and 60 s both read `1m`),
+# the end label is left off instead, since the tick's sits at its true
+# place. So no two labels overlap or repeat (fix round 2, LOW-2).
+DELAY_LABEL_PAD = 6
 
 # Chart 4. A gap of this long or more between two of a session's
 # messages, sent or received, is quiet: hatched and labeled. Three hours:
@@ -525,22 +528,32 @@ def walk_messages(tc, head_limit):
     descriptors close as soon as that inbox is walked, so a mailbox of
     many names never runs out of descriptors; LOW-9, a message the inbox
     listed that is gone by its read (a `tc read` moved it) is read once
-    more by its name in read/, with its read time, never counted as a
-    header that did not parse.
+    more by its name in read/, never counted as a header that did not
+    parse.
+
+    Fix round 2 (Claude Opus 5.5, unreviewed): LOW-1. tc read moves every
+    message first and appends their read-time lines after, so a message
+    found by that retry may have no line yet. Such an inbox stays open
+    to the end of the walk, and its read/'s record is read once more
+    then: the message gets its read time when the record has it by the
+    end of the walk, and none (`read, time not recorded` in tc log's
+    words) when tc read is slower than the whole walk.
 
     @interacts  see the module block's extract.
-    @deps       contextlib, os; tc.open_mail, tc.open_inbox, tc.unpin,
-                tc.message_files, tc.read_times, tc.valid_name,
-                tc.MESSAGE_NAME_PATTERN; read_head, parse_head, parse_time,
-                Record.
+    @deps       os; tc.open_mail, tc.open_inbox, tc.unpin, tc.valid_name,
+                tc.read_times; walk_inbox, parse_time; INBOX_PREFIX,
+                READ_FOLDER.
     @complexity O(n log n + T + t log t + R) over n inboxes, T names
                 listed, t messages read (head_limit bytes each, plus a
                 sort of each folder's names in message_files) and R
-                record bytes.
+                record bytes, plus one more read of each record whose
+                inbox had a message moved mid-walk (rare).
     @alloc      one Record per message, returned; mail/'s descriptor and
-                one inbox's two at a time, each closed when done with.
+                one inbox's two at a time, each closed when done with,
+                but for an inbox with a message moved mid-walk, whose two
+                stay open to the walk's end (one race each, rare).
     """
-    found, boxes, words, missed = {}, set(), [], []
+    found, boxes, words, missed, late = {}, set(), [], [], []
     try:
         mail_fd = tc.open_mail()
     except OSError as err:
@@ -558,17 +571,29 @@ def walk_messages(tc, head_limit):
             to = entry[len(INBOX_PREFIX):]
             if tc.valid_name(to):
                 inbox = tc.open_inbox(mail_fd, to)
+                waiting = []
                 try:
-                    walk_inbox(tc, inbox, to, head_limit, found, boxes, words, missed)
+                    waiting = walk_inbox(tc, inbox, to, head_limit, found, boxes, words, missed)
                 finally:
-                    tc.unpin(inbox.read, inbox.box)
+                    if waiting:
+                        late.append((inbox, waiting))  # fix round 2, LOW-1: its record is read again at the end
+                    else:
+                        tc.unpin(inbox.read, inbox.box)
+        for inbox, waiting in late:
+            times, why = tc.read_times(inbox.read, inbox.path / READ_FOLDER)
+            if why is not None:
+                words.append(why)
+            for key, name in waiting:
+                found[key] = found[key]._replace(read=parse_time(times.get(name)))
     finally:
+        for inbox, _ in late:
+            tc.unpin(inbox.read, inbox.box)
         os.close(mail_fd)
     return list(found.values()), boxes, words, missed
 
 
 def walk_inbox(tc, inbox, to, head_limit, found, boxes, words, missed):
-    """One open inbox's messages, unread then read, into `found` (keyed by recipient, number and sender), its name into `boxes`, anything it could not read into `words`, and each folder it could not open or list into `missed` and `words`, as walk_messages says.
+    """One open inbox's messages, unread then read, into `found` (keyed by recipient, number and sender), its name into `boxes`, anything it could not read into `words`, and each folder it could not open or list into `missed` and `words`, as walk_messages says. Returns [(key, name in read/)] for each message the retry found in read/ with no read time yet, for walk_messages to look up again at the walk's end (fix round 2, LOW-1); [] for none.
 
     @interacts  lists the inbox and its read/ through their descriptors,
                 reads each message's head and read/'s record once.
@@ -577,17 +602,17 @@ def walk_inbox(tc, inbox, to, head_limit, found, boxes, words, missed):
     @complexity O(U + u log u + R) over U names in the two folders, u
                 messages among them and R record bytes.
     @alloc      one Record per new message, into `found`; the record's
-                map while the inbox is walked.
+                map while the inbox is walked; the list returned.
     """
     if inbox.box.fd is None:
         if inbox.box.problem is not None:
             boxes.add(to)
             words.append(inbox.box.problem)
             missed.append(inbox.box.problem)
-        return
+        return []
     boxes.add(to)
     read_path = inbox.path / READ_FOLDER
-    times = None
+    times, waiting = None, []
 
     def read_times():
         """read/'s record, read once, on first need: {name in read/: time text}.
@@ -622,19 +647,22 @@ def walk_inbox(tc, inbox, to, head_limit, found, boxes, words, missed):
             number, sender = int(named.group(1)), named.group(2)
             if (to, number, sender) in found:
                 continue
-            moved = in_read
+            moved, retried = in_read, False
             try:
                 data = read_head(path.name, pinned.fd, head_limit)
             except FileNotFoundError:
                 data = None
                 if not in_read and inbox.read.fd is not None:
                     try:
-                        data, moved = read_head(path.name, inbox.read.fd, head_limit), True
+                        data, moved, retried = read_head(path.name, inbox.read.fd, head_limit), True, True
                     except FileNotFoundError:
                         data = None
             sent, tag, refs = parse_head(data) if data is not None else (None, None, ())
             read = parse_time(read_times().get(path.name)) if moved else None
             found[(to, number, sender)] = Record(number, sender, to, sent, read, st.st_size, tag, refs)
+            if retried and read is None:
+                waiting.append(((to, number, sender), path.name))
+    return waiting
 
 
 def read_reports_to(tc, board):
@@ -885,12 +913,14 @@ def char_width(css):
     return SMALL_CHAR_WIDTH if "small" in (css or "").split() else CHAR_WIDTH
 
 
-def fit_words(words, room, css="label"):
+def fit_words(words, room, css="label", keep_start=False):
     """`words` as they fit in `room` units of width, for text of class list `css` (char_width): (words to draw, the whole words when cut, else None).
 
-    A cut keeps the end (session names differ most at their ends: the
-    `-api`, the `-2`) after CUT_MARK, and the caller puts the whole in a
-    <title> inside the text.
+    A name's cut keeps its end (session names differ most at their ends:
+    the `-api`, the `-2`) after CUT_MARK; with `keep_start` the cut keeps
+    the start and puts CUT_MARK after it, for a line that opens with its
+    count (fix round 2, LOW-3). The caller puts the whole in a <title>
+    inside the text.
 
     @interacts  none.
     @deps       char_width; CUT_MARK.
@@ -901,6 +931,8 @@ def fit_words(words, room, css="label"):
     if len(words) <= fits:
         return words, None
     keep = max(0, fits - len(CUT_MARK))
+    if keep_start:
+        return words[:keep] + CUT_MARK, words
     return CUT_MARK + (words[-keep:] if keep else ""), words
 
 
@@ -1286,7 +1318,7 @@ def empty_chart(key, number, heading, words):
 
 
 def row_label(y, name, detail, edge=None):
-    """A row's words at its left: the name, bold, and one line of detail under it, both ending at `edge` (the gutter's edge less LABEL_GAP when None), each cut by fit_words so it starts no further left than LABEL_GAP (fix round 1, MEDIUM-2).
+    """A row's words at its left: the name, bold, and one line of detail under it, both ending at `edge` (the gutter's edge less LABEL_GAP when None), each cut by fit_words so it starts no further left than LABEL_GAP (fix round 1, MEDIUM-2): the name keeping its end, the detail line, which opens with its count, keeping its start (fix round 2, LOW-3).
 
     @interacts  none.
     @deps       text_at, fit_words; LABEL_GUTTER, LABEL_GAP, LINE_GAP.
@@ -1295,7 +1327,7 @@ def row_label(y, name, detail, edge=None):
     """
     edge = LABEL_GUTTER - LABEL_GAP if edge is None else edge
     shown, whole = fit_words(name, edge - LABEL_GAP)
-    said, said_whole = fit_words(detail, edge - LABEL_GAP, "small")
+    said, said_whole = fit_words(detail, edge - LABEL_GAP, "small", keep_start=True)
     return [text_at(edge, y - LINE_GAP / 2, shown, "label", "end", whole),
             text_at(edge, y + LINE_GAP / 2, said, "small", "end", said_whole)]
 
@@ -1384,8 +1416,10 @@ def delay_strips(key, rows, heading, desc, footer=()):
     inside the chart's width. `footer` is lines of words
     under the axis. The axis has a grid line at each of
     DELAY_TICKS_SECONDS the data reaches, each labeled, and the longest
-    delay drawn labeled at its far end; a tick label closer to that end
-    than DELAY_END_GAP is left off, so the two never overlap.
+    delay drawn labeled at its far end; a tick label that would reach
+    within DELAY_LABEL_PAD of the end label is left off, and the end
+    label is left off when its words equal a tick's, so no two labels
+    overlap or repeat (fix round 2, LOW-2).
 
     @interacts  none; pure.
     @deps       math; element, text_at, titled, svg_chart, row_label,
@@ -1410,14 +1444,21 @@ def delay_strips(key, rows, heading, desc, footer=()):
 
     bottom = CHART_TOP + STRIP_HEIGHT * len(rows)
     body = []
-    for tick in (t for t in DELAY_TICKS_SECONDS if t <= longest):
-        label = ([] if tick == longest or x_of(longest) - x_of(tick) < DELAY_END_GAP else
-                 [text_at(x_of(tick), bottom + LINE_GAP, span_text(tick), "small", "middle")])
+    ticks = [t for t in DELAY_TICKS_SECONDS if t <= longest]
+    end_words = span_text(longest)
+    end_drawn = end_words not in {span_text(t) for t in ticks}
+    end_left = x_of(longest) - len(end_words) * SMALL_CHAR_WIDTH if end_drawn else math.inf
+    for tick in ticks:
+        words = span_text(tick)
+        right = x_of(tick) + len(words) * SMALL_CHAR_WIDTH / 2
+        label = ([] if right + DELAY_LABEL_PAD > end_left else
+                 [text_at(x_of(tick), bottom + LINE_GAP, words, "small", "middle")])
         body.append(element("g", (("class", "delay-tick"),), [
             element("line", (("class", "grid"), ("x1", num(x_of(tick))), ("y1", num(CHART_TOP)),
                              ("x2", num(x_of(tick))), ("y2", num(bottom)))), *label]))
-    body.append(element("g", (("class", "delay-tick"),), [
-        text_at(x_of(longest), bottom + LINE_GAP, span_text(longest), "small", "end")]))
+    if end_drawn:
+        body.append(element("g", (("class", "delay-tick"),), [
+            text_at(x_of(longest), bottom + LINE_GAP, end_words, "small", "end")]))
     for line, (name, detail, dots) in enumerate(rows):
         middle = CHART_TOP + STRIP_HEIGHT * line + STRIP_HEIGHT / 2
         marks = [element("line", (("class", "axis"), ("x1", num(LABEL_GUTTER)), ("y1", num(middle)),
