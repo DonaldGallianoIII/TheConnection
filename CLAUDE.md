@@ -72,7 +72,9 @@ Two ideas carry the whole tool.
 
 - Every tunable is a module constant at the top of `tc` with a comment
   saying why (`DEFAULT_WAIT_SECONDS`, `WAIT_MEMORY_CAP_BYTES`,
-  `CACHE_TTL_SECONDS`). The only other globals are `ROOT` and the
+  `CACHE_TTL_SECONDS`); the one exception is `tc report`'s few
+  constants, which sit beside `cmd_report` (DASH's work set named only
+  that spot). The only other globals are `ROOT` and the
   paths built from it (`MAIL`, `STATUS`, `SEQ_FILE`, `CARDS`), plus
   `ROOT_FROM`, which says whether `TC_ROOT` set ROOT or tc's own folder
   did (R2; `tc health` prints it). tc fixes all six at import, from
@@ -141,11 +143,13 @@ EMPTYROOT) are merged too. As of 2026-10-17, next are a main update, R39
 tc                                 the whole tool (python3, stdlib only)
 JOIN.md                            what you point a new Claude session at
 JOIN-CODEX.md                      what you point a new Codex session at
-board/                             the live board: serve.py (127.0.0.1, token), live.html, look.js, theme.css; demo.html shows every state
+board/                             the live board: serve.py (127.0.0.1, token), live.html, look.js, theme.css; demo.html shows every state; report.py draws tc report's page (C7)
 tests/test_*.py                    unittest suites (mailbox, names, cards, router, codex route, usage, health, shared, ssh, ...)
 tests/test_inbox_pinned.py         the class proof that every inbox act works inside one pinned folder (D35)
 tests/test_wake_files.py           the class proof that no member holds or redirects another's lock, ring record or exit record (D35, D36, F1)
 tests/test_wait_exit.py            the wait exit record: writer, reader, tc watch, tc health and the board (F1)
+tests/test_read_times.py           the read-time record: tc read writes it, tc log shows it, tc peek leaves it (D41)
+tests/test_report.py               tc report: the facts, the scrub, each chart, the refusals, the same bytes twice (C7, D42)
 tests/*.test.mjs                   node --test suites for the board
 tests/board-browser-check.mjs      headless check of the live board (needs a Playwright install)
 tests/_root.py                     shared harness: throwaway TC_ROOT, proven listener, fake ssh and codex
