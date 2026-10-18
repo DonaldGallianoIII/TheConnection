@@ -199,7 +199,7 @@ class HealthCardsTest(unittest.TestCase):
     """
 
     def test_health_shows_each_card_in_text_and_json(self):
-        """The `cards` key lists name, kind, account, route, reports_to, ssh_target; the `cards` line says it as `tc cards` does.
+        """The `cards` key lists name, kind, account, route, reports_to, ssh_target, ssh_trust (R10: D43, null here, a private mailbox); the `cards` line says it as `tc cards` does.
 
         With no cards: an empty list and `cards      none`.
 
@@ -221,13 +221,15 @@ class HealthCardsTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         # CARDS fix round 1 (Claude Opus 5.5, unreviewed): ssh_target,
         # null unless the route is ssh, and the ssh card in `tc cards`' words.
+        # R10 (Claude Opus 5.5, unreviewed): D43's ssh_trust, null on a
+        # private mailbox (tests/test_ssh_card_trust.py tests the marks).
         self.assertEqual(json.loads(out)["cards"], [
             {"name": "b", "kind": "claude", "account": "unknown", "route": "local", "reports_to": "a",
-             "ssh_target": None},
+             "ssh_target": None, "ssh_trust": None},
             {"name": "c", "kind": "codex", "account": "work", "route": "codex", "reports_to": None,
-             "ssh_target": None},
+             "ssh_target": None, "ssh_trust": None},
             {"name": "x", "kind": "other", "account": "far", "route": "ssh", "reports_to": None,
-             "ssh_target": "u@h"},
+             "ssh_target": "u@h", "ssh_trust": None},
         ])
         self.assertEqual(tcode, 0, terr)
         self.assertIn("\ncards      b (claude, account unknown, route local), reports to a\n"

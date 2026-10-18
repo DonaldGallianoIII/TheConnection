@@ -16,7 +16,9 @@ or redirects its wait lock, watch lock, inbox lock or ring marker, and a
 file planted at the owner's lock name is moved aside with words. Its
 mutations, and the lines each turned red, are in handoffs/P3FIX.md. F1
 fix round 1 (Claude Opus 5.5, unreviewed): the wait exit record is a row
-too; its mutation is in handoffs/F1.md.
+too; its mutation is in handoffs/F1.md. R10 (Claude Opus 5.5,
+unreviewed): so is an ssh card a member wrote for a name nobody claimed
+(D43); its mutations are in handoffs/R10.md.
 
 Model:  Claude Opus 5.5 (the P3 fixer, round 1b), 2026-10-15
 Status: unreviewed
@@ -63,6 +65,11 @@ second-user walk is qa/human/route-shared.md.
             rename the second's fresh lock by hand, at one moment of it.
             P3 fix round 3 (Claude Opus 5.5, unreviewed): the audit's
             LOW-4 test sets the owner's own lock to mode 000 by hand.
+            R10 (Claude Opus 5.5, unreviewed): the class proof's ssh
+            card row writes two cards with tc card, counts one as the
+            member's (members_patched), and runs two sends in process
+            with PATH set to the root's, a fake ssh first on it, its
+            calls asserted.
             Writes nothing outside the root's temp folder.
 @deps       python3 stdlib (argparse, contextlib, errno, fcntl, gc, io, json, os,
             pathlib, pwd, stat, subprocess, sys, time, unittest,
@@ -76,8 +83,9 @@ second-user walk is qa/human/route-shared.md.
             per root, each wait or watch run under a second or two; the
             private pin test waits out one of tc's polls (POLL_SECONDS),
             and each refused command one LOCK_WAIT_SECONDS. The class
-            proof: 6 subtests (the exit record's since F1 fix round 1)
-            and 8 planted cases, each a fresh root.
+            proof: 7 subtests (the exit record's since F1 fix round 1,
+            the ssh card's since R10) and 8 planted cases, each a fresh
+            root.
 @alloc      one TcRoot per test or case, removed when its context exits,
             with every child it started.
 """
@@ -313,6 +321,13 @@ OWN_MOVED_WORDS = ("tc {kind}: {path} was this user's own {kind} lock, which tc 
                    "aside to {aside} and made a new one")
 LOCKED_OUT_WHY = os.strerror(errno.EACCES)
 NOT_OWN_WORDS = "not this user's own"
+# R10 (Claude Opus 5.5, unreviewed): D43. The class proof's ssh card row:
+# the name the member wrote an ssh card for, ann's own far name, their
+# made-up target, and C4's words for the refusal (written here).
+SSH_CARD_PLANTED, SSH_CARD_OWN = "far-y", "far-x"
+SSH_CARD_TARGET = "u@h"
+SSH_CARD_REFUSED_WORDS = ("is an ssh card {writer} wrote, and only {writer} and the user who ran init ({init}) send "
+                          "over it")
 
 
 def login(uid):
@@ -1170,14 +1185,20 @@ class WakeFilesAreTheirOwnersTest(UmaskTestCase):
     MEDIUM-1 and REC-1): a member's file at the record's name or its old
     fixed .tmp name, before and while ann's wait runs, is moved aside
     with words, and ann's record still says `listening`, then `mail`.
+    R10 (Claude Opus 5.5, unreviewed): D43, the ssh card is a row (the P3
+    review's DEBT-6): an ssh card the member wrote for a name nobody
+    claimed is never followed by ann's send, which refuses with words
+    naming the member and the init user and runs no ssh, while her own
+    card's send runs it (the fake ssh asserted called).
 
     @interacts  see the module block.
     @deps       _root.TcRoot, UmaskTestCase, primary_group, load_tc,
                 member, identity, members_patched, run_in_process, login,
                 contents from test_shared.py.
-    @complexity O(f) subtests over f = 6 (five files, the marker twice;
-                the exit record since F1 fix round 1), plus eight for the
-                planted entries and three for the owner's two waits.
+    @complexity O(f) subtests over f = 7 (five files, the marker twice;
+                the exit record since F1 fix round 1; the ssh card since
+                R10), plus eight for the planted entries and three for the
+                owner's two waits.
     @alloc      one TcRoot per subtest.
     """
 
@@ -1337,6 +1358,33 @@ class WakeFilesAreTheirOwnersTest(UmaskTestCase):
         return {"ran": ran, "seen": seen, "before": (record_said, tmp_said), "after": after,
                 "record": record, "old_tmp": old_tmp}
 
+    # R10 (Claude Opus 5.5, unreviewed): D43, an ssh card a member wrote is a row.
+    def ssh_card_case(self, root):
+        """The ssh card: the member wrote cards/far-y.json, an ssh card for a name nobody claimed; ann's send to far-y, then her send to her own far-x card, both in process with a fake ssh first on PATH. What was seen.
+
+        @interacts  two tc cards (far-y's then counted as the member's);
+                    a fake ssh; two cmd_send runs in process with PATH
+                    set to the root's.
+        @deps       identity, members_patched, run_in_process, load_tc;
+                    _root.TcRoot.fake_bin; unittest.mock.
+        @complexity O(1): one fake ssh run.
+        @alloc      one module.
+        """
+        folder, calls = root.fake_bin("ssh", 0)
+        for name in (SSH_CARD_PLANTED, SSH_CARD_OWN):
+            self.assertEqual(root.tc("card", name, "--ssh", SSH_CARD_TARGET)[0], 0)
+        planted = {identity(root.path / "cards" / f"{SSH_CARD_PLANTED}.json")}
+        tc = load_tc(root)
+        record = folder.parent / "calls.jsonl"
+
+        def send(to):
+            return lambda: tc.cmd_send(argparse.Namespace(sender=OWNER, to=to, message="hi", origin=None))
+        with members_patched(root.path, planted, set()), mock.patch.dict(os.environ, {"PATH": root.env["PATH"]}):
+            refused = run_in_process(send(SSH_CARD_PLANTED))
+            silent = not record.exists()
+            sent = run_in_process(send(SSH_CARD_OWN))
+        return {"refused": refused, "silent": silent, "sent": sent, "calls": calls() if record.exists() else None}
+
     def test_no_member_holds_or_redirects_another_members_wake_file(self):
         """For each wake file, a member who is not ann tries to hold or rewrite it before and while ann's command runs (or a send to ann, for the marker): ann's listener holds its own lock and health names ann's pid, never the member's; her read on a held inbox lock fails within the bound, writes nothing, and names the member; and a send after the sender's own backoff rings her Codex thread whatever the member wrote.
 
@@ -1350,13 +1398,17 @@ class WakeFilesAreTheirOwnersTest(UmaskTestCase):
         while ann's wait runs) are moved aside with words while ann's
         record still says `listening`, then `mail`. Must reject a plant
         that stops ann's record (refused instead of moved aside or worked
-        around): the F1 audit's MEDIUM-1.
+        around): the F1 audit's MEDIUM-1. R10 (Claude Opus 5.5,
+        unreviewed): and an ssh card the member wrote, which ann's send
+        never follows (D43). Must reject a send that runs ann's ssh to the
+        member's target.
 
         @interacts  per subtest: a shared mailbox with ann joined, then
-                    listener_case, inbox_case, marker_case or record_case.
+                    listener_case, inbox_case, marker_case, record_case or
+                    ssh_card_case.
         @deps       shared_with_ann, listener_case, inbox_case,
-                    marker_case, record_case, login; os.
-        @complexity O(f): f = 6 subtests.
+                    marker_case, record_case, ssh_card_case, login; os.
+        @complexity O(f): f = 7 subtests.
         @alloc      one TcRoot per subtest.
         """
         mine, other, init = login(os.geteuid()), login(os.geteuid() + HOLDER_UID_STEP), login(os.geteuid() + 1)
@@ -1415,6 +1467,18 @@ class WakeFilesAreTheirOwnersTest(UmaskTestCase):
             for path, k in ((record, 1), (old_tmp, 1), (old_tmp, 2)):
                 self.assertIn(RECORD_MOVED_WORDS.format(path=path, owner=other,
                                                         aside=path.with_name(f"{path.name}.planted-{k}")), err)
+        # R10 (Claude Opus 5.5, unreviewed): D43, the ssh card a member wrote for a name nobody claimed.
+        with self.subTest(wake_file="an ssh card"), _root.TcRoot() as root:
+            self.shared_with_ann(root)
+            got = self.ssh_card_case(root)
+            code, out, err = got["refused"]
+            # Allowed by C4: the member owns the card's name; never ann's ssh to the member's target.
+            self.assertEqual(code, EXIT_REFUSED, f"ann's send followed the member's ssh card: {out}{err}")
+            self.assertIn(SSH_CARD_REFUSED_WORDS.format(writer=other, init=init), err)
+            self.assertTrue(got["silent"], "ssh ran over the member's card")
+            self.assertEqual(got["sent"][0], 0, got["sent"])
+            self.assertIsNotNone(got["calls"], "the fake ssh never ran, not even for ann's own card")
+            self.assertEqual(len(got["calls"]), 1)
 
     def test_a_file_planted_at_the_owners_lock_name_is_moved_aside_with_words_and_the_owners_lock_made(self):
         """Another member's file (held), a symlink to a file outside the mailbox, a FIFO, or a file with a second name, planted at ann's wait or watch lock's name: ann's command moves it aside to the first aside name with one line naming what it was and whose, makes her own lock at 0600, and runs to its end; the planted entry itself sits at the aside name, and the link's target is unchanged.
