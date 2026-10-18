@@ -172,6 +172,19 @@ HOURLY_UP_TO_SECONDS = 7 * 24 * 60 * 60
 # The words for each bucket.
 BUCKET_WORDS = {"hour": "an hour", "day": "a day"}
 
+# Charts 3 and 5, the delay strips. A strip is this tall; its dots have
+# this radius and sit at these offsets from its middle line in turn, so
+# dots at one delay stay apart; the median's tick reaches this far up and
+# down. Delays run on a log scale (a minute and a day both need room), up
+# to the longest delay drawn but never less than DELAY_SCALE_MIN_SECONDS,
+# with a grid line at each of DELAY_TICKS_SECONDS that fits.
+STRIP_HEIGHT = 56
+DOT_RADIUS = 5
+DOT_OFFSETS = (0, -7, 7)
+MEDIAN_REACH = 15
+DELAY_SCALE_MIN_SECONDS = 60
+DELAY_TICKS_SECONDS = (0, 60, 600, 3600, 6 * 3600, 24 * 3600, 7 * 24 * 3600, 30 * 24 * 3600)
+
 # The page's look. Colors are tokens, light and dark; every token pair of
 # text on its surface holds its contrast in grayscale too, and no meaning
 # rides on a color alone (shape, dash, position and words carry it).
@@ -205,6 +218,9 @@ svg .halo{paint-order:stroke;stroke:var(--panel);stroke-width:4px;stroke-linejoi
 .edge-count{font-weight:700}
 .axis{stroke:var(--rule);stroke-width:1}
 .bar{fill:var(--s1)}
+.grid{stroke:var(--rule);stroke-width:1;stroke-dasharray:2 3}
+.dot{fill:var(--s1);stroke:var(--panel);stroke-width:1.5}
+.median{stroke:var(--ink);stroke-width:2.5}
 footer{margin-top:40px;color:var(--ink-2);font-size:13px}
 """
 
@@ -1050,8 +1066,126 @@ def chart_senders(page):
     return figure(2, heading, how, svg_chart("senders", CHART_WIDTH, height, heading, desc, body))
 
 
+def median_of(values):
+    """The median of `values` (the mean of the middle two for an even count).
+
+    @interacts  none.
+    @deps       none.
+    @complexity O(v log v) over v values.
+    @alloc      one sorted copy, freed on return.
+    """
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    return ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def delay_strips(key, rows, heading, desc):
+    """The SVG of charts 3 and 5: one strip per row, one dot per delay on a log scale, the median as a labeled tick.
+
+    `rows` is a list of (name, detail words, [(delay seconds, title)]). A
+    strip is its own plot with one series, labeled at its left; a row with
+    no delays draws its words and no median.
+
+    @interacts  none; pure.
+    @deps       math; element, text_at, titled, svg_chart, row_label,
+                median_of, span_text, plot_right, num; the strip
+                constants.
+    @complexity O(d + r) over d delays and r rows, plus one sort per row
+                for its median.
+    @alloc      the SVG text, returned.
+    """
+    longest = max([DELAY_SCALE_MIN_SECONDS] + [delay for _, _, dots in rows for delay, _ in dots])
+    reach = plot_right() - LABEL_GUTTER
+
+    def x_of(delay):
+        """The x of `delay` seconds on the log scale.
+
+        @interacts  none.
+        @deps       math.
+        @complexity O(1).
+        @alloc      none.
+        """
+        return LABEL_GUTTER + reach * math.log1p(delay) / math.log1p(longest)
+
+    bottom = CHART_TOP + STRIP_HEIGHT * len(rows)
+    body = []
+    for tick in (t for t in DELAY_TICKS_SECONDS if t <= longest):
+        body.append(element("g", (("class", "delay-tick"),), [
+            element("line", (("class", "grid"), ("x1", num(x_of(tick))), ("y1", num(CHART_TOP)),
+                             ("x2", num(x_of(tick))), ("y2", num(bottom)))),
+            text_at(x_of(tick), bottom + LINE_GAP, span_text(tick), "small", "middle")]))
+    for line, (name, detail, dots) in enumerate(rows):
+        middle = CHART_TOP + STRIP_HEIGHT * line + STRIP_HEIGHT / 2
+        marks = [element("line", (("class", "axis"), ("x1", num(LABEL_GUTTER)), ("y1", num(middle)),
+                                  ("x2", num(plot_right())), ("y2", num(middle))))]
+        for index, (delay, title) in enumerate(dots):
+            marks.append(element("circle", (("class", "dot"), ("cx", num(x_of(delay))),
+                                            ("cy", num(middle + DOT_OFFSETS[index % len(DOT_OFFSETS)])),
+                                            ("r", num(DOT_RADIUS))), [titled(title)]))
+        if dots:
+            median = median_of([delay for delay, _ in dots])
+            marks.append(element("line", (("class", "median"), ("x1", num(x_of(median))),
+                                          ("y1", num(middle - MEDIAN_REACH)), ("x2", num(x_of(median))),
+                                          ("y2", num(middle + MEDIAN_REACH)))))
+            marks.append(text_at(x_of(median), middle - MEDIAN_REACH - DOT_RADIUS, f"median {span_text(median)}",
+                                 "small halo", "middle"))
+        body.append(element("g", (("class", "plot"), ("data-plot", name)), [
+            element("g", (("class", "series"), ("data-label", name), ("data-shape", "circle"), ("data-dash", "none")),
+                    row_label(middle, name, detail) + marks)]))
+    return svg_chart(key, CHART_WIDTH, bottom + AXIS_HEIGHT, heading, desc, body)
+
+
+def dot_name(record):
+    """How a dot names its message: `#<number>`, and its tag when it has one.
+
+    @interacts  none.
+    @deps       none.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    return f"#{record.number} {record.tag}" if record.tag else f"#{record.number}"
+
+
+def chart_read(page):
+    """Chart 3, sent to read, per recipient: one dot per message with a read time, at its delay, the median as a labeled tick, and `n of m messages have a read time`.
+
+    m counts the messages to that recipient with a sent time; n those of
+    them with a read time too. A read before its sent time (a clock set
+    back) draws at 0. A message with no sent time is left out.
+
+    @interacts  none; pure.
+    @deps       delay_strips, figure, empty_chart, dot_name, span_text,
+                seconds_of, plural.
+    @complexity O(t + d log d) over t records and d dots.
+    @alloc      the SVG text, returned; one list per recipient.
+    """
+    heading = "From sent to read, per recipient"
+    timed = [r for r in page.records if r.sent is not None]
+    if not timed:
+        return empty_chart("read", 3, heading, "No messages yet." if not page.records else
+                           "No message has a sent time.")
+    rows = []
+    for session in page.sessions:
+        mine = [r for r in timed if r.recipient == session.name]
+        if not mine:
+            continue
+        dots = []
+        for record in mine:
+            if record.read is not None:
+                delay = max(0.0, seconds_of(record.read) - seconds_of(record.sent))
+                dots.append((delay, f"{dot_name(record)} from {record.sender}: read after {span_text(delay)}"))
+        verb = "has" if len(mine) == 1 else "have"
+        rows.append((session.name, f"{len(dots)} of {plural(len(mine), 'message')} {verb} a read time", dots))
+    how = ("One dot per message with a read time, placed by how long it waited from sent to read, on a log scale. "
+           "The heavy tick is the median, named above it. A message read by a tc older than read-time records "
+           "has no dot; the words at the left count them. Hover a dot for its message.")
+    desc = ("One strip per recipient; each dot is one message's wait from sent to read, the median marked and "
+            "named, and how many of its messages have a read time.")
+    return figure(3, heading, how, delay_strips("read", rows, heading, desc))
+
+
 # The charts, in page order. Each takes the Page and returns its section.
-CHARTS = (chart_graph, chart_senders)
+CHARTS = (chart_graph, chart_senders, chart_read)
 
 
 def render(page):

@@ -548,5 +548,46 @@ class SendersTest(unittest.TestCase):
                 self.assertIn("one hour", words(chart))
 
 
+class ReadTest(unittest.TestCase):
+    """Chart 3: sent to read, per recipient: one dot per message with a read time, the median as a labeled tick, and `n of m`.
+
+    @interacts  renders the fixture.
+    @deps       rendered, charts, plots_by_label, series_of, mark_titles.
+    @complexity two renders.
+    @alloc      the pages.
+    """
+
+    # Per recipient: (n of m words, median words, each dot's title as
+    # (number, tag, sender, read after)).
+    STRIPS = {
+        "annika": ("3 of 5 messages have a read time", "median 20m",
+                   [(2, "QUESTION", "bertil", "2m"), (4, None, "bertil", "20m"), (8, "ANSWER", "bertil", "30m")]),
+        "bertil": ("3 of 4 messages have a read time", "median 5m",
+                   [(1, "PLAN", "annika", "5m"), (3, "ANSWER", "annika", "40m"), (9, "FYI", "dagny", "1m")]),
+        "corwin": ("1 of 2 messages have a read time", "median 30m", [(6, None, "annika", "30m")]),
+    }
+
+    def test_each_strip_has_its_dots_its_median_and_its_count_in_words(self):
+        """Exact dots, median and words per recipient, real and scrubbed; dagny, who got no mail, has no strip.
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity two renders.
+        @alloc      the pages.
+        """
+        for scrub, names in ((False, {n: n for n in fixture.NAMES}), (True, ScrubTest.LABELS)):
+            with self.subTest(scrub=scrub):
+                _, page = rendered(scrub)
+                plots = plots_by_label(charts(page)["read"])
+                self.assertEqual(list(plots), [names[n] for n in self.STRIPS])
+                for recipient, (count, median, dots) in self.STRIPS.items():
+                    (series,) = series_of(plots[names[recipient]])
+                    self.assertEqual([t.text for t in series.iter("text")], [names[recipient], count, median])
+                    self.assertEqual(len(list(series.iter("circle"))), len(dots))
+                    want = [f"#{ScrubTest.RANKS[n] if scrub else n}{' ' + tag if tag else ''} from {names[sender]}: "
+                            f"read after {after}" for n, tag, sender, after in dots]
+                    self.assertEqual(mark_titles(series), want)
+
+
 if __name__ == "__main__":
     unittest.main()
