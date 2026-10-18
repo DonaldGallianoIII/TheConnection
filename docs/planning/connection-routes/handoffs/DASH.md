@@ -360,3 +360,79 @@ in 277.465s`, `OK`. `node --test tests/*.test.mjs`: `# tests 68`, `# pass
 - `os.link` needs hard links: on a filesystem without them, a page
   without `--force` refuses with `could not write`, as a message send
   refuses there.
+
+## Fix round 2 (audits/2026-10-17-2233-custom, and C7 at the dev checkout's d0523c7)
+
+<!-- Fix round 2 section added by Claude Opus 5.5 (the DASH lane agent), 2026-10-17. Status: unreviewed. -->
+
+One code commit, `00e3e92`, and this section's commit. Line numbers are
+at `00e3e92`: `walk_messages` `board/report.py:514`, `walk_inbox` `:595`,
+`fit_words` `:916`, `row_label` `:1320`, `delay_strips` `:1410`,
+`DELAY_LABEL_PAD` `:254`; `REPORT_RESERVED_NAMES` `tc:5773`,
+`REPORT_RESERVED_WORDS` `tc:5775`, `report_inside` `tc:5799`,
+`report_folder` `tc:5815`.
+
+1. **LOW-1, option A, built as the coordinator put it.** `walk_inbox`
+   returns each message its retry found in read/ with no read time yet;
+   `walk_messages` keeps that inbox's two descriptors open to the walk's
+   end, reads its read/'s record once more then, and fills the read
+   times the record has by then. tc read moves every message first and
+   writes the lines after, so a re-read at the end of the walk, not at
+   the moment of the retry, is what catches the common case. The
+   docstring now says a message gets its read time when the record has
+   it by the walk's end. The test writes the record line after the
+   report has looked for it (at the next other message's read), which
+   is tc's order; the round 1 test wrote both at once and passed on the
+   old code. With the line moved, the old code was red on its
+   assertion before the fix.
+2. **LOW-2, option A, with one refinement.** A tick label is left off
+   when its estimated extent (char_width) reaches within
+   `DELAY_LABEL_PAD` of the end label's left edge. When the end label's
+   words equal a tick's (a longest wait of 84 to 119 s reads `1m`, as
+   the 60 s tick does), I leave off the end label, not the tick: the
+   tick's label sits at its true place, and an end label `1m` at 100 s
+   would mislabel the far end. The comment is rewritten. Tested at
+   13h30m (`6h00m` is left off; the end reads `13h30m`) and at 100 s
+   (`0s`, `1m`, no repeat).
+3. **LOW-3, option A.** `fit_words(..., keep_start=True)` for a row's
+   detail line, which opens with its count; a name still keeps its end.
+   Tested with 12345 hand-made records: chart 3's line opens `12345 of
+   12345`, chart 4's `12345 sent`.
+4. **LOW-4, as the relay ruled it into C7.** `report_folder` refuses,
+   exit 1, even with `--force`, an OUT whose folder resolves to ROOT and
+   whose name is one of `REPORT_RESERVED_NAMES` (`.shared`, `mail`,
+   `status`, `cards`, `outbox`, `tc`, `board`) or starts with a dot,
+   whether or not the entry is there. Judged after resolving: the folder
+   as its pinned descriptor resolves, and, when OUT's own name in that
+   folder is a link, where the link leads, read by name in the
+   descriptor and resolved from there. A link that leads into
+   `mail/`, `status/`, `cards/` or `outbox/` is refused with the inside
+   words. tc never writes through such a link anyway (a link or rename
+   by name replaces the link itself), but C7 says to refuse it, so it
+   does. Red first with the four cases: `.shared` with `--force` (on the
+   old code the page replaced `.shared` and every later command
+   refused), a missing `mail` entry, a link at ROOT to `.shared` with
+   `--force` (plus a link elsewhere to `.shared`), and `history.html` in
+   ROOT, which is written. The README's refusal line names the entries.
+5. **LOW-5.** `walk_messages`' `@deps` now names what it calls
+   (`walk_inbox`, `tc.read_times`, `parse_time`) and no `contextlib`;
+   `row_label`'s block says which end each line keeps; tc's module block
+   and cmd_report's say the new refusal.
+
+**Mutations**, one each, on `git archive` copies with
+`PYTHONDONTWRITEBYTECODE=1`:
+
+| Mutation | Result |
+|---|---|
+| 1: no re-read at the walk's end | `FAILED (failures=1)`: the read time is `None` |
+| 2: the fixed 48-unit gap put back | `FAILED (failures=1)`: `903.7 not less than 895.2` (6h00m overprints 13h30m) |
+| 3: the count line keeps its end again | `FAILED (failures=1)`: `'... of 12345 messages have a read time'` |
+| LOW-4: reserved names allowed | `FAILED (failures=5)`: `0 != 1`, and `.shared` replaced |
+
+**Runs at `00e3e92`.** `python3 -m unittest discover -s tests -p
+'test_*.py'`: `Ran 441 tests in 259.655s`, `OK`. `node --test
+tests/*.test.mjs`: `# tests 68`, `# pass 68`, `# fail 0`.
+
+**Not taken this round:** REC-1 (bind mounts) and REC-2 (a cycle made
+only of names with no mail still breaks by name order: one bit about two
+undrawn names, recorded here beside the hand-made-twin residual).
