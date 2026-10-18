@@ -25,7 +25,7 @@ chart and counted in words.
             (a TcRoot's throwaway TC_ROOT, never a live mailbox): one file
             per message, one read/.read-times per read/, one card per
             carded name, one status file; sets each message file's times.
-@deps       python3 stdlib (datetime, json, os, pathlib).
+@deps       python3 stdlib (collections, datetime, json, os).
 @complexity O(m) over m = 12 messages.
 @alloc      the files, removed with the TcRoot.
 """

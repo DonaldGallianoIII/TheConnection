@@ -7,20 +7,26 @@ memory, and calls report(); nothing here runs on its own.
 Model:  Claude Opus 5.5 (the DASH lane agent), 2026-10-17
 Status: unreviewed
 
-Three steps, each a pure handoff to the next:
+Three steps, each a pure handoff to the next, then one call for tc:
 
-1. extract(tc): one pinned walk of every mail/to-*/ and its read/ (D35,
-   through tc's own open_mail, open_inbox and message_files, as tc log
-   walks), one bounded read per message, one read of each read/'s
+1. extract(tc, board): one pinned walk of every mail/to-*/ and its read/
+   (D35, through tc's own open_mail, open_inbox and message_files, as tc
+   log walks), one bounded read per message, one read of each read/'s
    .read-times (tc's read_times: C2's rules), and cards/*.json for
    reports_to only. Out comes one closed Record per message and one
-   Session per name, with C5's role from board/serve.py's own hierarchy(),
-   loaded from source (load_board_module), never copied.
-2. scrub(mailbox): names to role labels by first mail, tags off
-   SCRUB_TAGS to `other`, every time to seconds from the first message,
-   numbers to ranks. It runs on the records, before the renderer, so the
-   renderer never sees a real name, time or number on a scrubbed page.
-3. render(mailbox): records in, one HTML string out.
+   Session per name, with C5's role from board/serve.py's own
+   hierarchy(), loaded from source (load_board_module), never copied.
+2. page_of(mailbox, at), then scrub(page) for --scrub: names to role
+   labels by first mail, tags off SCRUB_TAGS to `other`, every time to
+   seconds from the first message, numbers to ranks. It runs on the
+   records, before the renderer, so the renderer never sees a real
+   name, time or number on a scrubbed page.
+3. render(page): records in, one HTML string out. Pure: inline CSS and
+   inline SVG, no script, no link, no url(, nothing fetched (D26); every
+   text node and attribute escaped; no clock read, so the same page gives
+   the same bytes. Charts 1 to 5 as C7 lists them (chart_graph,
+   chart_senders, chart_read, chart_quiet, chart_answers).
+4. report(tc, board, scrubbed, at): all of it, for tc's cmd_report.
 
 What it reads, and nothing else (C7, D42): each message's file name
 (number, sender, recipient) and size; its header line, for the sent time
@@ -36,20 +42,33 @@ ROOT.
             message by name in its folder's descriptor (never through a
             link, never blocking) and reads at most tc's
             MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES of it; reads
-            each read/'s .read-times through tc.read_times; globs cards/ and reads each card through tc.read_regular_file.
-            Writes nothing. load_board_module reads board/serve.py and runs
-            its top level (imports and constants; its main() is not run).
-@deps       python3 stdlib (collections, contextlib, datetime, json, os,
-            pathlib, re, stat, types); the tc module its caller passes;
-            board/serve.py (hierarchy, card_text).
+            each read/'s .read-times through tc.read_times; globs cards/
+            and reads each card through tc.read_regular_file. Writes
+            nothing. load_board_module reads board/serve.py and runs its
+            top level (imports and constants; its main() is not run).
+            scrub and render touch nothing outside their arguments.
+@deps       python3 stdlib (collections, contextlib, datetime, html, json,
+            math, os, pathlib, re, stat, types); the tc module its caller
+            passes; board/serve.py (hierarchy, card_text).
 @complexity extract O(n log n + T + t log t + R + c) over n inboxes, T
-            names in every inbox and read/, t messages ever (low thousands
-            after weeks of heavy use), each read at most
+            names in every inbox and read/, t messages ever (low
+            thousands after weeks of heavy use), each read at most
             MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES, R bytes of the
-            read-time records and c cards; plus serve.py's hierarchy, O(n + p + e).
+            read-time records and c cards; plus serve.py's hierarchy,
+            O(n + p + e). scrub O(t + r + s) over r references and s
+            sessions. render O(t x s + p + d log d + g x q) over p
+            directed pairs, d dots in charts 3 and 5 (each strip sorted
+            for its median), g quiet gaps and q hatch lines per gap (at
+            most CHART_WIDTH / HATCH_STEP + LANE_HEIGHT / HATCH_STEP);
+            the t x s term is chart 3's and chart 4's pass over the
+            records once per session (tens of sessions).
 @alloc      extract: one Record per message and one Session per name,
             returned; each inbox's two descriptors, closed before it
-            returns; each message's head bytes, freed per message.
+            returns; each message's head bytes, freed per message. scrub:
+            a new Page of new Records. render: the page's text, O(t)
+            bytes (measured: 2000 messages among 16 names made 1.8 MB, in
+            0.3 s for the whole tc report), and each chart's text while it
+            is built.
 """
 
 import collections
@@ -137,6 +156,13 @@ GRAPH_MARGIN = 28
 # two directions of one pair never lie on each other; it stops this far
 # short of a box; its head is this long and this wide either side.
 EDGE_BEND = 16
+# An arrow between two boxes on one line with others between them bends
+# further, by this share of its length, so it arcs over the boxes between
+# its ends instead of through them.
+EDGE_BEND_PER_LENGTH = 0.18
+# A level with more names than this wraps onto further lines, so the
+# graph keeps the page's width and its words stay readable when scaled.
+GRAPH_LINE_MAX_NODES = 5
 EDGE_GAP = 4
 ARROW_LENGTH = 10
 ARROW_HALF_WIDTH = 5
@@ -695,8 +721,8 @@ def titled(words):
     return element("title", (), [esc(words)])
 
 
-def svg_chart(key, width, height, title, desc, body):
-    """One chart's SVG: its key, its size, a <title> and a <desc> (rule 9), and `body`.
+def svg_chart(key, width, height, title, desc, body, top=0):
+    """One chart's SVG: its key, its size, a <title> and a <desc> (rule 9), and `body`. `top` is the y the drawing starts at (chart 1 draws arcs above its first row).
 
     No xmlns: inline SVG in HTML needs none, and the page holds no
     address of any host.
@@ -706,7 +732,7 @@ def svg_chart(key, width, height, title, desc, body):
     @complexity O(b) over b characters of body.
     @alloc      one string.
     """
-    return element("svg", (("class", "chart"), ("data-chart", key), ("viewBox", f"0 0 {num(width)} {num(height)}"),
+    return element("svg", (("class", "chart"), ("data-chart", key), ("viewBox", f"0 {num(top)} {num(width)} {num(height)}"),
                            ("width", num(width)), ("height", num(height)), ("role", "img"),
                            ("aria-labelledby", f"{key}-title {key}-desc")),
                    [element("title", (("id", f"{key}-title"),), [esc(title)]),
@@ -833,9 +859,11 @@ def chart_graph(page):
     """Chart 1, who talks to whom: one arrow per sender and recipient with its count, nodes by C5's level, shape and role word by role.
 
     Rows are C5's levels, top to bottom; a name with no role sits on a row
-    below them. In a row, names keep first-mail order (page.sessions). An
-    arrow is a curve that bends to the right of its travel, so a pair's two
-    directions part; its head is drawn as a triangle (no marker, which
+    below them. In a row, names keep first-mail order (page.sessions), at
+    most GRAPH_LINE_MAX_NODES to a line, a longer level wrapping onto more
+    lines. An arrow is a curve that bends to the right of its travel, so a
+    pair's two directions part; one between two boxes on one line with
+    others between them bends further, with its length, to arc past them; its head is drawn as a triangle (no marker, which
     would need a url() reference) and its count sits at its middle, with
     the full words in its title. A message a name sent itself draws no
     arrow; the caption counts them.
@@ -860,16 +888,17 @@ def chart_graph(page):
     labels = {s.name: f"{s.name} · {role_word(s)}" for s in sessions}
     widths = {name: len(label) * CHAR_WIDTH + 2 * NODE_PAD_X for name, label in labels.items()}
     slot = max(widths.values()) + NODE_GAP
-    widest = max(len(row) for row in rows.values())
+    lines = [rows[level][first:first + GRAPH_LINE_MAX_NODES] for level in sorted(rows)
+             for first in range(0, len(rows[level]), GRAPH_LINE_MAX_NODES)]
+    widest = max(len(row) for row in lines)
     width = max(CHART_WIDTH, slot * widest + 2 * GRAPH_MARGIN)
-    order = sorted(rows)
-    height = 2 * GRAPH_MARGIN + NODE_HEIGHT + GRAPH_ROW_GAP * (len(order) - 1)
-    at = {}
-    for line, level in enumerate(order):
-        row = rows[level]
+    height = 2 * GRAPH_MARGIN + NODE_HEIGHT + GRAPH_ROW_GAP * (len(lines) - 1)
+    at, seat = {}, {}
+    for line, row in enumerate(lines):
         start = (width - slot * len(row)) / 2
         for place, session in enumerate(row):
             at[session.name] = (start + slot * (place + 0.5), GRAPH_MARGIN + NODE_HEIGHT / 2 + GRAPH_ROW_GAP * line)
+            seat[session.name] = (line, place)
     counts, selves = {}, 0
     for record in page.records:
         if record.sender == record.recipient:
@@ -877,7 +906,7 @@ def chart_graph(page):
             continue
         pair = (record.sender, record.recipient)
         counts[pair] = counts.get(pair, 0) + 1
-    edges = []
+    edges, reach_y = [], (0, height)
     for (sender, recipient), count in counts.items():
         (sx, sy), (rx, ry) = at[sender], at[recipient]
         length = math.hypot(rx - sx, ry - sy) or 1
@@ -885,8 +914,11 @@ def chart_graph(page):
         start = box_edge((sx, sy), (widths[sender] / 2, NODE_HEIGHT / 2), (ux, uy))
         end = box_edge((rx, ry), (widths[recipient] / 2, NODE_HEIGHT / 2), (-ux, -uy))
         normal = (-uy, ux)
-        control = ((start[0] + end[0]) / 2 + 2 * EDGE_BEND * normal[0],
-                   (start[1] + end[1]) / 2 + 2 * EDGE_BEND * normal[1])
+        (line_s, place_s), (line_r, place_r) = seat[sender], seat[recipient]
+        over = line_s == line_r and abs(place_s - place_r) > 1
+        bend = EDGE_BEND + (EDGE_BEND_PER_LENGTH * length if over else 0)
+        control = ((start[0] + end[0]) / 2 + 2 * bend * normal[0],
+                   (start[1] + end[1]) / 2 + 2 * bend * normal[1])
         tx, ty = end[0] - control[0], end[1] - control[1]
         tangent = math.hypot(tx, ty) or 1
         tx, ty = tx / tangent, ty / tangent
@@ -894,6 +926,7 @@ def chart_graph(page):
         head = (end, (base[0] - ty * ARROW_HALF_WIDTH, base[1] + tx * ARROW_HALF_WIDTH),
                 (base[0] + ty * ARROW_HALF_WIDTH, base[1] - tx * ARROW_HALF_WIDTH))
         middle = ((start[0] + 2 * control[0] + end[0]) / 4, (start[1] + 2 * control[1] + end[1]) / 4)
+        reach_y = (min(reach_y[0], middle[1]), max(reach_y[1], middle[1]))
         edges.append(element("g", (("class", "edge"),), [
             titled(f"{sender} to {recipient}: {plural(count, 'message')}"),
             element("path", (("class", "edge-line"), ("d", f"M{num(start[0])},{num(start[1])} Q{num(control[0])},"
@@ -916,8 +949,10 @@ def chart_graph(page):
         how += f" {plural(selves, 'message')} a session sent itself draw no arrow."
     desc = (f"A graph of {plural(len(sessions), 'session')} and {plural(len(counts), 'arrow')}, each arrow "
             "labeled with how many messages went that way.")
-    return figure(1, "Who talks to whom", how, svg_chart("graph", width, height, "Who talks to whom", desc,
-                                                          edges + nodes))
+    top = min(0, reach_y[0] - GRAPH_MARGIN)
+    bottom = max(height, reach_y[1] + GRAPH_MARGIN)
+    return figure(1, "Who talks to whom", how, svg_chart("graph", width, bottom - top, "Who talks to whom", desc,
+                                                          edges + nodes, top))
 
 
 def summary_lines(page):
