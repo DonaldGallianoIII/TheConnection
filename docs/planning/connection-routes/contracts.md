@@ -245,8 +245,46 @@ route <route> is not built yet; nothing sent`, exit 1, nothing written.
   fixes it back into a lost wake.
 
 `tc read` holds the same inbox lock from its glob of the inbox to its
-last rename into `read/`, so a send cannot land a message between them
-and skip its ring (D14). `tc peek` takes no lock: it moves nothing.
+last rename into `read/`, and on through its write of the read-time
+record (below), so a send cannot land a message between them and skip
+its ring (D14). `tc peek` takes no lock: it moves nothing.
+
+**The read-time record** (D41, pause READTIME-1). A message's header says
+when it was sent; `mail/to-<name>/read/.read-times` says when it was
+read. It is append-only JSON lines, one per message `tc read` moved:
+`{"name": "000042-from-ann.md", "number": 42, "read": "2026-10-17T19:52:01-05:00"}`.
+`name` is its name in `read/` (a by-hand name for a message moved to
+one), `number` the number in the name it had in its inbox (null when
+that name is not of the message form), `read` the read's time with its
+offset. These three keys are stable: a later change adds keys, never
+renames or drops one (the board's later report reads them).
+- `tc read` writes it under the inbox lock, after its moves, one time
+  for the whole read, one write of every line, then `fsync`. Only a
+  message that moved gets a line. A read killed between its last move
+  and the write leaves those messages with no line: never a time for a
+  message that did not move.
+- Only `read/`'s owner records. In a shared mailbox, a member's read
+  of another name moves only that member's own messages, which is not
+  the recipient picking them up: no line, and one stderr line says the
+  name's owner keeps its read times.
+- The file is `0640`, its owner's, opened by name in `read/`'s
+  descriptor with `O_APPEND | O_CREAT | O_NOFOLLOW`. Anything else at
+  its name is moved aside with words, as at the wait exit record's
+  names (C4). A record that cannot be written is one stderr line, `tc
+  read: read time not recorded for <n> messages (<why>)` (`1 message`
+  for one), and the read's exit code stays as it was: the mail was
+  read.
+- `tc log` prints one line after each message's header line: `read
+  <time>`, `unread` for one still in its inbox, or `read, time not
+  recorded` (read before D41, by a non-owner, by a read killed mid-way,
+  or still being recorded by a read in progress). It believes only a
+  record that is a regular one-name file owned by `read/`'s owner, reads
+  at most its newest `READ_TIMES_MAX_BYTES`, passes by a line that does
+  not parse, and when a name has two lines takes the last. A record it
+  will not read is one stderr line, and the exit stays as it was.
+- No message file is ever changed. `tc peek` and `tc wait` never touch
+  the record, and no listing of messages counts it (it does not end in
+  `.md`).
 
 `tc read` and `tc peek` on a name with no inbox print `no unread mail for
 <name>` and create nothing (open item O2).
@@ -569,7 +607,8 @@ For a separate Linux user per account on one machine.
     hanging tc (D19). At a wait or watch lock's name, in the owner's own
     inbox, the owner's tc moves it aside with words and makes its own
     lock (D35); the same holds at the wait exit record's names
-    (`.wait.exit` and its temp names, F1). The one other exception: a gate's retry of an id already
+    (`.wait.exit` and its temp names, F1), and at the read-time record's
+    name in `read/` (`.read-times`, D41). The one other exception: a gate's retry of an id already
     filed for a codex name answers exit 0 with a warning (C3).
 - **Nobody touches another member's mail** (D20, Donald: "prevent that
   from occurring"; it replaces D19's trust trade). Under shared mode:

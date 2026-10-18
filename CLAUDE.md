@@ -154,10 +154,11 @@ docs/known-bugs/                   INDEX.md plus one detail file per entry. See 
 docs/planning/connection-routes/   the plan: 00-index, contracts, phases, decisions, handoffs/, pauses/
 mail/to-<name>/NNNNNN-from-X.md    unread messages (gitignored)
 mail/to-<name>/read/               read messages, kept as history
+mail/to-<name>/read/.read-times    when each was read: one JSON line per message tc read moved (name, number, read time), 0640, its owner's, appended; a plant there is moved aside as .read-times.planted-<k> (D41)
 mail/to-<name>/.wait.lock          the listener's lock, 0600, its owner's (D35); .watch.lock beside it for tc watch; a file planted there is moved aside as .wait.lock.planted-<k>
 mail/to-<name>/.wait.exit          the wait's exit record, 0640, its owner's: listening, mail or timeout and a time; never proof of life (C5, F1)
 mail/.wait-<name>.lock             the lock's old place before D35: tc never reads it since F2; old files may remain until the owner removes them
-mail/.box-<name>.lock              the inbox lock: send's count plus write, read's glob plus rename, tc card's check plus write (D14)
+mail/.box-<name>.lock              the inbox lock: send's count plus write, read's glob, renames and read-time record, tc card's check plus write (D14)
 mail/.ring-pending-<name>          the codex ring's state: ringing, failed, timed out, joined with unread mail, or clear; never removed (D14, D16, D20)
 cards/<name>.json                  one address card per name: kind, account, route (gitignored)
 .shared                            the group a shared mailbox uses, 0644, written by init (gitignored)
