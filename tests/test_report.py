@@ -110,7 +110,7 @@ class FirstLineTest(unittest.TestCase):
         self.report = _root.load_source("board_report", REPORT_PATH)
 
     def test_a_leading_token_is_the_tag_with_one_trailing_colon_stripped(self):
-        """`PLAN-READY:` and `PLAN-READY` are both the tag PLAN-READY; a second colon, one letter, lowercase or 25 characters are no tag.
+        """`PLAN-READY:` and `PLAN-READY` are both the tag PLAN-READY; a second colon, one letter, lowercase or 25 characters are no tag; a #N of more than REF_MAX_DIGITS digits is no ref, and 5000 digits raise nothing (LOW-1).
 
         @interacts  none.
         @deps       report.first_line_facts.
@@ -128,10 +128,48 @@ class FirstLineTest(unittest.TestCase):
             "ABCDEFGHIJKLMNOPQRSTUVWXY too long": (None, ()),
             "ABCDEFGHIJKLMNOPQRSTUVWX fits": ("ABCDEFGHIJKLMNOPQRSTUVWX", ()),
             "": (None, ()),
+            "PLAN #" + "9" * 5000 + " and #7": ("PLAN", (7,)),
+            "PLAN #123456789 #1234567890": ("PLAN", (123456789,)),
         }
         for line, want in cases.items():
             with self.subTest(line=line):
                 self.assertEqual(self.report.first_line_facts(line), want)
+
+
+class HeadTest(unittest.TestCase):
+    """parse_head reads a tag and refs only from the line after a tc header (LOW-6).
+
+    @interacts  loads board/report.py.
+    @deps       _root.load_source; REPORT_PATH.
+    @complexity O(1) per case.
+    @alloc      the module.
+    """
+
+    def test_no_tag_or_ref_comes_from_line_two_when_line_one_is_no_tc_header(self):
+        """A file whose first line is not a tc header gives no tag and no refs; a tc header whose time does not parse still gives its first body line's.
+
+        @interacts  loads report.py.
+        @deps       report.parse_head.
+        @complexity O(1).
+        @alloc      none.
+        """
+        report = _root.load_source("board_report", REPORT_PATH)
+        self.assertEqual(report.parse_head(b"hello there\nPLAN #3 second line\n"), (None, None, ()))
+        self.assertEqual(report.parse_head(b"hello\n\nPLAN #3\n"), (None, None, ()))
+        self.assertEqual(report.parse_head(b"# #5 from a to b, not a time\n\nPLAN #3\n"), (None, "PLAN", (3,)))
+
+    def test_ties_in_sent_order_go_by_number_then_size_never_by_name(self):
+        """Two messages at one time: the lower number first; at one number too, the smaller first, whatever the names (REC-3).
+
+        @interacts  loads report.py.
+        @deps       report.sent_order, report.Record.
+        @complexity O(1).
+        @alloc      none.
+        """
+        report = _root.load_source("board_report", REPORT_PATH)
+        late = report.Record(5, "aaa", "bbb", fixture.BASE, None, 90, None, ())
+        early = report.Record(5, "zzz", "yyy", fixture.BASE, None, 10, None, ())
+        self.assertEqual(sorted([late, early], key=report.sent_order), [early, late])
 
 
 class ExtractTest(unittest.TestCase):
@@ -161,7 +199,7 @@ class ExtractTest(unittest.TestCase):
             for spec in fixture.MESSAGES:
                 folder = root.path / "mail" / f"to-{spec.to}" / ("read" if spec.read is not None else "")
                 size = (folder / f"{spec.number:06d}-from-{spec.sender}.md").stat().st_size
-                tag, refs = report.first_line_facts(spec.body.split("\n")[0])
+                tag, refs = (None, ()) if spec.sent is None else report.first_line_facts(spec.body.split("\n")[0])
                 want.append(report.Record(spec.number, spec.sender, spec.to, fixture_time(spec.sent),
                                           fixture_time(spec.read), size, tag, refs))
             want.sort(key=lambda r: (r.sent is None, r.sent.timestamp() if r.sent else 0, r.number))
@@ -186,6 +224,117 @@ class ExtractTest(unittest.TestCase):
                 report.Session("corwin", "worker", "declared", 1),
                 report.Session("dagny", None, None, None),
             ])
+
+    def test_a_header_that_real_tc_send_wrote_parses(self):
+        """Mail sent and read by tc itself, through the harness: its sent time, tag, refs and read time come out (REC-1), so a change to tc's header shape goes red here.
+
+        @interacts  runs tc join, send and read as children; loads tc and report.py.
+        @deps       report.extract; _root.TcRoot.tc.
+        @complexity four children and one extract.
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            for args in (("join", "ann"), ("join", "ben"), ("send", "--from", "ann", "--to", "ben", "PLAN: one"),
+                         ("send", "--from", "ben", "--to", "ann", "ANSWER re #1: two"), ("read", "ben")):
+                code, _, stderr = root.tc(*args)
+                self.assertEqual(code, EXIT_OK, (args, stderr))
+            tc, report = modules_for(root)
+            box = report.extract(tc)
+            self.assertEqual(box.unparsed, 0)
+            got = {r.number: (r.tag, r.refs, r.sent is not None, r.read is not None) for r in box.records}
+            self.assertEqual(got, {1: ("PLAN", (), True, True), 2: ("ANSWER", (1,), True, False)})
+
+    def test_each_inbox_is_closed_before_the_next_is_walked(self):
+        """Forty inboxes: the open descriptors never grow by more than a few during the walk (LOW-2).
+
+        @interacts  builds forty inboxes; counts /proc/self/fd at each message read.
+        @deps       report.extract, report.read_head.
+        @complexity O(40).
+        @alloc      forty small files.
+        """
+        with _root.TcRoot() as root:
+            for n in range(1, 41):
+                box = root.path / "mail" / f"to-box{n}"
+                (box / "read").mkdir(parents=True)
+                (box / f"{n:06d}-from-ann.md").write_text(f"# #{n} from ann to box{n}, {fixture.at(n)}\n\nFYI\n",
+                                                          encoding="utf-8")
+            tc, report = modules_for(root)
+            real, counts = report.read_head, []
+
+            def counting(*args):
+                """read_head, counting this process's open descriptors first.
+
+                @interacts  lists /proc/self/fd.
+                @deps       os.
+                @complexity O(f) over f descriptors.
+                @alloc      one list entry.
+                """
+                counts.append(len(os.listdir("/proc/self/fd")))
+                return real(*args)
+
+            report.read_head = counting
+            before = len(os.listdir("/proc/self/fd"))
+            self.assertEqual(len(report.extract(tc).records), 40)
+            self.assertLessEqual(max(counts) - before, 6, counts)
+
+    def test_a_message_tc_read_moves_mid_walk_is_read_from_read(self):
+        """A message renamed into read/ between the listing and its read is read from read/, with its read time, not counted as a header that did not parse (LOW-9).
+
+        @interacts  builds the fixture; moves one message mid-walk.
+        @deps       report.extract, report.read_head.
+        @complexity O(12).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            tc, report = modules_for(root)
+            box = root.path / "mail" / "to-annika"
+            name = "000012-from-corwin.md"
+            real, moved = report.read_head, []
+
+            def moving(entry, folder_fd, limit):
+                """Move message 12 into read/ (and record its read time) just before its first read, as tc read would.
+
+                @interacts  renames one file; appends one line to read/.read-times.
+                @deps       os.
+                @complexity O(1).
+                @alloc      none.
+                """
+                if entry == name and not moved:
+                    moved.append(entry)
+                    os.rename(box / name, box / "read" / name)
+                    with open(box / "read" / ".read-times", "a", encoding="utf-8") as record:
+                        record.write('{"name": "%s", "number": 12, "read": "%s"}\n' % (name, fixture.at(18 * fixture.HOUR)))
+                return real(entry, folder_fd, limit)
+
+            report.read_head = moving
+            box_facts = report.extract(tc)
+            self.assertTrue(moved)
+            twelve = [r for r in box_facts.records if r.number == 12]
+            self.assertEqual(len(twelve), 1)
+            self.assertEqual((twelve[0].sent, twelve[0].read, twelve[0].tag),
+                             (fixture_time(17 * fixture.HOUR), fixture_time(18 * fixture.HOUR), "QUESTION"))
+            self.assertEqual(box_facts.unparsed, 1)
+
+    def test_a_reports_to_cycle_is_broken_at_the_earliest_first_mail_not_the_first_name(self):
+        """Cards zeta and alpha report to each other; zeta mails first. zeta is the root (level 0), though alpha sorts first (LOW-10, the relay's addition).
+
+        @interacts  writes two cards and two messages; loads tc and report.py.
+        @deps       report.extract.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            for name, other, number, offset in (("zeta", "alpha", 1, 0), ("alpha", "zeta", 2, fixture.HOUR)):
+                (root.path / "cards").mkdir(exist_ok=True)
+                (root.path / "cards" / f"{name}.json").write_text('{"reports_to": "%s"}' % other, encoding="utf-8")
+                box = root.path / "mail" / f"to-{other}"
+                (box / "read").mkdir(parents=True, exist_ok=True)
+                (box / f"{number:06d}-from-{name}.md").write_text(
+                    f"# #{number} from {name} to {other}, {fixture.at(offset)}\n\nFYI\n", encoding="utf-8")
+            tc, report = modules_for(root)
+            levels = {s.name: s.level for s in report.extract(tc).sessions}
+            self.assertEqual(levels, {"zeta": 0, "alpha": 1})
 
     def test_a_header_past_the_read_window_leaves_no_time_and_no_tag(self):
         """A header longer than MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES gives no sent time and no tag: nothing past the window is read.
@@ -251,7 +400,7 @@ class ScrubTest(unittest.TestCase):
             for spec in fixture.MESSAGES:
                 folder = root.path / "mail" / f"to-{spec.to}" / ("read" if spec.read is not None else "")
                 size = (folder / f"{spec.number:06d}-from-{spec.sender}.md").stat().st_size
-                tag, refs = report.first_line_facts(spec.body.split("\n")[0])
+                tag, refs = (None, ()) if spec.sent is None else report.first_line_facts(spec.body.split("\n")[0])
                 tag = tag if tag in report.SCRUB_TAGS or tag is None else "other"
                 want.append(report.Record(self.RANKS[spec.number], self.LABELS[spec.sender], self.LABELS[spec.to],
                                           spec.sent, spec.read, size, tag, tuple(self.RANKS[r] for r in refs)))

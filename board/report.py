@@ -47,7 +47,7 @@ ROOT.
             nothing. load_board_module reads board/serve.py and runs its
             top level (imports and constants; its main() is not run).
             scrub and render touch nothing outside their arguments.
-@deps       python3 stdlib (collections, contextlib, datetime, html, json,
+@deps       python3 stdlib (collections, datetime, html, json,
             math, os, pathlib, re, stat, types); the tc module its caller
             passes; board/serve.py (hierarchy, card_text).
 @complexity extract O(n log n + T + t log t + R + c) over n inboxes, T
@@ -72,7 +72,6 @@ ROOT.
 """
 
 import collections
-import contextlib
 import datetime
 import html
 import json
@@ -97,6 +96,15 @@ TAG_PATTERN = re.compile(r"[A-Z][A-Z0-9-]{1,23}")
 TAG_COLON = ":"
 # A reference to an earlier message on a first line: `#` and its number.
 REF_PATTERN = re.compile(r"#([0-9]+)")
+# The most digits a #N may have to count as a reference (fix round 1,
+# LOW-1). A billion messages is far past any mailbox's history, and a
+# longer run of digits, which Python refuses to turn into an int past 4300
+# of them, is no reference: it is passed by, never a traceback.
+REF_MAX_DIGITS = 9
+# A line that starts this way is a tc header, whether or not its time
+# parses; only after one is the next line a first body line (fix round 1,
+# LOW-6: C7 reads nothing past a body's first line).
+TC_HEADER_START = re.compile(r"# #[0-9]+ from ")
 # A message's header line, as tc's publish_message writes it: `# #<n> from
 # <sender> to <to>, <time>[, <note>]`. Only the time is kept; the note is
 # matched so a header that carries one still parses, and is never kept.
@@ -116,6 +124,9 @@ SCRUB_TAGS = frozenset(("ANSWER", "FYI", "QUESTION", "PLAN", "PLAN-READY", "PLAN
                         "PLAN-EDITED", "PLAN-REVIEWED", "CORRECTION", "HEADS-UP", "MERGE", "REVIEW",
                         "STATUS", "BLOCKED", "DONE", "BREACH"))
 OTHER_TAG = "other"
+# A stand-in name that sorts in first-mail order, zero-padded so text
+# order is number order for any mailbox (first_mail_levels).
+FIRST_MAIL_KEY = "{place:012d}"
 # What a scrubbed name is called when C5 gives it no role (C7): a name
 # with no inbox and no card.
 NO_ROLE_LABEL = "session"
@@ -359,10 +370,14 @@ def first_line_facts(line):
     off, when it fullmatches TAG_PATTERN. Nothing else of the line is
     returned or kept.
 
+    A #N of more than REF_MAX_DIGITS digits is no reference.
+
     @interacts  none; string work only.
-    @deps       re; TAG_PATTERN, TAG_COLON, REF_PATTERN.
-    @complexity O(c) over c characters of the line, at most
-                TAG_READ_MAX_BYTES of them from a message.
+    @deps       re; TAG_PATTERN, TAG_COLON, REF_PATTERN, REF_MAX_DIGITS.
+    @complexity O(c) over c characters of the line: from a message, the
+                rest of the read window after the header, at most
+                MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES less the
+                header's own bytes (about 4,300).
     @alloc      the token and a tuple of ints, returned; the split, freed
                 on return.
     """
@@ -371,7 +386,8 @@ def first_line_facts(line):
     if token.endswith(TAG_COLON):
         token = token[:-len(TAG_COLON)]
     tag = token if TAG_PATTERN.fullmatch(token) else None
-    refs = tuple(dict.fromkeys(int(number) for number in REF_PATTERN.findall(line)))
+    refs = tuple(dict.fromkeys(int(number) for number in REF_PATTERN.findall(line)
+                               if len(number) <= REF_MAX_DIGITS))
     return tag, refs
 
 
@@ -380,32 +396,42 @@ def parse_head(data):
 
     The header is the first line; it parses only when it ends inside
     `data`, is UTF-8 and fullmatches HEADER_PATTERN with a time that has
-    its offset. One blank line after it is passed over, and the next line
-    is the first body line (first_line_facts), cut where `data` ends.
+    its offset. Only when it is a tc header (TC_HEADER_START, its time
+    parsed or not) is one blank line after it passed over and the next
+    line read as the first body line (first_line_facts), cut where `data`
+    ends; any other first line gives no tag and no refs (fix round 1,
+    LOW-6).
 
     @interacts  none; bytes and string work only.
-    @deps       datetime; HEADER_PATTERN, first_line_facts.
+    @deps       datetime; HEADER_PATTERN, TC_HEADER_START, first_line_facts.
     @complexity O(b) over b bytes of `data`, at most
                 MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES.
     @alloc      the decoded lines, freed on return; the facts, returned.
     """
     header, newline, rest = data.partition(b"\n")
+    if not newline:
+        return None, None, ()
+    try:
+        line = header.decode("utf-8")
+    except ValueError:
+        return None, None, ()
+    if TC_HEADER_START.match(line) is None:
+        return None, None, ()
     sent = None
-    if newline:
+    found = HEADER_PATTERN.fullmatch(line)
+    if found is not None:
         try:
-            found = HEADER_PATTERN.fullmatch(header.decode("utf-8"))
-            if found is not None:
-                sent = datetime.datetime.fromisoformat(found.group("sent"))
+            sent = datetime.datetime.fromisoformat(found.group("sent"))
         except ValueError:
             sent = None
     if rest.startswith(b"\n"):
         rest = rest[1:]
-    tag, refs = first_line_facts(rest.partition(b"\n")[0].decode("utf-8", "replace") if newline else "")
+    tag, refs = first_line_facts(rest.partition(b"\n")[0].decode("utf-8", "replace"))
     return sent, tag, refs
 
 
 def read_head(name, folder_fd, limit):
-    """At most `limit` bytes from the start of the message `name` in the folder open at `folder_fd`; None when it is not a regular file or cannot be read.
+    """At most `limit` bytes from the start of the message `name` in the folder open at `folder_fd`; None when it is not a regular file or cannot be read. Raises FileNotFoundError when nothing has the name (a `tc read` moved it since the listing: the walk looks in read/, LOW-9).
 
     Opened by name in the folder's descriptor (D35), never through a link
     and never blocking, and checked by fstat before any read.
@@ -417,6 +443,8 @@ def read_head(name, folder_fd, limit):
     """
     try:
         fd = os.open(name, HEAD_OPEN_FLAGS, dir_fd=folder_fd)
+    except FileNotFoundError:
+        raise
     except OSError:
         return None
     try:
@@ -454,7 +482,13 @@ def parse_time(text):
 
 
 def sent_order(record):
-    """The sort key of sent order: messages with a sent time by that time, then by number; those with none last, by number.
+    """The sort key of sent order: messages with a sent time by that time, then by number, then by size; those with none last, by number, then size.
+
+    Never by a name (fix round 1, REC-3): on a scrubbed page the ranks,
+    and the first-mail order the labels follow, would otherwise tell
+    which real name sorts first. Two messages at one time with one number
+    and one size keep the walk's order (inboxes by name): a known
+    residual, rare, as only a hand-made twin can make it.
 
     @interacts  none.
     @deps       none.
@@ -462,9 +496,9 @@ def sent_order(record):
     @alloc      one tuple.
     """
     if record.sent is None:
-        return (1, 0, record.number, record.sender, record.recipient)
+        return (1, 0, record.number, record.size)
     when = record.sent.timestamp() if isinstance(record.sent, datetime.datetime) else record.sent
-    return (0, when, record.number, record.sender, record.recipient)
+    return (0, when, record.number, record.size)
 
 
 def walk_messages(tc, head_limit):
@@ -476,68 +510,118 @@ def walk_messages(tc, head_limit):
     (tc.message_files: regular files only, never a link). A name that is
     not a mailbox name under C0 is passed by. A message in read/ with the
     same recipient, number and sender as one in the inbox counts once, as
-    the inbox copy (serve.py's rule). Each read/ that holds messages has
-    its .read-times read once, through tc.read_times.
+    the inbox copy (serve.py's rule). Each read/'s .read-times is read
+    once, through tc.read_times, when read/ holds messages or a message
+    moved into it mid-walk.
+
+    Fix round 1 (Claude Opus 5.5, unreviewed): LOW-2, each inbox's two
+    descriptors close as soon as that inbox is walked, so a mailbox of
+    many names never runs out of descriptors; LOW-9, a message the inbox
+    listed that is gone by its read (a `tc read` moved it) is read once
+    more by its name in read/, with its read time, never counted as a
+    header that did not parse.
 
     @interacts  see the module block's extract.
     @deps       contextlib, os; tc.open_mail, tc.open_inbox, tc.unpin,
                 tc.message_files, tc.read_times, tc.valid_name,
                 tc.MESSAGE_NAME_PATTERN; read_head, parse_head, parse_time,
                 Record.
-    @complexity O(n log n + T + t + R) over n inboxes, T names listed, t
-                messages read (head_limit bytes each) and R record bytes.
-    @alloc      one Record per message, returned; two descriptors per
-                inbox, closed before return.
+    @complexity O(n log n + T + t log t + R) over n inboxes, T names
+                listed, t messages read (head_limit bytes each, plus a
+                sort of each folder's names in message_files) and R
+                record bytes.
+    @alloc      one Record per message, returned; mail/'s descriptor and
+                one inbox's two at a time, each closed when done with.
     """
     found, boxes, words = {}, set(), []
-    with contextlib.ExitStack() as held:
-        try:
-            mail_fd = tc.open_mail()
-        except OSError as err:
-            return [], boxes, [f"could not open {tc.MAIL} ({err.strerror})"]
-        if mail_fd is None:
-            return [], boxes, words
-        held.callback(os.close, mail_fd)
+    try:
+        mail_fd = tc.open_mail()
+    except OSError as err:
+        return [], boxes, [f"could not open {tc.MAIL} ({err.strerror})"]
+    if mail_fd is None:
+        return [], boxes, words
+    try:
         try:
             entries = sorted(entry for entry in os.listdir(mail_fd) if entry.startswith(INBOX_PREFIX))
         except OSError as err:
             return [], boxes, [f"could not list {tc.MAIL} ({err.strerror})"]
         for entry in entries:
             to = entry[len(INBOX_PREFIX):]
-            if not tc.valid_name(to):
-                continue
-            inbox = tc.open_inbox(mail_fd, to)
-            held.callback(tc.unpin, inbox.read, inbox.box)
-            if inbox.box.fd is None:
-                if inbox.box.problem is not None:
-                    boxes.add(to)
-                    words.append(inbox.box.problem)
-                continue
-            boxes.add(to)
-            for folder, pinned, in_read in ((inbox.path, inbox.box, False),
-                                            (inbox.path / READ_FOLDER, inbox.read, True)):
-                if pinned.fd is None:
-                    if pinned.problem is not None:
-                        words.append(pinned.problem)
-                    continue
-                messages, _, problem = tc.message_files(folder, pinned.fd)
-                if problem is not None:
-                    words.append(problem)
-                times, why = tc.read_times(pinned, folder) if in_read and messages else ({}, None)
-                if why is not None:
-                    words.append(why)
-                for path, st in messages:
-                    named = tc.MESSAGE_NAME_PATTERN.fullmatch(path.name)
-                    if named is None:
-                        continue
-                    number, sender = int(named.group(1)), named.group(2)
-                    if (to, number, sender) in found:
-                        continue
-                    data = read_head(path.name, pinned.fd, head_limit)
-                    sent, tag, refs = parse_head(data) if data is not None else (None, None, ())
-                    read = parse_time(times.get(path.name)) if in_read else None
-                    found[(to, number, sender)] = Record(number, sender, to, sent, read, st.st_size, tag, refs)
+            if tc.valid_name(to):
+                inbox = tc.open_inbox(mail_fd, to)
+                try:
+                    walk_inbox(tc, inbox, to, head_limit, found, boxes, words)
+                finally:
+                    tc.unpin(inbox.read, inbox.box)
+    finally:
+        os.close(mail_fd)
     return list(found.values()), boxes, words
+
+
+def walk_inbox(tc, inbox, to, head_limit, found, boxes, words):
+    """One open inbox's messages, unread then read, into `found` (keyed by recipient, number and sender), its name into `boxes`, and anything it could not read into `words`, as walk_messages says.
+
+    @interacts  lists the inbox and its read/ through their descriptors,
+                reads each message's head and read/'s record once.
+    @deps       tc.message_files, tc.read_times, tc.MESSAGE_NAME_PATTERN;
+                read_head, parse_head, parse_time, Record; READ_FOLDER.
+    @complexity O(U + u log u + R) over U names in the two folders, u
+                messages among them and R record bytes.
+    @alloc      one Record per new message, into `found`; the record's
+                map while the inbox is walked.
+    """
+    if inbox.box.fd is None:
+        if inbox.box.problem is not None:
+            boxes.add(to)
+            words.append(inbox.box.problem)
+        return
+    boxes.add(to)
+    read_path = inbox.path / READ_FOLDER
+    times = None
+
+    def read_times():
+        """read/'s record, read once, on first need: {name in read/: time text}.
+
+        @interacts  reads read/.read-times through tc.read_times, once.
+        @deps       tc.read_times.
+        @complexity O(R) over R record bytes.
+        @alloc      the map, kept for this inbox.
+        """
+        nonlocal times
+        if times is None:
+            times, why = tc.read_times(inbox.read, read_path) if inbox.read.fd is not None else ({}, None)
+            if why is not None:
+                words.append(why)
+        return times
+
+    for folder, pinned, in_read in ((inbox.path, inbox.box, False), (read_path, inbox.read, True)):
+        if pinned.fd is None:
+            if pinned.problem is not None:
+                words.append(pinned.problem)
+            continue
+        messages, _, problem = tc.message_files(folder, pinned.fd)
+        if problem is not None:
+            words.append(problem)
+        for path, st in messages:
+            named = tc.MESSAGE_NAME_PATTERN.fullmatch(path.name)
+            if named is None:
+                continue
+            number, sender = int(named.group(1)), named.group(2)
+            if (to, number, sender) in found:
+                continue
+            moved = in_read
+            try:
+                data = read_head(path.name, pinned.fd, head_limit)
+            except FileNotFoundError:
+                data = None
+                if not in_read and inbox.read.fd is not None:
+                    try:
+                        data, moved = read_head(path.name, inbox.read.fd, head_limit), True
+                    except FileNotFoundError:
+                        data = None
+            sent, tag, refs = parse_head(data) if data is not None else (None, None, ())
+            read = parse_time(read_times().get(path.name)) if moved else None
+            found[(to, number, sender)] = Record(number, sender, to, sent, read, st.st_size, tag, refs)
 
 
 def read_reports_to(tc, board):
@@ -572,6 +656,37 @@ def read_reports_to(tc, board):
     return cards
 
 
+def first_mail_levels(board, nodes, parents, records):
+    """C5 rule 5's levels for `nodes` under `parents`, with any reports_to cycle broken at the member with the earliest first mail instead of the first name in sort order (fix round 1, LOW-10, the relay's addition).
+
+    serve.py's levels_of breaks a cycle at the name that sorts first, and
+    on a scrubbed page the top node would then tell which real name sorts
+    first. So levels_of runs here over stand-in names that sort in
+    first-mail order (`records` is in sent order; a node with no mail
+    follows, by name, and is never drawn), and the levels are mapped
+    back. serve.py, and the board's own layout, are unchanged; with no
+    cycle the levels are the same either way.
+
+    @interacts  none; pure.
+    @deps       board.levels_of; FIRST_MAIL_KEY.
+    @complexity O(t + n log n + e) over t records, n nodes and e parent
+                edges.
+    @alloc      two maps of n names and the parent map in stand-ins,
+                freed on return; the levels, returned.
+    """
+    order = []
+    for record in records:
+        for name in (record.sender, record.recipient):
+            if name in nodes and name not in order:
+                order.append(name)
+    order += sorted(set(nodes) - set(order))
+    key = {name: FIRST_MAIL_KEY.format(place=place) for place, name in enumerate(order)}
+    back = {stand: name for name, stand in key.items()}
+    levels = board.levels_of(set(key.values()), {key[child]: (key[parent], source)
+                                                 for child, (parent, source) in parents.items()})
+    return {back[stand]: level for stand, level in levels.items()}
+
+
 def extract(tc, board=None):
     """The mailbox's facts (C7): a Mailbox of records in sent order, sessions in first-mail order with C5's roles, the count of headers that did not parse, and words for stderr.
 
@@ -585,8 +700,8 @@ def extract(tc, board=None):
 
     @interacts  see the module block's extract.
     @deps       walk_messages, read_reports_to, load_board_module,
-                sent_order; Mailbox, Session; tc.MESSAGE_HEADER_MAX_BYTES;
-                TAG_READ_MAX_BYTES.
+                sent_order, first_mail_levels; Mailbox, Session;
+                tc.MESSAGE_HEADER_MAX_BYTES; TAG_READ_MAX_BYTES.
     @complexity see the module block.
     @alloc      see the module block.
     """
@@ -602,7 +717,8 @@ def extract(tc, board=None):
         for one, other in ((record.sender, record.recipient), (record.recipient, record.sender)):
             mine = partners.setdefault(one, {})
             mine[other] = mine.get(other, 0) + 1
-    _, roles, levels = board.hierarchy(nodes, cards, partners)
+    parents, roles, levels = board.hierarchy(nodes, cards, partners)
+    levels = first_mail_levels(board, nodes, parents, records)
     sessions = {}
     for record in records:
         for name in (record.sender, record.recipient):
@@ -639,6 +755,13 @@ def scrub(page):
     - Numbers become ranks from 1 in sent order (the records' order), and
       each #N reference the rank of the first message numbered N; a
       reference to no message here is dropped.
+
+    No order on the page follows real name order (fix round 1, LOW-10 and
+    REC-3): extract breaks a reports_to cycle at the earliest first mail
+    (first_mail_levels), and sent order breaks ties by number and size
+    (sent_order). Known residual: two messages at one time with one
+    number and one size, which only a hand-made twin makes, keep the
+    walk's order, inboxes by name.
 
     @interacts  none; pure.
     @deps       datetime; Page, Record, Session, SCRUB_TAGS, OTHER_TAG,
