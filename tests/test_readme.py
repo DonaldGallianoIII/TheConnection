@@ -101,7 +101,7 @@ settled by a2 for the owner, 2026-10-17).
 @complexity Parsing: O(L) over L README lines (under a thousand), once
             per test. Matching one command: one regex over its output,
             O(o * e) at worst over o output bytes and e expected lines
-            (a dozen each). A chain runs c commands (9 in the quick
+            (a dozen each). A chain runs c commands (10 in the quick
             start chain, 4 in the ssh chain, 1 for the board) plus at
             most 5 setup steps, each one child; the quick start chain
             waits one tc wait poll (5 s) for a wake.
@@ -181,6 +181,9 @@ SAMPLE_PATTERNS = {
 BOARD_PORT = re.compile(r"127\.0\.0\.1:(\d+)/")
 
 # The chains (test methods of ReadmeBlocksTest), by the name RUN uses.
+# RECORD (Claude Opus 5.5, unreviewed): the README shows `read ...`, which the
+# mapping rule matches to any text after `read `; this pins a time with its offset.
+READ_TIME_LINE = r"\Aread \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\Z"
 QUICK_START = "quick start, local, codex, cards and health"
 SSH_OUTBOUND = "ssh outbound"
 BOARD = "the live board"
@@ -190,6 +193,7 @@ RUN = {
     "$ ~/TheConnection/tc health": QUICK_START,
     "$ tc join b --account work --reports-to a": QUICK_START,
     "$ tc read a": QUICK_START,
+    "$ tc log": QUICK_START,  # RECORD (Claude Opus 5.5, unreviewed): the record-of-work section
     "$ tc health": QUICK_START,
     '$ tc send --from a --to newname "first mail"': QUICK_START,
     '$ tc send --from a --to cx "please review the parser"': QUICK_START,
@@ -743,7 +747,8 @@ class ReadmeBlocksTest(unittest.TestCase):
         Order: the relay prompt's `tc join a` and `tc wait a` (setup);
         b's join and background wait; the quick start's health (both
         pids); b's send, which wakes a's wait with the MAIL line the
-        README quotes; a's read; JOIN.md step 4's status post (setup);
+        README quotes; a's read; the log, its read line a real time
+        (RECORD); JOIN.md step 4's status post (setup);
         the health section's block; the new-inbox send; the Codex join
         (its command from the prose, its output equal to its block) and
         the send that rings it; far-b's card as ssh step 6 writes it
@@ -758,7 +763,7 @@ class ReadmeBlocksTest(unittest.TestCase):
                     harness's fake codex, asserted called once.
         @deps       Story, shown, setup_step, assert_ran_all, prose,
                     expected_pattern; _root.TcRoot.
-        @complexity 14 tc children, and one wait for a wake (one 5 s
+        @complexity 16 tc children, and one wait for a wake (one 5 s
                     poll).
         @alloc      one TcRoot, removed on exit.
         """
@@ -776,6 +781,11 @@ class ReadmeBlocksTest(unittest.TestCase):
                 self.assertEqual((relay.returncode, printed(out, err)),
                                  (EXIT_OK, prose(r"a's wait prints `([^`]+)` and exits 0")))
             self.shown(story, "$ tc read a")
+            self.shown(story, "$ tc log")  # RECORD (Claude Opus 5.5, unreviewed): a's read is recorded
+            with self.subTest(claim="tc log's read line is the read time, with its offset"):
+                code, out, err = story.run(["tc", "log"])
+                self.assertEqual(code, EXIT_OK, printed(out, err))
+                self.assertRegex(out.splitlines()[1], READ_TIME_LINE)
             self.setup_step(story, ["tc", "status", "b", STATUS_WORDS])  # JOIN.md step 4: post status
             self.shown(story, "$ tc health")
             self.shown(story, '$ tc send --from a --to newname "first mail"')
