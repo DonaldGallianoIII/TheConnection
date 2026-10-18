@@ -10,3 +10,5 @@ audits/
 /cards/
 /outbox/
 /.shared
+# Claude Opus 5.5 (the QA lane agent), unreviewed. tc qa's runs (C8): tokens and logs.
+/qaruns/

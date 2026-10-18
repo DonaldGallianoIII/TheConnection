@@ -414,7 +414,7 @@ class ScrubTest(unittest.TestCase):
     LABELS = {"annika": "orchestrator-1", "bertil": "worker-1", "corwin": "worker-2", "dagny": "session-1"}
 
     def test_the_allow_list_is_c7s(self):
-        """SCRUB_TAGS holds exactly C7's seventeen tags.
+        """SCRUB_TAGS holds exactly C7's eighteen tags (QA since D45; pause QA-2).
 
         @interacts  loads report.py.
         @deps       report.SCRUB_TAGS.
@@ -424,7 +424,7 @@ class ScrubTest(unittest.TestCase):
         report = _root.load_source("board_report", REPORT_PATH)
         self.assertEqual(set(report.SCRUB_TAGS), {
             "ANSWER", "FYI", "QUESTION", "PLAN", "PLAN-READY", "PLAN-CHECK", "PLAN-EDIT", "PLAN-EDITED",
-            "PLAN-REVIEWED", "CORRECTION", "HEADS-UP", "MERGE", "REVIEW", "STATUS", "BLOCKED", "DONE", "BREACH"})
+            "PLAN-REVIEWED", "CORRECTION", "HEADS-UP", "MERGE", "REVIEW", "STATUS", "BLOCKED", "DONE", "BREACH", "QA"})
 
     def test_names_tags_times_and_numbers_become_labels_other_elapsed_and_ranks(self):
         """Every scrubbed record: rank, role label by first mail, elapsed seconds, the size, an allow-listed tag or `other`, refs as ranks.

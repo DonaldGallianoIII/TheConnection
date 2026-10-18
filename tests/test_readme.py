@@ -53,6 +53,17 @@ How a command runs:
 - The board block runs `python3 board/serve.py --port 0`: the README's
   next line allows `--port`, and port 0 cannot collide with a live board
   on 8780. The port its line prints must answer live.html with 200.
+- The QA blocks (QA, Claude Opus 5.5, unreviewed) run as one chain with
+  board/qa.py, qa.html, qa.js and serve.py copied beside the copy of
+  tc, HOME set to the root's temp folder (a made-up shop's log and
+  checklist under ~/shopfront there): each `tc qa run` is started in
+  the background with `--port 0`, its first line compared with the
+  README's; the session's run is ended by `tc qa stop` (setup, as the
+  prose says the session does); during the person's run the curl line
+  runs for real in /bin/sh from the folder tc is in (skipped, with words,
+  where curl is missing), reading the token from run.json on stdin (QA
+  fix round 1, LOW-17), its port taken from the run's printed line, then
+  the note and the stop. A mail must carry the posted event.
 - The report block (DASH, Claude Opus 5.5, unreviewed) runs with
   board/report.py and board/serve.py copied beside the copy of tc, as a
   clone has them, with HOME and its working folder set to the root's
@@ -79,7 +90,10 @@ fails.
    numbers in those three places, and `N Claude Code · M Codex` any two
    counts: they are this machine's, not tc's.
 9. `127.0.0.1:8780/` matches `127.0.0.1:<any port>/` (the board block's
-   --port 0, above), and that port is then asked for live.html.
+   --port 0, above), and that port is then asked for live.html. QA
+   (Claude Opus 5.5, unreviewed): `127.0.0.1:8790/` too, for the QA
+   blocks, which run with `--port 0` as the README's "add --port"
+   allows.
 
 The exit table test (item 2) parses the README's "Exit codes" table and
 contracts.md's: the same codes, 0 to 11, in order, each meaning holding
@@ -93,7 +107,11 @@ settled by a2 for the owner, 2026-10-17).
             unset (its mailbox is that root); runs ../tc through tests/_root.py
             under a TC_ROOT of its own for background waits and the far
             side's gate; starts board/serve.py on 127.0.0.1, port 0, and
-            asks it for live.html. Writes a fake nvidia-smi, a loopback
+            asks it for live.html. QA (Claude Opus 5.5, unreviewed): copies
+            board/qa.py, qa.html, qa.js and serve.py beside the QA chain's
+            copy of tc, starts two tc qa run children (port 0), and runs
+            curl once against the run's endpoint on 127.0.0.1.
+            Writes a fake nvidia-smi, a loopback
             ssh wrapper and the harness's fakes inside the root's temp
             folder. Reads /proc/locks to prove a listener. Every child
             is killed by its own pid in the harness's teardown. Loads tc
@@ -175,7 +193,7 @@ PLACEHOLDER = re.compile(
     r"|(?P<age>\b\d+s ago)"
     r"|(?P<load>load \d+(?:\.\d+)? / \d+ cores · mem free \d+(?:\.\d+)?%)"
     r"|(?P<sessions>\b\d+ Claude Code · \d+ Codex)"
-    r"|(?P<port>127\.0\.0\.1:8780/)")
+    r"|(?P<port>127\.0\.0\.1:(?:8780|8790)/)")  # QA (Claude Opus 5.5, unreviewed): 8790, the QA blocks
 # What each placeholder but ellipsis, checkout, login and pid becomes.
 SAMPLE_PATTERNS = {
     "token": BOARD_TOKEN,
@@ -202,6 +220,29 @@ REPORT_FILES = ("board/report.py", "board/serve.py")
 # The words a scrubbed page carries, and the warning only a real one does (C7).
 SCRUBBED_MARK = "Scrubbed:"
 REAL_WARNING = "Holds real session names and times."
+# QA (Claude Opus 5.5, unreviewed): the QA streaming section's chain, and
+# what it copies beside the copy of tc: tc qa loads board/qa.py, which
+# serves qa.html and qa.js and loads board/serve.py.
+QA_STREAMING = "qa streaming"
+QA_FILES = ("board/qa.py", "board/qa.html", "board/qa.js", "board/serve.py")
+QA_SESSION_BLOCK = ("$ tc qa run --to a --log ~/shopfront/app.log --level warn    "
+                    "# a session starts this in the background")
+QA_PERSON_BLOCK = "$ tc qa run --to a --log ~/shopfront/app.log --checklist ~/shopfront/checklist.md"
+QA_CURL_BLOCK = ("$ python3 -c 'import glob, json; print(\"X-TC-Token:\", json.load(open(sorted(glob.glob("
+                 "\"qaruns/*/run.json\"))[-1]))[\"token\"])' | curl -s -H @- -d '{\"level\": \"error\", \"tag\": "
+                 "\"payments\", \"text\": \"card declined\"}' http://127.0.0.1:8790/event")
+# The made-up shop's checklist the person's run reads.
+QA_CHECKLIST = "# Shopfront walk\n\n## Cart\n\n- [ ] Add a mug to the cart\n- [ ] Pay with the test card\n"
+# Reads the token and the port back out of a run's printed line.
+QA_URL = re.compile(r"127\.0\.0\.1:(?P<port>\d+)/qa\.html#token=(?P<token>[A-Za-z0-9_-]+)")
+# The README's own port in its QA blocks, replaced by a run's. QA fix
+# round 1 (Claude Opus 5.5, unreviewed): LOW-17, the curl line reads the
+# token from run.json on stdin, so the chain runs it whole in sh, from the
+# folder tc is in.
+QA_README_PORT = "127.0.0.1:8790"
+# A stopped run keeps answering for its linger (board/qa.py
+# LINGER_SECONDS, 6 s) before it exits; room for a loaded machine.
+QA_EXIT_CEILING_SECONDS = 20
 
 # Every command block a chain runs, and which chain.
 RUN = {
@@ -218,6 +259,9 @@ RUN = {
     '$ tc send --from homebox-a --to far-c "first"': SSH_OUTBOUND,
     "$ python3 board/serve.py": BOARD,
     "$ tc report ~/history.html --scrub": REPORT,  # DASH (Claude Opus 5.5, unreviewed)
+    QA_SESSION_BLOCK: QA_STREAMING,  # QA (Claude Opus 5.5, unreviewed): the three QA streaming blocks
+    QA_PERSON_BLOCK: QA_STREAMING,
+    QA_CURL_BLOCK: QA_STREAMING,
 }
 
 # Every command block no test can run, with the reason.
@@ -964,6 +1008,84 @@ class ReadmeBlocksTest(unittest.TestCase):
                 self.assertIn(SCRUBBED_MARK, page)
                 self.assertNotIn(REAL_WARNING, page)
             self.assert_ran_all(story, REPORT)
+
+    # QA (Claude Opus 5.5, unreviewed): the QA streaming section's three blocks.
+    def qa_run(self, story, key):
+        """Start a QA block's `tc qa run` in the background with --port 0 and compare its first line with the README's: (Popen, token, port).
+
+        @interacts  one child (the harness's start, HOME set to the root's
+                    temp folder); reads its first stdout line within
+                    BOARD_LINE_CEILING_SECONDS.
+        @deps       readme_blocks, expected_pattern; select, shlex, sys;
+                    QA_URL, ANY_PORT.
+        @complexity O(1).
+        @alloc      one child, killed in the root's teardown.
+        """
+        block = readme_blocks(README.read_text(encoding="utf-8"))[key]
+        command, lines = block.commands[0]
+        story.ran.add((key, 0))
+        words = [str(story.home) + w[1:] if w.startswith("~/") else w for w in shlex.split(command, comments=True)]
+        self.assertEqual(words[:3], ["tc", "qa", "run"])
+        proc = story.root.start(argv=[sys.executable, str(story.exe(words[0])), *words[1:], "--port", ANY_PORT],
+                                env={"HOME": str(story.home)})
+        ready, _, _ = select.select([proc.stdout], [], [], BOARD_LINE_CEILING_SECONDS)
+        self.assertTrue(ready, f"tc qa run printed nothing in {BOARD_LINE_CEILING_SECONDS} s")
+        line = proc.stdout.readline().rstrip("\n")
+        self.assertIsNotNone(re.fullmatch(expected_pattern(lines[:1], story), line),
+                             f"\nthe README shows:\n{lines[0]}\n\ntc qa run printed:\n{line}")
+        self.assertEqual(lines[1:], [ELLIPSIS], "the README shows the rest of a run's output as ...")
+        found = QA_URL.search(line)
+        return proc, found["token"], found["port"]
+
+    def test_the_qa_blocks_start_runs_post_note_and_stop(self):
+        """The session's background run starts and is stopped; the person's run starts, the curl line posts, the note lands, the stop ends it; each prints what the README shows.
+
+        Must reject other words on any line, a curl answer other than the
+        README's, and a run that does not exit 0 after its stop.
+
+        @interacts  one TcRoot; copies four board files; tc children, two
+                    tc qa run children, one curl child.
+        @deps       Story, setup_step, qa_run, expected_pattern, printed,
+                    assert_ran_all; shutil, subprocess.
+        @complexity a dozen children; two runs' lingers.
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            story = Story(root)
+            for name in QA_FILES:
+                (root.path / name).parent.mkdir(exist_ok=True)
+                shutil.copyfile(REPO / name, root.path / name)
+            story.cwd = story.home = root.base
+            shop = root.base / "shopfront"
+            shop.mkdir()
+            (shop / "app.log").write_text("", encoding="utf-8")
+            (shop / "checklist.md").write_text(QA_CHECKLIST, encoding="utf-8")
+            self.setup_step(story, ["tc", "join", "a", "--account", "work"], CLAUDE_ENV)
+            session, _, _ = self.qa_run(story, QA_SESSION_BLOCK)
+            self.setup_step(story, ["tc", "qa", "stop"])
+            session.communicate(timeout=QA_EXIT_CEILING_SECONDS)
+            self.assertEqual(session.returncode, EXIT_OK)
+            person, token, port = self.qa_run(story, QA_PERSON_BLOCK)
+            blocks = readme_blocks(README.read_text(encoding="utf-8"))
+            command, lines = blocks[QA_CURL_BLOCK].commands[0]
+            story.ran.add((QA_CURL_BLOCK, 0))
+            with self.subTest(block=f"README.md:{blocks[QA_CURL_BLOCK].start}", command=command):
+                if shutil.which("curl") is None:
+                    self.skipTest("curl is not on this machine; the endpoint's own tests post the same JSON")
+                self.assertNotIn(token, command)
+                line = command.replace(QA_README_PORT, f"127.0.0.1:{port}")
+                done = subprocess.run(["/bin/sh", "-c", line], capture_output=True, text=True, cwd=root.path,
+                                      timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS)
+                self.assertEqual(done.returncode, EXIT_OK, done.stderr)
+                self.assertIsNotNone(re.fullmatch(expected_pattern(lines, story), printed(done.stdout, done.stderr)),
+                                     f"the README shows {lines}, curl printed {done.stdout!r}")
+            self.shown(story, QA_PERSON_BLOCK, first=1)
+            person.communicate(timeout=QA_EXIT_CEILING_SECONDS)
+            self.assertEqual(person.returncode, EXIT_OK)
+            if shutil.which("curl") is not None:
+                mails = [p.read_text(encoding="utf-8") for p in (root.path / "mail" / "to-a").glob("*.md")]
+                self.assertTrue(any("post error payments: card declined" in m for m in mails))
+            self.assert_ran_all(story, QA_STREAMING)
 
 
 def exit_table(text, lead):

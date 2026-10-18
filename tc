@@ -40,6 +40,10 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
   outbox/<user>/.rang-<name>               that user's own last ring of codex name <name>, its mtime the time, 0600 (D36)
   outbox/.origin-token                     this mailbox's random origin token (D25)
   mail/.origins/<user>/<key-name>/<id>     an ssh message's origin id, filed as it lands, empty (D25, D33)
+  qaruns/.live.lock                        held by the live `tc qa run` for its life: one live run per mailbox (C8)
+  qaruns/<run-id>/                         one QA run, 0700: run.json (0600: port, token, pid, to), events.jsonl
+                                           (every event, redacted), results.md (the checklist with its marks)
+                                           (QA, Claude Opus 5.5, unreviewed)
 
 @interacts  writes mail/, status/, cards/ and outbox/ under ROOT. Its one
             way off the machine is `ssh` (SSH S1, Claude Opus 5.5,
@@ -288,12 +292,27 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             TAG_READ_MAX_BYTES of each file), each read/'s read-time
             record and each card's reports_to; and writes one page, OUT:
             its folder opened once and judged from that descriptor (one
-            inside mail/, status/, cards/ or outbox/ refuses, and so does
+            inside mail/, status/, cards/, outbox/ or qaruns/ (QA fix round 1)
+            refuses, and so does
             a name at ROOT's top level that is one of tc's own or starts
             with a dot, even with --force, fix round 2), then a .tmp
             by name in it, hard-linked to OUT's name (renamed over it with
             --force) and the .tmp's name removed (fix round 1). It writes
             nothing in the mailbox.
+            QA (Claude Opus 5.5, unreviewed): C8, D45. `qa` loads
+            board/qa.py (and through it board/serve.py) from tc's own
+            folder, from source, in memory, writing no bytecode. `qa run`
+            makes ROOT/qaruns/ and holds an flock on qaruns/.live.lock for
+            its life; makes qaruns/<id>/ with run.json, events.jsonl and
+            results.md; binds one socket on 127.0.0.1 (the endpoint and
+            the checklist page, behind C6's Host check and a token from
+            secrets); follows the --log files it is given (reads only)
+            and reads the --checklist and --redact files (never writes
+            them); and sends its mail from the name qa through the router,
+            as send does. It sets SIGINT and SIGTERM handlers while it
+            runs. `qa note` and `qa stop` read run.json and ask the run
+            over loopback; a run.json naming a dead pid is rewritten as
+            ended. No event text reaches a shell, a tc argument or a path.
             R10 (Claude Opus 5.5, unreviewed): D43, C4's "Only your own
             or the init user's ssh card". Under a shared mailbox the ssh
             route, in send and in flush, follows a card only when the
@@ -367,6 +386,10 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             records once per session), plus one compile of report.py and
             serve.py and a page O(t) bytes (DASH, Claude Opus 5.5,
             unreviewed; the s x t term, fix round 1).
+            qa run: one compile of qa.py and serve.py, then per tick
+            (QA's TICK_SECONDS) O(b) over the log bytes read, and one
+            message per batch mailed (QA, Claude Opus 5.5, unreviewed);
+            qa note and stop O(r) over r runs ever, plus one request.
             health O(p + k + n log n + M + m log m + c): p processes on
             the machine (hundreds), k lines in /proc/locks (tens), n
             mailbox names and c cards (a few dozen each), M names in
@@ -432,7 +455,12 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             per key name, made on first use and kept (SSH fix round 1,
             D33); mail/.origins/ itself made by init on a shared mailbox
             and by the first filing on a private one, kept (P3 fix round
-            1c, Claude Opus 5.5, unreviewed: D36 (3)).
+            1c, Claude Opus 5.5, unreviewed: D36 (3)). QA (Claude Opus 5.5,
+            unreviewed): one folder per QA run under ROOT/qaruns/, with
+            its run.json, events.jsonl (capped by qa.py's
+            EVENTS_FILE_MAX_BYTES) and results.md, kept; qaruns/.live.lock,
+            kept. A running `qa run` holds that lock, one socket, one
+            thread per request and its run's batch for its life.
             Nothing held in memory past one command. P3 fix round 1a
             (Claude Opus 5.5, unreviewed): D35. A command holds each inbox
             it acts on open, two descriptors, until it is done with it
@@ -465,8 +493,10 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             each wait exit record write, for its .tmp's name
             (write_wait_exit). DASH (Claude Opus 5.5, unreviewed):
             secrets.token_hex(REPORT_TMP_NONCE_BYTES) once per tc report
-            run, for its page's .tmp name (publish_report). Nothing else
-            draws randomness.
+            run, for its page's .tmp name (publish_report). QA (Claude Opus
+            5.5, unreviewed): board/qa.py draws secrets for each run's
+            token, run id and whole-file .tmp names (its own @rng).
+            Nothing else draws randomness.
 """
 
 import argparse
@@ -4431,6 +4461,8 @@ def cmd_send(args):
     @alloc      the body string, freed on exit; whatever the route keeps.
     """
     require_names(args.sender, args.to)  # CARDS R1 (Claude Opus 5.5, unreviewed)
+    if getattr(args, "origin", None) is None:  # QA fix round 2: a far route's send (--origin) may carry qa
+        refuse_reserved(args.sender)  # QA fix round 1 (Claude Opus 5.5, unreviewed): D46, qa is the runs' own sender
     # CARDS R3 (Claude Opus 5.5, unreviewed): size, then the card, then the route.
     body = read_body(args.message)
     if not body.strip():
@@ -5915,7 +5947,8 @@ REPORT_BOARD_MISSING_WORDS = ("tc report: no board/serve.py at {source} ({why}).
                               "has it. Nothing was written.")
 # C7, pause DASH-2 as a2 settled it: a page never lands in the mailbox.
 REPORT_INSIDE_WORDS = ("tc report: {folder} is inside the mailbox ({top}), and tc report writes nothing in the "
-                       "mailbox. Name a file outside mail/, status/, cards/ and outbox/; ROOT's own folder is fine.")
+                       "mailbox. Name a file outside mail/, status/, cards/, outbox/ and qaruns/; ROOT's own folder "
+                       "is fine.")
 # Fix round 2 (Claude Opus 5.5, unreviewed): LOW-4, as the relay ruled it
 # into C7. tc's own entries at ROOT's top level, which a page must never
 # replace, even with --force: the shared-mailbox marker, the four mailbox
@@ -5952,15 +5985,15 @@ def report_time(text):
 
 
 def report_inside(folder):
-    """The resolved mail/, status/, cards/ or outbox/ that the resolved folder `folder` is, or is under; None when it is none of them (C7).
+    """The resolved mail/, status/, cards/, outbox/ or qaruns/ (QA fix round 1, LOW-24) that the resolved folder `folder` is, or is under; None when it is none of them (C7).
 
-    @interacts  resolves MAIL, STATUS, CARDS and ROOT/outbox
+    @interacts  resolves MAIL, STATUS, CARDS, ROOT/outbox and ROOT/qaruns
                 (os.path.realpath).
-    @deps       os; MAIL, STATUS, CARDS, ROOT, OUTBOX_NAME.
-    @complexity O(1): four realpaths.
-    @alloc      four short strings, freed on return.
+    @deps       os; MAIL, STATUS, CARDS, ROOT, OUTBOX_NAME, QA_RUNS_NAME.
+    @complexity O(1): five realpaths.
+    @alloc      five short strings, freed on return.
     """
-    for top in (MAIL, STATUS, CARDS, ROOT / OUTBOX_NAME):
+    for top in (MAIL, STATUS, CARDS, ROOT / OUTBOX_NAME, ROOT / QA_RUNS_NAME):  # QA fix round 1: LOW-24
         inside = os.path.realpath(top)
         if folder == inside or folder.startswith(inside.rstrip(os.sep) + os.sep):
             return inside
@@ -6163,6 +6196,81 @@ def cmd_report(args):
         os.close(folder_fd)
     print(f"wrote {printable(os.path.join(real, out.name))}: {summary}. Mailbox {printable(ROOT)}, "
           f"{ROOT_FROM_WORDS[ROOT_FROM]}.")
+
+
+# ---------- qa: a QA walk streamed to a session as mail (C8, D45) ----------
+# QA (Claude Opus 5.5, unreviewed): tc qa. The run, its endpoint and its
+# page live in board/qa.py beside tc, loaded here from source; tc keeps
+# only the command line.
+# Where tc qa finds its code, from the folder tc's own file is in.
+QA_SOURCE = pathlib.Path("board") / "qa.py"
+# The levels an event may carry, lowest first (C8's record).
+QA_LEVELS = ("debug", "info", "warn", "error")
+# The endpoint's default port: beside the board's 8780, so the two can run
+# at once; --port moves it, and 0 lets the system pick.
+QA_DEFAULT_PORT = 8790
+QA_MISSING_WORDS = ("tc qa: no board/qa.py at {source} ({why}). tc qa needs the board/ folder beside tc, as a "
+                    "full checkout has it. Nothing was started.")
+# QA fix round 1 (Claude Opus 5.5, unreviewed): D46. The name every QA mail
+# is from (board/qa.py's QA_SENDER), reserved: join, card and send --from
+# refuse it, so a real session is never mistaken for a run.
+QA_SENDER_NAME = "qa"
+# Where tc qa keeps its runs under ROOT (board/qa.py's QARUNS_NAME); tc
+# report never writes there (QA fix round 1, LOW-24).
+QA_RUNS_NAME = "qaruns"
+RESERVED_NAME_WORDS = ('tc: "{name}" is reserved: tc qa\'s runs send their mail from it, so no session may take '
+                       "it. Pick another name.")
+
+
+def refuse_reserved(name):
+    """Refuse `name` when it is the reserved QA sender (D46), in any case (QA fix round 2, LOW-2: QA, Qa and qA too): RESERVED_NAME_WORDS, exit 6, before anything is written.
+
+    Called by join, card and send. QA fix round 2 (Claude Opus 5.5,
+    unreviewed): LOW-1. Send skips it when --origin is given: only a far
+    tc's ssh route sends --origin, and on a far key with no forced
+    command that route runs `tc send --from qa --origin <id>` for every
+    QA mail, which must land. --from carries no authority either way;
+    the reservation is a label, so a session is never taken for a run.
+
+    @interacts  on a refusal, one line to stderr and exit 6.
+    @deps       refuse; QA_SENDER_NAME, RESERVED_NAME_WORDS, EXIT_BAD_NAME.
+    @complexity O(1).
+    @alloc      none.
+    """
+    if name.casefold() == QA_SENDER_NAME:
+        refuse(RESERVED_NAME_WORDS.format(name=name), EXIT_BAD_NAME)
+
+
+def cmd_qa(args):
+    """`tc qa run|note|stop`: QA streaming (C8, D45), all of it in board/qa.py, loaded from tc's own folder.
+
+    Thin, as cmd_report is: board/qa.py is read and run in memory, in a
+    fresh module, so no bytecode is read or written beside it; a missing
+    file refuses, exit 1, naming where tc looked. qa.py gets a module
+    holding this module's names (its router, its name check, ROOT and the
+    exit codes) and returns the exit code: 0, 1 (refused, with words), 9
+    (usage), or 6 for a bad --to name (C0, through require_names).
+
+    @interacts  reads board/qa.py beside tc and runs its top level; then
+                qa.py's main(): see board/qa.py (ROOT/qaruns/, the
+                endpoint on 127.0.0.1, mail through the router); exits.
+    @deps       refuse, printable; pathlib, sys; QA_SOURCE,
+                QA_MISSING_WORDS, EXIT_REFUSED; board/qa.py (main).
+    @complexity one compile of qa.py (and serve.py through it), then the
+                command's: a run's life, or one request for note and stop.
+    @alloc      the module, freed on exit.
+    """
+    source = pathlib.Path(__file__).resolve().parent / QA_SOURCE
+    try:
+        code = compile(source.read_bytes(), str(source), "exec", dont_inherit=True)
+    except OSError as err:
+        refuse(QA_MISSING_WORDS.format(source=printable(source), why=err.strerror), EXIT_REFUSED)
+    qa = type(sys)("tc_qa")  # a fresh module, as cmd_report makes one
+    qa.__file__ = str(source)
+    exec(code, qa.__dict__)
+    me = type(sys)(__name__)  # this module's names, wherever it was loaded from (cmd_report's DEBT-5)
+    me.__dict__.update(globals())
+    sys.exit(qa.main(me, args))
 
 
 # ---------- cards: who each name is and how mail reaches it (C1) ----------
@@ -6572,6 +6680,7 @@ def cmd_join(args):
                 kept (never removed, D20).
     """
     require_names(args.name, args.reports_to)
+    refuse_reserved(args.name)  # QA fix round 1 (Claude Opus 5.5, unreviewed): D46
     refuse_self_report(args.name, args.reports_to)
     thread = os.environ.get("CODEX_THREAD_ID") or None
     # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14, so a join never
@@ -6658,6 +6767,7 @@ def cmd_card(args):
                 lock file.
     """
     require_names(args.name, args.reports_to)
+    refuse_reserved(args.name)  # QA fix round 1 (Claude Opus 5.5, unreviewed): D46
     refuse_self_report(args.name, args.reports_to)
     if not SSH_TARGET_PATTERN.fullmatch(args.ssh):
         refuse(f'tc card: bad ssh target "{args.ssh}": user@host or host, '
@@ -11016,6 +11126,30 @@ def main():
     rp.add_argument("--to", dest="window_to", metavar="TIME",
                     help="only mail sent before TIME, in --from's forms")
     rp.set_defaults(fn=cmd_report)
+
+    # QA (Claude Opus 5.5, unreviewed): tc qa run, note and stop (C8, D45).
+    qa = sub.add_parser("qa", help="stream a QA walk to a session as mail: logs, posts, notes and checklist marks")
+    qs = qa.add_subparsers(dest="qa_cmd", required=True, parser_class=TcParser)
+    qr = qs.add_parser("run", help="start a run in the foreground and print its checklist page's URL")
+    qr.add_argument("--to", required=True, help="the name the run mails")
+    qr.add_argument("--log", action="append", default=[], metavar="FILE",
+                    help="a log to follow from its end, JSON or plain lines; repeat for more")
+    qr.add_argument("--include", action="append", default=[], metavar="K=V|/re/",
+                    help="keep only log and post events that match one of these: a JSON field K equal to V, or "
+                         "/regex/ in the text")
+    qr.add_argument("--exclude", action="append", default=[], metavar="K=V|/re/",
+                    help="drop log and post events that match any of these")
+    qr.add_argument("--level", choices=QA_LEVELS, help="drop log and post events below this level")
+    qr.add_argument("--checklist", metavar="FILE.md", help="the walk's checklist; its - [ ] rows become the page")
+    qr.add_argument("--redact", metavar="FILE", help="more patterns to redact, one regex per line")
+    qr.add_argument("--port", type=int, default=QA_DEFAULT_PORT,
+                    help=f"the endpoint's port on 127.0.0.1 (default {QA_DEFAULT_PORT}; 0 lets the system pick)")
+    qn = qs.add_parser("note", help="post one event to the live run")
+    qn.add_argument("--level", choices=QA_LEVELS, default="info")
+    qn.add_argument("--tag", default="", help="a short word for the event, at most 32 characters")
+    qn.add_argument("text")
+    qs.add_parser("stop", help="end the live run cleanly: the last batch and the summary mailed")
+    qa.set_defaults(fn=cmd_qa)
 
     h = sub.add_parser("health", help="machine load, memory, GPU, sessions, listeners, cards, mail")
     h.add_argument("--json", action="store_true", help="machine-readable, for a board")

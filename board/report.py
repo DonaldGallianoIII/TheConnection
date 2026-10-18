@@ -142,7 +142,8 @@ HEAD_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 # project's own working words, none of which names a person, a project or
 # a machine; any other tag reads OTHER_TAG.
 SCRUB_TAGS = ("ANSWER", "FYI", "QUESTION", "PLAN", "PLAN-READY", "PLAN-CHECK", "PLAN-EDIT", "PLAN-EDITED",
-              "PLAN-REVIEWED", "CORRECTION", "HEADS-UP", "MERGE", "REVIEW", "STATUS", "BLOCKED", "DONE", "BREACH")
+              "PLAN-REVIEWED", "CORRECTION", "HEADS-UP", "MERGE", "REVIEW", "STATUS", "BLOCKED", "DONE", "BREACH",
+              "QA")  # QA (Claude Opus 5.5, unreviewed): tc qa's mail keeps its tag on a scrubbed page (C7, D45)
 OTHER_TAG = "other"
 # A stand-in name that sorts in first-mail order, zero-padded so text
 # order is number order for any mailbox (first_mail_levels).
