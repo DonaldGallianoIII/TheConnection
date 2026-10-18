@@ -911,7 +911,11 @@ script, no font or image fetched, no link to any host (D26). An existing
 place. It reads the mailbox and writes nothing in it: an OUT whose
 folder, resolved (`realpath`, so through any link), is inside ROOT's
 `mail/`, `status/`, `cards/` or `outbox/` is refused, exit 1, with words
-naming the folder; ROOT's own top level is allowed. An OUT that cannot
+naming the folder; ROOT's own top level is allowed, except an OUT
+there named `.shared`, `mail`, `status`, `cards`, `outbox`, `tc`,
+`board` or any name starting with a dot, judged after resolving (so a
+link to one of them is refused too): exit 1 with words, even with
+`--force`, which must never be able to break the mailbox. An OUT that cannot
 be written (no folder, no permission, no space) is exit 1 with one
 line, `tc report: could not write <OUT> (<why>); nothing was written
 there.`, its own `.tmp` cleaned up (pause DASH-2).
