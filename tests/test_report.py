@@ -12,8 +12,11 @@ Status: unreviewed
             _root.load_source (no bytecode read or written), with TC_ROOT
             set to the root for tc's load and put back after; runs ../tc
             report as a child through the harness, writing its page in
-            the root's temp folder, outside the mailbox.
-@deps       python3 stdlib (datetime, os, pathlib, re, sys, unittest,
+            the root's temp folder, outside the mailbox. The window
+            tests (WINDOW, Claude Opus 5.5, unreviewed) set TZ for a
+            child and stat a zone's file in the tz database (TZDIR, else
+            /usr/share/zoneinfo) to skip when it is missing (needs_zone).
+@deps      python3 stdlib (datetime, os, pathlib, re, sys, unittest,
             xml.etree.ElementTree); tests/_root.py (TcRoot, load_source,
             TC); tests/_report_fixture.py; ../tc; board/report.py,
             board/serve.py.
@@ -58,6 +61,38 @@ DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
 CLOCK_PATTERN = re.compile(r"\b\d{1,2}:\d{2}\b")
 # A --at for the as-of tests, after the fixture's last message.
 AT_TIME = "2026-10-03T12:30:00-05:00"
+# WINDOW (Claude Opus 5.5, unreviewed): the three-day mailbox's middle day
+# (C7, D44), as --from and --to with the fixture's own offset.
+DAY_TWO_FROM = "2026-10-02T00:00:00-05:00"
+DAY_THREE_FROM = "2026-10-03T00:00:00-05:00"
+# Local zones for the date-only and no-offset bounds, as POSIX TZ strings
+# with no daylight time: one at the fixture's offset, one at UTC.
+TZ_AT_FIXTURE = "EST5"
+TZ_AT_UTC = "UTC0"
+# WINDOW fix round 1 (Claude Opus 5.5, unreviewed): real zones from the
+# system's tz database, one with daylight time (both 2026 change days) and
+# one east of UTC, for the calendar's first year.
+TZ_WITH_DAYLIGHT = "America/Chicago"
+TZ_EAST_OF_UTC = "Europe/Berlin"
+# Where the C library looks a named zone up for a child's TZ: TZDIR when
+# set, else the system's tz database. A zone missing there makes the child
+# fall back to UTC, so a test that needs it skips (needs_zone).
+ZONEINFO_DIR = "/usr/share/zoneinfo"
+ZONEINFO_DIR_ENV = "TZDIR"
+
+
+def needs_zone(test, zone):
+    """Skip `test` (a TestCase, or one subTest of it) with words naming `zone` when the tz database a child would read lacks it.
+
+    @interacts  stats one file under TZDIR or ZONEINFO_DIR.
+    @deps       os, pathlib; ZONEINFO_DIR, ZONEINFO_DIR_ENV.
+    @complexity O(1).
+    @alloc      one path.
+    """
+    folder = pathlib.Path(os.environ.get(ZONEINFO_DIR_ENV) or ZONEINFO_DIR)
+    if not (folder / zone).is_file():
+        test.skipTest(f"the tz database at {folder} has no {zone}, so a child under TZ={zone} would read UTC; "
+                      "this test needs that zone's own rules")
 
 
 def modules_for(root):
@@ -1472,7 +1507,8 @@ class CommandTest(unittest.TestCase):
 
             with mock.patch.object(tc.secrets, "token_hex", late):
                 with self.assertRaises(SystemExit) as stop:
-                    tc.cmd_report(argparse.Namespace(out=str(out), scrub=False, force=False, at=None))
+                    tc.cmd_report(argparse.Namespace(out=str(out), scrub=False, force=False, at=None,
+                                                     window_from=None, window_to=None))
             self.assertEqual(stop.exception.code, EXIT_REFUSED)
             self.assertEqual(out.read_text(encoding="utf-8"), "late")
             self.assertEqual(sorted(p.name for p in out.parent.iterdir()), ["race.html"])
@@ -1675,6 +1711,448 @@ class SafetyTest(unittest.TestCase):
             self.assertEqual(plain.replace(old[0], new[0]), moved)
         self.assertIn("As of 2026-10-03 12:30-05:00.", at[0])
         self.assertIn("As of T+2d03h.", at[1])
+
+
+# ---------- the time window (C7, "A time window", D44) ----------
+# WINDOW (Claude Opus 5.5, unreviewed): every test below runs over the
+# three-day mailbox, fixture.WINDOW_MESSAGES.
+
+def window_root(root):
+    """Build the three-day mailbox under `root`'s path.
+
+    @interacts  writes the fixture under the root (fixture.build).
+    @deps       fixture.build, fixture.WINDOW_MESSAGES, fixture.WINDOW_INBOXES.
+    @complexity O(17) files.
+    @alloc      the files, removed with the root.
+    """
+    fixture.build(root.path, fixture.WINDOW_MESSAGES, fixture.WINDOW_INBOXES)
+
+
+def window_page(scrub=False, start=DAY_TWO_FROM, end=DAY_THREE_FROM):
+    """The three-day mailbox's page for the window `start` to `end` (offset forms only, so no local zone is read), rendered in this process: (report module, mailbox, html).
+
+    @interacts  builds the mailbox under a TcRoot of its own; loads tc
+                and report.py.
+    @deps       modules_for, window_root; report.window_of, extract,
+                page_of, scrub, render.
+    @complexity O(17) messages, plus two compiles.
+    @alloc      one TcRoot, removed before return; the page, returned.
+    """
+    with _root.TcRoot() as root:
+        window_root(root)
+        tc, report = modules_for(root)
+        box = report.extract(tc, window=report.window_of(start, end))
+        page = report.page_of(box, None)
+        return report, box, report.render(report.scrub(page) if scrub else page)
+
+
+def window_run(root, *args, tz=TZ_AT_FIXTURE, out=None):
+    """Run `tc report OUT [args]` under the local zone `tz`, OUT in the root's temp folder: (exit, stdout, stderr, page text or None).
+
+    @interacts  runs ../tc report as a child with TZ set for that call;
+                reads the page it wrote.
+    @deps       _root.TcRoot.tc.
+    @complexity the child's own work.
+    @alloc      the page text, returned.
+    """
+    out = out or root.base / "out" / "window.html"
+    out.parent.mkdir(exist_ok=True)
+    code, stdout, stderr = root.tc("report", str(out), *args, env={"TZ": tz})
+    return code, stdout, stderr, out.read_text(encoding="utf-8") if out.exists() else None
+
+
+class WindowTest(unittest.TestCase):
+    """`--from` and `--to` (C7, D44): the report covers mail sent from --from up to --to, and everything on the page comes from that mail.
+
+    @interacts  builds the three-day mailbox under a TcRoot; renders it in
+                this process or runs tc report as a child with TZ set.
+    @deps       window_page, window_run, window_root, charts, groups,
+                plots_by_label, series_of, mark_titles, text_outside_svg,
+                words.
+    @complexity a few renders or children of 17 messages per test.
+    @alloc      one TcRoot per render or test, removed on exit.
+    """
+
+    # The middle day's messages, in sent order, and their ranks.
+    DAY_TWO = (7, 8, 9, 10, 11, 12, 13, 14)
+    # Chart 1 over the middle day: one arrow per sender and recipient.
+    EDGES = {("corwin", "annika", 2), ("annika", "bertil", 1), ("annika", "corwin", 1), ("eskil", "annika", 3),
+             ("annika", "eskil", 1)}
+    # The scrub's labels inside the window: corwin mails first there.
+    LABELS = {"corwin": "worker-1", "annika": "orchestrator-1", "bertil": "worker-2", "eskil": "worker-3"}
+
+    def test_a_window_over_the_middle_day_holds_its_mail_only(self):
+        """Exactly messages 7 to 14 in sent order; the broken header counted apart; C5's roles and levels from that day's mail (eskil a worker by inference, annika an orchestrator by inference), with the cards' reports_to still counted.
+
+        @interacts  see the class.
+        @deps       window_page; report.Session.
+        @complexity one extract.
+        @alloc      the records.
+        """
+        report, box, _ = window_page()
+        self.assertEqual(tuple(r.number for r in box.records), self.DAY_TWO)
+        self.assertEqual(box.unparsed, 1)
+        self.assertEqual(list(box.sessions), [
+            report.Session("corwin", "worker", "declared", 1),
+            report.Session("annika", "orchestrator", "inferred", 0),
+            report.Session("bertil", "worker", "declared", 1),
+            report.Session("eskil", "worker", "inferred", 1),
+        ])
+
+    def test_chart_1_counts_the_windows_mail_and_the_scrub_numbers_by_its_first_mail(self):
+        """Chart 1's arrows and counts, exactly, real and scrubbed; the scrubbed labels follow the window's first mail (corwin is worker-1).
+
+        @interacts  see the class.
+        @deps       window_page, charts, groups, title_of.
+        @complexity two renders.
+        @alloc      the pages.
+        """
+        for scrub, names in ((False, {n: n for n in fixture.WINDOW_NAMES}), (True, self.LABELS)):
+            with self.subTest(scrub=scrub):
+                _, _, page = window_page(scrub)
+                graph = charts(page)["graph"]
+                edges = {title_of(edge): [t.text for t in edge.iter("text")] for edge in groups(graph, "edge")}
+                self.assertEqual(edges, {f"{names[s]} to {names[r]}: {message_count(n)}": [str(n)]
+                                         for s, r, n in self.EDGES})
+                self.assertIn("8 messages among 4 sessions", page)
+
+    def test_t_plus_0_is_the_windows_first_message(self):
+        """Scrubbed, message 7 is rank 1 at T+0, every time counts from it, a #N naming a message outside the window is dropped, and the as-of is the window's last message.
+
+        @interacts  see the class.
+        @deps       modules_for, window_root; report.scrub, page_of, extract, window_of.
+        @complexity one extract.
+        @alloc      the records.
+        """
+        with _root.TcRoot() as root:
+            window_root(root)
+            tc, report = modules_for(root)
+            box = report.extract(tc, window=report.window_of(DAY_TWO_FROM, DAY_THREE_FROM))
+            page = report.scrub(report.page_of(box, None))
+        hour, minute = fixture.HOUR, fixture.MINUTE
+        got = [(r.number, r.sent, r.read, r.refs) for r in page.records]
+        self.assertEqual(got, [(1, 0, hour, ()), (2, hour, 2 * hour, ()), (3, 2 * hour, 3 * hour, (1,)),
+                               (4, 4 * hour, 4 * hour + 10 * minute, ()), (5, 5 * hour, 5 * hour + 5 * minute, (4,)),
+                               (6, 7 * hour, 7 * hour + 20 * minute, ()), (7, 10 * hour, 24 * hour, ()),
+                               (8, 14 * hour, None, ())])
+        self.assertEqual(page.as_of, 14 * hour)
+        self.assertEqual([s.name for s in page.sessions], list(self.LABELS.values()))
+
+    def test_the_as_of_is_the_windows_last_message(self):
+        """With no --at, the real page's as-of is message 14's sent time, the last inside the window, not message 16's.
+
+        @interacts  see the class.
+        @deps       window_page.
+        @complexity one render.
+        @alloc      the page.
+        """
+        _, _, page = window_page()
+        self.assertIn('<p class="as-of">As of 2026-10-02 15:00-05:00.</p>', page)
+
+    def test_quiet_stretches_are_bounded_by_the_window_and_read_times_after_it_stay(self):
+        """Chart 4: corwin's three hours across --from are no quiet stretch, its eight inside are; each lane's gaps, exactly. Chart 3: message 13, read on day three, keeps its read time.
+
+        @interacts  see the class.
+        @deps       window_page, charts, plots_by_label, groups, series_of, mark_titles.
+        @complexity one render.
+        @alloc      the page.
+        """
+        _, _, page = window_page()
+        found = charts(page)
+        lanes = plots_by_label(found["quiet"])
+        gaps = {name: [t.text for q in groups(plot, "quiet") for t in q.iter("text")] for name, plot in lanes.items()}
+        self.assertEqual(gaps, {"corwin": ["quiet 8h00m"], "annika": ["quiet 3h00m", "quiet 4h00m"], "bertil": [],
+                                "eskil": ["quiet 7h00m"]})
+        (series,) = series_of(plots_by_label(found["read"])["annika"])
+        self.assertIn("#13 MERGE from corwin: read 2026-10-03 01:00-05:00, after 14h00m", mark_titles(series))
+        self.assertEqual([t.text for t in series.iter("text")][1], "4 of 5 messages have a read time")
+
+    def test_a_reply_to_an_ask_before_the_window_is_counted_in_words_never_drawn(self):
+        """Pairs only inside the window, (7, 9) and (10, 11); message 8, naming message 2 from day one, is one reply counted in page text, in no SVG, and draws no dot; the MERGE answered on day three is an ask with no reply.
+
+        @interacts  see the class.
+        @deps       window_page, charts, plots_by_label, series_of, mark_titles, text_outside_svg, words.
+        @complexity two renders.
+        @alloc      the pages.
+        """
+        report, box, page = window_page()
+        self.assertEqual([(a.number, b.number) for a, b in report.answer_pairs(box.records)], [(7, 9), (10, 11)])
+        dots = {name: mark_titles(series_of(plot)[0]) for name, plot in plots_by_label(charts(page)["answers"]).items()}
+        self.assertEqual(dots, {"annika": ["#7 QUESTION to #9 ANSWER: 2h00m", "#10 QUESTION to #11: 1h00m"]})
+        outside = text_outside_svg(page)
+        for line in ("1 reply names a message before this window.", "2 answers name the message they answer.",
+                     "1 ask has no reply that names it."):
+            with self.subTest(line=line):
+                self.assertIn(line, outside)
+                for svg in charts(page).values():
+                    self.assertNotIn(line, words(svg))
+        _, _, plain = window_page(start=None, end=DAY_THREE_FROM)
+        self.assertNotIn("before this window", plain)
+
+    def test_a_broken_header_is_outside_the_window_and_said_so(self):
+        """Message 17, whose header does not parse, is in no chart (chart 1 has no bertil to corwin arrow) and the page says it is outside the window.
+
+        @interacts  see the class.
+        @deps       window_page, charts, groups, title_of.
+        @complexity one render.
+        @alloc      the page.
+        """
+        _, _, page = window_page()
+        self.assertIn("1 message had a header line that did not parse, so it has no sent time and is outside this "
+                      "window.", text_outside_svg(page))
+        self.assertNotIn("chart 1 counts", page)
+        titles = [title_of(edge) for edge in groups(charts(page)["graph"], "edge")]
+        self.assertFalse([t for t in titles if t.startswith("bertil to corwin")], titles)
+
+    def test_date_only_bounds_are_local_midnight_and_print_with_their_offset(self):
+        """`--from 2026-10-02 --to 2026-10-03`: at the fixture's zone, the middle day's 8 messages and `From 2026-10-02 00:00-05:00 to 2026-10-03 00:00-05:00`; at UTC, midnight there, so 9 messages (corwin's 22:00 -05:00 joins) and `+00:00` on both bounds.
+
+        @interacts  see the class.
+        @deps       window_run, window_root.
+        @complexity two children.
+        @alloc      one TcRoot.
+        """
+        cases = ((TZ_AT_FIXTURE, 8, "From 2026-10-02 00:00-05:00 to 2026-10-03 00:00-05:00."),
+                 (TZ_AT_UTC, 9, "From 2026-10-02 00:00+00:00 to 2026-10-03 00:00+00:00."))
+        with _root.TcRoot() as root:
+            window_root(root)
+            for tz, count, face in cases:
+                with self.subTest(tz=tz):
+                    code, stdout, stderr, page = window_run(root, "--force", "--from", "2026-10-02", "--to",
+                                                            "2026-10-03", tz=tz)
+                    self.assertEqual(code, EXIT_OK, stderr)
+                    self.assertIn(f": {count} messages, real names and times.", stdout)
+                    self.assertIn(f'<p class="window">{face}</p>', page)
+
+    def test_date_time_bounds_with_and_without_an_offset(self):
+        """A bound with an offset prints with that offset, as given (05:00+00:00 is the fixture's midnight); one with none is local time.
+
+        @interacts  see the class.
+        @deps       window_run, window_root.
+        @complexity two children.
+        @alloc      one TcRoot.
+        """
+        cases = ((("--from", "2026-10-02T05:00:00+00:00", "--to", DAY_THREE_FROM),
+                  "From 2026-10-02 05:00+00:00 to 2026-10-03 00:00-05:00."),
+                 (("--from", "2026-10-02T00:00", "--to", "2026-10-03T00:00:00"),
+                  "From 2026-10-02 00:00-05:00 to 2026-10-03 00:00-05:00."))
+        with _root.TcRoot() as root:
+            window_root(root)
+            for args, face in cases:
+                with self.subTest(args=args):
+                    code, stdout, stderr, page = window_run(root, "--force", *args)
+                    self.assertEqual(code, EXIT_OK, stderr)
+                    self.assertIn(": 8 messages, real names and times.", stdout)
+                    self.assertIn(f'<p class="window">{face}</p>', page)
+
+    def test_from_alone_and_to_alone_name_only_their_bound(self):
+        """`--from` alone: messages 7 to 16, `From <from>.` and no `to`; `--to` alone: messages 1 to 6, `Up to <to>.`; each as of its last message inside.
+
+        @interacts  see the class.
+        @deps       window_run, window_root.
+        @complexity two children.
+        @alloc      one TcRoot.
+        """
+        cases = ((("--from", DAY_TWO_FROM), 10, "From 2026-10-02 00:00-05:00.", "As of 2026-10-03 06:00-05:00."),
+                 (("--to", DAY_TWO_FROM), 6, "Up to 2026-10-02 00:00-05:00.", "As of 2026-10-01 22:00-05:00."))
+        with _root.TcRoot() as root:
+            window_root(root)
+            for args, count, face, as_of in cases:
+                with self.subTest(args=args):
+                    code, stdout, stderr, page = window_run(root, "--force", *args)
+                    self.assertEqual(code, EXIT_OK, stderr)
+                    self.assertIn(f": {count} messages, real names and times.", stdout)
+                    self.assertEqual(re.findall(r'<p class="window">[^<]*</p>', page),
+                                     [f'<p class="window">{face}</p>'])
+                    self.assertIn(as_of, page)
+
+    def test_the_scrubbed_page_names_the_windows_length_and_no_date_or_clock(self):
+        """Scrubbed, with both bounds, --from alone and --to alone: `A window of this mailbox, <length> long.` (whole days for two dates, else the bounds' real length, or the first to the last message inside), no fixture name, no date and no clock anywhere; the real page of each has dates and clocks, so the check can fail.
+
+        @interacts  see the class.
+        @deps       window_run, window_root; DATE_PATTERN, CLOCK_PATTERN.
+        @complexity six children.
+        @alloc      one TcRoot.
+        """
+        cases = ((("--from", DAY_TWO_FROM, "--to", DAY_THREE_FROM), "1d00h"), (("--from", DAY_TWO_FROM), "1d05h"),
+                 (("--to", DAY_TWO_FROM), "13h00m"), (("--from", "2026-10-02", "--to", "2026-10-03"), "1 day"))
+        with _root.TcRoot() as root:
+            window_root(root)
+            for args, length in cases:
+                with self.subTest(args=args):
+                    code, _, stderr, safe = window_run(root, "--force", "--scrub", *args)
+                    self.assertEqual(code, EXIT_OK, stderr)
+                    self.assertIsNone(DATE_PATTERN.search(safe), DATE_PATTERN.search(safe))
+                    self.assertIsNone(CLOCK_PATTERN.search(safe), CLOCK_PATTERN.search(safe))
+                    for name in fixture.WINDOW_NAMES:
+                        self.assertNotIn(name, safe)
+                    self.assertIn(f'<p class="window">A window of this mailbox, {length} long.</p>', safe)
+                    code, _, stderr, real = window_run(root, "--force", *args)
+                    self.assertEqual(code, EXIT_OK, stderr)
+                    self.assertRegex(real, DATE_PATTERN)
+                    self.assertRegex(real, CLOCK_PATTERN)
+
+    def test_a_bad_bound_is_a_usage_error_and_writes_nothing(self):
+        """A --from or --to that is not a time, a --from equal to --to, and one after it: each exits 9 with words opening `tc report:`, no traceback, nothing written; an existing OUT is left as it was.
+
+        @interacts  see the class.
+        @deps       window_run, window_root.
+        @complexity six children.
+        @alloc      one TcRoot.
+        """
+        cases = (("--from", "noon"), ("--to", "2026-13-45"), ("--from", "yesterday", "--to", DAY_THREE_FROM),
+                 ("--from", DAY_TWO_FROM, "--to", DAY_TWO_FROM), ("--from", DAY_THREE_FROM, "--to", DAY_TWO_FROM))
+        with _root.TcRoot() as root:
+            window_root(root)
+            for args in cases:
+                with self.subTest(args=args):
+                    code, stdout, stderr, page = window_run(root, *args)
+                    self.assertEqual(code, EXIT_USAGE, stderr)
+                    self.assertTrue(stderr.startswith("tc report: "), stderr)
+                    self.assertIn("nothing was written", stderr)
+                    self.assertNotIn("Traceback", stderr)
+                    self.assertIsNone(page)
+                    self.assertEqual(list((root.base / "out").iterdir()), [])
+            kept = root.base / "out" / "kept.html"
+            kept.write_text("keep me", encoding="utf-8")
+            code, _, stderr, page = window_run(root, "--force", "--from", "noon", out=kept)
+            self.assertEqual((code, page), (EXIT_USAGE, "keep me"), stderr)
+
+    # WINDOW fix round 1 (Claude Opus 5.5, unreviewed): MEDIUM-1 as C7 now
+    # rules it (dev dc166ae), LOW-1, LOW-2 and LOW-3.
+    def test_a_window_of_whole_dates_reads_whole_days_on_daylight_change_days(self):
+        """Under America/Chicago, scrubbed: each date-only window reads whole calendar days, `1 day` on the fall change day, the spring change day and an ordinary day, `3 days` across three dates; a timed window with no offsets across the fall change reads its real length, 3h30m; offset bounds keep their real difference, 1d01h.
+
+        @interacts  see the class.
+        @deps       window_run, window_root; DATE_PATTERN, CLOCK_PATTERN.
+        @complexity six children.
+        @alloc      one TcRoot.
+        """
+        cases = ((("--from", "2026-11-01", "--to", "2026-11-02"), "1 day"),
+                 (("--from", "2026-03-08", "--to", "2026-03-09"), "1 day"),
+                 (("--from", "2026-10-02", "--to", "2026-10-03"), "1 day"),
+                 (("--from", "2026-11-01", "--to", "2026-11-04"), "3 days"),
+                 (("--from", "2026-11-01T00:30", "--to", "2026-11-01T03:00"), "3h30m"),
+                 (("--from", "2026-11-01T00:00:00-05:00", "--to", "2026-11-02T00:00:00-06:00"), "1d01h"))
+        needs_zone(self, TZ_WITH_DAYLIGHT)
+        with _root.TcRoot() as root:
+            window_root(root)
+            for args, length in cases:
+                with self.subTest(args=args):
+                    code, _, stderr, safe = window_run(root, "--force", "--scrub", *args, tz=TZ_WITH_DAYLIGHT)
+                    self.assertEqual(code, EXIT_OK, stderr)
+                    self.assertIsNone(DATE_PATTERN.search(safe), DATE_PATTERN.search(safe))
+                    self.assertIsNone(CLOCK_PATTERN.search(safe), CLOCK_PATTERN.search(safe))
+                    self.assertIn(f'<p class="window">A window of this mailbox, {length} long.</p>', safe)
+
+    def test_a_date_only_window_on_the_fall_change_day_prints_both_offsets(self):
+        """Unscrubbed, under America/Chicago, 2026-11-01 to 2026-11-02 prints each local midnight with its own offset, -05:00 then -06:00.
+
+        @interacts  see the class.
+        @deps       window_run, window_root.
+        @complexity one child.
+        @alloc      one TcRoot.
+        """
+        needs_zone(self, TZ_WITH_DAYLIGHT)
+        with _root.TcRoot() as root:
+            window_root(root)
+            code, _, stderr, page = window_run(root, "--from", "2026-11-01", "--to", "2026-11-02",
+                                               tz=TZ_WITH_DAYLIGHT)
+            self.assertEqual(code, EXIT_OK, stderr)
+            self.assertIn('<p class="window">From 2026-11-01 00:00-05:00 to 2026-11-02 00:00-06:00.</p>', page)
+
+    def test_a_bound_in_the_skipped_spring_hour_draws_without_a_traceback(self):
+        """Under America/Chicago, 02:30 on 2026-03-08 does not exist; a --from there exits 0 with no traceback and a window line (the handoff says what the bound becomes).
+
+        @interacts  see the class.
+        @deps       window_run, window_root.
+        @complexity one child.
+        @alloc      one TcRoot.
+        """
+        needs_zone(self, TZ_WITH_DAYLIGHT)
+        with _root.TcRoot() as root:
+            window_root(root)
+            code, _, stderr, page = window_run(root, "--from", "2026-03-08T02:30", "--to", "2026-03-09",
+                                               tz=TZ_WITH_DAYLIGHT)
+            self.assertEqual(code, EXIT_OK, stderr)
+            self.assertNotIn("Traceback", stderr)
+            self.assertEqual(len(re.findall(r'<p class="window">From [^<]*</p>', page)), 1)
+
+    def test_a_bound_the_local_zone_cannot_place_is_a_usage_error_naming_it(self):
+        """Year 1 under Europe/Berlin and 9999-12-31T23:00 under EST5 fall off the calendar in local time: exit 9, words opening `tc report:` that name the flag and its text, no traceback, nothing written (LOW-1).
+
+        @interacts  see the class.
+        @deps       window_run, window_root.
+        @complexity two children.
+        @alloc      one TcRoot.
+        """
+        cases = ((("--from", "0001-01-01"), TZ_EAST_OF_UTC, "--from '0001-01-01'"),
+                 (("--to", "9999-12-31T23:00"), TZ_AT_FIXTURE, "--to '9999-12-31T23:00'"))
+        with _root.TcRoot() as root:
+            window_root(root)
+            for args, tz, named in cases:
+                with self.subTest(args=args, tz=tz):
+                    if tz == TZ_EAST_OF_UTC:
+                        needs_zone(self, tz)
+                    code, _, stderr, page = window_run(root, *args, tz=tz)
+                    self.assertEqual(code, EXIT_USAGE, stderr)
+                    self.assertTrue(stderr.startswith("tc report: "), stderr)
+                    self.assertIn(named, stderr)
+                    self.assertNotIn("Traceback", stderr)
+                    self.assertIsNone(page)
+
+    def test_an_empty_window_says_so_in_the_summary_and_every_chart(self):
+        """A window after the last message: `No messages in this window.` in the summary and in each of the five charts, and `No messages yet.` nowhere (LOW-2).
+
+        @interacts  see the class.
+        @deps       window_page, charts, words.
+        @complexity one render.
+        @alloc      the page.
+        """
+        _, box, page = window_page(start="2026-10-05T00:00:00-05:00", end=None)
+        self.assertEqual(box.records, ())
+        self.assertNotIn("No messages yet.", page)
+        self.assertIn("No messages in this window.", text_outside_svg(page))
+        found = charts(page)
+        self.assertEqual(set(found), {"graph", "senders", "read", "quiet", "answers"})
+        for key, svg in found.items():
+            with self.subTest(chart=key):
+                self.assertIn("No messages in this window.", words(svg))
+
+    def test_the_windowed_caveat_names_a_reply_after_the_window(self):
+        """Under chart 5, a windowed page's caveat adds `or one that replied after this window ends`; the whole mailbox's page does not (LOW-3, C7 at dev dc166ae).
+
+        @interacts  see the class.
+        @deps       window_page, rendered, text_outside_svg.
+        @complexity two renders.
+        @alloc      the pages.
+        """
+        late = "or one that replied after this window ends"
+        _, _, windowed = window_page()
+        self.assertIn(late, text_outside_svg(windowed))
+        _, whole = rendered()
+        self.assertNotIn(late, whole)
+        self.assertIn(ASK_CAVEAT, text_outside_svg(whole))
+
+    def test_the_same_window_gives_the_same_bytes(self):
+        """Two runs of one window, real and scrubbed: the same bytes each time.
+
+        @interacts  see the class.
+        @deps       window_run, window_root.
+        @complexity four children.
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            window_root(root)
+            for extra in ((), ("--scrub",)):
+                with self.subTest(extra=extra):
+                    pages = []
+                    for _ in range(2):
+                        code, _, stderr, page = window_run(root, "--force", "--from", DAY_TWO_FROM, "--to",
+                                                           DAY_THREE_FROM, *extra)
+                        self.assertEqual(code, EXIT_OK, stderr)
+                        pages.append(page)
+                    self.assertEqual(pages[0], pages[1])
 
 
 if __name__ == "__main__":

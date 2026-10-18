@@ -5927,6 +5927,10 @@ REPORT_RESERVED_WORDS = ("tc report: {out} would land on {entry}, one of tc's ow
                          "({root}); tc report never writes there, even with --force. Name another file.")
 # C7's words, exactly (pause DASH-2, settled).
 REPORT_WRITE_WORDS = "tc report: could not write {out} ({why}); nothing was written there."
+# WINDOW (Claude Opus 5.5, unreviewed): a --from or --to that does not
+# parse, or a --from not before --to, is a usage error (C7, D44), exit 9;
+# report.py's window_of gives the why.
+REPORT_WINDOW_WORDS = "tc report: {why}; nothing was written."
 
 
 def report_time(text):
@@ -6075,7 +6079,15 @@ def publish_report(folder_fd, name, page, force, out):
 
 
 def cmd_report(args):
-    """`tc report OUT.html [--scrub] [--force] [--at TIME]`: the mailbox drawn as one self-contained HTML page (C7, D42).
+    """`tc report OUT.html [--scrub] [--force] [--at TIME] [--from TIME] [--to TIME]`: the mailbox drawn as one self-contained HTML page (C7, D42), or the part of it sent in a time window (D44).
+
+    WINDOW (Claude Opus 5.5, unreviewed): board/report.py is loaded first,
+    and its window_of parses --from and --to; a bound that does not parse,
+    or a --from not before --to, refuses as a usage error, exit 9
+    (REPORT_WINDOW_WORDS), before OUT's folder is opened, so nothing is
+    written and an existing OUT is left as it was. A missing renderer is
+    therefore refused before any refusal about OUT. The Window goes to
+    report.py's report().
 
     Thin. OUT's folder is opened once and judged from that descriptor
     (report_folder): one inside the mailbox, one tc cannot open, or an OUT
@@ -6106,8 +6118,9 @@ def cmd_report(args):
                 to stdout and stderr; closes the folder on every way out.
     @deps       report_folder, publish_report, name_taken, printable, refuse; os,
                 pathlib, sys; REPORT_SOURCE, ROOT, ROOT_FROM,
-                ROOT_FROM_WORDS, the REPORT_ words, EXIT_REFUSED;
-                board/report.py (load_board_module, SERVE_PATH, report).
+                ROOT_FROM_WORDS, the REPORT_ words, EXIT_REFUSED,
+                EXIT_USAGE; board/report.py (window_of,
+                load_board_module, SERVE_PATH, report).
     @complexity one compile of report.py and serve.py (about 150 KB), then
                 report.py's: O(t log t + s x t) over t messages ever and
                 s sessions, each message read at most
@@ -6116,6 +6129,18 @@ def cmd_report(args):
     @alloc      the two modules and the page text, freed on exit; one
                 descriptor, closed on return; one file, OUT, kept.
     """
+    source = pathlib.Path(__file__).resolve().parent / REPORT_SOURCE
+    try:
+        code = compile(source.read_bytes(), str(source), "exec", dont_inherit=True)
+    except OSError as err:
+        refuse(REPORT_MISSING_WORDS.format(source=printable(source), why=err.strerror), EXIT_REFUSED)
+    renderer = type(sys)("tc_report")  # a fresh module: type(sys) is the module type, and needs no import
+    renderer.__file__ = str(source)
+    exec(code, renderer.__dict__)
+    try:  # WINDOW (Claude Opus 5.5, unreviewed): the bounds, before OUT is touched (C7, D44)
+        window = renderer.window_of(args.window_from, args.window_to)
+    except ValueError as err:
+        refuse(REPORT_WINDOW_WORDS.format(why=printable(str(err))), EXIT_USAGE)
     out = pathlib.Path(args.out)
     folder_fd, real = report_folder(out)
     try:
@@ -6123,14 +6148,6 @@ def cmd_report(args):
             refuse(REPORT_WRITE_WORDS.format(out=printable(out), why="it names a folder, not a file"), EXIT_REFUSED)
         if not args.force and name_taken(out.name, folder_fd):
             refuse(REPORT_EXISTS_WORDS.format(out=printable(out)), EXIT_REFUSED)
-        source = pathlib.Path(__file__).resolve().parent / REPORT_SOURCE
-        try:
-            code = compile(source.read_bytes(), str(source), "exec", dont_inherit=True)
-        except OSError as err:
-            refuse(REPORT_MISSING_WORDS.format(source=printable(source), why=err.strerror), EXIT_REFUSED)
-        renderer = type(sys)("tc_report")  # a fresh module: type(sys) is the module type, and needs no import
-        renderer.__file__ = str(source)
-        exec(code, renderer.__dict__)
         try:
             board = renderer.load_board_module()
         except OSError as err:
@@ -6138,7 +6155,7 @@ def cmd_report(args):
                    EXIT_REFUSED)
         me = type(sys)(__name__)  # fix round 1, DEBT-5: this module's names, wherever it was loaded from
         me.__dict__.update(globals())
-        page, summary, words = renderer.report(me, board, args.scrub, args.at)
+        page, summary, words = renderer.report(me, board, args.scrub, args.at, window)
         for line in words:
             print(f"tc report: {printable(line)}", file=sys.stderr)
         publish_report(folder_fd, out.name, page, args.force, out)
@@ -10992,6 +11009,12 @@ def main():
     rp.add_argument("--force", action="store_true", help="replace OUT.html when it exists")
     rp.add_argument("--at", type=report_time, metavar="TIME",
                     help="the page's as-of time, with its offset (default: the last message's)")
+    # WINDOW (Claude Opus 5.5, unreviewed): the time window (C7, D44); report.py parses the text.
+    rp.add_argument("--from", dest="window_from", metavar="TIME",
+                    help="only mail sent at or after TIME: a date (local midnight) or a date and time, "
+                         "with or without an offset (none: local time)")
+    rp.add_argument("--to", dest="window_to", metavar="TIME",
+                    help="only mail sent before TIME, in --from's forms")
     rp.set_defaults(fn=cmd_report)
 
     h = sub.add_parser("health", help="machine load, memory, GPU, sessions, listeners, cards, mail")

@@ -26,8 +26,11 @@ chart and counted in words.
             per message, one read/.read-times per read/, one card per
             carded name, one status file; sets each message file's times.
 @deps       python3 stdlib (collections, datetime, json, os).
-@complexity O(m) over m = 12 messages.
+@complexity O(m) over m = 12 messages (17 for the three-day mailbox).
 @alloc      the files, removed with the TcRoot.
+
+WINDOW (Claude Opus 5.5, unreviewed): a second, three-day mailbox for
+the time window (C7, D44), WINDOW_MESSAGES, built by the same build().
 """
 
 import collections
@@ -72,6 +75,51 @@ MESSAGES = (
 
 # Cards: name to reports_to (None for none). dagny has none at all.
 CARDS = {"annika": None, "bertil": "annika", "corwin": "annika"}
+# The inboxes build() makes: every recipient's, and only those.
+INBOXES = ("annika", "bertil", "corwin")
+
+# ---------- the three-day mailbox, for the time window (C7, D44) ----------
+# WINDOW (Claude Opus 5.5, unreviewed): seventeen messages over three
+# days, 2026-10-01 to 2026-10-03 at BASE's offset (-05:00), among annika,
+# bertil and corwin (carded as above) and eskil, who has an inbox and no
+# card, so C5 infers eskil's role from mail alone. The middle day runs
+# from DAY_TWO to DAY_THREE. Facts the window tests lean on:
+# - corwin mails first on day two (7), so the window's first-mail order,
+#   and its scrub labels, differ from the whole history's;
+# - over the whole history eskil splits between bertil (3, 4, 5) and
+#   annika (10, 11, 12, 14) and gets no inferred parent (a peer); on day
+#   two alone eskil mails only annika, so eskil is a worker under annika
+#   by inference, and annika an orchestrator by inference;
+# - 8, on day two, names 2, on day one, and runs back from 2's recipient
+#   to its sender: a reply to a message before the window;
+# - 13, a MERGE ask on day two, is read on day three and answered on day
+#   three (15): its read time stays, its answer is outside the window;
+# - corwin's 6 (day one, 22:00) and 7 (day two, 01:00) are three hours
+#   apart: a quiet stretch over the whole history, none in the window;
+# - 17's header does not parse: no sent time, outside any window.
+DAY_TWO = 15 * HOUR
+DAY_THREE = 39 * HOUR
+WINDOW_MESSAGES = (
+    Spec(1, "annika", "bertil", 0, 5 * MINUTE, "PLAN: day one", None),
+    Spec(2, "bertil", "annika", HOUR, HOUR + 20 * MINUTE, "QUESTION which format", None),
+    Spec(3, "eskil", "bertil", 2 * HOUR, 2 * HOUR + 10 * MINUTE, "FYI hello", None),
+    Spec(4, "bertil", "eskil", 3 * HOUR, 3 * HOUR + 5 * MINUTE, "FYI hello back", None),
+    Spec(5, "eskil", "bertil", 4 * HOUR, 4 * HOUR + 30 * MINUTE, "STATUS: fine", None),
+    Spec(6, "corwin", "annika", 13 * HOUR, 13 * HOUR + 30 * MINUTE, "STATUS: late", None),
+    Spec(7, "corwin", "annika", 16 * HOUR, 17 * HOUR, "QUESTION still on?", None),
+    Spec(8, "annika", "bertil", 17 * HOUR, 18 * HOUR, "ANSWER re #2: json", None),
+    Spec(9, "annika", "corwin", 18 * HOUR, 19 * HOUR, "ANSWER re #7: yes", None),
+    Spec(10, "eskil", "annika", 20 * HOUR, 20 * HOUR + 10 * MINUTE, "QUESTION may I", None),
+    Spec(11, "annika", "eskil", 21 * HOUR, 21 * HOUR + 5 * MINUTE, "Re #10: yes", None),
+    Spec(12, "eskil", "annika", 23 * HOUR, 23 * HOUR + 20 * MINUTE, "FYI thanks", None),
+    Spec(13, "corwin", "annika", 26 * HOUR, 40 * HOUR, "MERGE ready", None),
+    Spec(14, "eskil", "annika", 30 * HOUR, None, "FYI one more", None),
+    Spec(15, "annika", "corwin", 40 * HOUR, None, "ANSWER re #13: merged", None),
+    Spec(16, "bertil", "annika", 45 * HOUR, 46 * HOUR, "DONE", None),
+    Spec(17, "bertil", "corwin", None, None, "STATUS: odd header", None),
+)
+WINDOW_INBOXES = ("annika", "bertil", "corwin", "eskil")
+WINDOW_NAMES = ("annika", "bertil", "corwin", "eskil")
 
 
 def at(offset):
@@ -85,19 +133,19 @@ def at(offset):
     return (BASE + datetime.timedelta(seconds=offset)).isoformat(timespec="seconds")
 
 
-def build(root):
-    """Write the fixture mailbox under `root` (a pathlib.Path: a TcRoot's path).
+def build(root, messages=MESSAGES, inboxes=INBOXES):
+    """Write the fixture mailbox under `root` (a pathlib.Path: a TcRoot's path): `messages` (MESSAGES, or WINDOW_MESSAGES for the three-day mailbox) into `inboxes`, with CARDS and the status file either way.
 
     @interacts  see the module block.
-    @deps       json, os; MESSAGES, CARDS, at.
+    @deps       json, os; MESSAGES, INBOXES, CARDS, at.
     @complexity O(m) over m messages.
     @alloc      the files.
     """
     mail = root / "mail"
-    for name in ("annika", "bertil", "corwin"):
+    for name in inboxes:
         (mail / f"to-{name}" / "read").mkdir(parents=True, exist_ok=True)
     records = {}
-    for spec in MESSAGES:
+    for spec in messages:
         name = f"{spec.number:06d}-from-{spec.sender}.md"
         folder = mail / f"to-{spec.to}" / ("read" if spec.read is not None else "")
         if spec.sent is None:

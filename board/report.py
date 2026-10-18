@@ -25,7 +25,18 @@ Three steps, each a pure handoff to the next, then one call for tc:
    text node and attribute escaped; no clock read, so the same page gives
    the same bytes. Charts 1 to 5 as C7 lists them (chart_graph,
    chart_senders, chart_read, chart_quiet, chart_answers).
-4. report(tc, board, scrubbed, at): all of it, for tc's cmd_report.
+4. report(tc, board, scrubbed, at, window): all of it, for tc's
+   cmd_report.
+
+WINDOW (Claude Opus 5.5, unreviewed): a time window (C7, "A time
+window", D44). window_of parses --from and --to, here and nowhere else;
+extract cuts the records to the window right after their sort, before
+roles, sessions, the scrub or the renderer see them, so every chart, C5's
+mail-inferred roles and levels, the scrub's first-mail numbering, T+0,
+the as-of and the quiet stretches come from the window's messages. The
+page's face states the window: its bounds when real, only its length
+when scrubbed (whole calendar days when both bounds are dates with no
+time, fix round 1).
 
 What it reads, and nothing else (C7, D42): each message's file name
 (number, sender, recipient) and size; its header line, for the sent time
@@ -46,6 +57,8 @@ ROOT.
             nothing. load_board_module reads board/serve.py and runs its
             top level (imports and constants; its main() is not run).
             scrub and render touch nothing outside their arguments.
+            window_of reads the local zone's rules (TZ, else the
+            system's) for a bound with no offset; it reads no clock.
 @deps       python3 stdlib (collections, datetime, html, json,
             math, os, pathlib, re, stat, types); the tc module its caller
             passes; board/serve.py (hierarchy, card_text).
@@ -54,7 +67,9 @@ ROOT.
             thousands after weeks of heavy use), each read at most
             MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES, R bytes of the
             read-time records and c cards; plus serve.py's hierarchy,
-            O(n + p + e), and first_mail_levels, O(t + n log n + e).
+            O(n + p + e), and first_mail_levels, O(t + n log n + e); a
+            window adds O(t + r) (in_window, replies_before), and from
+            there t is the window's messages.
             scrub O(t + r + s) over r references and s sessions. render
             O(s x t + t log t + p + d log d + g x q) over p directed
             pairs, d dots in charts 3 and 5 (each strip sorted for its
@@ -135,6 +150,22 @@ FIRST_MAIL_KEY = "{place:012d}"
 # What a scrubbed name is called when C5 gives it no role (C7): a name
 # with no inbox and no card.
 NO_ROLE_LABEL = "session"
+
+# ---------- the time window (C7, "A time window", D44) ----------
+# WINDOW (Claude Opus 5.5, unreviewed). --from and --to are parsed here,
+# in one place (window_of); tc passes their text through and refuses, exit
+# 9, with these words when they do not parse or are out of order. A bound
+# is ISO 8601: a date alone is local midnight, a date and time with no
+# offset is local time.
+WINDOW_TIME_WORDS = ("{flag} {text!r} is not a time; give a date (2026-10-17, local midnight) or a date and time "
+                     "(2026-10-17T09:30, local time, or with an offset as 2026-10-17T09:30-05:00)")
+WINDOW_ORDER_WORDS = "--from {start} is not before --to {end}"
+# WINDOW fix round 1 (Claude Opus 5.5, unreviewed): LOW-1. A bound with no
+# offset so near the calendar's ends that local time cannot place it (year
+# 1 east of UTC, the last hours of 9999 west of it).
+WINDOW_PLACE_WORDS = ("{flag} {text!r} is too near the calendar's first or last day to place in local time; give "
+                      "a nearer date, or a time with its offset")
+FROM_FLAG, TO_FLAG = "--from", "--to"
 
 # ---------- the renderer's rules and sizes ----------
 # Every length below is in the SVG's own units; the page scales each SVG
@@ -293,6 +324,17 @@ SHAPE_GLYPHS = {"triangle-up": "▲", "circle": "●", "square": "■", "diamond
 ASK_TAGS = ("QUESTION", "PLAN-READY", "PLAN-CHECK", "MERGE", "BLOCKED")
 ASK_CAVEAT = ("A session that does not put #N on its first line answers without naming the ask, so this count "
               "can include asks that were answered.")
+# WINDOW fix round 1 (Claude Opus 5.5, unreviewed): LOW-3, C7 at dev
+# dc166ae. On a windowed page the caveat adds C7's words after "naming
+# the ask": a reply after --to is cut off with the rest of the mail past
+# the window, so its ask counts as one with no reply here.
+ASK_CAVEAT_JOIN = "answers without naming the ask"
+WINDOW_ASK_CAVEAT = ASK_CAVEAT.replace(ASK_CAVEAT_JOIN,
+                                       f"{ASK_CAVEAT_JOIN}, or one that replied after this window ends")
+# WINDOW fix round 1: LOW-2. What the summary and each chart say with no
+# records: the whole mailbox is empty, or only the window is.
+EMPTY_WORDS = "No messages yet."
+EMPTY_WINDOW_WORDS = "No messages in this window."
 
 # The page's look. Colors are tokens, light and dark; every token pair of
 # text on its surface holds its contrast in grayscale too, and no meaning
@@ -354,16 +396,35 @@ Record = collections.namedtuple("Record", "number sender recipient sent read siz
 # One name in the report: its label, and C5's role, role source and level
 # (all None for a name C5 gives no role: one with no inbox and no card).
 Session = collections.namedtuple("Session", "name role source level")
+# A time window's bounds (WINDOW, D44): start (--from, inclusive) and end
+# (--to, exclusive), each an aware datetime or None for no bound. Fix
+# round 1 (MEDIUM-1, C7 at dev dc166ae): start_date and end_date, the
+# calendar date of a bound given as a date with no time, else None.
+Window = collections.namedtuple("Window", "start end start_date end_date", defaults=(None, None))
+# A scrubbed window's length (fix round 1, MEDIUM-1 and DEBT-1): whole
+# calendar days when both bounds were dates with no time, else whole
+# seconds of real elapsed time; the other field None. Its own type, so a
+# scrubbed page's window is never a Window and never holds a bound.
+Length = collections.namedtuple("Length", "seconds days")
 # What extract hands on: the records in sent order, the sessions in first
 # mail order, how many headers did not parse, words for stderr (why a
 # folder or record was not read), which never reach the page, and how many
-# folders could not be read (fix round 1, REC-13), which does.
-Mailbox = collections.namedtuple("Mailbox", "records sessions unparsed words unreadable")
+# folders could not be read (fix round 1, REC-13), which does. WINDOW
+# (Claude Opus 5.5, unreviewed): the Window the records were cut to (None
+# for the whole mailbox), and how many replies inside it name a message
+# sent before its start (None when it has no start).
+Mailbox = collections.namedtuple("Mailbox", "records sessions unparsed words unreadable window early",
+                                 defaults=(None, None))
 # What the renderer draws, and all it ever sees: the records and sessions,
 # the count of headers that did not parse, whether the page is scrubbed,
 # its "as of" (a time, as the records' times are, or None), and how many
-# folders could not be read (0 unless given).
-Page = collections.namedtuple("Page", "records sessions unparsed scrubbed as_of unreadable", defaults=(0,))
+# folders could not be read (0 unless given). WINDOW: `window` is None for
+# the whole mailbox; on a real page the Window, on a scrubbed one only its
+# Length (scrub), so a scrubbed page never holds a bound.
+# `early` is the count of replies naming a message before the window, or
+# None when the window has no start.
+Page = collections.namedtuple("Page", "records sessions unparsed scrubbed as_of unreadable window early",
+                              defaults=(0, None, None))
 
 
 def load_board_module():
@@ -742,7 +803,107 @@ def first_mail_levels(board, nodes, parents, records):
     return {back[stand]: level for stand, level in levels.items()}
 
 
-def extract(tc, board=None):
+# WINDOW (Claude Opus 5.5, unreviewed): the time window's four functions.
+def window_time(flag, text):
+    """One bound's text (`flag` is FROM_FLAG or TO_FLAG, for the words) as an aware datetime: ISO 8601, a date alone being local midnight and a date and time with no offset local time (C7, D44). Raises ValueError with WINDOW_TIME_WORDS when it does not parse.
+
+    Local time is the process's own zone (TZ, else the system's), read by
+    datetime's astimezone for that date, so a date-only bound gets the
+    offset that date has there. No clock is read. A local time that does
+    not exist (the hour skipped in spring) comes back moved forward by
+    the skip, as astimezone gives it (02:30 becomes 03:30). Fix round 1,
+    LOW-1: one local time cannot place at all (near year 1 or year 9999)
+    raises ValueError with WINDOW_PLACE_WORDS.
+
+    @interacts  none; reads the local zone's rules.
+    @deps       datetime; WINDOW_TIME_WORDS, WINDOW_PLACE_WORDS.
+    @complexity O(c) over c characters.
+    @alloc      one datetime.
+    """
+    try:
+        when = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError(WINDOW_TIME_WORDS.format(flag=flag, text=text)) from None
+    if when.tzinfo is not None:
+        return when
+    try:  # fix round 1, LOW-1: a bound local time cannot place is a usage error too
+        return when.astimezone()
+    except (OverflowError, OSError, ValueError):
+        raise ValueError(WINDOW_PLACE_WORDS.format(flag=flag, text=text)) from None
+
+
+def calendar_date(text):
+    """`text`, one bound as given, as a datetime.date when it is a date with no time (ISO 8601: `2026-10-17`, and the other date forms date.fromisoformat takes), else None (WINDOW fix round 1, Claude Opus 5.5, unreviewed: MEDIUM-1, C7 at dev dc166ae).
+
+    @interacts  none.
+    @deps       datetime.
+    @complexity O(c) over c characters.
+    @alloc      one date, or none.
+    """
+    try:
+        return datetime.date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def window_of(start_text, end_text):
+    """`--from` and `--to` as given (text, or None for a bound not given) as a Window, or None when neither is given. Raises ValueError with words for a bound that does not parse or cannot be placed (window_time) or a --from not before --to (WINDOW_ORDER_WORDS); tc refuses either, exit 9. Each bound given as a date with no time also keeps that date (calendar_date), for the scrubbed length in whole days (fix round 1, MEDIUM-1).
+
+    @interacts  none (window_time reads the local zone's rules).
+    @deps       window_time, calendar_date, bound_text; Window,
+                WINDOW_ORDER_WORDS, FROM_FLAG, TO_FLAG.
+    @complexity O(c) over c characters of the two bounds.
+    @alloc      one Window.
+    """
+    if start_text is None and end_text is None:
+        return None
+    start = None if start_text is None else window_time(FROM_FLAG, start_text)
+    end = None if end_text is None else window_time(TO_FLAG, end_text)
+    if start is not None and end is not None and start >= end:
+        raise ValueError(WINDOW_ORDER_WORDS.format(start=bound_text(start), end=bound_text(end)))
+    return Window(start, end, None if start_text is None else calendar_date(start_text),
+                  None if end_text is None else calendar_date(end_text))
+
+
+def in_window(record, window):
+    """Whether `record` was sent inside `window`: from its start, inclusive, up to its end, exclusive. A record with no sent time is inside no window.
+
+    @interacts  none.
+    @deps       none.
+    @complexity O(1).
+    @alloc      none.
+    """
+    if record.sent is None:
+        return False
+    return ((window.start is None or record.sent >= window.start)
+            and (window.end is None or record.sent < window.end))
+
+
+def replies_before(records, kept, start):
+    """How many of `kept` (the window's records) reply to a message sent before `start`, by chart 5's rule for an answer: its first line names #N, #N (the first message numbered N among all `records`, in sent order) was sent before `start`, and it goes from #N's recipient back to #N's sender. Each reply counts once, however many such messages it names; first answer or not. A note a name sent itself is no reply.
+
+    @interacts  none; pure.
+    @deps       none.
+    @complexity O(t + r) over t records and r references in the window.
+    @alloc      a map of t numbers, freed on return.
+    """
+    first = {}
+    for record in records:
+        first.setdefault(record.number, record)
+    count = 0
+    for reply in kept:
+        if reply.sender == reply.recipient:
+            continue
+        for ref in reply.refs:
+            ask = first.get(ref)
+            if (ask is not None and ask.sent is not None and ask.sent < start
+                    and ask.sender == reply.recipient and ask.recipient == reply.sender):
+                count += 1
+                break
+    return count
+
+
+def extract(tc, board=None, window=None):
     """The mailbox's facts (C7): a Mailbox of records in sent order, sessions in first-mail order with C5's roles, the count of headers that did not parse, and words for stderr.
 
     C5's nodes are the names with an inbox or a card. Their partners are
@@ -753,16 +914,34 @@ def extract(tc, board=None):
     no role. `board` is serve.py as load_board_module gives it, loaded
     here when None.
 
+    WINDOW (Claude Opus 5.5, unreviewed): given a Window, the records are
+    cut to the messages sent inside it (in_window) right after the sort,
+    before anything else reads them, so the partner counts, C5's
+    mail-inferred roles and levels, the sessions and their first-mail
+    order all come from the window's mail; the cards' reports_to still
+    count. A message read after the window's end keeps its read time.
+    `unparsed` still counts every header that did not parse, all of them
+    outside the window. `early` counts the window's replies to a message
+    sent before its start (replies_before), over the whole mailbox's
+    records; None with no start.
+
     @interacts  see the module block's extract.
     @deps       walk_messages, read_reports_to, load_board_module,
-                sent_order, first_mail_levels; Mailbox, Session;
-                tc.MESSAGE_HEADER_MAX_BYTES; TAG_READ_MAX_BYTES.
-    @complexity see the module block.
-    @alloc      see the module block.
+                sent_order, first_mail_levels, in_window, replies_before;
+                Mailbox, Session; tc.MESSAGE_HEADER_MAX_BYTES;
+                TAG_READ_MAX_BYTES.
+    @complexity see the module block; the window adds O(t + r).
+    @alloc      see the module block; the window's own list of records.
     """
     board = load_board_module() if board is None else board
     records, boxes, words, missed = walk_messages(tc, tc.MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES)
     records.sort(key=sent_order)
+    unparsed = sum(1 for record in records if record.sent is None)
+    early = None
+    if window is not None:
+        kept = [record for record in records if in_window(record, window)]
+        early = replies_before(records, kept, window.start) if window.start is not None else None
+        records = kept
     cards = read_reports_to(tc, board)
     nodes = boxes | set(cards)
     partners = {}
@@ -780,12 +959,11 @@ def extract(tc, board=None):
             if name not in sessions:
                 role, source = roles.get(name, (None, None))
                 sessions[name] = Session(name, role, source, levels.get(name))
-    unparsed = sum(1 for record in records if record.sent is None)
-    return Mailbox(tuple(records), tuple(sessions.values()), unparsed, tuple(words), len(missed))
+    return Mailbox(tuple(records), tuple(sessions.values()), unparsed, tuple(words), len(missed), window, early)
 
 
 def page_of(mailbox, at):
-    """The unscrubbed Page of `mailbox`, as of `at` (an aware datetime, `--at`) or, when None, the last message's sent time.
+    """The unscrubbed Page of `mailbox`, as of `at` (an aware datetime, `--at`) or, when None, the last message's sent time: with a window, the last message inside it (WINDOW, D44), since the mailbox's records are the window's.
 
     @interacts  none; pure.
     @deps       Page.
@@ -794,7 +972,8 @@ def page_of(mailbox, at):
     """
     sent = [record.sent for record in mailbox.records if record.sent is not None]
     as_of = at if at is not None else (max(sent, key=lambda when: when.timestamp()) if sent else None)
-    return Page(mailbox.records, mailbox.sessions, mailbox.unparsed, False, as_of, mailbox.unreadable)
+    return Page(mailbox.records, mailbox.sessions, mailbox.unparsed, False, as_of, mailbox.unreadable,
+                mailbox.window, mailbox.early)
 
 
 def scrub(page):
@@ -810,13 +989,30 @@ def scrub(page):
     - Numbers become ranks from 1 in sent order (the records' order), and
       each #N reference the rank of the first message numbered N; a
       reference to no message here is dropped.
+    - WINDOW (Claude Opus 5.5, unreviewed): a window's bounds become its
+      Length, never a time (C7, D44). Fix round 1, MEDIUM-1 (C7 at dev
+      dc166ae): when both bounds were dates with no time, whole calendar
+      days between them, so a day reads 1 day on a daylight-time change
+      day too; else whole seconds of real elapsed time, --to less --from
+      when both were given, or the first to the last sent time inside
+      the window (0 for none). The records are already the window's, so
+      the labels' first mail, the ranks and T+0 are the window's too, and
+      T+ times stay real elapsed time. `early` is a count and passes as
+      it is.
 
     No order on the page follows real name order (fix round 1, LOW-10 and
     REC-3): extract breaks a reports_to cycle at the earliest first mail
     (first_mail_levels), and sent order breaks ties by number and size
     (sent_order). Known residual: two messages at one time with one
     number and one size, which only a hand-made twin makes, keep the
-    walk's order, inboxes by name.
+    walk's order, inboxes by name. Known residual, one bit (WINDOW fix
+    round 1, LOW-4): first_mail_levels places a node with no mail in the
+    window by real name order, so when every member of a declared
+    reports_to cycle is idle in the window, the cycle breaks at the name
+    that sorts first, and a drawn name below it can sit one row off.
+    Only a misconfigured declared cycle reaches this (inferred cycle
+    edges are dropped first); before the window it needed a name with no
+    mail ever, now one idle window is enough.
 
     @interacts  none; pure.
     @deps       datetime; Page, Record, Session, SCRUB_TAGS, OTHER_TAG,
@@ -833,6 +1029,15 @@ def scrub(page):
         sessions.append(Session(labels[session.name], session.role, session.source, session.level))
     sent = [record.sent.timestamp() for record in page.records if record.sent is not None]
     first = min(sent) if sent else None
+    length = None
+    if page.window is not None:
+        window = page.window
+        if window.start_date is not None and window.end_date is not None:  # fix round 1, MEDIUM-1
+            length = Length(None, (window.end_date - window.start_date).days)
+        elif window.start is not None and window.end is not None:
+            length = Length(round((window.end - window.start).total_seconds()), None)
+        else:
+            length = Length(round(max(sent) - first) if sent else 0, None)
 
     def elapsed(when):
         """`when` as whole seconds since `first`; None when either is None.
@@ -854,7 +1059,8 @@ def scrub(page):
                record.size, record.tag if record.tag is None or record.tag in SCRUB_TAGS else OTHER_TAG,
                tuple(ranks[ref] for ref in record.refs if ref in ranks))
         for rank, record in enumerate(page.records, 1))
-    return Page(records, tuple(sessions), page.unparsed, True, elapsed(page.as_of), page.unreadable)
+    return Page(records, tuple(sessions), page.unparsed, True, elapsed(page.as_of), page.unreadable, length,
+                page.early)
 
 
 # ---------- the renderer ----------
@@ -1056,6 +1262,47 @@ def time_text(when):
     return f"T{'+' if when > 0 else '-'}{span_text(when)}"
 
 
+def bound_text(when):
+    """A window bound as the real page's face shows it: its date, clock and offset, to the minute, or to the second or finer when it has them, so a bound is never shown rounded (WINDOW, Claude Opus 5.5, unreviewed).
+
+    @interacts  none.
+    @deps       datetime.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    whole_minute = when.second == 0 and when.microsecond == 0
+    return when.isoformat(sep=" ", timespec="minutes" if whole_minute else "auto")
+
+
+def window_words(window):
+    """The window's line on the page's face (C7, D44): on a real page (a Window) `From <from> to <to>`, `From <from>` or `Up to <to>`, each bound with its offset; on a scrubbed one (a Length) `A window of this mailbox, <length> long`, never a date or clock time: `1 day`, `3 days` for whole calendar days (fix round 1, MEDIUM-1), else span_text's form.
+
+    @interacts  none.
+    @deps       bound_text, span_text, plural; Length.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    if isinstance(window, Length):
+        long = plural(window.days, "day") if window.days is not None else span_text(window.seconds)
+        return f"A window of this mailbox, {long} long."
+    if window.start is not None and window.end is not None:
+        return f"From {bound_text(window.start)} to {bound_text(window.end)}."
+    if window.start is not None:
+        return f"From {bound_text(window.start)}."
+    return f"Up to {bound_text(window.end)}."
+
+
+def empty_words(page):
+    """What the summary and each chart say when `page` has no records: EMPTY_WINDOW_WORDS on a windowed page, whose mailbox may well hold mail outside the window, else EMPTY_WORDS (WINDOW fix round 1, Claude Opus 5.5, unreviewed: LOW-2).
+
+    @interacts  none.
+    @deps       EMPTY_WORDS, EMPTY_WINDOW_WORDS.
+    @complexity O(1).
+    @alloc      none.
+    """
+    return EMPTY_WINDOW_WORDS if page.window is not None else EMPTY_WORDS
+
+
 def role_word(session):
     """The words after a node's name: its C5 role, `· inferred` when its role is a guess, or NO_ROLE_WORD.
 
@@ -1134,17 +1381,18 @@ def chart_graph(page):
 
     @interacts  none; pure.
     @deps       math; element, text_at, titled, svg_chart, figure,
-                node_shape, node_label, box_edge, plural, num; the graph
-                constants.
+                node_shape, node_label, box_edge, plural, num, empty_words;
+                the graph constants.
     @complexity O(t + s + p) over t records, s sessions and p directed
                 pairs.
     @alloc      the SVG text, returned; a few maps of s and p entries.
     """
     sessions = page.sessions
     if not sessions:
-        svg = svg_chart("graph", CHART_WIDTH, NODE_HEIGHT * 2, "Who talks to whom", "No messages yet.",
-                        [text_at(GRAPH_MARGIN, NODE_HEIGHT, "No messages yet.")])
-        return figure(1, "Who talks to whom", "No messages yet.", svg)
+        nothing = empty_words(page)
+        svg = svg_chart("graph", CHART_WIDTH, NODE_HEIGHT * 2, "Who talks to whom", nothing,
+                        [text_at(GRAPH_MARGIN, NODE_HEIGHT, nothing)])
+        return figure(1, "Who talks to whom", nothing, svg)
     deepest = max((s.level for s in sessions if s.level is not None), default=-1)
     rows = {}
     for session in sessions:
@@ -1220,19 +1468,29 @@ def chart_graph(page):
 
 
 def summary_lines(page):
-    """The page's opening lines: the warning or the scrub line, the counts and span, the as-of, and the headers that did not parse.
+    """The page's opening lines: the warning or the scrub line, the window's line when there is one, the counts and span, the as-of, and the headers that did not parse.
+
+    WINDOW (Claude Opus 5.5, unreviewed): with a window, its line
+    (window_words) follows the warning or scrub line; an empty window
+    says `No messages in this window.`; and the headers that did not
+    parse are said to be outside the window, since no chart counts them
+    there. Fix round 1, LOW-2: an empty page's words are empty_words's.
 
     @interacts  none; pure.
-    @deps       element, esc, plural, time_text, seconds_of; REAL_WARNING,
-                SCRUBBED_WORDS; page.unreadable (fix round 1, REC-13).
+    @deps       element, esc, plural, time_text, seconds_of, window_words,
+                empty_words;
+                REAL_WARNING, SCRUBBED_WORDS; page.unreadable (fix round
+                1, REC-13); page.window.
     @complexity O(t) over t records.
     @alloc      a list of strings, returned.
     """
     lines = [element("p", (("class", "scrubbed"),), [esc(SCRUBBED_WORDS)]) if page.scrubbed else
              element("p", (("class", "warning"),), [esc(f"Warning: {REAL_WARNING}")])]
+    if page.window is not None:
+        lines.append(element("p", (("class", "window"),), [esc(window_words(page.window))]))
     sent = [r.sent for r in page.records if r.sent is not None]
     if not page.records:
-        lines.append(element("p", (), [esc("No messages yet.")]))
+        lines.append(element("p", (), [esc(empty_words(page))]))
     else:
         span = ""
         if sent:
@@ -1247,7 +1505,12 @@ def summary_lines(page):
             f"{plural(page.unreadable, 'folder')} could not be read, so the mail in "
             f"{'it is' if page.unreadable == 1 else 'them is'} not drawn here; tc report's stderr names "
             f"{'it' if page.unreadable == 1 else 'them'}.")]))
-    if page.unparsed:
+    if page.unparsed and page.window is not None:
+        has, are = ("has", "is") if page.unparsed == 1 else ("have", "are")
+        lines.append(element("p", (), [esc(f"{plural(page.unparsed, 'message')} had a header line that did not "
+                                           f"parse, so {'it' if page.unparsed == 1 else 'they'} {has} no sent time "
+                                           f"and {are} outside this window.")]))
+    elif page.unparsed:
         them = "it" if page.unparsed == 1 else "them"
         lines.append(element("p", (), [esc(f"{plural(page.unparsed, 'message')} had a header line that did not "
                                            f"parse, so the time charts (2 to 5) leave {them} out; chart 1 counts "
@@ -1361,8 +1624,8 @@ def chart_senders(page):
     @interacts  none; pure.
     @deps       math; element, text_at, titled, svg_chart, figure,
                 row_label, time_axis, time_span, bucket_seconds, later,
-                seconds_of, plot_right, empty_chart, num, plural; the
-                chart 2 constants.
+                seconds_of, plot_right, empty_chart, empty_words, num,
+                plural; the chart 2 constants.
     @complexity O(t + s x b) over t records, s senders and b buckets
                 (at most 169 hours, or the span in days).
     @alloc      the SVG text, returned; one count map per sender.
@@ -1370,7 +1633,7 @@ def chart_senders(page):
     heading = "Messages over time, per sender"
     first, last = time_span(page.records)
     if first is None:
-        return empty_chart("senders", 2, heading, "No messages yet." if not page.records else
+        return empty_chart("senders", 2, heading, empty_words(page) if not page.records else
                            "No message has a sent time.")
     span = seconds_of(last) - seconds_of(first)
     bucket = bucket_seconds(span)
@@ -1517,8 +1780,8 @@ def chart_read(page):
     back) draws at 0. A message with no sent time is left out.
 
     @interacts  none; pure.
-    @deps       delay_strips, figure, empty_chart, dot_name, span_text,
-                seconds_of, plural.
+    @deps       delay_strips, figure, empty_chart, empty_words, dot_name,
+                span_text, seconds_of, plural.
     @complexity O(s x t + d log d) over s sessions, t records and d
                 dots: the records are filtered once per session (fix
                 round 1, LOW-18), and each strip is sorted for its median.
@@ -1527,7 +1790,7 @@ def chart_read(page):
     heading = "From sent to read, per recipient"
     timed = [r for r in page.records if r.sent is not None]
     if not timed:
-        return empty_chart("read", 3, heading, "No messages yet." if not page.records else
+        return empty_chart("read", 3, heading, empty_words(page) if not page.records else
                            "No message has a sent time.")
     rows = []
     for session in page.sessions:
@@ -1600,7 +1863,7 @@ def chart_quiet(page):
 
     @interacts  none; pure.
     @deps       element, text_at, titled, svg_chart, figure, empty_chart,
-                row_label, marker, hatch, time_axis, time_span, dot_name,
+                empty_words, row_label, marker, hatch, time_axis, time_span, dot_name,
                 seconds_of, time_text, span_text, plural, plot_right, num;
                 the chart 4 constants.
     @complexity O(s x t + t log t + g x (w + h) / HATCH_STEP) over s
@@ -1613,7 +1876,7 @@ def chart_quiet(page):
     heading = "Busy and quiet stretches"
     first, last = time_span(page.records)
     if first is None:
-        return empty_chart("quiet", 4, heading, "No messages yet." if not page.records else
+        return empty_chart("quiet", 4, heading, empty_words(page) if not page.records else
                            "No message has a sent time.")
     start, span = seconds_of(first), seconds_of(last) - seconds_of(first)
     reach = plot_right() - LABEL_GUTTER
@@ -1721,16 +1984,24 @@ def answer_pairs(records):
 def chart_answers(page):
     """Chart 5, ask to answer: per answerer, one dot per pair at the time from the ask's sent time to the answer's, in chart 3's form, and in words how many answers paired, how many asks have no reply that names them (an ask with no sent time is left out of that count, and counted apart), and ASK_CAVEAT.
 
+    WINDOW (Claude Opus 5.5, unreviewed): inside a window the records are
+    the window's, so a pair needs both ends inside it; with a start, one
+    more line counts the window's replies to a message before it
+    (page.early), as page text, never drawn (C7, D44). Fix round 1, LOW-3
+    (C7 at dev dc166ae): a windowed page's caveat is WINDOW_ASK_CAVEAT,
+    which adds that a session may have replied after the window ends.
+
     @interacts  none; pure.
-    @deps       answer_pairs, delay_strips, figure, empty_chart, element,
-                text_at, dot_name, span_text, seconds_of, plural; ASK_TAGS.
+    @deps       answer_pairs, delay_strips, figure, empty_chart, empty_words,
+                element, text_at, dot_name, span_text, seconds_of, plural;
+                ASK_TAGS, ASK_CAVEAT, WINDOW_ASK_CAVEAT.
     @complexity O(t + r + d log d) over t records, r references and d
                 pairs.
     @alloc      the SVG text, returned; the pairs.
     """
     heading = "From ask to answer"
     if not any(r.sent is not None for r in page.records):
-        return empty_chart("answers", 5, heading, "No messages yet." if not page.records else
+        return empty_chart("answers", 5, heading, empty_words(page) if not page.records else
                            "No message has a sent time.")
     pairs = answer_pairs(page.records)
     by_answerer = {}
@@ -1751,7 +2022,10 @@ def chart_answers(page):
     if untimed:
         lines.append("1 ask has no sent time and is left out of this count." if untimed == 1 else
                      f"{untimed} asks have no sent time and are left out of this count.")
-    lines.append(ASK_CAVEAT)
+    if page.early is not None:  # WINDOW (Claude Opus 5.5, unreviewed): C7, D44
+        lines.append("1 reply names a message before this window." if page.early == 1 else
+                     f"{page.early} replies name a message before this window.")
+    lines.append(WINDOW_ASK_CAVEAT if page.window is not None else ASK_CAVEAT)  # fix round 1, LOW-3
     desc = ("One strip per session that answered; each dot is one ask and its first answer, placed by the time "
             "between them, the median marked and named. The counts are in the page text under the chart.")
     how = ("A message answers an earlier one when its first line names that message's number (#N, whatever its "
@@ -1793,10 +2067,11 @@ def render(page):
         element("main", (), body)])]) + "\n"
 
 
-def report(tc, board, scrubbed=False, at=None):
+def report(tc, board, scrubbed=False, at=None, window=None):
     """`tc report`'s whole work, for tc's cmd_report: (page HTML, one line of summary words, words for stderr). `board` is serve.py as load_board_module gives it, which tc loads first so a missing one is refused in words.
 
-    extract, then page_of (as of `at` or the last message), then scrub
+    extract (cut to `window`, a Window from window_of, when given: WINDOW,
+    D44), then page_of (as of `at` or the last message), then scrub
     when `scrubbed`, then render. The summary names the message count and
     whether the page is scrubbed; the stderr words say what could not be
     read (a folder, a read-time record) and never reach the page.
@@ -1806,7 +2081,7 @@ def report(tc, board, scrubbed=False, at=None):
     @complexity extract's, then render's.
     @alloc      the page text and the words, returned.
     """
-    mailbox = extract(tc, board)
+    mailbox = extract(tc, board, window)
     page = page_of(mailbox, at)
     if scrubbed:
         page = scrub(page)

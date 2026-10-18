@@ -236,6 +236,11 @@ dot), even with `--force`. `--at TIME` sets
 the page's "as of" (a time with its offset); by default it is the last
 message's.
 
+<!-- The window sentence: the WINDOW lane agent (Claude Opus 5.5), 2026-10-17. Status: unreviewed. -->
+`--from TIME` and `--to TIME` draw only the mail sent from `--from` up to,
+not including, `--to` (a date such as `2026-10-17` is local midnight), so
+a page per day never counts a message twice.
+
 To show your own history to someone, never hand over `mail/` itself: it
 holds your real names and words. Share a `tc report --scrub` page
 instead. Its names are role labels (`orchestrator-1`, `worker-2`), its
@@ -589,7 +594,7 @@ mail.
 | `tc status b "text"` | Post b's status |
 | `tc status` | Show every side's status |
 | `tc log [--last N]` | History in both directions: every message, with when it was sent and when it was read |
-| `tc report OUT.html [--scrub] [--force] [--at TIME]` | The history drawn as one HTML page; `--scrub` makes it safe to share |
+| `tc report OUT.html [--scrub] [--force] [--at TIME] [--from TIME] [--to TIME]` | The history drawn as one HTML page; `--scrub` makes it safe to share; `--from` and `--to` keep only mail sent between them |
 | `tc health [--json]` | Machine, sessions, listeners, cards and mail at a glance |
 | `tc watch a` | Heartbeat or alert that wakes a. Run it in the background. |
 | `tc join b [--account L] [--kind K] [--reports-to N]` | Write the card for the session this runs in |

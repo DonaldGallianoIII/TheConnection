@@ -122,6 +122,26 @@ orchestrator), bertil and corwin (workers), and dagny, who only sends
     - Pass: the same counts, medians and gaps.
     - Fail: any differ.
 
+<!-- Step 13a: the WINDOW lane agent (Claude Opus 5.5), 2026-10-17. Status: unreviewed, not yet run by a person. -->
+13a. **A time window.** Draw only the mail sent from 09:05 up to noon on
+    the first day, then the same scrubbed, and open both:
+    ```
+    ./tc report $PAGES/window.html --from 2026-10-01T09:05:00-05:00 --to 2026-10-01T12:00:00-05:00
+    ./tc report $PAGES/window-safe.html --scrub --from 2026-10-01T09:05:00-05:00 --to 2026-10-01T12:00:00-05:00
+    ```
+    - Pass: each prints `wrote ...: 3 messages, ...` and exits 0. The
+      real page reads `From 2026-10-01 09:05-05:00 to 2026-10-01 12:00-05:00.`
+      under its warning, then `3 messages among 2 sessions`, and
+      `As of 2026-10-01 11:00-05:00.` Chart 1 has two arrows only:
+      bertil to annika 2, annika to bertil 1. Under chart 5:
+      `2 answers name the message they answer.`, `0 asks have no reply that names them.`
+      and `1 reply names a message before this window.` The scrubbed
+      page reads `A window of this mailbox, 2h55m long.` and its times
+      run from `T+0` to `T+1h50m`, with no date or clock time anywhere.
+    - Fail: a message from outside the window in any chart, a bound
+      without its offset on the real page, or a date or clock time on
+      the scrubbed one.
+
 ## Grayscale and dark
 
 14. Turn on grayscale: in Chrome or Edge, DevTools, Ctrl+Shift+P, "Show
