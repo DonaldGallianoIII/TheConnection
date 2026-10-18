@@ -2,7 +2,7 @@
 
 Model:  Claude Opus 5.5 (the DASH lane agent), 2026-10-17, fix round 1
 Status: unreviewed
-Pause:  open. The lane built the stdout half and left the page half out.
+Pause:  settled by the architect, 2026-10-17, by C7 as written: the page names no mailbox, the stdout line does
 
 ## The question
 
