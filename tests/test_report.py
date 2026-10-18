@@ -416,6 +416,19 @@ class PageTest(unittest.TestCase):
         self.assertIn("&lt;b x=&quot;1&quot;&gt;&amp;", page)
         charts(page)
 
+    def test_an_empty_mailbox_draws_every_chart_with_words(self):
+        """No messages: the page still renders, each chart saying so in words.
+
+        @interacts  loads report.py; renders an empty page.
+        @deps       report.render, report.Page.
+        @complexity O(1).
+        @alloc      one small page.
+        """
+        report = _root.load_source("board_report", REPORT_PATH)
+        page = report.render(report.Page((), (), 0, True, None))
+        self.assertEqual(set(charts(page)), {"graph", "senders", "read", "quiet", "answers"})
+        self.assertIn("No messages yet.", page)
+
 
 class GraphTest(unittest.TestCase):
     """Chart 1: one arrow per pair and direction with its count, node shape and role word by C5's role.
@@ -626,6 +639,66 @@ class QuietTest(unittest.TestCase):
                     self.assertEqual([t.text for q in quiet for t in q.iter("text")], gaps)
                     for gap in quiet:
                         self.assertIn("hatch", [p.get("class") for p in gap.iter("path")])
+
+
+class AnswersTest(unittest.TestCase):
+    """Chart 5: a message whose first line names #N and goes from #N's recipient back to #N's sender answers #N, whatever its tag.
+
+    @interacts  renders the fixture; loads tc and report.py.
+    @deps       rendered, charts, plots_by_label, series_of, mark_titles,
+                modules_for.
+    @complexity two renders and one extract.
+    @alloc      the pages.
+    """
+
+    # Per answerer: (detail words, median words, each dot as (ask, its tag,
+    # answer, its tag, time)). annika answered 2 (by 3, `ANSWER re #2`) and
+    # 5 (by 6, `#5 got it`); bertil answered 1 (by 2) and 3 (by 4, `Re #3`).
+    STRIPS = {
+        "annika": ("2 answers", "median 20m", [(2, "QUESTION", 3, "ANSWER", "10m"), (5, fixture.PLANTED_TAG, 6, None, "30m")]),
+        "bertil": ("2 answers", "median 55m", [(1, "PLAN", 2, "QUESTION", "10m"), (3, "ANSWER", 4, None, "1h40m")]),
+    }
+
+    def test_replies_pair_by_their_named_number_and_direction_only(self):
+        """The pairs, exactly: `ANSWER re #N` and `Re #N:` both pair; 7 (the wrong way round) and 8 (no #N) do not.
+
+        @interacts  builds the fixture; loads tc and report.py.
+        @deps       report.answer_pairs, report.extract.
+        @complexity O(12).
+        @alloc      the records.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            tc, report = modules_for(root)
+            pairs = report.answer_pairs(report.extract(tc).records)
+            self.assertEqual([(ask.number, answer.number) for ask, answer in pairs], [(1, 2), (2, 3), (3, 4), (5, 6)])
+
+    def test_each_answerer_strip_has_its_pairs_its_median_and_the_unanswered_asks_in_words(self):
+        """Exact dots, titles and medians per answerer, real and scrubbed, and the asks no answer names counted in words.
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity two renders.
+        @alloc      the pages.
+        """
+        for scrub, names in ((False, {n: n for n in fixture.NAMES}), (True, ScrubTest.LABELS)):
+            with self.subTest(scrub=scrub):
+                _, page = rendered(scrub)
+                chart = charts(page)["answers"]
+                plots = plots_by_label(chart)
+                self.assertEqual(list(plots), [names[n] for n in self.STRIPS])
+                for answerer, (detail, median, dots) in self.STRIPS.items():
+                    (series,) = series_of(plots[names[answerer]])
+                    self.assertEqual([t.text for t in series.iter("text")], [names[answerer], detail, median])
+                    want = []
+                    for ask, ask_tag, answer, answer_tag, after in dots:
+                        if scrub and ask_tag == fixture.PLANTED_TAG:
+                            ask_tag = "other"
+                        want.append(f"#{ask}{' ' + ask_tag if ask_tag else ''} to "
+                                    f"#{answer}{' ' + answer_tag if answer_tag else ''}: {after}")
+                    self.assertEqual(mark_titles(series), want)
+                self.assertIn("4 answers name the message they answer.", words(chart))
+                self.assertIn("1 QUESTION message has no answer naming it.", words(chart))
 
 
 if __name__ == "__main__":

@@ -208,6 +208,13 @@ SERIES_DASHES = ("none", "3 2", "1 2", "6 2 1 2")
 SERIES_COLORS = ("s1", "s2", "s3", "s4")
 SHAPE_GLYPHS = {"triangle-up": "▲", "circle": "●", "square": "■", "diamond": "◆"}
 
+# Chart 5. The tags that mark a message as an ask, for the count of asks
+# no answer names. C7 says such asks are counted in words and never
+# guessed, but not what an ask is; pause DASH-1 asks, and recommends this:
+# a message tagged QUESTION. Any message an answer names is drawn as an
+# ask whatever its tag.
+ASK_TAGS = ("QUESTION",)
+
 # The page's look. Colors are tokens, light and dark; every token pair of
 # text on its surface holds its contrast in grayscale too, and no meaning
 # rides on a color alone (shape, dash, position and words carry it).
@@ -1109,12 +1116,13 @@ def median_of(values):
     return ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
 
 
-def delay_strips(key, rows, heading, desc):
+def delay_strips(key, rows, heading, desc, footer=None):
     """The SVG of charts 3 and 5: one strip per row, one dot per delay on a log scale, the median as a labeled tick.
 
     `rows` is a list of (name, detail words, [(delay seconds, title)]). A
     strip is its own plot with one series, labeled at its left; a row with
-    no delays draws its words and no median.
+    no delays draws its words and no median. `footer`, when given, is one
+    line of words under the axis.
 
     @interacts  none; pure.
     @deps       math; element, text_at, titled, svg_chart, row_label,
@@ -1162,7 +1170,11 @@ def delay_strips(key, rows, heading, desc):
         body.append(element("g", (("class", "plot"), ("data-plot", name)), [
             element("g", (("class", "series"), ("data-label", name), ("data-shape", "circle"), ("data-dash", "none")),
                     row_label(middle, name, detail) + marks)]))
-    return svg_chart(key, CHART_WIDTH, bottom + AXIS_HEIGHT, heading, desc, body)
+    height = bottom + AXIS_HEIGHT
+    if footer is not None:
+        body.append(text_at(LABEL_GAP, height, footer, "small"))
+        height += LINE_GAP
+    return svg_chart(key, CHART_WIDTH, height, heading, desc, body)
 
 
 def dot_name(record):
@@ -1344,8 +1356,83 @@ def chart_quiet(page):
     return figure(4, heading, how, svg_chart("quiet", CHART_WIDTH, bottom_line + AXIS_HEIGHT, heading, desc, body))
 
 
+def answer_pairs(records):
+    """C7's ask to answer pairs among `records` (in sent order): [(ask, answer)], in the answers' order.
+
+    A message answers #N when its first line names #N (any tag, or none:
+    `ANSWER re #N`, `Re #N: ...`), it goes from #N's recipient back to
+    #N's sender, both have a sent time, and it comes after #N in sent
+    order. #N is the first message numbered N. Only the first answer to
+    each ask counts. A message naming no #N never pairs, and nothing is
+    paired by time or by guess. A note a name sent itself is never an ask
+    or an answer.
+
+    @interacts  none; pure.
+    @deps       none.
+    @complexity O(t + r) over t records and r references.
+    @alloc      a map of t numbers, a set of answered asks, and the list,
+                returned.
+    """
+    first, place = {}, {}
+    for index, record in enumerate(records):
+        first.setdefault(record.number, record)
+        place.setdefault(id(record), index)
+    pairs, answered = [], set()
+    for index, answer in enumerate(records):
+        if answer.sent is None or answer.sender == answer.recipient:
+            continue
+        for ref in answer.refs:
+            ask = first.get(ref)
+            if (ask is None or id(ask) in answered or ask.sent is None or place[id(ask)] >= index
+                    or ask.sender != answer.recipient or ask.recipient != answer.sender):
+                continue
+            answered.add(id(ask))
+            pairs.append((ask, answer))
+    return pairs
+
+
+def chart_answers(page):
+    """Chart 5, ask to answer: per answerer, one dot per pair at the time from the ask's sent time to the answer's, in chart 3's form, and in words how many answers paired and how many asks no answer names.
+
+    @interacts  none; pure.
+    @deps       answer_pairs, delay_strips, figure, empty_chart, element,
+                text_at, dot_name, span_text, seconds_of, plural; ASK_TAGS.
+    @complexity O(t + r + d log d) over t records, r references and d
+                pairs.
+    @alloc      the SVG text, returned; the pairs.
+    """
+    heading = "From ask to answer"
+    if not any(r.sent is not None for r in page.records):
+        return empty_chart("answers", 5, heading, "No messages yet." if not page.records else
+                           "No message has a sent time.")
+    pairs = answer_pairs(page.records)
+    by_answerer = {}
+    for ask, answer in pairs:
+        wait = max(0.0, seconds_of(answer.sent) - seconds_of(ask.sent))
+        by_answerer.setdefault(answer.sender, []).append(
+            (wait, f"{dot_name(ask)} to {dot_name(answer)}: {span_text(wait)}"))
+    rows = [(s.name, plural(len(by_answerer[s.name]), "answer"), by_answerer[s.name])
+            for s in page.sessions if s.name in by_answerer]
+    paired = {id(ask) for ask, _ in pairs}
+    open_asks = [r for r in page.records if r.tag in ASK_TAGS and id(r) not in paired]
+    tags = " or ".join(ASK_TAGS)
+    it = "it" if len(open_asks) == 1 else "them"
+    has = "has" if len(open_asks) == 1 else "have"
+    named = ("1 answer names the message it answers." if len(pairs) == 1 else
+             f"{len(pairs)} answers name the message they answer.")
+    counts = f"{named} {plural(len(open_asks), f'{tags} message')} {has} no answer naming {it}."
+    desc = ("One strip per session that answered; each dot is one ask and its first answer, placed by the time "
+            "between them, the median marked and named. " + counts)
+    how = ("A message answers an earlier one when its first line names that message's number (#N, whatever its "
+           "tag, as in ANSWER re #N or Re #N:) and it goes back from that message's recipient to its sender. "
+           "Each dot is the time from the ask to its first answer, on a log scale, per answerer. Nothing is "
+           "paired by guess: a reply that names no number is not drawn.")
+    svg = delay_strips("answers", rows, heading, desc, counts)
+    return figure(5, heading, how, svg)
+
+
 # The charts, in page order. Each takes the Page and returns its section.
-CHARTS = (chart_graph, chart_senders, chart_read, chart_quiet)
+CHARTS = (chart_graph, chart_senders, chart_read, chart_quiet, chart_answers)
 
 
 def render(page):
