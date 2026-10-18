@@ -1030,7 +1030,12 @@ window; a reply naming a message before `--from` is counted in words,
 the window on its face: unscrubbed, `From <from> to <to>`, each bound
 with its offset, so a date-only `--from` read in another zone is never
 ambiguous; scrubbed, `A window of this mailbox, <length> long`, never a
-date or clock time.
+date or clock time. When both bounds are dates with no time, the
+scrubbed length is given in whole calendar days (`3 days`, `1 day`), so
+a day's page reads the same on a daylight-time change day as on any
+other; any other window's length is real elapsed time. `T+` times inside
+stay real elapsed time. On a windowed page the caveat under chart 5
+adds `or one that replied after this window ends`.
 
 **Determinism.** No wall-clock read in the renderer. The report's span
 comes from its data; its "as of" is the last message's time, or `--at`.
