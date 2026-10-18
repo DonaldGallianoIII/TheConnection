@@ -1,6 +1,7 @@
 # QA: tc report, the mailbox drawn as one page
 
-Model:  Claude Opus 5.5 (the DASH lane agent), 2026-10-17
+Model:  Claude Opus 5.5 (the DASH lane agent), 2026-10-17; fix round 1
+        the same day (a setup script, the round's words and refusals)
 Status: unreviewed, not yet run by a person.
 
 What this checks: `tc report` writes one page that opens offline, draws
@@ -17,32 +18,39 @@ orchestrator), bertil and corwin (workers), and dagny, who only sends
 ## Setup
 
 1. Open a terminal in the repo (the checkout with `tc` and `board/`).
-2. Make a throwaway mailbox and a folder for the pages:
+2. Make a fresh throwaway mailbox and a folder for the pages (a new one
+   each walk, so a second walk never meets the first one's pages):
    ```
-   export TC_ROOT=$(mktemp -d)
-   mkdir -p /tmp/report-qa
-   python3 -c "import sys, pathlib; sys.path.insert(0, 'tests'); import _report_fixture as f; f.build(pathlib.Path('$TC_ROOT'))"
+   eval "$(python3 qa/human/report-fixture.py)"
+   echo $TC_ROOT $PAGES
    ```
-   - Pass: no output, and `ls $TC_ROOT/mail` shows `to-annika  to-bertil  to-corwin`.
-   - Fail: an error, or other folders.
+   - Pass: two paths in a new `/tmp/report-qa-...` folder, and
+     `ls $TC_ROOT/mail` shows `to-annika  to-bertil  to-corwin`. No
+     `__pycache__` appears under `tests/` (`ls tests | grep pycache`
+     prints nothing).
+   - Fail: an error, other folders, or a `__pycache__`.
 3. Write both pages:
    ```
-   ./tc report /tmp/report-qa/real.html
-   ./tc report /tmp/report-qa/safe.html --scrub
+   ./tc report $PAGES/real.html
+   ./tc report $PAGES/safe.html --scrub
    ```
-   - Pass: each prints one line, `wrote /tmp/report-qa/real.html: 12 messages, real names and times`
-     and `wrote /tmp/report-qa/safe.html: 12 messages, scrubbed`, and exits 0 (`echo $?` prints 0).
+   - Pass: each prints one line, `wrote <PAGES>/real.html: 12 messages, real names and times. Mailbox <TC_ROOT>, from TC_ROOT.`
+     and the same for `safe.html` ending `scrubbed. Mailbox ...`, and exits 0 (`echo $?` prints 0).
    - Fail: anything else.
-4. Run the first one again:
+4. Run the first one again, then try a page inside the mailbox:
    ```
-   ./tc report /tmp/report-qa/real.html; echo $?
+   ./tc report $PAGES/real.html; echo $?
+   ./tc report $TC_ROOT/mail/x.html; echo $?
    ```
-   - Pass: one line saying the file already exists and to pass `--force`, then `1`.
-   - Fail: exit 0, or the file changed (its time in `ls -l` moved).
+   - Pass: one line opening `tc report:` saying the file already exists
+     and to pass `--force`, then `1`; then one line opening `tc report:`
+     saying the folder is inside the mailbox, then `1`, and no `x.html`
+     in `$TC_ROOT/mail`.
+   - Fail: exit 0, the file changed (its time in `ls -l` moved), or a page in the mailbox.
 
 ## The real page
 
-5. Open `/tmp/report-qa/real.html` in a browser (File, Open). Turn off the
+5. Open `$PAGES/real.html` in a browser (File, Open). Turn off the
    network first if you can (the browser's offline mode, or unplug).
    - Pass: the page draws whole, offline. At the top, a box reading
      `Warning: Holds real session names and times. Share only a --scrub copy.`
@@ -72,6 +80,8 @@ orchestrator), bertil and corwin (workers), and dagny, who only sends
      `median 20m`; bertil `3 of 4 ...`, `median 5m`; corwin `1 of 2 ...`,
      `median 30m`. Each strip has that many dots. Hovering a dot names its
      message, as `#2 QUESTION from bertil: read 2026-10-01 09:12-05:00, after 2m`.
+     The axis under the strips reads `0s`, `1m`, `10m` and, at its far
+     end, `40m`, the longest wait.
    - Fail: a count, a median or a dot wrong.
 9. **Chart 4, busy and quiet stretches.**
    - Pass: four lanes. Each has `▲ sent` above its line and `● received`
@@ -83,8 +93,11 @@ orchestrator), bertil and corwin (workers), and dagny, who only sends
      only by color.
 10. **Chart 5, from ask to answer.**
     - Pass: two strips. annika `2 answers`, `median 20m`; bertil
-      `2 answers`, `median 55m`. Under them: `4 answers name the message they answer. 1 QUESTION message has no answer naming it.`
-      Hovering annika's right dot shows `#5 ZEBRAPLANT to #6: 30m`.
+      `2 answers`, `median 55m`. Under them: `4 answers name the message they answer. 1 ask has no reply that names it.`,
+      then a line saying a session that does not put #N on its first
+      line answers without naming the ask, so this count can include
+      asks that were answered. Hovering annika's right dot shows
+      `#5 ZEBRAPLANT to #6: 30m`.
     - Fail: a pair that should not be there (message 7 runs the wrong
       way, message 8 names no number), or a count wrong.
 11. Search the page (Ctrl+F) for `SECRETWORDA`, `SECONDLINEPLANT`,
@@ -95,10 +108,11 @@ orchestrator), bertil and corwin (workers), and dagny, who only sends
 
 ## The scrubbed page
 
-12. Open `/tmp/report-qa/safe.html`.
-    - Pass: the top box starts `Scrubbed:` and says what that means; no
-      warning box. The names read `orchestrator-1`, `worker-1`,
-      `worker-2` and `session-1` (dagny). Times read `T+0` to `T+17h00m`.
+12. Open `$PAGES/safe.html`.
+    - Pass: the top box starts `Scrubbed:`, says what that means and
+      lists the tags it keeps; no warning box. The names read
+      `orchestrator-1`, `worker-1`, `worker-2` and `session-1` (dagny),
+      each node in chart 1 its label alone, with no role word after it. Times read `T+0` to `T+17h00m`.
       Chart 5's dot reads `#5 other to #6: 30m`.
     - Fail: any of annika, bertil, corwin, dagny or ZEBRAPLANT anywhere
       (search with Ctrl+F), or any date or clock time such as `2026` or
@@ -121,8 +135,13 @@ orchestrator), bertil and corwin (workers), and dagny, who only sends
 15. Set the OS or browser to dark mode and reload.
     - Pass: a dark page with light text, every chart readable.
     - Fail: dark text on dark, or a chart that vanishes.
+15a. Make the browser window narrow, as a phone (DevTools, the device
+    toolbar, 390 px wide).
+    - Pass: each chart keeps its words readable and scrolls sideways
+      inside its own box; nothing shrinks to a size you must squint at.
+    - Fail: a chart whose text shrinks with the window.
 
 ## Clean up
 
-16. `unset TC_ROOT`. The pages in `/tmp/report-qa` and the throwaway
-    mailbox are yours to remove; nothing else was written.
+16. `unset TC_ROOT PAGES`. The `/tmp/report-qa-...` folder (the
+    mailbox and the pages) is yours to remove; nothing else was written.

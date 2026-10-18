@@ -26,9 +26,12 @@ Status: unreviewed
 
 import argparse
 import datetime
+import importlib.util
 import os
 import pathlib
 import re
+import shlex
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -1351,6 +1354,44 @@ class CommandTest(unittest.TestCase):
                 with self.subTest(args=args):
                     code, _, stderr = root.tc(*args)
                     self.assertEqual(code, EXIT_USAGE, stderr)
+
+
+class QaSetupTest(unittest.TestCase):
+    """qa/human/report-fixture.py builds the walk's mailbox in a fresh folder and writes no bytecode (REC-12).
+
+    @interacts  runs the script as a child with bytecode writing on and a
+                cache prefix in the root's temp folder.
+    @deps       subprocess, shlex; _root.TcRoot.
+    @complexity one child.
+    @alloc      one TcRoot.
+    """
+
+    def test_the_setup_script_builds_the_fixture_and_writes_no_bytecode(self):
+        """Its one line names the mailbox and an empty pages folder; the mailbox holds the fixture; no .pyc of the fixture module is written (the standard library's own caches are not this test's).
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity one child.
+        @alloc      one TcRoot.
+        """
+        script = HERE.parent / "qa" / "human" / "report-fixture.py"
+        with _root.TcRoot() as root:
+            prefix = root.base / "cache"
+            env = dict(root.env)
+            env.pop("PYTHONDONTWRITEBYTECODE", None)
+            env["PYTHONPYCACHEPREFIX"] = str(prefix)
+            done = subprocess.run([sys.executable, str(script), str(root.base / "walk")], env=env,
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                  timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS)
+            self.assertEqual(done.returncode, EXIT_OK, done.stderr)
+            words = shlex.split(done.stdout)
+            self.assertEqual(words, ["export", f"TC_ROOT={root.base / 'walk' / 'mailbox'}",
+                                     f"PAGES={root.base / 'walk' / 'pages'}"])
+            self.assertEqual(sorted(p.name for p in (root.base / "walk" / "mailbox" / "mail").iterdir()),
+                             ["to-annika", "to-bertil", "to-corwin"])
+            self.assertEqual(list((root.base / "walk" / "pages").iterdir()), [])
+            fixture_cache = importlib.util.cache_from_source(str(HERE / "_report_fixture.py"))
+            self.assertEqual([p.name for p in prefix.rglob(pathlib.Path(fixture_cache).name)], [])
 
 
 class SafetyTest(unittest.TestCase):

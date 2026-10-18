@@ -216,26 +216,34 @@ opens in any browser, offline: who mails whom and how often, each
 session's mail over time, how long mail waits before it is read, the
 busy and quiet stretches, and how long a message that names an earlier
 one (`ANSWER re #12`, `Re #12:`) took to come back. It reads each
-message's file name, size and header line, the read times, and only the
-tag and `#N` numbers at the start of its first line, never the rest of a
-message.
+message's file name, size and header line, the read times, each card's
+`reports_to`, and from the first line of each message only its leading
+tag (a word in capitals, such as `PLAN` or `PLAN-READY:`) and any `#N`
+numbers in that line, never the rest of a message.
 
 ```
 $ tc report ~/history.html --scrub
 wrote .../history.html: ... messages, scrubbed. Mailbox /home/you/TheConnection, TC_ROOT unset, so the folder tc is in.
 ```
 
-It needs the `board/` folder beside `tc`, as a clone has it. An existing
-file is refused unless you add `--force`. `--at TIME` sets the page's
-"as of" (a time with its offset); by default it is the last message's.
+It needs the `board/` folder beside `tc`, as a clone has it. The line it
+prints names the page and the mailbox it read. An existing file is
+refused unless you add `--force`, and so is a page named inside the
+mailbox (`mail/`, `status/`, `cards/` or `outbox/`). `--at TIME` sets
+the page's "as of" (a time with its offset); by default it is the last
+message's.
 
 To show your own history to someone, never hand over `mail/` itself: it
 holds your real names and words. Share a `tc report --scrub` page
 instead. Its names are role labels (`orchestrator-1`, `worker-2`), its
 times count from the first message (`T+3h10m`), its message numbers are
-ranks, and any tag off a short fixed list reads `other`. A page made
-without `--scrub` holds your real session names and times, and says so
-at its top: keep that one to yourself.
+ranks, and any tag off a fixed list reads `other`. The tags it keeps are
+ANSWER, FYI, QUESTION, PLAN, PLAN-READY, PLAN-CHECK, PLAN-EDIT,
+PLAN-EDITED, PLAN-REVIEWED, CORRECTION, HEADS-UP, MERGE, REVIEW, STATUS,
+BLOCKED, DONE and BREACH, and the page lists them. A page made without
+`--scrub` holds your real session names and times, and every message's
+leading tag as you wrote it; its top says so for the names and times.
+Keep that one to yourself.
 
 ## Exit codes
 
@@ -774,7 +782,7 @@ sessions and traffic.
 tc                                    the whole tool (python3, stdlib only)
 JOIN.md                               what you point a new Claude session at
 JOIN-CODEX.md                         what you point a new Codex session at
-board/                                the live board: serve.py, live.html, look.js, theme.css, demo.html
+board/                                the live board: serve.py, live.html, look.js, theme.css, demo.html; report.py, tc report's page
 mail/to-<name>/NNNNNN-from-X.md       unread messages
 mail/to-<name>/read/                  read messages, kept as history
 mail/to-<name>/.wait.lock             the listener's lock, its owner's alone (0600); .watch.lock beside it
