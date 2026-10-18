@@ -2,7 +2,18 @@
 
 Model:  Claude Opus 5.5 (the TheConnection architect session), 2026-10-17
 Status: unreviewed
-Pause:  open, for a2 (for the owner)
+Pause:  settled by a2 for the owner, 2026-10-17: as designed, plus the message number
+
+## The ruling
+
+a2 (#1615): yes, as designed. One addition: each line's fields stay
+stable, since DASH will read this file, and each line carries the
+message's number too. So a line is
+`{"name": "000042-from-ann.md", "number": 42, "read": "2026-10-17T19:52:01-05:00"}`:
+`number` is the number in the name the message had in its inbox
+(`MESSAGE_NAME_PATTERN`), and null for a name that does not match it.
+The three keys are a contract: a later change adds keys, never renames
+or drops one.
 
 ## The ask
 
