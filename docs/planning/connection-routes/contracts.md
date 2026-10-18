@@ -23,7 +23,7 @@ pause; no lane reuses a number for a new meaning.
 | Code | Meaning | Who exits with it | Since |
 |---|---|---|---|
 | 0 | ok (`wait`: mail; `watch`: heartbeat) | every command | today |
-| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force`, a body that is not UTF-8 text, an outbox branch another user owns or that is a link (D33); also a link or FIFO planted where tc opens a file (at a wait or watch lock's name it is moved aside instead and the command runs, D35), an inbox that is a link, not a folder, or one tc cannot list, a `.shared` tc cannot read, a wait or watch lock that something else took again each time tc moved one aside, and on a shared mailbox an inbox not its owner's and `wait` or `watch` on a name the running user does not own (C4, D36) | `send`, `join`, `card`, router, `gate` (empty message), `flush` (a refused branch), `wait`, `watch`, `read`, `peek`, `log`, `status`, `init` | today (empty message), this plan (D17 to D21, D33, D36) |
+| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force`, a body that is not UTF-8 text, an outbox branch another user owns or that is a link (D33); also a link or FIFO planted where tc opens a file (at a wait or watch lock's name it is moved aside instead and the command runs, D35), an inbox that is a link, not a folder, or one tc cannot list, a `.shared` tc cannot read, a wait or watch lock that something else took again each time tc moved one aside, and on a shared mailbox an inbox not its owner's and `wait` or `watch` on a name the running user does not own (C4, D36) | `send`, `join`, `card`, router, `gate` (empty message), `flush` (a refused branch), `wait`, `watch`, `read`, `peek`, `log`, `status`, `init`, `report` (its output file exists, C7) | today (empty message), this plan (D17 to D21, D33, D36) |
 | 2 | `wait` timed out or hit its keepalive | `wait` | today |
 | 3 | another listener or watcher already holds this name's lock | `wait`, `watch` | today |
 | 4 | kept in the outbox: ssh could not reach the target, the target already has a queue, or another tc holds this member's send lock or it would not open | `send` (ssh route), `flush` | this plan (C3, D33) |
@@ -675,7 +675,9 @@ that it reads (the machine's load and memory, the live listeners from
 `cards/*.json` in C1's shape, **never** through a `cards` key in
 `health`) and message file names. It never opens a message body, and it
 never runs `nvidia-smi` or anything else slow on a request: the GPU part
-of `tc health` is not on the board's path.
+of `tc health` is not on the board's path. The report (C7, D42) reads a
+message's header line and the tag of its first body line; the feed
+never does.
 
 ```json
 {
@@ -891,3 +893,85 @@ each term.
 - `live.html` polls `/feed` every `POLL_MS` = 3000, keeps the newest answer
   only (a slow old answer never overwrites a newer one), and calls
   `patchBoard`. It has the look switch and `?gray=1` like the demo.
+
+## C7. The report (`tc report`)
+
+<!-- C7 added by Claude Opus 5.5 (the TheConnection architect session), 2026-10-17, from the DASH plan a2 approved for the owner (D42). Status: unreviewed. -->
+
+A static picture of how the mailbox was used, for the owner to keep or
+show. Built by a new `board/report.py`; `tc report` is a thin
+subcommand that loads it from tc's own folder, the way `serve.py` loads
+tc (C5: from source, in memory, no bytecode beside it).
+
+**Command.** `tc report OUT.html [--scrub] [--force] [--at TIME]`.
+Writes one self-contained HTML file: inline SVG and inline CSS, no
+script, no font or image fetched, no link to any host (D26). An existing
+`OUT.html` is refused, exit 1, with words, nothing written, unless
+`--force`; the file is written to a `.tmp` beside it and renamed into
+place. It reads the mailbox and writes nothing in it.
+
+**What it reads, and nothing else** (D42). For each message in every
+`mail/to-*/` and its `read/` (the same pinned walk as `tc log`, D35):
+- its file name (number, sender, recipient) and size;
+- its header line, for the sent time (a header that does not parse
+  leaves the message out of the time charts and is counted in words);
+- the first line of its body, read within the first
+  `MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES` bytes of the file, from
+  which it keeps only the tag (a leading token matching
+  `^[A-Z][A-Z0-9-]{1,23}$`) and any `#<number>` references in that line.
+  The rest of the line is dropped on read and never kept;
+- `read/.read-times` (C2, D41), for read times;
+- `cards/*.json`, for `reports_to` only, and the feed's role rules (C5
+  rules 1 to 5), for roles.
+It never reads a body past that first line, a status file, an outbox,
+a header note, or anything outside ROOT. The board feed (C5) is
+unchanged: it still never opens a message body.
+
+**The facts.** One closed record per message: number, sender, recipient,
+sent, read (or none), size, tag (or none), refs. The renderer sees only
+these records, never a path, a login, a hostname or ROOT.
+
+**Charts (v1).**
+1. Who talks to whom: a directed graph, one arrow per pair and
+   direction with its count as a label; node shape and role word by
+   role (C5); deterministic layout by C5's levels.
+2. Messages over time per sender: small multiples, one row per sender,
+   labeled at its left; the bucket (hour or day) chosen from the span by
+   a named rule.
+3. Sent to read, per recipient: one dot per message with a read time,
+   the median as a labeled tick, and `n of m messages have a read time`.
+4. Busy and quiet stretches: one lane per session, ticks for mail sent
+   and received; a gap of `QUIET_GAP_SECONDS` or more is hatched and
+   labeled with its length.
+5. Ask to ANSWER: where an `ANSWER` message's first line names `#N`,
+   the time from #N's sent time to the answer's, in chart 3's form; asks
+   with no answer naming them are counted in words, never guessed.
+
+**Accessibility** (rule 9, the owner is colorblind). Every series is
+labeled directly; no legend carries meaning. Series that share a plot
+differ in marker shape and dash pattern as well as color, and no two in
+one plot share both. Quiet is hatched, never a fill color alone.
+
+**`--scrub`, safe by construction** (D42).
+- Names become role labels from C5's roles: `orchestrator-1`,
+  `worker-1`, `peer-1`, numbered by first mail, never by name order.
+- A tag not on `SCRUB_TAGS` becomes `other`. The list: ANSWER, FYI,
+  QUESTION, PLAN, PLAN-READY, PLAN-CHECK, PLAN-EDIT, PLAN-EDITED,
+  PLAN-REVIEWED, CORRECTION, HEADS-UP, MERGE, REVIEW, STATUS, BLOCKED,
+  DONE, BREACH.
+- Times are relative to the report's first message (`T+0`, `T+3h10m`,
+  `T+1d02h`): no calendar date and no clock time appears anywhere in
+  the output, axis labels and the page's own text included.
+- Message numbers become ranks from 1 in sent order.
+- The page says on its face that it is scrubbed and what that means.
+Unscrubbed, times are absolute with their offset, and the page says so.
+
+**Determinism.** No wall-clock read in the renderer. The report's span
+comes from its data; its "as of" is the last message's time, or `--at`.
+The same mailbox gives the same bytes.
+
+**Cost.** One pinned walk and one bounded read per message (O(t) for t
+messages ever, each at most `MESSAGE_HEADER_MAX_BYTES +
+TAG_READ_MAX_BYTES` bytes), one read of each `read/.read-times`, and
+rendering O(t + p) for p sender and recipient pairs. Run on request,
+never on the board's poll.
