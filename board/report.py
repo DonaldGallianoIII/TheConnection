@@ -167,6 +167,12 @@ SMALL_CHAR_WIDTH = 6.8
 # and beside them, the smallest text any chart draws.
 TEXT_UNITS = 13
 SMALL_TEXT_UNITS = 12
+# Fix round 3, item 3: below this many pixels of window, the page says in
+# one line, above the first chart, that each chart scrolls sideways (a CSS
+# media query shows it; no script). Wider, the line is hidden: the charts
+# then fit the column.
+SCROLL_HINT_MAX_WIDTH = 700
+SCROLL_HINT = "Each chart scrolls sideways."
 # The fewest pixels any text may draw at (fix round 1, MEDIUM-1). Each SVG
 # gets a CSS min-width of its width x MIN_TEXT_PX / SMALL_TEXT_UNITS, so on
 # a narrow screen its .figure scrolls sideways instead of the chart
@@ -178,7 +184,10 @@ CUT_MARK = "..."
 # Chart 1, the graph. A node is a box this tall, padded this much either
 # side of its words; boxes in one row sit this far apart, rows this far
 # apart center to center (room for the arrows and their counts between),
-# and the drawing keeps this margin.
+# and the drawing keeps this margin. The drawing is as wide as its widest
+# line of boxes and these margins, no wider (fix round 3: a 960-wide
+# canvas with the graph centered opened a phone's first view on blank
+# space), so its leftmost box starts GRAPH_MARGIN + NODE_GAP / 2 in.
 NODE_HEIGHT = 34
 NODE_PAD_X = 14
 NODE_GAP = 44
@@ -307,6 +316,9 @@ p{margin:6px 0}
 .warning{background:var(--warn);color:var(--warn-ink)}
 .scrubbed{background:var(--panel)}
 .how{color:var(--ink-2);font-size:14px}
+.note{color:var(--ink-2);font-size:14px;margin-top:6px}
+.scroll-hint{display:none}
+@media (max-width:SCROLL_HINT_MAX_WIDTHpx){.scroll-hint{display:block}}
 .figure{overflow-x:auto}
 svg{display:block;max-width:100%;height:auto;margin-top:8px;background:var(--panel);border-radius:6px}
 svg text{font:TEXT_UNITSpx system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;fill:var(--ink)}
@@ -332,7 +344,8 @@ footer{margin-top:40px;color:var(--ink-2);font-size:13px}
 """
 # The two text sizes, from their constants, so the CSS and the width floor
 # never disagree.
-PAGE_CSS = PAGE_CSS.replace("SMALL_TEXT_UNITSpx", f"{SMALL_TEXT_UNITS}px").replace("TEXT_UNITSpx", f"{TEXT_UNITS}px")
+PAGE_CSS = (PAGE_CSS.replace("SMALL_TEXT_UNITSpx", f"{SMALL_TEXT_UNITS}px").replace("TEXT_UNITSpx", f"{TEXT_UNITS}px")
+            .replace("SCROLL_HINT_MAX_WIDTHpx", f"{SCROLL_HINT_MAX_WIDTH}px"))
 
 # One message, closed (C7): exactly these eight facts. sent and read are
 # aware datetimes on a real page, whole seconds since the first message on
@@ -971,17 +984,21 @@ def svg_chart(key, width, height, title, desc, body, top=0):
                     element("desc", (("id", f"{key}-desc"),), [esc(desc)]), *body])
 
 
-def figure(number, heading, how, svg):
-    """One chart's section: a numbered heading, a line on how to read it, then its SVG.
+def figure(number, heading, how, svg, notes=()):
+    """One chart's section: a numbered heading, a line on how to read it, its SVG, then each of `notes` as a line of page text under it.
+
+    Sentences go in page text, never in the SVG, so they wrap on a narrow
+    screen instead of being cut by the chart's sideways scroll (fix round
+    3, item 2).
 
     @interacts  none.
     @deps       element, esc.
-    @complexity O(s) over s characters of the SVG.
+    @complexity O(s) over s characters of the SVG and the notes.
     @alloc      one string.
     """
     return element("section", (("class", "figure"),),
                    [element("h2", (), [esc(f"{number}. {heading}")]), element("p", (("class", "how"),), [esc(how)]),
-                    svg])
+                    svg, *(element("p", (("class", "note"),), [esc(note)]) for note in notes)])
 
 
 def plural(count, one, many=None):
@@ -1138,7 +1155,7 @@ def chart_graph(page):
     lines = [rows[level][first:first + GRAPH_LINE_MAX_NODES] for level in sorted(rows)
              for first in range(0, len(rows[level]), GRAPH_LINE_MAX_NODES)]
     widest = max(len(row) for row in lines)
-    width = max(CHART_WIDTH, slot * widest + 2 * GRAPH_MARGIN)
+    width = slot * widest + 2 * GRAPH_MARGIN  # fix round 3: the graph's own bounds, so a phone opens on its left
     height = 2 * GRAPH_MARGIN + NODE_HEIGHT + GRAPH_ROW_GAP * (len(lines) - 1)
     at, seat = {}, {}
     for line, row in enumerate(lines):
@@ -1407,14 +1424,13 @@ def median_of(values):
     return ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
 
 
-def delay_strips(key, rows, heading, desc, footer=()):
+def delay_strips(key, rows, heading, desc):
     """The SVG of charts 3 and 5: one strip per row, one dot per delay on a log scale, the median as a labeled tick.
 
     `rows` is a list of (name, detail words, [(delay seconds, title)]). A
     strip is its own plot with one series, labeled at its left; a row with
     no delays draws its words and no median; a median's words are kept
-    inside the chart's width. `footer` is lines of words
-    under the axis. The axis has a grid line at each of
+    inside the chart's width. The axis has a grid line at each of
     DELAY_TICKS_SECONDS the data reaches, each labeled, and the longest
     delay drawn labeled at its far end; a tick label that would reach
     within DELAY_LABEL_PAD of the end label is left off, and the end
@@ -1479,11 +1495,7 @@ def delay_strips(key, rows, heading, desc, footer=()):
         body.append(element("g", (("class", "plot"), ("data-plot", name)), [
             element("g", (("class", "series"), ("data-label", name), ("data-shape", "circle"), ("data-dash", "none")),
                     row_label(middle, name, detail) + marks)]))
-    height = bottom + AXIS_HEIGHT
-    for words in footer:
-        body.append(text_at(LABEL_GAP, height, words, "small"))
-        height += LINE_GAP
-    return svg_chart(key, CHART_WIDTH, height, heading, desc, body)
+    return svg_chart(key, CHART_WIDTH, bottom + AXIS_HEIGHT, heading, desc, body)
 
 
 def dot_name(record):
@@ -1741,13 +1753,13 @@ def chart_answers(page):
                      f"{untimed} asks have no sent time and are left out of this count.")
     lines.append(ASK_CAVEAT)
     desc = ("One strip per session that answered; each dot is one ask and its first answer, placed by the time "
-            "between them, the median marked and named. " + " ".join(lines))
+            "between them, the median marked and named. The counts are in the page text under the chart.")
     how = ("A message answers an earlier one when its first line names that message's number (#N, whatever its "
            "tag, as in ANSWER re #N or Re #N:) and it goes back from that message's recipient to its sender. "
            "Each dot is the time from the ask to its first answer, on a log scale, per answerer. Nothing is "
            "paired by guess: a reply that names no number is not drawn.")
-    svg = delay_strips("answers", rows, heading, desc, lines)
-    return figure(5, heading, how, svg)
+    svg = delay_strips("answers", rows, heading, desc)
+    return figure(5, heading, how, svg, lines)
 
 
 # The charts, in page order. Each takes the Page and returns its section.
@@ -1768,7 +1780,8 @@ def render(page):
                 says (fix round 1, LOW-18).
     @alloc      the page text, returned; each chart's text while built.
     """
-    body = [element("h1", (), [esc(PAGE_TITLE)]), *summary_lines(page), *(chart(page) for chart in CHARTS),
+    body = [element("h1", (), [esc(PAGE_TITLE)]), *summary_lines(page),
+            element("p", (("class", "scroll-hint"),), [esc(SCROLL_HINT)]), *(chart(page) for chart in CHARTS),
             element("footer", (), [esc("Made by tc report from each message's file name, size and header time, "
                                        "the read-time records, a tag and #N references from each message's first "
                                        "line, and each card's reports-to. No other text of any message is in "

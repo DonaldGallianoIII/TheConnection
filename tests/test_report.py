@@ -26,6 +26,7 @@ Status: unreviewed
 
 import argparse
 import datetime
+import html
 import importlib.util
 import json
 import os
@@ -465,6 +466,18 @@ def charts(page):
     return found
 
 
+def text_outside_svg(page):
+    """The words of `page` (HTML) outside every <svg>: the SVGs cut out, then every tag, entities undone, runs of space made one.
+
+    @interacts  none.
+    @deps       re, html.
+    @complexity O(p) over p characters.
+    @alloc      one string.
+    """
+    bare = re.sub(r"<svg\b.*?</svg>", " ", page, flags=re.S)
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", bare)).split())
+
+
 def words(element):
     """All the text inside `element`, joined.
 
@@ -684,6 +697,10 @@ class GraphTest(unittest.TestCase):
 LONG_NAME = "lng" + "q" * 53 + "-endpart"
 # The fewest pixels a page's text may draw at (MEDIUM-1).
 MIN_TEXT_PX = 11
+# A phone's width, as the relay looked at the page (fix round 3), and the
+# page's side gutter (main's 16 px padding each side).
+PHONE_PX = 390
+PAGE_GUTTER_PX = 16
 
 
 def text_start(text, report):
@@ -755,6 +772,63 @@ class LegibleTest(unittest.TestCase):
                     self.assertTrue(text.text.endswith("-endpart"), text.text)
         self.assertGreater(cut, 0, "the long name was never cut, so this test checked no cut")
         self.assertIn(LONG_NAME, page)
+
+    def test_on_a_phone_chart_1_shows_its_leftmost_node_in_the_first_view(self):
+        """At 390 px, the leftmost node's box in chart 1 starts inside the first 390 px of the chart and fits whole in the first view (fix round 3, item 1).
+
+        How it is computed. The SVG's width attribute is W (its viewBox
+        width, in its own units) and its CSS min-width is F px; with
+        max-width:100% it draws at max(F, min(W, column)) px, where column
+        is PHONE_PX less the page's two 16 px gutters. One unit draws at
+        that width / W px. The leftmost node's box starts at the smallest
+        x of any node's outline (the rect's x, or a peer polygon's
+        smallest x), in units; times the scale, that must be under
+        PHONE_PX. And the relay's complaint was a box cut at the first
+        view's right edge, so the test also asks that the whole leftmost
+        box (to its rect's x + width, or the polygon's largest x) fits in
+        that first view, the column.
+
+        @interacts  renders the fixture, real and scrubbed.
+        @deps       rendered, charts, groups.
+        @complexity two renders.
+        @alloc      the pages.
+        """
+        for scrub in (False, True):
+            with self.subTest(scrub=scrub):
+                _, page = rendered(scrub)
+                graph = charts(page)["graph"]
+                wide = float(graph.get("width"))
+                floor = float(re.fullmatch(r"min-width:(\d+)px", graph.get("style")).group(1))
+                drawn = max(floor, min(wide, PHONE_PX - 2 * PAGE_GUTTER_PX))
+                boxes = []
+                for node in groups(graph, "node"):
+                    outline = node[1]
+                    if outline.tag == "rect":
+                        left = float(outline.get("x"))
+                        boxes.append((left, left + float(outline.get("width"))))
+                    else:
+                        xs = [float(pair.split(",")[0]) for pair in outline.get("points").split()]
+                        boxes.append((min(xs), max(xs)))
+                left, right = min(boxes)
+                scale = drawn / wide
+                self.assertLess(left * scale, PHONE_PX, (left, drawn, wide))
+                self.assertLessEqual(right * scale, PHONE_PX - 2 * PAGE_GUTTER_PX, (right, drawn, wide))
+
+    def test_below_700_px_one_line_says_each_chart_scrolls_sideways(self):
+        """The line sits above the first chart, hidden by default and shown by a max-width:700px media query (fix round 3, item 3).
+
+        @interacts  renders the fixture.
+        @deps       rendered; re.
+        @complexity one render.
+        @alloc      the page.
+        """
+        report, page = rendered()
+        line = '<p class="scroll-hint">Each chart scrolls sideways.</p>'
+        self.assertIn(line, page)
+        self.assertLess(page.index(line), page.index("<svg"))
+        css = report.PAGE_CSS.replace("\n", "")
+        self.assertIn(".scroll-hint{display:none}", css)
+        self.assertRegex(css, r"@media \(max-width:700px\)\{\.scroll-hint\{display:block\}\}")
 
     def test_each_chart_has_a_width_floor_that_keeps_its_smallest_text_at_11_px(self):
         """Each SVG's min-width is its width x MIN_TEXT_PX / SMALL_TEXT_UNITS, rounded up, and no SVG text rule is smaller than SMALL_TEXT_UNITS.
@@ -1092,23 +1166,27 @@ class AnswersTest(unittest.TestCase):
                         want.append(f"#{ask}{' ' + ask_tag if ask_tag else ''} to "
                                     f"#{answer}{' ' + answer_tag if answer_tag else ''}: {after}")
                     self.assertEqual(mark_titles(series), want)
-                self.assertIn("4 answers name the message they answer.", words(chart))
-                self.assertIn("1 ask has no reply that names it.", words(chart))
-                self.assertIn(ASK_CAVEAT, words(chart))
+                outside = text_outside_svg(page)
+                for line in ("4 answers name the message they answer.", "1 ask has no reply that names it.",
+                             ASK_CAVEAT):
+                    with self.subTest(line=line):
+                        self.assertIn(line, outside)
+                        for svg in charts(page).values():
+                            self.assertNotIn(line, words(svg))
                 self.assertNotIn("nobody answered", page)
                 self.assertNotIn("unanswered", page)
 
     def ask_words(self, records):
-        """Chart 5's words for a hand-made page of `records` among ann and ben.
+        """Chart 5's page words, outside its SVG, for a hand-made page of `records` among ann and ben.
 
         @interacts  loads report.py; renders one chart.
-        @deps       report.chart_answers, report.Page, report.Session.
+        @deps       report.chart_answers, report.Page, report.Session; text_outside_svg.
         @complexity O(r) over r records.
         @alloc      one chart's text.
         """
         report = _root.load_source("board_report", REPORT_PATH)
         sessions = (report.Session("ann", None, None, None), report.Session("ben", None, None, None))
-        return words(charts(report.chart_answers(report.Page(tuple(records), sessions, 0, False, None)))["answers"])
+        return text_outside_svg(report.chart_answers(report.Page(tuple(records), sessions, 0, False, None)))
 
     def test_each_ask_tag_counts_and_other_tags_do_not(self):
         """Each of C7's five ask tags, alone and unreplied, is one ask with no reply; FYI is none; all five are five.
