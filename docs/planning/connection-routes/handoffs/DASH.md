@@ -337,7 +337,7 @@ in 277.465s`, `OK`. `node --test tests/*.test.mjs`: `# tests 68`, `# pass
 
 - **DEBT-2** (cards read by path after a glob): the only swapper is the
   init user (D34); the same shape as tc's own card reads.
-- **DEBT-3** (one 1,700-line file): a split moves tc's loader path,
+- **DEBT-3** (one 1,760-line file): a split moves tc's loader path,
   tc's words and the tests' module paths; worth its own lane.
 - **DEBT-4** (every message ever on one page): a window changes page_of,
   the scrub's origin and every axis together; v2.
