@@ -117,12 +117,12 @@ READ_FOLDER = "read"
 CARD_SUFFIX = ".json"
 # Opening a message: never through a link, never blocking on a FIFO.
 HEAD_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-# The tags a scrubbed page keeps as they are (C7). The project's own
-# working words, none of which names a person, a project or a machine;
-# any other tag reads OTHER_TAG.
-SCRUB_TAGS = frozenset(("ANSWER", "FYI", "QUESTION", "PLAN", "PLAN-READY", "PLAN-CHECK", "PLAN-EDIT",
-                        "PLAN-EDITED", "PLAN-REVIEWED", "CORRECTION", "HEADS-UP", "MERGE", "REVIEW",
-                        "STATUS", "BLOCKED", "DONE", "BREACH"))
+# The tags a scrubbed page keeps as they are (C7), in C7's order: a tuple,
+# not a set, so the scrub note lists them in the same order every run. The
+# project's own working words, none of which names a person, a project or
+# a machine; any other tag reads OTHER_TAG.
+SCRUB_TAGS = ("ANSWER", "FYI", "QUESTION", "PLAN", "PLAN-READY", "PLAN-CHECK", "PLAN-EDIT", "PLAN-EDITED",
+              "PLAN-REVIEWED", "CORRECTION", "HEADS-UP", "MERGE", "REVIEW", "STATUS", "BLOCKED", "DONE", "BREACH")
 OTHER_TAG = "other"
 # A stand-in name that sorts in first-mail order, zero-padded so text
 # order is number order for any mailbox (first_mail_levels).
@@ -139,7 +139,7 @@ PAGE_TITLE = "Mailbox report"
 REAL_WARNING = "Holds real session names and times. Share only a --scrub copy."
 SCRUBBED_WORDS = ("Scrubbed: names are role labels numbered by first mail, tags off a fixed list read "
                   f"{OTHER_TAG}, times are elapsed from the first message (T+0), and message numbers are "
-                  "ranks in sent order.")
+                  f"ranks in sent order. The tags kept as they are: {', '.join(SCRUB_TAGS)}.")
 # Lengths of time, for the short forms (`3h10m`, `1d02h`) and the buckets.
 SECONDS_PER_MINUTE = 60
 SECONDS_PER_HOUR = 60 * SECONDS_PER_MINUTE
@@ -334,13 +334,15 @@ Record = collections.namedtuple("Record", "number sender recipient sent read siz
 # (all None for a name C5 gives no role: one with no inbox and no card).
 Session = collections.namedtuple("Session", "name role source level")
 # What extract hands on: the records in sent order, the sessions in first
-# mail order, how many headers did not parse, and words for stderr (why a
-# folder or record was not read), which never reach the page.
-Mailbox = collections.namedtuple("Mailbox", "records sessions unparsed words")
+# mail order, how many headers did not parse, words for stderr (why a
+# folder or record was not read), which never reach the page, and how many
+# folders could not be read (fix round 1, REC-13), which does.
+Mailbox = collections.namedtuple("Mailbox", "records sessions unparsed words unreadable")
 # What the renderer draws, and all it ever sees: the records and sessions,
 # the count of headers that did not parse, whether the page is scrubbed,
-# and its "as of" (a time, as the records' times are, or None).
-Page = collections.namedtuple("Page", "records sessions unparsed scrubbed as_of")
+# its "as of" (a time, as the records' times are, or None), and how many
+# folders could not be read (0 unless given).
+Page = collections.namedtuple("Page", "records sessions unparsed scrubbed as_of unreadable", defaults=(0,))
 
 
 def load_board_module():
@@ -502,7 +504,7 @@ def sent_order(record):
 
 
 def walk_messages(tc, head_limit):
-    """Every message in the mailbox as (records, names with an inbox, words), records unsorted.
+    """Every message in the mailbox as (records, names with an inbox, words, folders missed), records unsorted; each folder it could not open or list is one entry of `folders missed`, its words in `words` too.
 
     tc's pinned walk (D35), as tc log walks: mail/ opened once, each
     to-<name>/ by its name in it and its read/ by name in the inbox's
@@ -533,33 +535,35 @@ def walk_messages(tc, head_limit):
     @alloc      one Record per message, returned; mail/'s descriptor and
                 one inbox's two at a time, each closed when done with.
     """
-    found, boxes, words = {}, set(), []
+    found, boxes, words, missed = {}, set(), [], []
     try:
         mail_fd = tc.open_mail()
     except OSError as err:
-        return [], boxes, [f"could not open {tc.MAIL} ({err.strerror})"]
+        missed.append(f"could not open {tc.MAIL} ({err.strerror})")
+        return [], boxes, missed, missed
     if mail_fd is None:
-        return [], boxes, words
+        return [], boxes, words, missed
     try:
         try:
             entries = sorted(entry for entry in os.listdir(mail_fd) if entry.startswith(INBOX_PREFIX))
         except OSError as err:
-            return [], boxes, [f"could not list {tc.MAIL} ({err.strerror})"]
+            missed.append(f"could not list {tc.MAIL} ({err.strerror})")
+            return [], boxes, missed, missed
         for entry in entries:
             to = entry[len(INBOX_PREFIX):]
             if tc.valid_name(to):
                 inbox = tc.open_inbox(mail_fd, to)
                 try:
-                    walk_inbox(tc, inbox, to, head_limit, found, boxes, words)
+                    walk_inbox(tc, inbox, to, head_limit, found, boxes, words, missed)
                 finally:
                     tc.unpin(inbox.read, inbox.box)
     finally:
         os.close(mail_fd)
-    return list(found.values()), boxes, words
+    return list(found.values()), boxes, words, missed
 
 
-def walk_inbox(tc, inbox, to, head_limit, found, boxes, words):
-    """One open inbox's messages, unread then read, into `found` (keyed by recipient, number and sender), its name into `boxes`, and anything it could not read into `words`, as walk_messages says.
+def walk_inbox(tc, inbox, to, head_limit, found, boxes, words, missed):
+    """One open inbox's messages, unread then read, into `found` (keyed by recipient, number and sender), its name into `boxes`, anything it could not read into `words`, and each folder it could not open or list into `missed` and `words`, as walk_messages says.
 
     @interacts  lists the inbox and its read/ through their descriptors,
                 reads each message's head and read/'s record once.
@@ -574,6 +578,7 @@ def walk_inbox(tc, inbox, to, head_limit, found, boxes, words):
         if inbox.box.problem is not None:
             boxes.add(to)
             words.append(inbox.box.problem)
+            missed.append(inbox.box.problem)
         return
     boxes.add(to)
     read_path = inbox.path / READ_FOLDER
@@ -598,10 +603,13 @@ def walk_inbox(tc, inbox, to, head_limit, found, boxes, words):
         if pinned.fd is None:
             if pinned.problem is not None:
                 words.append(pinned.problem)
+                missed.append(pinned.problem)
             continue
         messages, _, problem = tc.message_files(folder, pinned.fd)
         if problem is not None:
             words.append(problem)
+            if not messages:
+                missed.append(problem)
         for path, st in messages:
             named = tc.MESSAGE_NAME_PATTERN.fullmatch(path.name)
             if named is None:
@@ -706,7 +714,7 @@ def extract(tc, board=None):
     @alloc      see the module block.
     """
     board = load_board_module() if board is None else board
-    records, boxes, words = walk_messages(tc, tc.MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES)
+    records, boxes, words, missed = walk_messages(tc, tc.MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES)
     records.sort(key=sent_order)
     cards = read_reports_to(tc, board)
     nodes = boxes | set(cards)
@@ -726,7 +734,7 @@ def extract(tc, board=None):
                 role, source = roles.get(name, (None, None))
                 sessions[name] = Session(name, role, source, levels.get(name))
     unparsed = sum(1 for record in records if record.sent is None)
-    return Mailbox(tuple(records), tuple(sessions.values()), unparsed, tuple(words))
+    return Mailbox(tuple(records), tuple(sessions.values()), unparsed, tuple(words), len(missed))
 
 
 def page_of(mailbox, at):
@@ -739,7 +747,7 @@ def page_of(mailbox, at):
     """
     sent = [record.sent for record in mailbox.records if record.sent is not None]
     as_of = at if at is not None else (max(sent, key=lambda when: when.timestamp()) if sent else None)
-    return Page(mailbox.records, mailbox.sessions, mailbox.unparsed, False, as_of)
+    return Page(mailbox.records, mailbox.sessions, mailbox.unparsed, False, as_of, mailbox.unreadable)
 
 
 def scrub(page):
@@ -799,7 +807,7 @@ def scrub(page):
                record.size, record.tag if record.tag is None or record.tag in SCRUB_TAGS else OTHER_TAG,
                tuple(ranks[ref] for ref in record.refs if ref in ranks))
         for rank, record in enumerate(page.records, 1))
-    return Page(records, tuple(sessions), page.unparsed, True, elapsed(page.as_of))
+    return Page(records, tuple(sessions), page.unparsed, True, elapsed(page.as_of), page.unreadable)
 
 
 
@@ -1178,6 +1186,11 @@ def summary_lines(page):
                                            f"{plural(len(page.sessions), 'session')}{span}.")]))
     if page.as_of is not None:
         lines.append(element("p", (("class", "as-of"),), [esc(f"As of {time_text(page.as_of)}.")]))
+    if page.unreadable:
+        lines.append(element("p", (("class", "unreadable"),), [esc(
+            f"{plural(page.unreadable, 'folder')} could not be read, so the mail in "
+            f"{'it is' if page.unreadable == 1 else 'them is'} not drawn here; tc report's stderr names "
+            f"{'it' if page.unreadable == 1 else 'them'}.")]))
     if page.unparsed:
         them = "it" if page.unparsed == 1 else "them"
         lines.append(element("p", (), [esc(f"{plural(page.unparsed, 'message')} had a header line that did not "

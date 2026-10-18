@@ -561,6 +561,45 @@ class PageTest(unittest.TestCase):
         self.assertIn("Scrubbed:", safe)
         self.assertNotIn("Scrubbed:", real)
 
+    def test_the_scrub_note_lists_the_tags_it_keeps(self):
+        """The scrubbed page's note names every tag on SCRUB_TAGS (REC-9).
+
+        @interacts  see the class.
+        @deps       rendered; re; report.SCRUB_TAGS.
+        @complexity one render.
+        @alloc      the page.
+        """
+        report, safe = rendered(True)
+        note = re.search(r'<p class="scrubbed">([^<]*)</p>', safe).group(1)
+        for tag in report.SCRUB_TAGS:
+            with self.subTest(tag=tag):
+                self.assertRegex(note, rf"(?<![A-Z-]){re.escape(tag)}(?![A-Z-])")
+
+    def test_a_folder_the_report_could_not_read_is_counted_on_the_page(self):
+        """An inbox closed to this user: extract counts one folder it could not read, and the page says so in words (REC-13).
+
+        @interacts  builds the fixture and one inbox with no permissions
+                    (put back before the root is removed); loads tc and
+                    report.py.
+        @deps       modules_for, fixture; report.extract, report.render.
+        @complexity one extract and one render.
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            closed = root.path / "mail" / "to-shut"
+            closed.mkdir()
+            closed.chmod(0)
+            try:
+                tc, report = modules_for(root)
+                box = report.extract(tc)
+            finally:
+                closed.chmod(0o700)
+            self.assertEqual(box.unreadable, 1)
+            page = report.render(report.page_of(box, None))
+            self.assertIn("1 folder could not be read", page)
+            self.assertNotIn("folders could not be read", report.render(report.page_of(report.extract(tc), None)))
+
     def test_every_text_node_and_attribute_is_escaped(self):
         """A name holding markup reaches the page only escaped.
 

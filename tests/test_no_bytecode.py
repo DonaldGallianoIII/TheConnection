@@ -7,7 +7,7 @@ the first edit's code, and a mutation record could pass on old code.
 Model:  Claude Opus 5.5 (the R30 lane agent), 2026-10-17
 Status: unreviewed
 
-Five tests:
+Six tests:
   1. tc and serve.py loaded through _root.load_source, and through every
      loader in the suites, write no .pyc for either. Each load runs in its
      own child with bytecode writing on and PYTHONPYCACHEPREFIX pointed at
@@ -22,6 +22,9 @@ Five tests:
      before the second load: the load still runs the second edit.
   5. Every child the harness starts sees PYTHONDONTWRITEBYTECODE=1, even
      when the test's own env tries to unset it.
+  6. DASH fix round 1 (Claude Opus 5.5, unreviewed): REC-5. `tc report`,
+     run with bytecode writing on, writes no .pyc of board/report.py or
+     board/serve.py, which it loads from source.
 
 @interacts  runs one child per row of LOADERS (sys.executable -c ...),
             outside the harness on purpose: a harness child gets
@@ -32,17 +35,20 @@ Five tests:
             it at CHILD_CEILING_SECONDS. Copies tc into the root's temp
             folder and loads the copy in this process with TC_ROOT set to
             the root and put back; plants one .pyc beside a copy with
-            py_compile. Reads tests/test_*.py as text. Never touches the
-            checkout's own __pycache__.
+            py_compile. Reads tests/test_*.py as text. Test 6 runs ../tc
+            report once the same way, writing its page in the root's temp
+            folder. Never touches the checkout's own __pycache__.
 @deps       python3 stdlib (importlib.util, os, pathlib, py_compile, re,
             subprocess, sys, unittest, unittest.mock); tests/_root.py;
-            ../tc; board/serve.py; the test modules LOADERS names.
+            ../tc; board/serve.py; board/report.py; the test modules
+            LOADERS names.
 @complexity Test 1: L = len(LOADERS) + 2 = 14 children, each one test
             module's import plus one load (well under a second each), then
             one walk of the cache folder, O(c) over c cached files (a few
             hundred stdlib and test modules). Test 2: O(b) over b bytes of
             tests/test_*.py (about 1 MB). Tests 3 and 4: O(s) over s bytes
-            of tc, compiled twice each. Test 5: two children.
+            of tc, compiled twice each. Test 5: two children. Test 6: one
+            child, then one walk of its cache folder.
 @alloc      one TcRoot per test, removed on exit, with the cache folder,
             the scratch copies and the planted cache in it.
 """
@@ -66,6 +72,8 @@ if str(HERE) not in sys.path:
 import _root  # noqa: E402  (needs the path line above)
 
 SERVE_PATH = HERE.parent / "board" / "serve.py"
+# DASH fix round 1 (Claude Opus 5.5, unreviewed): REC-5, the renderer tc report loads from source.
+REPORT_PATH = HERE.parent / "board" / "report.py"
 # A child imports one test module and loads once; that is well under a
 # second. One that runs this long is hung.
 CHILD_CEILING_SECONDS = 30
@@ -300,6 +308,34 @@ class NoBytecodeTest(unittest.TestCase):
                     timeout=CHILD_CEILING_SECONDS)
                 with self.subTest(env=label):
                     self.assertEqual(out.strip(), NO_BYTECODE_SEEN, err)
+
+    # DASH fix round 1 (Claude Opus 5.5, unreviewed): REC-5.
+    def test_tc_report_writes_no_cache_of_report_or_serve(self):
+        """`tc report`, run with bytecode writing on, leaves no .pyc of board/report.py or board/serve.py under the cache prefix.
+
+        @interacts  one child (sys.executable ../tc report), outside the
+                    harness for the reason test 1 gives, with the root's
+                    env less PYTHONDONTWRITEBYTECODE and PYTHONPYCACHEPREFIX
+                    set; its page lands in the root's temp folder.
+        @deps       subprocess, importlib.util; _root.TC; SERVE_PATH,
+                    REPORT_PATH.
+        @complexity one child, then one walk of the cache folder.
+        @alloc      one TcRoot, removed on exit.
+        """
+        with _root.TcRoot() as root:
+            prefix = root.base / "cache-report"
+            env = dict(root.env)
+            env.pop(NO_BYTECODE_KEY, None)
+            env[CACHE_PREFIX_KEY] = str(prefix)
+            done = subprocess.run([sys.executable, str(_root.TC), "report", str(root.base / "page.html")], env=env,
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                  timeout=CHILD_CEILING_SECONDS)
+            with self.subTest(check="ran"):
+                self.assertEqual(done.returncode, 0, done.stderr)
+            names = {pathlib.Path(importlib.util.cache_from_source(str(src))).name for src in (REPORT_PATH, SERVE_PATH)}
+            written = sorted(str(p.relative_to(prefix)) for p in prefix.rglob("*.pyc") if p.name in names)
+            with self.subTest(check="cache"):
+                self.assertEqual(written, [], "tc report wrote a bytecode cache of its renderer")
 
 
 if __name__ == "__main__":
