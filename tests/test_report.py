@@ -30,6 +30,7 @@ import pathlib
 import re
 import sys
 import unittest
+from xml.etree import ElementTree
 
 HERE = pathlib.Path(__file__).resolve().parent
 # Run as `python3 -m unittest tests.test_report` from the repo root,
@@ -262,6 +263,198 @@ class ScrubTest(unittest.TestCase):
         page = report.Page((record,), (report.Session("ann", None, None, None), report.Session("ben", None, None, None)),
                            0, False, None)
         self.assertEqual(report.scrub(page).records[0].refs, (1,))
+
+
+def rendered(scrub=False, at=None):
+    """The fixture's page as HTML, rendered in this process: (report module, html).
+
+    @interacts  builds the fixture under a TcRoot of its own; loads tc
+                and report.py.
+    @deps       modules_for, fixture.build; _root.TcRoot.
+    @complexity O(12) messages, plus two compiles.
+    @alloc      one TcRoot, removed before return; the page, returned.
+    """
+    with _root.TcRoot() as root:
+        fixture.build(root.path)
+        tc, report = modules_for(root)
+        page = report.page_of(report.extract(tc), at)
+        return report, report.render(report.scrub(page) if scrub else page)
+
+
+def charts(page):
+    """Each chart's SVG in `page`, parsed: {data-chart: Element}.
+
+    Every SVG is written as well-formed XML, so ElementTree parses it; a
+    page that is not fails here.
+
+    @interacts  none.
+    @deps       re, xml.etree.ElementTree.
+    @complexity O(p) over p characters of the page.
+    @alloc      one tree per SVG, returned.
+    """
+    found = {}
+    for svg in re.findall(r"<svg\b.*?</svg>", page, re.S):
+        element = ElementTree.fromstring(svg)
+        found[element.get("data-chart")] = element
+    return found
+
+
+def words(element):
+    """All the text inside `element`, joined.
+
+    @interacts  none.
+    @deps       none.
+    @complexity O(n) over n nodes under it.
+    @alloc      one string.
+    """
+    return "".join(element.itertext())
+
+
+def groups(element, kind):
+    """Every <g> under `element` whose class list holds `kind`.
+
+    @interacts  none.
+    @deps       none.
+    @complexity O(n) over n nodes under it.
+    @alloc      one list.
+    """
+    return [g for g in element.iter("g") if kind in (g.get("class") or "").split()]
+
+
+def title_of(element):
+    """The text of `element`'s own <title> child, or None.
+
+    @interacts  none.
+    @deps       none.
+    @complexity O(c) over c children.
+    @alloc      none.
+    """
+    title = element.find("title")
+    return None if title is None else title.text
+
+
+# The fixture's graph: one arrow per sender and recipient, with its count.
+# Message 10's header does not parse, but its file name still counts here.
+GRAPH_EDGES = {("annika", "bertil", 3), ("bertil", "annika", 3), ("corwin", "annika", 2),
+               ("annika", "corwin", 2), ("dagny", "bertil", 1), ("bertil", "corwin", 1)}
+GRAPH_NODES = {"annika": "orchestrator", "bertil": "worker", "corwin": "worker", "dagny": "no role"}
+
+
+def message_count(count):
+    """`1 message` or `<n> messages`.
+
+    @interacts  none.
+    @deps       none.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    return f"{count} message" if count == 1 else f"{count} messages"
+
+
+class PageTest(unittest.TestCase):
+    """The page's frame: one self-contained HTML file with its title, lang, warning or scrub line, and escaped text.
+
+    @interacts  builds the fixture; renders it in this process.
+    @deps       rendered, charts.
+    @complexity a few renders of 12 messages.
+    @alloc      the pages.
+    """
+
+    def test_the_page_is_self_contained_with_a_title_lang_and_a_title_and_desc_in_each_svg(self):
+        """No script, no link, no http, no url(; a <title>, lang, and each SVG's <title> and <desc>.
+
+        @interacts  see the class.
+        @deps       rendered, charts.
+        @complexity O(p) over the page.
+        @alloc      the page.
+        """
+        for scrub in (False, True):
+            with self.subTest(scrub=scrub):
+                _, page = rendered(scrub)
+                self.assertTrue(page.startswith("<!doctype html>"))
+                self.assertIn('<html lang="en">', page)
+                self.assertRegex(page, r"<title>[^<]+</title>")
+                for banned in ("<script", "<link", "http", "url(", "@import", "<img", "<iframe"):
+                    self.assertNotIn(banned, page.lower())
+                found = charts(page)
+                self.assertTrue(found)
+                for key, svg in found.items():
+                    self.assertTrue(svg.find("title") is not None and svg.find("title").text, key)
+                    self.assertTrue(svg.find("desc") is not None and svg.find("desc").text, key)
+
+    def test_the_real_page_warns_and_the_scrubbed_page_says_it_is_scrubbed(self):
+        """The unscrubbed page carries C7's warning on its face; the scrubbed page does not, and says it is scrubbed.
+
+        @interacts  see the class.
+        @deps       rendered.
+        @complexity two renders.
+        @alloc      the pages.
+        """
+        warning = "Holds real session names and times. Share only a --scrub copy."
+        _, real = rendered(False)
+        _, safe = rendered(True)
+        self.assertIn(warning, real)
+        self.assertNotIn(warning, safe)
+        self.assertIn("Scrubbed:", safe)
+        self.assertNotIn("Scrubbed:", real)
+
+    def test_every_text_node_and_attribute_is_escaped(self):
+        """A name holding markup reaches the page only escaped.
+
+        @interacts  loads report.py; renders a hand-made page.
+        @deps       report.render, report.Page, report.Record, report.Session.
+        @complexity O(1).
+        @alloc      one small page.
+        """
+        report = _root.load_source("board_report", REPORT_PATH)
+        bad = '<b x="1">&'
+        record = report.Record(1, bad, "ben", fixture.BASE, None, 10, "FYI", ())
+        page = report.render(report.Page((record,), (report.Session(bad, None, None, None),
+                                                    report.Session("ben", None, None, None)), 0, False, fixture.BASE))
+        self.assertNotIn(bad, page)
+        self.assertNotIn("<b ", page)
+        self.assertIn("&lt;b x=&quot;1&quot;&gt;&amp;", page)
+        charts(page)
+
+
+class GraphTest(unittest.TestCase):
+    """Chart 1: one arrow per pair and direction with its count, node shape and role word by C5's role.
+
+    @interacts  renders the fixture.
+    @deps       rendered, charts, groups, title_of.
+    @complexity two renders.
+    @alloc      the pages.
+    """
+
+    def test_each_arrow_carries_its_count_and_each_node_its_role(self):
+        """Every edge's title and count label, exactly; every node's role, shape and word; the same on a scrubbed page under its labels.
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity two renders.
+        @alloc      the pages.
+        """
+        for scrub, names in ((False, {n: n for n in fixture.NAMES}), (True, ScrubTest.LABELS)):
+            with self.subTest(scrub=scrub):
+                _, page = rendered(scrub)
+                graph = charts(page)["graph"]
+                edges = {}
+                for edge in groups(graph, "edge"):
+                    labels = [t.text for t in edge.iter("text")]
+                    edges[title_of(edge)] = labels
+                self.assertEqual(edges, {f"{names[s]} to {names[r]}: {message_count(n)}": [str(n)]
+                                         for s, r, n in GRAPH_EDGES})
+                nodes = {}
+                for node in groups(graph, "node"):
+                    nodes[node.get("data-role")] = nodes.get(node.get("data-role"), set()) | {
+                        "".join(node.find("text").itertext())}
+                want = {}
+                for name, role in GRAPH_NODES.items():
+                    want.setdefault(role, set()).add(f"{names[name]} · {role}")
+                self.assertEqual(nodes, want)
+                shapes = {node.get("data-role"): node[1].tag + (node[1].get("rx") or "") +
+                          (node[1].get("stroke-dasharray") or "") for node in groups(graph, "node")}
+                self.assertEqual(len(set(shapes.values())), len(shapes), shapes)
 
 
 if __name__ == "__main__":

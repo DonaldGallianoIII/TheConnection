@@ -55,7 +55,9 @@ ROOT.
 import collections
 import contextlib
 import datetime
+import html
 import json
+import math
 import os
 import pathlib
 import re
@@ -98,6 +100,86 @@ OTHER_TAG = "other"
 # What a scrubbed name is called when C5 gives it no role (C7): a name
 # with no inbox and no card.
 NO_ROLE_LABEL = "session"
+
+# ---------- the renderer's rules and sizes ----------
+# Every length below is in the SVG's own units; the page scales each SVG
+# down to its column, so these are proportions, not screen pixels.
+PAGE_TITLE = "Mailbox report"
+# C7, a2's add (d): the words an unscrubbed page carries on its face.
+REAL_WARNING = "Holds real session names and times. Share only a --scrub copy."
+SCRUBBED_WORDS = ("Scrubbed: names are role labels numbered by first mail, tags off a fixed list read "
+                  f"{OTHER_TAG}, times are elapsed from the first message (T+0), and message numbers are "
+                  "ranks in sent order.")
+# Lengths of time, for the short forms (`3h10m`, `1d02h`) and the buckets.
+SECONDS_PER_MINUTE = 60
+SECONDS_PER_HOUR = 60 * SECONDS_PER_MINUTE
+SECONDS_PER_DAY = 24 * SECONDS_PER_HOUR
+# The role word a node carries for a name C5 gives no role.
+NO_ROLE_WORD = "no role"
+# The words beside C5's role source when it is a guess (C5 rule 4).
+INFERRED = "inferred"
+# The widest a chart draws by default: the page's column is 1000 px, and
+# a chart this wide leaves a margin inside it.
+CHART_WIDTH = 960
+# About how wide one character of the 13 px label text is, to size a node
+# box or a gutter from its words without measuring text (no script runs).
+CHAR_WIDTH = 7.4
+# Chart 1, the graph. A node is a box this tall, padded this much either
+# side of its words; boxes in one row sit this far apart, rows this far
+# apart center to center (room for the arrows and their counts between),
+# and the drawing keeps this margin.
+NODE_HEIGHT = 34
+NODE_PAD_X = 14
+NODE_GAP = 44
+GRAPH_ROW_GAP = 130
+GRAPH_MARGIN = 28
+# An arrow bends this far to the right of its travel at its middle, so the
+# two directions of one pair never lie on each other; it stops this far
+# short of a box; its head is this long and this wide either side.
+EDGE_BEND = 16
+EDGE_GAP = 4
+ARROW_LENGTH = 10
+ARROW_HALF_WIDTH = 5
+# The outline each role's node draws (C5, rule 9: role never by color):
+# an orchestrator a square box with a heavy line, a worker a rounded pill,
+# a peer a box pointed at both ends, a name with no role a dashed box.
+ORCHESTRATOR, WORKER, PEER = "orchestrator", "worker", "peer"
+NODE_DASH = "5 3"
+NODE_CORNER = 4
+
+# The page's look. Colors are tokens, light and dark; every token pair of
+# text on its surface holds its contrast in grayscale too, and no meaning
+# rides on a color alone (shape, dash, position and words carry it).
+PAGE_CSS = """
+:root{--surface:#ffffff;--panel:#f6f8fa;--ink:#1f2328;--ink-2:#57606a;--rule:#d0d7de;
+--node:#ffffff;--s1:#2f5fb3;--s2:#b8541a;--quiet:#8c959f;--warn:#fff4d6;--warn-ink:#4d3800}
+@media (prefers-color-scheme: dark){:root{--surface:#16191d;--panel:#1e2228;--ink:#e6e8eb;
+--ink-2:#a3aab2;--rule:#3a4048;--node:#1e2228;--s1:#7aa7f0;--s2:#f0a060;--quiet:#7d8590;
+--warn:#3a2f12;--warn-ink:#f5e2b0}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--surface);color:var(--ink);
+font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:1000px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:26px;margin:0 0 8px}
+h2{font-size:19px;margin:32px 0 4px}
+p{margin:6px 0}
+.warning,.scrubbed{padding:8px 12px;border:2px solid var(--ink-2);border-radius:6px;font-weight:600}
+.warning{background:var(--warn);color:var(--warn-ink)}
+.scrubbed{background:var(--panel)}
+.how{color:var(--ink-2);font-size:14px}
+.figure{overflow-x:auto}
+svg{display:block;max-width:100%;height:auto;margin-top:8px;background:var(--panel);border-radius:6px}
+svg text{font:13px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;fill:var(--ink)}
+svg .small{font-size:11px;fill:var(--ink-2)}
+svg .label{font-weight:600}
+svg .halo{paint-order:stroke;stroke:var(--panel);stroke-width:4px;stroke-linejoin:round}
+.node-box{fill:var(--node);stroke:var(--ink);stroke-width:1.5}
+.orchestrator .node-box{stroke-width:3}
+.edge-line{fill:none;stroke:var(--ink-2);stroke-width:1.5}
+.edge-head{fill:var(--ink-2)}
+.edge-count{font-weight:700}
+footer{margin-top:40px;color:var(--ink-2);font-size:13px}
+"""
 
 # One message, closed (C7): exactly these eight facts. sent and read are
 # aware datetimes on a real page, whole seconds since the first message on
@@ -460,3 +542,357 @@ def scrub(page):
                tuple(ranks[ref] for ref in record.refs if ref in ranks))
         for rank, record in enumerate(page.records, 1))
     return Page(records, tuple(sessions), page.unparsed, True, elapsed(page.as_of))
+
+
+
+# ---------- the renderer ----------
+
+def esc(value):
+    """`value` as text safe in an HTML or SVG text node or a quoted attribute (html.escape, quote=True).
+
+    @interacts  none.
+    @deps       html.
+    @complexity O(c) over c characters.
+    @alloc      one string, returned.
+    """
+    return html.escape(str(value), quote=True)
+
+
+def num(value):
+    """A coordinate as short, fixed text: one decimal, a trailing `.0` dropped, so the same number always prints the same.
+
+    @interacts  none.
+    @deps       none.
+    @complexity O(1).
+    @alloc      one string, returned.
+    """
+    text = f"{value:.1f}"
+    return text[:-2] if text.endswith(".0") else text
+
+
+def element(name, attrs=(), children=None):
+    """One SVG or HTML element: `<name a="v" ...>children</name>`, or self-closed when `children` is None.
+
+    Every attribute value passes through esc. `children` are strings the
+    caller built with element() or esc(), never raw text.
+
+    @interacts  none.
+    @deps       esc.
+    @complexity O(a + c) over a attributes and c characters of children.
+    @alloc      one string, returned.
+    """
+    attributes = "".join(f' {key}="{esc(value)}"' for key, value in attrs)
+    if children is None:
+        return f"<{name}{attributes}/>"
+    return f"<{name}{attributes}>{''.join(children)}</{name}>"
+
+
+def text_at(x, y, words, css=None, anchor=None):
+    """An SVG <text> of `words` at (x, y), escaped, with an optional class and text-anchor.
+
+    @interacts  none.
+    @deps       element, esc, num.
+    @complexity O(c) over c characters.
+    @alloc      one string, returned.
+    """
+    attrs = [("x", num(x)), ("y", num(y))]
+    if css:
+        attrs.append(("class", css))
+    if anchor:
+        attrs.append(("text-anchor", anchor))
+    return element("text", attrs, [esc(words)])
+
+
+def titled(words):
+    """An SVG <title> child holding `words`: the hover text of the shape it sits in (no script needed).
+
+    @interacts  none.
+    @deps       element, esc.
+    @complexity O(c).
+    @alloc      one string.
+    """
+    return element("title", (), [esc(words)])
+
+
+def svg_chart(key, width, height, title, desc, body):
+    """One chart's SVG: its key, its size, a <title> and a <desc> (rule 9), and `body`.
+
+    No xmlns: inline SVG in HTML needs none, and the page holds no
+    address of any host.
+
+    @interacts  none.
+    @deps       element, esc, num.
+    @complexity O(b) over b characters of body.
+    @alloc      one string.
+    """
+    return element("svg", (("class", "chart"), ("data-chart", key), ("viewBox", f"0 0 {num(width)} {num(height)}"),
+                           ("width", num(width)), ("height", num(height)), ("role", "img"),
+                           ("aria-labelledby", f"{key}-title {key}-desc")),
+                   [element("title", (("id", f"{key}-title"),), [esc(title)]),
+                    element("desc", (("id", f"{key}-desc"),), [esc(desc)]), *body])
+
+
+def figure(number, heading, how, svg):
+    """One chart's section: a numbered heading, a line on how to read it, then its SVG.
+
+    @interacts  none.
+    @deps       element, esc.
+    @complexity O(s) over s characters of the SVG.
+    @alloc      one string.
+    """
+    return element("section", (("class", "figure"),),
+                   [element("h2", (), [esc(f"{number}. {heading}")]), element("p", (("class", "how"),), [esc(how)]),
+                    svg])
+
+
+def plural(count, one, many=None):
+    """`<count> <one>` or `<count> <many>` (one + "s" when many is None).
+
+    @interacts  none.
+    @deps       none.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    return f"{count} {one if count == 1 else (many or one + 's')}"
+
+
+def seconds_of(when):
+    """A record's time as seconds on one line: a datetime's epoch seconds, or a scrubbed time's own number.
+
+    @interacts  none.
+    @deps       datetime.
+    @complexity O(1).
+    @alloc      none.
+    """
+    return when.timestamp() if isinstance(when, datetime.datetime) else float(when)
+
+
+def span_text(seconds):
+    """A length of time in C7's short form: `45s`, `12m`, `3h10m`, `1d02h`.
+
+    @interacts  none.
+    @deps       SECONDS_PER_MINUTE, SECONDS_PER_HOUR, SECONDS_PER_DAY.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    whole = int(round(abs(seconds)))
+    if whole < SECONDS_PER_MINUTE:
+        return f"{whole}s"
+    if whole < SECONDS_PER_HOUR:
+        return f"{whole // SECONDS_PER_MINUTE}m"
+    if whole < SECONDS_PER_DAY:
+        return f"{whole // SECONDS_PER_HOUR}h{whole % SECONDS_PER_HOUR // SECONDS_PER_MINUTE:02d}m"
+    return f"{whole // SECONDS_PER_DAY}d{whole % SECONDS_PER_DAY // SECONDS_PER_HOUR:02d}h"
+
+
+def time_text(when):
+    """A record's time as the page shows it: a real time with its date, clock and offset, or a scrubbed one as `T+3h10m` (`T+0` at the first message).
+
+    @interacts  none.
+    @deps       datetime; span_text.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    if isinstance(when, datetime.datetime):
+        return when.isoformat(sep=" ", timespec="minutes")
+    if when == 0:
+        return "T+0"
+    return f"T{'+' if when > 0 else '-'}{span_text(when)}"
+
+
+def role_word(session):
+    """The words after a node's name: its C5 role, `· inferred` when its role is a guess, or NO_ROLE_WORD.
+
+    @interacts  none.
+    @deps       NO_ROLE_WORD, INFERRED.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    if session.role is None:
+        return NO_ROLE_WORD
+    return f"{session.role} · {INFERRED}" if session.source == INFERRED else session.role
+
+
+def node_shape(role, x, y, width):
+    """The outline of a node of `role` centered at (x, y), `width` wide: C5's role as a shape.
+
+    @interacts  none.
+    @deps       element, num; NODE_HEIGHT, NODE_DASH, NODE_CORNER.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    half_w, half_h = width / 2, NODE_HEIGHT / 2
+    box = (("class", "node-box"), ("x", num(x - half_w)), ("y", num(y - half_h)), ("width", num(width)),
+           ("height", num(NODE_HEIGHT)))
+    if role == ORCHESTRATOR:
+        return element("rect", box)
+    if role == WORKER:
+        return element("rect", box + (("rx", num(half_h)),))
+    if role == PEER:
+        points = ((x - half_w, y), (x - half_w + half_h, y - half_h), (x + half_w - half_h, y - half_h),
+                  (x + half_w, y), (x + half_w - half_h, y + half_h), (x - half_w + half_h, y + half_h))
+        return element("polygon", (("class", "node-box"), ("points", " ".join(f"{num(a)},{num(b)}" for a, b in points))))
+    return element("rect", box + (("rx", num(NODE_CORNER)), ("stroke-dasharray", NODE_DASH)))
+
+
+def box_edge(center, half, direction):
+    """Where a ray from `center` along the unit vector `direction` leaves a box of half sizes `half`, plus EDGE_GAP.
+
+    @interacts  none.
+    @deps       math; EDGE_GAP.
+    @complexity O(1).
+    @alloc      one tuple.
+    """
+    (cx, cy), (hw, hh), (ux, uy) = center, half, direction
+    reach = min(hw / abs(ux) if ux else math.inf, hh / abs(uy) if uy else math.inf) + EDGE_GAP
+    return cx + ux * reach, cy + uy * reach
+
+
+def chart_graph(page):
+    """Chart 1, who talks to whom: one arrow per sender and recipient with its count, nodes by C5's level, shape and role word by role.
+
+    Rows are C5's levels, top to bottom; a name with no role sits on a row
+    below them. In a row, names keep first-mail order (page.sessions). An
+    arrow is a curve that bends to the right of its travel, so a pair's two
+    directions part; its head is drawn as a triangle (no marker, which
+    would need a url() reference) and its count sits at its middle, with
+    the full words in its title. A message a name sent itself draws no
+    arrow; the caption counts them.
+
+    @interacts  none; pure.
+    @deps       math; element, text_at, titled, svg_chart, figure,
+                node_shape, box_edge, role_word, plural, num; the graph
+                constants.
+    @complexity O(t + s + p) over t records, s sessions and p directed
+                pairs.
+    @alloc      the SVG text, returned; a few maps of s and p entries.
+    """
+    sessions = page.sessions
+    if not sessions:
+        svg = svg_chart("graph", CHART_WIDTH, NODE_HEIGHT * 2, "Who talks to whom", "No messages yet.",
+                        [text_at(GRAPH_MARGIN, NODE_HEIGHT, "No messages yet.")])
+        return figure(1, "Who talks to whom", "No messages yet.", svg)
+    deepest = max((s.level for s in sessions if s.level is not None), default=-1)
+    rows = {}
+    for session in sessions:
+        rows.setdefault(session.level if session.level is not None else deepest + 1, []).append(session)
+    labels = {s.name: f"{s.name} · {role_word(s)}" for s in sessions}
+    widths = {name: len(label) * CHAR_WIDTH + 2 * NODE_PAD_X for name, label in labels.items()}
+    slot = max(widths.values()) + NODE_GAP
+    widest = max(len(row) for row in rows.values())
+    width = max(CHART_WIDTH, slot * widest + 2 * GRAPH_MARGIN)
+    order = sorted(rows)
+    height = 2 * GRAPH_MARGIN + NODE_HEIGHT + GRAPH_ROW_GAP * (len(order) - 1)
+    at = {}
+    for line, level in enumerate(order):
+        row = rows[level]
+        start = (width - slot * len(row)) / 2
+        for place, session in enumerate(row):
+            at[session.name] = (start + slot * (place + 0.5), GRAPH_MARGIN + NODE_HEIGHT / 2 + GRAPH_ROW_GAP * line)
+    counts, selves = {}, 0
+    for record in page.records:
+        if record.sender == record.recipient:
+            selves += 1
+            continue
+        pair = (record.sender, record.recipient)
+        counts[pair] = counts.get(pair, 0) + 1
+    edges = []
+    for (sender, recipient), count in counts.items():
+        (sx, sy), (rx, ry) = at[sender], at[recipient]
+        length = math.hypot(rx - sx, ry - sy) or 1
+        ux, uy = (rx - sx) / length, (ry - sy) / length
+        start = box_edge((sx, sy), (widths[sender] / 2, NODE_HEIGHT / 2), (ux, uy))
+        end = box_edge((rx, ry), (widths[recipient] / 2, NODE_HEIGHT / 2), (-ux, -uy))
+        normal = (-uy, ux)
+        control = ((start[0] + end[0]) / 2 + 2 * EDGE_BEND * normal[0],
+                   (start[1] + end[1]) / 2 + 2 * EDGE_BEND * normal[1])
+        tx, ty = end[0] - control[0], end[1] - control[1]
+        tangent = math.hypot(tx, ty) or 1
+        tx, ty = tx / tangent, ty / tangent
+        base = (end[0] - tx * ARROW_LENGTH, end[1] - ty * ARROW_LENGTH)
+        head = (end, (base[0] - ty * ARROW_HALF_WIDTH, base[1] + tx * ARROW_HALF_WIDTH),
+                (base[0] + ty * ARROW_HALF_WIDTH, base[1] - tx * ARROW_HALF_WIDTH))
+        middle = ((start[0] + 2 * control[0] + end[0]) / 4, (start[1] + 2 * control[1] + end[1]) / 4)
+        edges.append(element("g", (("class", "edge"),), [
+            titled(f"{sender} to {recipient}: {plural(count, 'message')}"),
+            element("path", (("class", "edge-line"), ("d", f"M{num(start[0])},{num(start[1])} Q{num(control[0])},"
+                                                          f"{num(control[1])} {num(base[0])},{num(base[1])}"))),
+            element("polygon", (("class", "edge-head"), ("points", " ".join(f"{num(a)},{num(b)}" for a, b in head)))),
+            text_at(middle[0], middle[1] + 4, str(count), "edge-count halo", "middle")]))
+    nodes = []
+    for session in sessions:
+        x, y = at[session.name]
+        role = session.role or NO_ROLE_WORD
+        nodes.append(element("g", (("class", f"node {role.replace(' ', '-')}"), ("data-role", role)), [
+            titled(labels[session.name]), node_shape(session.role, x, y, widths[session.name]),
+            text_at(x, y + 4, labels[session.name], "label", "middle")]))
+    how = ("One arrow for each sender and recipient, its count at its middle. Arrows bend to the right of their "
+           "travel, so a pair's two directions part. Shape and words give each role: a square box with a heavy "
+           "line is an orchestrator, a rounded one a worker, a box pointed at both ends a peer, a dashed box a "
+           "name with no role (no inbox and no card). Levels run top to bottom by the reports-to hints on cards "
+           "and, where none, by who mails whom most.")
+    if selves:
+        how += f" {plural(selves, 'message')} a session sent itself draw no arrow."
+    desc = (f"A graph of {plural(len(sessions), 'session')} and {plural(len(counts), 'arrow')}, each arrow "
+            "labeled with how many messages went that way.")
+    return figure(1, "Who talks to whom", how, svg_chart("graph", width, height, "Who talks to whom", desc,
+                                                          edges + nodes))
+
+
+def summary_lines(page):
+    """The page's opening lines: the warning or the scrub line, the counts and span, the as-of, and the headers that did not parse.
+
+    @interacts  none; pure.
+    @deps       element, esc, plural, time_text, seconds_of; REAL_WARNING,
+                SCRUBBED_WORDS.
+    @complexity O(t) over t records.
+    @alloc      a list of strings, returned.
+    """
+    lines = [element("p", (("class", "scrubbed"),), [esc(SCRUBBED_WORDS)]) if page.scrubbed else
+             element("p", (("class", "warning"),), [esc(f"Warning: {REAL_WARNING}")])]
+    sent = [r.sent for r in page.records if r.sent is not None]
+    if not page.records:
+        lines.append(element("p", (), [esc("No messages yet.")]))
+    else:
+        span = ""
+        if sent:
+            first, last = min(sent, key=seconds_of), max(sent, key=seconds_of)
+            span = f", sent from {time_text(first)} to {time_text(last)}"
+        lines.append(element("p", (), [esc(f"{plural(len(page.records), 'message')} among "
+                                           f"{plural(len(page.sessions), 'session')}{span}.")]))
+    if page.as_of is not None:
+        lines.append(element("p", (("class", "as-of"),), [esc(f"As of {time_text(page.as_of)}.")]))
+    if page.unparsed:
+        them = "it" if page.unparsed == 1 else "them"
+        lines.append(element("p", (), [esc(f"{plural(page.unparsed, 'message')} had a header line that did not "
+                                           f"parse, so the time charts (2 to 5) leave {them} out; chart 1 counts "
+                                           f"{them}.")]))
+    return lines
+
+
+# The charts, in page order. Each takes the Page and returns its section.
+CHARTS = (chart_graph,)
+
+
+def render(page):
+    """`page` as one self-contained HTML file (C7): inline CSS and inline SVG, no script, no link, nothing fetched.
+
+    Pure: no clock, no file, no environment. The same page gives the same
+    string, byte for byte.
+
+    @interacts  none; pure.
+    @deps       element, esc, summary_lines, CHARTS; PAGE_TITLE, PAGE_CSS.
+    @complexity O(t + s + p) over t records, s sessions and p pairs, as
+                each chart says.
+    @alloc      the page text, returned; each chart's text while built.
+    """
+    body = [element("h1", (), [esc(PAGE_TITLE)]), *summary_lines(page), *(chart(page) for chart in CHARTS),
+            element("footer", (), [esc("Made by tc report from each message's file name, size and header time, "
+                                       "the read-time records, a tag and #N references from each message's first "
+                                       "line, and each card's reports-to. No other text of any message is in "
+                                       "this file.")])]
+    head = element("head", (), ['<meta charset="utf-8"/>',
+                                '<meta name="viewport" content="width=device-width, initial-scale=1"/>',
+                                element("title", (), [esc(PAGE_TITLE)]), element("style", (), [PAGE_CSS])])
+    return "<!doctype html>\n" + element("html", (("lang", "en"),), [head, element("body", (), [
+        element("main", (), body)])]) + "\n"
