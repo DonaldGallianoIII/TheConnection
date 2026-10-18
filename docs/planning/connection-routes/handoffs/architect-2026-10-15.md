@@ -101,6 +101,39 @@ none started without the relay's word):
 - For the owner's delete list: the 18 old lock files and the two stale
   bytecode caches.
 
+### The owner's three asks, the evening of 2026-10-17
+
+The owner woke the architect for three things: a record of when each
+message is read, a README section on the mailbox as a record of the
+work, and dashboards built into tc that he can show people. All three
+merged the same evening, each approved by the relay for the owner (D8):
+
+1. READTIME (D41, pause READTIME-1) at `db142f9`: `tc read` appends one
+   JSON line per message it moved to `read/.read-times` (name, number,
+   read time), under the inbox lock, owner only, never through a link;
+   `tc log` prints `read <time>`, `unread` or `read, time not recorded`
+   after each header. One quick review (SHIP) and two fix rounds.
+2. RECORD at `e2be34f`: the README section "The mailbox is a record of
+   the work", with a `tc log` block the README test runs.
+3. DASH v1 (D42, C7) at `7b77092`: `tc report OUT.html [--scrub]`
+   writes one static HTML page of inline SVG, five charts, from metadata
+   only; `--scrub` swaps names for role labels, tags off a fixed list
+   for `other`, and every time for elapsed time. A standard review (FIX
+   THEN SHIP: two layout MEDIUMs), three fix rounds, one re-review
+   (SHIP), and the relay's own grayscale and phone-width look.
+
+**Added to the owner's walks:** `qa/human/report.md` (open a scrubbed
+and an unscrubbed page, in grayscale too) and `route-shared.md` steps
+45a to 45c (read times between two users). The first report from real
+mail is the owner's to run.
+
+**Added to the later list** (DASH v2, as ruled): the board's history
+panel, date filters, per-tag breakdowns, a scrubbed export of the mail
+files, and the review's leftovers: cards read by path (DEBT, init user
+only), `board/report.py` as one 1500-line file, no time window on a
+large mailbox, a class-proof row for `tc report`, and a counted growth
+test.
+
 ## Update, 2026-10-16
 
 The relay said yes in the morning. P3FIX merged into dev at `8b9b59d`
