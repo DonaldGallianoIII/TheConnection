@@ -24,12 +24,14 @@ Status: unreviewed
             the pages read back, freed when the test returns.
 """
 
+import argparse
 import datetime
 import os
 import pathlib
 import re
 import sys
 import unittest
+from unittest import mock
 from xml.etree import ElementTree
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -870,7 +872,8 @@ class CommandTest(unittest.TestCase):
             code, stdout, stderr, page = run_report(root, "--force", out=out)
             self.assertEqual(code, EXIT_OK, stderr)
             self.assertTrue(page.startswith("<!doctype html>"))
-            self.assertEqual(stdout.strip(), f"wrote {out}: 12 messages, real names and times")
+            self.assertEqual(stdout.strip(), f"wrote {out.resolve()}: 12 messages, real names and times. Mailbox "
+                                             f"{root.path}, from TC_ROOT.")
             self.assertEqual(sorted(p.name for p in out.parent.iterdir()), ["report.html"])
 
     def test_the_mailbox_is_unchanged_byte_for_byte(self):
@@ -950,6 +953,84 @@ class CommandTest(unittest.TestCase):
             self.assertIn(f"could not write {out}", stderr)
             self.assertNotIn("Traceback", stderr)
             self.assertFalse(out.parent.exists())
+
+    def test_a_page_inside_the_mailbox_is_refused_and_roots_top_level_is_allowed(self):
+        """An OUT in mail/, status/, cards/ or outbox/, named straight or through a link, refuses (exit 1, words naming its folder, nothing written); one at ROOT's top level is written.
+
+        @interacts  see the class; makes outbox/ and one link in the root's temp folder.
+        @deps       see the class.
+        @complexity five children.
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            (root.path / "outbox").mkdir()
+            link = root.base / "into-mail"
+            link.symlink_to(root.path / "mail")
+            cases = {"mail": root.path / "mail" / "to-annika" / "x.html", "status": root.path / "status" / "x.html",
+                     "cards": root.path / "cards" / "x.html", "outbox": root.path / "outbox" / "x.html",
+                     "link": link / "x.html"}
+            for case, out in cases.items():
+                with self.subTest(case=case):
+                    before = tree(root.path)
+                    code, _, stderr = root.tc("report", str(out))
+                    self.assertEqual(code, EXIT_REFUSED, stderr)
+                    self.assertTrue(stderr.startswith("tc report: "), stderr)
+                    self.assertIn(os.path.realpath(out.parent), stderr)
+                    self.assertIn("inside the mailbox", stderr)
+                    self.assertEqual(tree(root.path), before)
+            code, _, stderr = root.tc("report", str(root.path / "top.html"))
+            self.assertEqual(code, EXIT_OK, stderr)
+            self.assertTrue((root.path / "top.html").read_text(encoding="utf-8").startswith("<!doctype html>"))
+
+    def test_a_file_made_at_out_between_the_check_and_the_publish_is_kept(self):
+        """In process: a file appears at OUT after the existence check and before the publish; without --force it stays, the run refuses, and no .tmp is left.
+
+        @interacts  loads tc in this process (modules_for) and runs its
+                    cmd_report with the .tmp's random name stubbed so the
+                    stub makes the file at OUT first.
+        @deps       modules_for, mock; tc.cmd_report.
+        @complexity one in-process report.
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            tc, _ = modules_for(root)
+            out = root.base / "out" / "race.html"
+            out.parent.mkdir()
+
+            def late(_):
+                """Make a file at OUT, as another process would, then give a fixed .tmp name.
+
+                @interacts  writes OUT.
+                @deps       none.
+                @complexity O(1).
+                @alloc      one file.
+                """
+                out.write_text("late", encoding="utf-8")
+                return "0" * 16
+
+            with mock.patch.object(tc.secrets, "token_hex", late):
+                with self.assertRaises(SystemExit) as stop:
+                    tc.cmd_report(argparse.Namespace(out=str(out), scrub=False, force=False, at=None))
+            self.assertEqual(stop.exception.code, EXIT_REFUSED)
+            self.assertEqual(out.read_text(encoding="utf-8"), "late")
+            self.assertEqual(sorted(p.name for p in out.parent.iterdir()), ["race.html"])
+
+    def test_an_out_name_at_the_name_limit_is_written(self):
+        """An OUT whose name is 255 bytes, the most Linux allows, is written: the .tmp's name never grows from it.
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity one child.
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            out = root.base / ("a" * 250 + ".html")
+            code, _, stderr = root.tc("report", str(out))
+            self.assertEqual(code, EXIT_OK, stderr)
+            self.assertTrue(out.exists())
 
     def test_refusals_open_with_tc_report_under_any_invoked_name(self):
         """Run through a link named tconn, a refusal still opens `tc report:` (NAME's rule for prefixes).

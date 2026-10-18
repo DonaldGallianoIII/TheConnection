@@ -55,8 +55,10 @@ How a command runs:
   on 8780. The port its line prints must answer live.html with 200.
 - The report block (DASH, Claude Opus 5.5, unreviewed) runs with
   board/report.py and board/serve.py copied beside the copy of tc, as a
-  clone has them, in the root's temp folder as its working folder, so
-  the page it names lands there, outside the mailbox and the checkout.
+  clone has them, with HOME and its working folder set to the root's
+  temp folder and its `~/` expanded as a shell would, so the page it
+  names lands there, outside the mailbox, the checkout and the real
+  home.
 
 The mapping rule, from the README's text to a match (expected_pattern).
 Everything not named here is literal: a changed word, digit or space
@@ -215,7 +217,7 @@ RUN = {
     '$ tc send --from homebox-a --to far-b "hello far"': SSH_OUTBOUND,
     '$ tc send --from homebox-a --to far-c "first"': SSH_OUTBOUND,
     "$ python3 board/serve.py": BOARD,
-    "$ tc report history.html --scrub": REPORT,  # DASH (Claude Opus 5.5, unreviewed)
+    "$ tc report ~/history.html --scrub": REPORT,  # DASH (Claude Opus 5.5, unreviewed)
 }
 
 # Every command block no test can run, with the reason.
@@ -564,6 +566,7 @@ class Story:
         self.front = [fake_gpu(root)]
         self.ran = set()
         self.cwd = None  # DASH (Claude Opus 5.5, unreviewed): the folder a command runs in; None is the test's own
+        self.home = None  # DASH fix round 1 (Claude Opus 5.5, unreviewed): HOME, and what a shell makes of ~/, when set
 
     def exe(self, head):
         """The file to run for a command's first word: the copy, or a `tconn` link to it.
@@ -613,6 +616,9 @@ class Story:
         @complexity the child's own work.
         @alloc      the captured output, returned.
         """
+        if self.home is not None:  # DASH fix round 1 (Claude Opus 5.5, unreviewed): ~/ as a shell expands it
+            words = [str(self.home) + word[1:] if word.startswith("~/") else word for word in words]
+            env = {**(env or {}), "HOME": str(self.home)}
         done = subprocess.run([sys.executable, str(self.exe(words[0])), *words[1:]], env=self.env(env),
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, cwd=self.cwd,
                               timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS)
@@ -923,14 +929,15 @@ class ReadmeBlocksTest(unittest.TestCase):
 
     # DASH (Claude Opus 5.5, unreviewed): the record-of-work section's report block.
     def test_the_report_block_writes_a_scrubbed_page(self):
-        """`tc report history.html --scrub` prints the README's line and writes a scrubbed page in the folder it ran in.
+        """`tc report ~/history.html --scrub` prints the README's line and writes a scrubbed page in the home folder.
 
         board/report.py and board/serve.py are copied beside the copy of
         tc, as a clone has them. The mailbox holds two messages (setup: b
         joins and sends a the quick start's hello, a reads it and answers).
-        The command runs in the root's temp folder, outside the mailbox,
-        so its relative history.html lands there and never in the
-        checkout.
+        The command runs with HOME (and the folder it runs in) set to the
+        root's temp folder, outside the mailbox, and its ~/ expanded as a
+        shell would, so history.html lands there and never in the real
+        home or the checkout.
 
         Must reject other words, a missing page, and a page that is not
         scrubbed.
@@ -950,8 +957,8 @@ class ReadmeBlocksTest(unittest.TestCase):
             self.setup_step(story, ["tc", "send", "--from", "b", "--to", "a", "joined. working on the parser"])
             self.setup_step(story, ["tc", "read", "a"])
             self.setup_step(story, ["tc", "send", "--from", "a", "--to", "b", "ANSWER re #1: thanks"])
-            story.cwd = root.base
-            self.shown(story, "$ tc report history.html --scrub")
+            story.cwd = story.home = root.base
+            self.shown(story, "$ tc report ~/history.html --scrub")
             with self.subTest(claim="the page is in the folder the command ran in, and scrubbed"):
                 page = (root.base / "history.html").read_text(encoding="utf-8")
                 self.assertIn(SCRUBBED_MARK, page)

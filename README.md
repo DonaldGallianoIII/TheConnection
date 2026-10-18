@@ -221,8 +221,8 @@ tag and `#N` numbers at the start of its first line, never the rest of a
 message.
 
 ```
-$ tc report history.html --scrub
-wrote history.html: ... messages, scrubbed
+$ tc report ~/history.html --scrub
+wrote .../history.html: ... messages, scrubbed. Mailbox /home/you/TheConnection, TC_ROOT unset, so the folder tc is in.
 ```
 
 It needs the `board/` folder beside `tc`, as a clone has it. An existing
