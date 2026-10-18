@@ -23,7 +23,7 @@ pause; no lane reuses a number for a new meaning.
 | Code | Meaning | Who exits with it | Since |
 |---|---|---|---|
 | 0 | ok (`wait`: mail; `watch`: heartbeat) | every command | today |
-| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force`, a body that is not UTF-8 text, an outbox branch another user owns or that is a link (D33); also a link or FIFO planted where tc opens a file (at a wait or watch lock's name it is moved aside instead and the command runs, D35), an inbox that is a link, not a folder, or one tc cannot list, a `.shared` tc cannot read, a wait or watch lock that something else took again each time tc moved one aside, and on a shared mailbox an inbox not its owner's and `wait` or `watch` on a name the running user does not own (C4, D36) | `send`, `join`, `card`, router, `gate` (empty message), `flush` (a refused branch), `wait`, `watch`, `read`, `peek`, `log`, `status`, `init`, `report` (its output file exists, C7) | today (empty message), this plan (D17 to D21, D33, D36) |
+| 1 | refused with words: empty message, `--kind codex` with no thread, a route not built yet, a card over unread mail without `--force`, a body that is not UTF-8 text, an outbox branch another user owns or that is a link (D33); also a link or FIFO planted where tc opens a file (at a wait or watch lock's name it is moved aside instead and the command runs, D35), an inbox that is a link, not a folder, or one tc cannot list, a `.shared` tc cannot read, a wait or watch lock that something else took again each time tc moved one aside, and on a shared mailbox an inbox not its owner's and `wait` or `watch` on a name the running user does not own (C4, D36) | `send`, `join`, `card`, router, `gate` (empty message), `flush` (a refused branch), `wait`, `watch`, `read`, `peek`, `log`, `status`, `init`, `report` (its output file exists, sits inside the mailbox, or cannot be written, C7) | today (empty message), this plan (D17 to D21, D33, D36) |
 | 2 | `wait` timed out or hit its keepalive | `wait` | today |
 | 3 | another listener or watcher already holds this name's lock | `wait`, `watch` | today |
 | 4 | kept in the outbox: ssh could not reach the target, the target already has a queue, or another tc holds this member's send lock or it would not open | `send` (ssh route), `flush` | this plan (C3, D33) |
@@ -908,7 +908,13 @@ Writes one self-contained HTML file: inline SVG and inline CSS, no
 script, no font or image fetched, no link to any host (D26). An existing
 `OUT.html` is refused, exit 1, with words, nothing written, unless
 `--force`; the file is written to a `.tmp` beside it and renamed into
-place. It reads the mailbox and writes nothing in it.
+place. It reads the mailbox and writes nothing in it: an OUT whose
+folder, resolved (`realpath`, so through any link), is inside ROOT's
+`mail/`, `status/`, `cards/` or `outbox/` is refused, exit 1, with words
+naming the folder; ROOT's own top level is allowed. An OUT that cannot
+be written (no folder, no permission, no space) is exit 1 with one
+line, `tc report: could not write <OUT> (<why>); nothing was written
+there.`, its own `.tmp` cleaned up (pause DASH-2).
 
 **What it reads, and nothing else** (D42). For each message in every
 `mail/to-*/` and its `read/` (the same pinned walk as `tc log`, D35):
@@ -949,8 +955,13 @@ these records, never a path, a login, a hostname or ROOT.
    tag (`ANSWER re #N`, `Re #N: ...`), and that goes from #N's recipient
    back to #N's sender, answers #N; the time from #N's sent time to the
    answer's, in chart 3's form (the first answer only). A message with no
-   `#N` named is never paired, and asks with no answer naming them are
-   counted in words, never guessed.
+   `#N` named is never paired. An ask is a message tagged one of
+   `ASK_TAGS` (QUESTION, PLAN-READY, PLAN-CHECK, MERGE, BLOCKED), or any
+   message an answer names, whatever its tag. Asks with no reply naming
+   them are counted in words as `<n> asks have no reply that names
+   them`, never as unanswered: a session that does not put `#N` on its
+   first line answers without naming, so this count can include answered
+   asks, and the page says so (pause DASH-1).
 
 **Accessibility** (rule 9, the owner is colorblind). Every series is
 labeled directly; no legend carries meaning. Series that share a plot
