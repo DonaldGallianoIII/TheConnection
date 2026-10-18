@@ -626,7 +626,8 @@ class InboxPinnedTest(UmaskTestCase):
         elif row.label == "tc read":
             self.assertIn(REAL_TEXT, ran.out, "tc read did not show the real message")
             self.assertEqual((ran.code, ran.err), (0, ""))
-            self.assertEqual((files_in(real), files_in(real / "read")), ([], ["000001-from-ben.md"]),
+            # READTIME (Claude Opus 5.5, unreviewed): pause READTIME-2, the read-time record lands in the real read/.
+            self.assertEqual((files_in(real), files_in(real / "read")), ([], [".read-times", "000001-from-ben.md"]),
                              "tc read did not move the real message into the real read/")
         elif row.label == "tc wait's poll":
             self.assertEqual((ran.code, ran.out), (0, f"MAIL: 1 unread for {OWNER}. Run: tc read {OWNER}\n"))

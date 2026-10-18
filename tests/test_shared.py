@@ -1299,7 +1299,7 @@ class RegularFilesOnlyTest(UmaskTestCase):
         self.assertIn("to-zzz not shown", runs["log"][2])
         self.assertIn("left in place", runs["read"][2])
         self.assertEqual(left, (True, True), "tc read moved the planted link or FIFO")
-        self.assertEqual(moved, ["000001-from-a.md"])
+        self.assertEqual(moved, [".read-times", "000001-from-a.md"])  # READTIME (Claude Opus 5.5, unreviewed): pause READTIME-2
         self.assertEqual(waited[0], EXIT_TIMEOUT, f"tc wait woke for a planted entry: {waited}")
         self.assertEqual(after, TARGET_TEXT)
         self.assertEqual(printed.getvalue(), "", "show() printed what it was handed through a link")
@@ -2618,7 +2618,8 @@ class NoLostMailNoHangTest(UmaskTestCase):
                 self.assertIn("sent #2 to b", sent[1])
                 self.assertEqual(again[0], 0, again[2])
                 self.assertIn("second", again[1])
-                self.assertEqual(history, ["000001-from-a.md", "000002-from-a.md"])
+                # READTIME (Claude Opus 5.5, unreviewed): pause READTIME-2, the read-time record is in read/ too.
+                self.assertEqual(history, [".read-times", "000001-from-a.md", "000002-from-a.md"])
 
     def test_a_held_lock_makes_each_command_fail_within_the_bound_and_write_nothing(self):
         """This process holds mail/.seq or a name's inbox lock (LOCK_EX), one root per case: send, read, a codex join, tc card and a codex send (on its inbox lock, and on mail/.seq) each exit 10 (busy, D23) within LOCK_WAIT_SECONDS plus the margin, say whose lock, name its holder (the running user and this process's pid), and change nothing; a codex send with the ring marker held lands, rings once, and says the marker could not be cleared within two waits.
