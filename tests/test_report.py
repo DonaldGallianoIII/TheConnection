@@ -42,7 +42,15 @@ import _report_fixture as fixture  # noqa: E402  (needs the path line above)
 import _root  # noqa: E402
 
 REPORT_PATH = HERE.parent / "board" / "report.py"
+# tc's exit codes these tests expect (contracts.md, "Exit codes").
 EXIT_OK = 0
+EXIT_REFUSED = 1
+EXIT_USAGE = 9
+# C7's scrub test patterns: no calendar date and no clock time anywhere.
+DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
+CLOCK_PATTERN = re.compile(r"\b\d{1,2}:\d{2}\b")
+# A --at for the as-of tests, after the fixture's last message.
+AT_TIME = "2026-10-03T12:30:00-05:00"
 
 
 def modules_for(root):
@@ -561,6 +569,20 @@ class SendersTest(unittest.TestCase):
                 self.assertIn("one hour", words(chart))
 
 
+def read_text(offset, scrub):
+    """The fixture time `offset` as a page shows it: `T+<span>` scrubbed, the date, clock and offset when real.
+
+    @interacts  none.
+    @deps       fixture_time.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    if not scrub:
+        return fixture_time(offset).isoformat(sep=" ", timespec="minutes")
+    hours, minutes = divmod(offset // fixture.MINUTE, 60)
+    return f"T+{hours}h{minutes:02d}m" if hours else f"T+{minutes}m"
+
+
 class ReadTest(unittest.TestCase):
     """Chart 3: sent to read, per recipient: one dot per message with a read time, the median as a labeled tick, and `n of m`.
 
@@ -571,13 +593,17 @@ class ReadTest(unittest.TestCase):
     """
 
     # Per recipient: (n of m words, median words, each dot's title as
-    # (number, tag, sender, read after)).
+    # (number, tag, sender, read offset, read after)).
     STRIPS = {
         "annika": ("3 of 5 messages have a read time", "median 20m",
-                   [(2, "QUESTION", "bertil", "2m"), (4, None, "bertil", "20m"), (8, "ANSWER", "bertil", "30m")]),
+                   [(2, "QUESTION", "bertil", 12 * fixture.MINUTE, "2m"),
+                    (4, None, "bertil", 2 * fixture.HOUR + 20 * fixture.MINUTE, "20m"),
+                    (8, "ANSWER", "bertil", 5 * fixture.HOUR + 30 * fixture.MINUTE, "30m")]),
         "bertil": ("3 of 4 messages have a read time", "median 5m",
-                   [(1, "PLAN", "annika", "5m"), (3, "ANSWER", "annika", "40m"), (9, "FYI", "dagny", "1m")]),
-        "corwin": ("1 of 2 messages have a read time", "median 30m", [(6, None, "annika", "30m")]),
+                   [(1, "PLAN", "annika", 5 * fixture.MINUTE, "5m"), (3, "ANSWER", "annika", fixture.HOUR, "40m"),
+                    (9, "FYI", "dagny", 6 * fixture.HOUR + fixture.MINUTE, "1m")]),
+        "corwin": ("1 of 2 messages have a read time", "median 30m",
+                   [(6, None, "annika", 4 * fixture.HOUR, "30m")]),
     }
 
     def test_each_strip_has_its_dots_its_median_and_its_count_in_words(self):
@@ -598,7 +624,7 @@ class ReadTest(unittest.TestCase):
                     self.assertEqual([t.text for t in series.iter("text")], [names[recipient], count, median])
                     self.assertEqual(len(list(series.iter("circle"))), len(dots))
                     want = [f"#{ScrubTest.RANKS[n] if scrub else n}{' ' + tag if tag else ''} from {names[sender]}: "
-                            f"read after {after}" for n, tag, sender, after in dots]
+                            f"read {read_text(read, scrub)}, after {after}" for n, tag, sender, read, after in dots]
                     self.assertEqual(mark_titles(series), want)
 
 
@@ -699,6 +725,277 @@ class AnswersTest(unittest.TestCase):
                     self.assertEqual(mark_titles(series), want)
                 self.assertIn("4 answers name the message they answer.", words(chart))
                 self.assertIn("1 QUESTION message has no answer naming it.", words(chart))
+
+
+def run_report(root, *args, out=None):
+    """Run `tc report OUT [args]` through the harness, OUT in the root's temp folder (outside the mailbox): (exit, stdout, stderr, page text or None).
+
+    @interacts  runs ../tc report as a child under the root's TC_ROOT;
+                reads the page it wrote.
+    @deps       _root.TcRoot.tc.
+    @complexity the child's own work.
+    @alloc      the page text, returned.
+    """
+    out = out or root.base / "out" / "report.html"
+    out.parent.mkdir(exist_ok=True)
+    code, stdout, stderr = root.tc("report", str(out), *args)
+    return code, stdout, stderr, out.read_text(encoding="utf-8") if out.exists() else None
+
+
+def tree(folder):
+    """Every entry under `folder` as {relative path: (kind, bytes or link target or None, mode)}: a snapshot to compare byte for byte.
+
+    @interacts  walks `folder` without following links; reads each file.
+    @deps       os, pathlib, stat.
+    @complexity O(f + b) over f entries and b bytes (the fixture: a few dozen files).
+    @alloc      one dict, returned.
+    """
+    found = {}
+    for path in sorted(folder.rglob("*")):
+        st = path.lstat()
+        if path.is_symlink():
+            found[str(path.relative_to(folder))] = ("link", os.readlink(path), st.st_mode)
+        elif path.is_dir():
+            found[str(path.relative_to(folder))] = ("folder", None, st.st_mode)
+        else:
+            found[str(path.relative_to(folder))] = ("file", path.read_bytes(), st.st_mode)
+    return found
+
+
+class CommandTest(unittest.TestCase):
+    """`tc report OUT [--scrub] [--force] [--at TIME]`: refusals, exits, a mailbox left as it was, and a page with nothing fetched.
+
+    @interacts  builds the fixture under a TcRoot; runs tc report as a
+                child; copies tc alone into the root's temp folder once.
+    @deps       run_report, tree, fixture.build; _root.TcRoot, _root.TC.
+    @complexity a few tc children per test.
+    @alloc      one TcRoot per test, removed on exit.
+    """
+
+    def test_an_existing_file_is_refused_without_force_and_replaced_with_it(self):
+        """Exit 1 with words and the old file untouched without --force; exit 0 and a new page with it; no .tmp left.
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity three children.
+        @alloc      one TcRoot.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            out = root.base / "out" / "report.html"
+            out.parent.mkdir()
+            out.write_text("keep me", encoding="utf-8")
+            code, stdout, stderr, page = run_report(root, out=out)
+            self.assertEqual((code, page), (EXIT_REFUSED, "keep me"), stderr)
+            self.assertIn("--force", stderr)
+            self.assertIn(str(out), stderr)
+            code, stdout, stderr, page = run_report(root, "--force", out=out)
+            self.assertEqual(code, EXIT_OK, stderr)
+            self.assertTrue(page.startswith("<!doctype html>"))
+            self.assertEqual(stdout.strip(), f"wrote {out}: 12 messages, real names and times")
+            self.assertEqual(sorted(p.name for p in out.parent.iterdir()), ["report.html"])
+
+    def test_the_mailbox_is_unchanged_byte_for_byte(self):
+        """A report, scrubbed or not, writes nothing in the mailbox: every entry under TC_ROOT is as it was.
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity two children and two walks.
+        @alloc      two snapshots.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            before = tree(root.path)
+            for args in ((), ("--scrub", "--force")):
+                code, _, stderr, _ = run_report(root, *args)
+                self.assertEqual(code, EXIT_OK, stderr)
+            self.assertEqual(tree(root.path), before)
+
+    def test_the_page_fetches_nothing(self):
+        """No script tag, no http, no url( in either page the command writes.
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity two children.
+        @alloc      the pages.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            for args in ((), ("--scrub", "--force")):
+                code, _, stderr, page = run_report(root, *args)
+                self.assertEqual(code, EXIT_OK, stderr)
+                for banned in ("<script", "http", "url("):
+                    self.assertNotIn(banned, page.lower(), args)
+
+    def test_a_one_file_copy_of_tc_refuses_saying_where_it_looked(self):
+        """tc copied alone, with no board/ beside it, then with report.py and no serve.py: each exit 1, words naming the file it looked for, nothing written.
+
+        @interacts  copies ../tc into the root's temp folder and runs the copy.
+        @deps       shutil-free copy by bytes; subprocess through root.start.
+        @complexity one child.
+        @alloc      the copy, removed with the root.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            lone = root.base / "lone"
+            lone.mkdir()
+            (lone / "tc").write_bytes(_root.TC.read_bytes())
+            out = root.base / "lone-report.html"
+            proc = root.start(argv=[sys.executable, str(lone / "tc"), "report", str(out)])
+            stdout, stderr = proc.communicate(timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS)
+            self.assertEqual(proc.returncode, EXIT_REFUSED, stderr)
+            self.assertIn(str(lone / "board" / "report.py"), stderr)
+            self.assertFalse(out.exists())
+            (lone / "board").mkdir()
+            (lone / "board" / "report.py").write_bytes(REPORT_PATH.read_bytes())
+            proc = root.start(argv=[sys.executable, str(lone / "tc"), "report", str(out)])
+            stdout, stderr = proc.communicate(timeout=_root.DEFAULT_TC_TIMEOUT_SECONDS)
+            self.assertEqual(proc.returncode, EXIT_REFUSED, stderr)
+            self.assertIn(str(lone / "board" / "serve.py"), stderr)
+            self.assertFalse(out.exists())
+
+    def test_a_page_that_cannot_be_written_refuses_with_words(self):
+        """OUT in a folder that is not there: exit 1, words naming OUT, nothing written (pause DASH-2's recommendation).
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity one child.
+        @alloc      none.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            out = root.base / "no-such-folder" / "report.html"
+            code, _, stderr = root.tc("report", str(out))
+            self.assertEqual(code, EXIT_REFUSED, stderr)
+            self.assertIn(f"could not write {out}", stderr)
+            self.assertFalse(out.parent.exists())
+
+    def test_usage_errors_exit_9(self):
+        """No OUT, an unknown flag, and an --at that is not a time with its offset each exit 9.
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity four children.
+        @alloc      none.
+        """
+        with _root.TcRoot() as root:
+            for args in (("report",), ("report", "x.html", "--bogus"), ("report", "x.html", "--at", "noon"),
+                         ("report", "x.html", "--at", "2026-10-03T12:30:00")):
+                with self.subTest(args=args):
+                    code, _, stderr = root.tc(*args)
+                    self.assertEqual(code, EXIT_USAGE, stderr)
+
+
+class SafetyTest(unittest.TestCase):
+    """The planted-secret test, the scrub test, the accessibility test and determinism, on the pages the command writes.
+
+    @interacts  builds the fixture; runs tc report as a child.
+    @deps       run_report, charts, groups, series_of, fixture.
+    @complexity a few children per test.
+    @alloc      one TcRoot per test.
+    """
+
+    def pages(self, *extra):
+        """The fixture's unscrubbed and scrubbed pages, each from one run of the command with `extra`: (real, scrubbed).
+
+        @interacts  builds the fixture; two tc children.
+        @deps       run_report; _root.TcRoot.
+        @complexity two children.
+        @alloc      one TcRoot, removed before return; the two pages.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            pages = []
+            for args in ((), ("--scrub",)):
+                out = root.base / "out" / f"report{len(pages)}.html"
+                code, _, stderr, page = run_report(root, *args, *extra, out=out)
+                self.assertEqual(code, EXIT_OK, stderr)
+                pages.append(page)
+            return tuple(pages)
+
+    def test_planted_secrets_are_in_neither_page(self):
+        """A word after a tag, a word on a second body line, a header note, a card field and a status file: absent from both pages, byte for byte.
+
+        @interacts  see the class.
+        @deps       fixture.SECRETS.
+        @complexity two children.
+        @alloc      the pages.
+        """
+        real, safe = self.pages()
+        for secret in fixture.SECRETS:
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret.encode(), real.encode("utf-8"))
+                self.assertNotIn(secret.encode(), safe.encode("utf-8"))
+
+    def test_the_scrubbed_page_holds_no_name_no_planted_tag_no_date_and_no_clock(self):
+        """Scrubbed: no fixture name, not the off-list tag, no date, no clock, with --at too. Unscrubbed: every one of them there, so the test cannot pass by accident.
+
+        @interacts  see the class.
+        @deps       fixture.NAMES, fixture.PLANTED_TAG, DATE_PATTERN, CLOCK_PATTERN.
+        @complexity four children.
+        @alloc      the pages.
+        """
+        for extra in ((), ("--at", AT_TIME)):
+            with self.subTest(at=extra):
+                real, safe = self.pages(*extra)
+                for name in fixture.NAMES:
+                    self.assertIn(name, real)
+                    self.assertNotIn(name, safe)
+                self.assertIn(fixture.PLANTED_TAG, real)
+                self.assertNotIn(fixture.PLANTED_TAG, safe)
+                self.assertRegex(real, DATE_PATTERN)
+                self.assertRegex(real, CLOCK_PATTERN)
+                self.assertIsNone(DATE_PATTERN.search(safe), DATE_PATTERN.search(safe))
+                self.assertIsNone(CLOCK_PATTERN.search(safe), CLOCK_PATTERN.search(safe))
+                for spec in fixture.MESSAGES:
+                    for offset in (spec.sent, spec.read):
+                        if offset is not None:
+                            self.assertIn(fixture_time(offset).isoformat(sep=" ", timespec="minutes"), real)
+
+    def test_series_that_share_a_plot_differ_in_shape_and_dash_and_each_has_a_label(self):
+        """In every plot of every chart, real and scrubbed: no two series share a marker shape, none share a dash, and each series holds a text naming it.
+
+        @interacts  see the class.
+        @deps       charts, groups, series_of.
+        @complexity two children.
+        @alloc      the pages.
+        """
+        shared = 0
+        for page in self.pages():
+            for key, chart in charts(page).items():
+                for plot in groups(chart, "plot"):
+                    series = series_of(plot)
+                    with self.subTest(chart=key, plot=plot.get("data-plot")):
+                        self.assertTrue(series)
+                        shapes = [s.get("data-shape") for s in series]
+                        dashes = [s.get("data-dash") for s in series]
+                        self.assertEqual(len(set(shapes)), len(shapes), shapes)
+                        self.assertEqual(len(set(dashes)), len(dashes), dashes)
+                        for one in series:
+                            label = one.get("data-label")
+                            self.assertTrue(label)
+                            self.assertTrue(any(label in (t.text or "") for t in one.iter("text")), label)
+                    shared += len(series) > 1
+        self.assertGreater(shared, 0, "no plot with two series was checked")
+
+    def test_the_same_mailbox_gives_the_same_bytes_and_at_changes_only_the_as_of(self):
+        """Two runs, the same bytes; a run with --at differs in the as-of line alone, real and scrubbed.
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity six children.
+        @alloc      the pages.
+        """
+        first, second, at = self.pages(), self.pages(), self.pages("--at", AT_TIME)
+        self.assertEqual(first, second)
+        for plain, moved in zip(first, at):
+            old = re.findall(r'<p class="as-of">[^<]*</p>', plain)
+            new = re.findall(r'<p class="as-of">[^<]*</p>', moved)
+            self.assertEqual(len(old), 1)
+            self.assertNotEqual(old, new)
+            self.assertEqual(plain.replace(old[0], new[0]), moved)
+        self.assertIn("As of 2026-10-03 12:30-05:00.", at[0])
+        self.assertIn("As of T+2d03h.", at[1])
 
 
 if __name__ == "__main__":

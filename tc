@@ -279,6 +279,16 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             record once and prints `read <time>`, `unread` or `read, time
             not recorded` after each message's header line. `peek` writes
             nothing.
+            DASH (Claude Opus 5.5, unreviewed): C7, D42. `report` loads
+            board/report.py (and through it board/serve.py) from tc's own
+            folder, from source, in memory, writing no bytecode; reads,
+            by tc log's pinned walk, each message's name, size, header
+            line and the tag and #N references of its first body line
+            (at most MESSAGE_HEADER_MAX_BYTES + report.py's
+            TAG_READ_MAX_BYTES of each file), each read/'s read-time
+            record and each card's reports_to; and writes one page, OUT,
+            outside the mailbox, through a .tmp beside it and a rename.
+            It writes nothing in the mailbox.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
             grp, hashlib, io, json, pathlib, pwd, re, resource, secrets,
             selectors, shlex, shutil, signal, stat, subprocess, time,
@@ -324,6 +334,11 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             and R bytes of the read-time records, one line per message
             ever read, each read once, its newest READ_TIMES_MAX_BYTES at
             most (READTIME; the tail since fix round 2).
+            report O(n log n + T + t + R + c) the same way, over n
+            inboxes, T names, t messages ever (each read at most
+            MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES), R record bytes
+            and c cards, plus one compile of report.py and serve.py and a
+            page O(t) bytes (DASH, Claude Opus 5.5, unreviewed).
             health O(p + k + n log n + M + m log m + c): p processes on
             the machine (hundreds), k lines in /proc/locks (tens), n
             mailbox names and c cards (a few dozen each), M names in
@@ -413,7 +428,10 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             a retry. F1 fix round 1 (Claude Opus 5.5, unreviewed):
             secrets.token_hex(WAIT_EXIT_TMP_NONCE_BYTES) once per try of
             each wait exit record write, for its .tmp's name
-            (write_wait_exit). Nothing else draws randomness.
+            (write_wait_exit). DASH (Claude Opus 5.5, unreviewed):
+            secrets.token_hex(REPORT_TMP_NONCE_BYTES) once per tc report
+            run, for its page's .tmp name (cmd_report). Nothing else
+            draws randomness.
 """
 
 import argparse
@@ -5706,6 +5724,124 @@ def cmd_log(args):
                  + [f"tc log: {printable(problem)}; the mail in it is not shown" for problem in unlisted])
 
 
+# ---------- report: the mailbox drawn as one static page (C7, D42) ----------
+# DASH (Claude Opus 5.5, unreviewed): tc report. The drawing lives in
+# board/report.py beside tc, loaded here from source; tc keeps only the
+# command line, the refusals and the write.
+# Where tc report finds its renderer, from the folder tc's own file is in.
+REPORT_SOURCE = pathlib.Path("board") / "report.py"
+# The page holds real names and times unless scrubbed, so only its owner
+# reads it; a --scrub copy is shared on purpose, by a person, after.
+REPORT_FILE_MODE = 0o600
+# A fresh random part per run in the .tmp's name, so two reports at once,
+# or one killed mid-write, never meet at one name.
+REPORT_TMP_NONCE_BYTES = 8
+# The .tmp is made new (never one already there, never through a link).
+REPORT_TMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+REPORT_EXISTS_WORDS = ("{tc} report: {out} already exists; nothing was written. Pass --force to replace it, "
+                       "or name another file.")
+REPORT_MISSING_WORDS = ("{tc} report: no renderer at {source} ({why}). tc report needs the board/ folder beside "
+                        "tc, as a full checkout has it; a one-file copy of tc cannot draw a report. Nothing was "
+                        "written.")
+REPORT_WRITE_WORDS = "{tc} report: could not write {out} ({why}); nothing was written there."
+
+
+def report_time(text):
+    """`--at`'s argument as an aware datetime: an ISO time with its offset, as a message header writes one. Anything else is a usage error (exit 9, TcParser).
+
+    @interacts  none.
+    @deps       argparse, datetime.
+    @complexity O(c) over c characters.
+    @alloc      one datetime.
+    """
+    try:
+        when = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a time; give one with its offset, as "
+                                         f"2026-10-17T19:52:01-05:00") from None
+    if when.tzinfo is None:
+        raise argparse.ArgumentTypeError(f"{text!r} has no offset; give one, as 2026-10-17T19:52:01-05:00")
+    return when
+
+
+def cmd_report(args):
+    """`tc report OUT.html [--scrub] [--force] [--at TIME]`: the mailbox drawn as one self-contained HTML page (C7, D42).
+
+    Thin: an existing OUT (anything at its name, a link included) refuses,
+    exit 1, with words, unless --force. board/report.py is read from the
+    folder tc's own file is in and run in memory, in a fresh module, so no
+    bytecode is read or written beside it (as board/serve.py loads tc),
+    and it loads board/serve.py beside it the same way; either missing
+    refuses, exit 1, naming where tc looked. report.py reads
+    the mailbox and draws the page; tc writes it to a new .tmp beside OUT
+    (a random name, REPORT_TMP_FLAGS, REPORT_FILE_MODE) and renames it
+    into place, so a reader never sees half a page. A write that fails
+    (OUT's folder missing or not writable, no space; pause DASH-2) removes
+    this run's own .tmp and refuses, exit 1. Without --force OUT is
+    checked again just before the rename; a file made in between is kept
+    and the run refuses. Prints one line: what it wrote. Words report.py
+    gives about what it could not read go to stderr, and the exit stays 0.
+    Writes nothing in the mailbox.
+
+    @interacts  lstats OUT; reads board/report.py beside tc and runs its
+                top level, which loads board/serve.py the same way; see
+                report.py's extract for what it reads under ROOT; creates,
+                writes, fsyncs and renames one file in OUT's folder (or
+                removes it on a failure); prints to stdout and stderr.
+    @deps       printable, refuse, invoked_name; os, pathlib, secrets,
+                sys; REPORT_SOURCE, REPORT_FILE_MODE,
+                REPORT_TMP_NONCE_BYTES, REPORT_TMP_FLAGS, the REPORT_
+                words, EXIT_REFUSED; board/report.py (report).
+    @complexity one compile of report.py and serve.py (about 150 KB), then
+                report.py's extract and render: O(t) over t messages ever,
+                each read at most MESSAGE_HEADER_MAX_BYTES + its
+                TAG_READ_MAX_BYTES; the page is O(t) bytes.
+    @alloc      the two modules and the page text, freed on exit; one
+                file, OUT, kept.
+    @rng        secrets.token_hex(REPORT_TMP_NONCE_BYTES) once per run, for
+                the .tmp's name.
+    """
+    tc = invoked_name()
+    out = pathlib.Path(args.out)
+    if not args.force and os.path.lexists(out):
+        refuse(REPORT_EXISTS_WORDS.format(tc=tc, out=printable(out)), EXIT_REFUSED)
+    source = pathlib.Path(__file__).resolve().parent / REPORT_SOURCE
+    try:
+        code = compile(source.read_bytes(), str(source), "exec", dont_inherit=True)
+    except OSError as err:
+        refuse(REPORT_MISSING_WORDS.format(tc=tc, source=printable(source), why=err.strerror), EXIT_REFUSED)
+    renderer = type(sys)("tc_report")  # a fresh module: type(sys) is the module type, and needs no import
+    renderer.__file__ = str(source)
+    exec(code, renderer.__dict__)
+    try:
+        board = renderer.load_board_module()
+    except OSError as err:
+        refuse(REPORT_MISSING_WORDS.format(tc=tc, source=printable(renderer.SERVE_PATH), why=err.strerror),
+               EXIT_REFUSED)
+    page, summary, words = renderer.report(sys.modules[__name__], board, args.scrub, args.at)
+    for line in words:
+        print(f"{tc} report: {printable(line)}", file=sys.stderr)
+    tmp = out.parent / f".{out.name}.{secrets.token_hex(REPORT_TMP_NONCE_BYTES)}.tmp"
+    try:
+        fd = os.open(tmp, REPORT_TMP_FLAGS, REPORT_FILE_MODE)
+    except OSError as err:
+        refuse(REPORT_WRITE_WORDS.format(tc=tc, out=printable(out), why=err.strerror), EXIT_REFUSED)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(page.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        if not args.force and os.path.lexists(out):
+            os.unlink(tmp)  # this run's own .tmp, made above; the file made meanwhile stays
+            refuse(REPORT_EXISTS_WORDS.format(tc=tc, out=printable(out)), EXIT_REFUSED)
+        os.rename(tmp, out)
+    except OSError as err:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)  # this run's own .tmp, made above
+        refuse(REPORT_WRITE_WORDS.format(tc=tc, out=printable(out), why=err.strerror), EXIT_REFUSED)
+    print(f"wrote {printable(args.out)}: {summary}")
+
+
 # ---------- cards: who each name is and how mail reaches it (C1) ----------
 # CARDS R2 (Claude Opus 5.5, unreviewed). No card names a hub (D7):
 # reports_to is a hint for tc cards, tc health and the board, never a route.
@@ -10158,6 +10294,16 @@ def main():
     lg = sub.add_parser("log", help="full history, both directions")
     lg.add_argument("--last", type=int, default=0)
     lg.set_defaults(fn=cmd_log)
+
+    # DASH (Claude Opus 5.5, unreviewed): tc report (C7, D42).
+    rp = sub.add_parser("report", help="draw the mailbox as one self-contained HTML page")
+    rp.add_argument("out", metavar="OUT.html", help="the page to write; an existing file is refused without --force")
+    rp.add_argument("--scrub", action="store_true",
+                    help="role labels for names, elapsed times, ranks for numbers, off-list tags as other: safe to share")
+    rp.add_argument("--force", action="store_true", help="replace OUT.html when it exists")
+    rp.add_argument("--at", type=report_time, metavar="TIME",
+                    help="the page's as-of time, with its offset (default: the last message's)")
+    rp.set_defaults(fn=cmd_report)
 
     h = sub.add_parser("health", help="machine load, memory, GPU, sessions, listeners, cards, mail")
     h.add_argument("--json", action="store_true", help="machine-readable, for a board")

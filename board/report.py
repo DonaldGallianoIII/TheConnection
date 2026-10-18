@@ -518,7 +518,7 @@ def read_reports_to(tc, board):
     return cards
 
 
-def extract(tc):
+def extract(tc, board=None):
     """The mailbox's facts (C7): a Mailbox of records in sent order, sessions in first-mail order with C5's roles, the count of headers that did not parse, and words for stderr.
 
     C5's nodes are the names with an inbox or a card. Their partners are
@@ -526,7 +526,8 @@ def extract(tc):
     both ways, a name's notes to itself left out), and serve.py's
     hierarchy() gives each node its role, role source and level. A name
     that only sends (no inbox, no card) is not a node: its Session has
-    no role.
+    no role. `board` is serve.py as load_board_module gives it, loaded
+    here when None.
 
     @interacts  see the module block's extract.
     @deps       walk_messages, read_reports_to, load_board_module,
@@ -535,7 +536,7 @@ def extract(tc):
     @complexity see the module block.
     @alloc      see the module block.
     """
-    board = load_board_module()
+    board = load_board_module() if board is None else board
     records, boxes, words = walk_messages(tc, tc.MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES)
     records.sort(key=sent_order)
     cards = read_reports_to(tc, board)
@@ -1215,7 +1216,8 @@ def chart_read(page):
         for record in mine:
             if record.read is not None:
                 delay = max(0.0, seconds_of(record.read) - seconds_of(record.sent))
-                dots.append((delay, f"{dot_name(record)} from {record.sender}: read after {span_text(delay)}"))
+                dots.append((delay, f"{dot_name(record)} from {record.sender}: read {time_text(record.read)}, "
+                                    f"after {span_text(delay)}"))
         verb = "has" if len(mine) == 1 else "have"
         rows.append((session.name, f"{len(dots)} of {plural(len(mine), 'message')} {verb} a read time", dots))
     how = ("One dot per message with a read time, placed by how long it waited from sent to read, on a log scale. "
@@ -1457,3 +1459,24 @@ def render(page):
                                 element("title", (), [esc(PAGE_TITLE)]), element("style", (), [PAGE_CSS])])
     return "<!doctype html>\n" + element("html", (("lang", "en"),), [head, element("body", (), [
         element("main", (), body)])]) + "\n"
+
+
+def report(tc, board, scrubbed=False, at=None):
+    """`tc report`'s whole work, for tc's cmd_report: (page HTML, one line of summary words, words for stderr). `board` is serve.py as load_board_module gives it, which tc loads first so a missing one is refused in words.
+
+    extract, then page_of (as of `at` or the last message), then scrub
+    when `scrubbed`, then render. The summary names the message count and
+    whether the page is scrubbed; the stderr words say what could not be
+    read (a folder, a read-time record) and never reach the page.
+
+    @interacts  see extract; render is pure.
+    @deps       extract, page_of, scrub, render, plural.
+    @complexity extract's, then render's.
+    @alloc      the page text and the words, returned.
+    """
+    mailbox = extract(tc, board)
+    page = page_of(mailbox, at)
+    if scrubbed:
+        page = scrub(page)
+    kind = "scrubbed" if scrubbed else "real names and times"
+    return render(page), f"{plural(len(page.records), 'message')}, {kind}", mailbox.words
