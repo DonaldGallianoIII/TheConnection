@@ -918,7 +918,9 @@ place. It reads the mailbox and writes nothing in it.
 - the first line of its body, read within the first
   `MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES` bytes of the file, from
   which it keeps only the tag (a leading token matching
-  `^[A-Z][A-Z0-9-]{1,23}$`) and any `#<number>` references in that line.
+  `^[A-Z][A-Z0-9-]{1,23}$` once one trailing colon is stripped, so
+  `PLAN-READY:` is the tag `PLAN-READY`) and any `#<number>` references
+  in that line.
   The rest of the line is dropped on read and never kept;
 - `read/.read-times` (C2, D41), for read times;
 - `cards/*.json`, for `reports_to` only, and the feed's role rules (C5
@@ -943,9 +945,12 @@ these records, never a path, a login, a hostname or ROOT.
 4. Busy and quiet stretches: one lane per session, ticks for mail sent
    and received; a gap of `QUIET_GAP_SECONDS` or more is hatched and
    labeled with its length.
-5. Ask to ANSWER: where an `ANSWER` message's first line names `#N`,
-   the time from #N's sent time to the answer's, in chart 3's form; asks
-   with no answer naming them are counted in words, never guessed.
+5. Ask to answer: a message whose first line names `#N`, whatever its
+   tag (`ANSWER re #N`, `Re #N: ...`), and that goes from #N's recipient
+   back to #N's sender, answers #N; the time from #N's sent time to the
+   answer's, in chart 3's form (the first answer only). A message with no
+   `#N` named is never paired, and asks with no answer naming them are
+   counted in words, never guessed.
 
 **Accessibility** (rule 9, the owner is colorblind). Every series is
 labeled directly; no legend carries meaning. Series that share a plot
@@ -954,7 +959,8 @@ one plot share both. Quiet is hatched, never a fill color alone.
 
 **`--scrub`, safe by construction** (D42).
 - Names become role labels from C5's roles: `orchestrator-1`,
-  `worker-1`, `peer-1`, numbered by first mail, never by name order.
+  `worker-1`, `peer-1`, numbered by first mail, never by name order. A
+  name C5 gives no role becomes `session-1`, `session-2`, the same way.
 - A tag not on `SCRUB_TAGS` becomes `other`. The list: ANSWER, FYI,
   QUESTION, PLAN, PLAN-READY, PLAN-CHECK, PLAN-EDIT, PLAN-EDITED,
   PLAN-REVIEWED, CORRECTION, HEADS-UP, MERGE, REVIEW, STATUS, BLOCKED,
@@ -964,7 +970,9 @@ one plot share both. Quiet is hatched, never a fill color alone.
   the output, axis labels and the page's own text included.
 - Message numbers become ranks from 1 in sent order.
 - The page says on its face that it is scrubbed and what that means.
-Unscrubbed, times are absolute with their offset, and the page says so.
+Unscrubbed, times are absolute with their offset, and the page says so
+on its face: `Holds real session names and times. Share only a --scrub
+copy.`
 
 **Determinism.** No wall-clock read in the renderer. The report's span
 comes from its data; its "as of" is the last message's time, or `--at`.
