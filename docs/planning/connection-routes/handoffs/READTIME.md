@@ -17,7 +17,29 @@ a contract.
 |---|---|---|
 | Items 1 to 5, the QA step | `fead995` | Record when each message was read: tc read appends to read/.read-times, tc log shows it |
 | Pause | `7b8b232` | Add pause READTIME-2: three tests outside the work set list read/ and now find the record |
-| Handoff | the commit that adds this file | This handoff |
+| Handoff | `79ef162` | This handoff |
+| Fix round 1 | the commit that adds this row | Pause READTIME-2 settled; `1 message` |
+
+## Fix round 1 (the architect's two fixes)
+
+1. **Pause READTIME-2 settled** by the architect, option 1:
+   `.read-times` added to the expected name list in
+   `tests/test_inbox_pinned.py:629` (row d) and `tests/test_shared.py`
+   at the `moved` and `history` assertions (lines 1302 and 2621 at
+   `fead995`). Only those lists changed; each assertion is a listing of
+   read/ and nothing more, so none was widened. The five known failures
+   are gone.
+2. **`1 message`.** Both word sets, `READ_TIMES_FAILED_WORDS` and
+   `READ_TIMES_NOT_OWNER_WORDS`, take `{count}`: `1 message`, else
+   `<n> messages`, one conditional in `write_read_times`, no new
+   global. The not-owner words had the same `for 1 messages`, so they
+   share the fix. `test_a_failed_record_write_says_so_prints_the_mail_and_exits_0`
+   now runs over one message and two (subtests `messages=1` and
+   `messages=2`). Against `fead995`'s tc the `messages=1` subtest is red
+   on its assertion at line 420 (`... for 1 messages ...` against `...
+   for 1 message ...`), and green on the fix. The `<n> messages` in
+   pause READTIME-1's item 5 and in the brief are the architect's and
+   unchanged.
 
 ## What changed
 
@@ -145,12 +167,9 @@ Each red on assertions (FAIL, no ERROR):
 
 ## Not done, not verified
 
-- **Pause READTIME-2, five known failures.** Three existing tests outside
-  the work set list read/ after a `tc read` and now find `.read-times`:
-  `test_inbox_pinned.py:629` (row d, two kinds of swap),
-  `test_shared.py:2621` (two subtests) and `test_shared.py:1302`. The
-  lane left them unchanged; the pause recommends adding the record to
-  each list, as F1-1 was settled.
+- **Pause READTIME-2** (settled in fix round 1, above). Until then, three
+  existing tests outside the work set listed read/ after a `tc read` and
+  found `.read-times`: five known failures at `fead995` to `79ef162`.
 - **Nothing ran as a second Linux user.** The non-owner case is
   simulated in process by `os.fstat` reporting read/ as another user's,
   as the SHARED and F1 suites do. The kernel's sticky-bit refusal of a
@@ -158,7 +177,5 @@ Each red on assertions (FAIL, no ERROR):
   `O_CREAT` open of a member's plant (handled by moving it aside), are
   not proven by a test. `qa/human/route-shared.md` has no read-time step
   yet.
-- The write's words use the brief's `for <n> messages`, so one message
-  reads `for 1 messages`.
 - contracts.md (C2, C4), decisions.md and CLAUDE.md's layout line are
   the architect's, after the pause.

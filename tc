@@ -1264,12 +1264,13 @@ READ_TIMES_TRIES = 2
 # read/ shows NOT_RECORDED_LINE and log says why in one line on stderr.
 READ_TIMES_MAX_BYTES = 8 * 1024 * 1024
 # What tc read says, on stderr, when it records nothing: the record could
-# not be written ({n} messages moved, {why} the reason), or this user does
-# not own read/ ({read}), whose owner ({owner}) keeps {name}'s read times
-# (D36's rule, only a name's owner listens for it, applied to reading).
-READ_TIMES_FAILED_WORDS = "tc read: read time not recorded for {n} messages ({why})"
+# not be written ({count} the messages moved, `1 message` or `<n>
+# messages`, {why} the reason), or this user does not own read/ ({read}),
+# whose owner ({owner}) keeps {name}'s read times (D36's rule, only a
+# name's owner listens for it, applied to reading).
+READ_TIMES_FAILED_WORDS = "tc read: read time not recorded for {count} ({why})"
 READ_TIMES_NOT_OWNER_WORDS = ("tc read: read times for {name} are kept by {owner}, who owns {read}; none recorded "
-                              "for {n} messages")
+                              "for {count}")
 # What tc log prints on the line after each message's header line.
 READ_LINE = "read {time}"
 UNREAD_LINE = "unread"
@@ -4495,7 +4496,8 @@ def write_read_times(inbox, name, moved):
     fsync. A failure (the open, a short write, no space, the fsync) is one
     line, READ_TIMES_FAILED_WORDS, after any words of a plant moved aside,
     and never raises: the mail was read, and a waking session must not
-    stop over a missing timestamp.
+    stop over a missing timestamp. Both word sets count the messages
+    moved as `1 message` or `<n> messages`.
 
     @interacts  reads this process's user id, the clock (now_iso) and,
                 for the words, the user database; opens the record by name
@@ -4516,10 +4518,11 @@ def write_read_times(inbox, name, moved):
     """
     if not moved:
         return None
+    count = f"{len(moved)} message" if len(moved) == 1 else f"{len(moved)} messages"
     read = inbox.read
     if read.st.st_uid != os.geteuid():
         return READ_TIMES_NOT_OWNER_WORDS.format(name=name, owner=user_name(read.st.st_uid),
-                                                 read=inbox.path / "read", n=len(moved))
+                                                 read=inbox.path / "read", count=count)
     at = now_iso()
     data = "".join(json.dumps(dict(zip(READ_TIMES_KEYS, (now, message_number(was), at)))) + "\n"
                    for now, was in moved).encode("utf-8")
@@ -4540,7 +4543,7 @@ def write_read_times(inbox, name, moved):
         finally:
             os.close(fd)
     if why is not None:
-        said.append(READ_TIMES_FAILED_WORDS.format(n=len(moved), why=why))
+        said.append(READ_TIMES_FAILED_WORDS.format(count=count, why=why))
     return "\n".join(said) or None
 
 

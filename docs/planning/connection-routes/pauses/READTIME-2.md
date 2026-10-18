@@ -2,7 +2,26 @@
 
 Model:  Claude Opus 5.5 (the READTIME lane agent), 2026-10-17
 Status: unreviewed
-Pause:  open
+Pause:  settled by the architect, 2026-10-17: .read-times added to the three listings, as F1-1 did for .wait.exit
+
+## The ruling
+
+Option 1. `.read-times` is added to the expected name list in each of
+the three tests, and nothing else in them changes:
+
+- `tests/test_inbox_pinned.py`,
+  `InboxPinnedTest.test_a_member_swapping_its_inbox_mid_command_never_leads_tc_outside`,
+  row (d), `tc read`, both kinds of swap (the listing of the real
+  `read/` in `check`).
+- `tests/test_shared.py`,
+  `NoLostMailNoHangTest.test_a_send_after_mail_seq_is_set_back_never_takes_a_read_messages_name`,
+  both subtests (`history`).
+- `tests/test_shared.py`,
+  `RegularFilesOnlyTest.test_a_link_or_fifo_planted_as_a_message_is_never_printed_and_stays_in_place`
+  (`moved`).
+
+Each of the three assertions is a listing of `read/` and nothing more,
+so none was widened.
 
 ## The question
 

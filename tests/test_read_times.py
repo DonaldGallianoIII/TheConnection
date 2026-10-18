@@ -83,9 +83,12 @@ NOT_RECORDED_LINE = "read, time not recorded"
 # for the read-time record).
 MOVED_WORDS = ("tc read: {path} was {what} owned by {owner}, not this user's own read-time record; moved it "
                "aside to {aside}")
-FAILED_WORDS = "tc read: read time not recorded for {n} messages ({why})"
+FAILED_WORDS = "tc read: read time not recorded for {count} ({why})"
 NOT_OWNER_WORDS = ("tc read: read times for {name} are kept by {owner}, who owns {read}; none recorded for "
-                   "{n} messages")
+                   "{count}")
+# How both count the messages moved, written out by hand for each count a
+# test uses: one is singular, any other count plural.
+COUNT_WORDS = {1: "1 message", 2: "2 messages"}
 # The start of tc log's line on stderr for a record it would not read.
 LOG_UNREAD_RECORD_START = "tc log: {path} not read ("
 # The header line tc writes at the top of every message.
@@ -393,28 +396,30 @@ class WriterTest(UmaskTestCase):
                                  "the file outside the mailbox changed")
 
     def test_a_failed_record_write_says_so_prints_the_mail_and_exits_0(self):
-        """os.write raising ENOSPC while tc read runs in process: the mail still prints and moves, the exit is 0, and stderr is the one line `tc read: read time not recorded for 2 messages (No space left on device)`.
+        """os.write raising ENOSPC while tc read runs in process, over one message and over two: the mail still prints and moves, the exit is 0, and stderr is the one line `tc read: read time not recorded for 1 message (No space left on device)`, or `for 2 messages`.
 
         Must reject a read that fails, or stops printing, over a missing
-        timestamp, and one that says nothing.
+        timestamp, one that says nothing, and `1 messages`.
 
-        @interacts  two sends; tc read in process with os.write patched.
-        @deps       send, paths, load_tc, read_in_process; errno, os,
-                    unittest.mock.
-        @complexity O(1).
-        @alloc      one TcRoot and one module.
+        @interacts  per count: that many sends; tc read in process with
+                    os.write patched.
+        @deps       send, paths, load_tc, read_in_process, message_name;
+                    errno, os, unittest.mock; COUNT_WORDS.
+        @complexity O(1) per count.
+        @alloc      one TcRoot and one module per count.
         """
-        with _root.TcRoot() as root:
-            send(self, root, 2)
-            box, read, _ = paths(root)
-            tc = load_tc(root)
-            full = OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
-            with mock.patch.object(tc.os, "write", side_effect=full):
-                code, out, err = read_in_process(tc)
-            self.assertEqual(code, EXIT_OK, err)
-            self.assertEqual(err, FAILED_WORDS.format(n=2, why=os.strerror(errno.ENOSPC)) + "\n")
-            self.assertEqual((out.count("message 0"), out.count("message 1")), (1, 1), out)
-            self.assertEqual(sorted(p.name for p in read.glob("*.md")), [message_name(1), message_name(2)])
+        for n in COUNT_WORDS:
+            with self.subTest(messages=n), _root.TcRoot() as root:
+                send(self, root, n)
+                box, read, _ = paths(root)
+                tc = load_tc(root)
+                full = OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+                with mock.patch.object(tc.os, "write", side_effect=full):
+                    code, out, err = read_in_process(tc)
+                self.assertEqual(code, EXIT_OK, err)
+                self.assertEqual(err, FAILED_WORDS.format(count=COUNT_WORDS[n], why=os.strerror(errno.ENOSPC)) + "\n")
+                self.assertEqual([out.count(f"message {k}") for k in range(n)], [1] * n, out)
+                self.assertEqual(sorted(p.name for p in read.glob("*.md")), [message_name(k + 1) for k in range(n)])
 
     def test_a_member_who_does_not_own_read_records_nothing_and_says_why(self):
         """tc read run in process with read/ reported as another user's (os.fstat, as the SHARED suites report owners): the mail moves and prints, the exit is 0, no record is made, and stderr is the one NOT_OWNER_WORDS line.
@@ -435,7 +440,7 @@ class WriterTest(UmaskTestCase):
             tc = load_tc(root)
             with mock.patch.object(os, "fstat", owner_patched_fstat(read)):
                 code, out, err = read_in_process(tc)
-            said = NOT_OWNER_WORDS.format(name=NAME, owner=login(os.geteuid() + 1), read=read, n=2)
+            said = NOT_OWNER_WORDS.format(name=NAME, owner=login(os.geteuid() + 1), read=read, count=COUNT_WORDS[2])
             self.assertEqual((code, err), (EXIT_OK, said + "\n"))
             self.assertEqual((out.count("message 0"), out.count("message 1")), (1, 1), out)
             self.assertFalse(os.path.lexists(record), "a read by someone who does not own read/ wrote a record")
