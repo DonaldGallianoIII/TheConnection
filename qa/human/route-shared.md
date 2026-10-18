@@ -18,8 +18,8 @@ Status: unreviewed
   (`git rev-parse HEAD` in each prints the same). Every `tc` below is
   that copy, run as `python3 /path/to/tc` or `./tc`.
 - Two terminals for each user: some steps keep a wait running in one.
-- For steps 38 to 44 only: a far machine that ann's ssh key reaches
-  through `tc gate` and ben's does not. `qa/human/route-ssh.md` sets it
+- For steps 38 to 44 and 45h only: a far machine that ann's ssh key
+  reaches through `tc gate` and ben's does not. `qa/human/route-ssh.md` sets it
   up; the next section says when. Those steps run real `ssh`. No step
   runs real `codex`: step 31 uses a stand-in.
 
@@ -33,14 +33,16 @@ Walking both files, walk them as ann, so route-ssh.md's `you` is ann:
 
 1. route-ssh.md, steps 1 to 22.
 2. This file, steps 1 to 45, then 45a to 45c (read times, added after
-   the numbers below were set, so nothing after them moved). Steps 38 to
-   44 reuse route-ssh.md's alias `farbox-tc` and its far name `far-b`,
-   so their setup is done.
+   the numbers below were set, so nothing after them moved), then 45d
+   to 45h (ssh cards, D43, added the same way). Steps 38 to 44 and 45h
+   reuse route-ssh.md's alias `farbox-tc` and its far name `far-b`, so
+   their setup is done.
 3. This file's cleanup, steps 46 to 50.
 4. route-ssh.md's cleanup, steps 23 to 28, once, last.
 
 Walking this file alone: before step 38, as ann, do route-ssh.md's steps
-2 to 7, and at the end its cleanup for what those steps made.
+2 to 7, and at the end its cleanup for what those steps made. Steps 45d
+to 45h need step 38's card and route-ssh.md's alias.
 
 ## What this checks
 
@@ -796,6 +798,70 @@ same throwaway mailbox, `TC_ROOT=/srv/tc-shared`, and need no ssh.
       /srv/tc-shared/mail/to-ann2/read/.read-times.planted-1
       ~/tc-qa-aside/step45c-planted` (ben's own file).
 
+<!-- Steps 45d to 45h: the R10 lane agent (Claude Opus 5.5), D43, 2026-10-17. Status: unreviewed. -->
+## Only your own or the init user's ssh card (D43)
+
+On a shared mailbox the first member to write `cards/<name>.json` owns
+that name's card, and an ssh card says where a send goes and what
+program ssh runs there. So a send over ssh follows only a card the
+sender wrote or the init user (ann here) wrote. Anyone else's card is
+refused before ssh runs, and `tc cards` and `tc health` mark it. These
+steps use the same throwaway mailbox, `TC_ROOT=/srv/tc-shared`. `far-d`
+is a name nobody has claimed, here or on farbox; it is made up. Only
+step 45h runs ssh, to route-ssh.md's alias `farbox-tc`, as step 41 does.
+
+45d. ben writes an ssh card for the unclaimed name. As ben: `tc card
+    far-d --ssh farbox-tc --remote-tc '~/tc-qa/tc'`, then `ls -l
+    /srv/tc-shared/cards/far-d.json`.
+    - It prints `card written: far-d (other, account unknown, route ssh
+      to farbox-tc)`.
+    - `ls -l` shows `-rw-r-----`, owner `ben`.
+45e. As ann: `tc cards`, then `tc health`.
+    - `tc cards` has the line `far-d (other, account unknown, route ssh
+      to farbox-tc); ssh card by ben: only its writer and ann send over
+      it`. Step 38's `far-b` line has no mark: ann wrote it, and ann ran
+      init.
+    - `tc health`'s `cards` lines end the same way for far-d.
+    - Pass: that mark on far-d's line in both. Fail: no mark, or a mark
+      on far-b's line.
+45f. ann's send over ben's card is refused. As ann: `tc send --from ann
+    --to far-d "over ben's card"; echo "exit $?"`, then `ls
+    /srv/tc-shared/outbox/ann/`.
+    - It prints on stderr `tc send: /srv/tc-shared/cards/far-d.json is
+      an ssh card ben wrote, and only ben and the user who ran init
+      (ann) send over it. Nothing sent and no ssh run. The user who ran
+      init (ann) can write it for everyone: tc card far-d --ssh
+      <target>. Or write your own card under a name of your own: tc
+      card <your-name> --ssh <target>.`, then `exit 1`.
+    - `ls` lists no `to-far-d`: nothing was queued.
+    - Pass: those words, `exit 1`, no `to-far-d`. Fail: `exit 0` or
+      `exit 4`, or words with `sent over ssh` or `could not reach`: tc
+      ran ann's ssh over ben's card.
+45g. ann, the init user, writes far-d's card for everyone. As ann: `tc
+    card far-d --ssh farbox-tc --remote-tc '~/tc-qa/tc'`, then `ls -l
+    /srv/tc-shared/cards/far-d.json`, then `tc cards`.
+    - It prints `card written: far-d (...)`. It replaces ben's card:
+      ann owns `cards/`, and the owner of a sticky folder may replace
+      any entry in it.
+    - `ls -l` shows owner `ann` now, `-rw-r-----`.
+    - far-d's line in `tc cards` has no mark.
+45h. Now the send goes. As ann: `tc send --from ann --to far-d "over
+    ann's card"; echo "exit $?"`.
+    - It prints `sent over ssh to farbox-tc: sent #... to far-d: ...`
+      and `exit 0`. On stderr the far tc's warning, `new inbox: nobody
+      has joined as far-d`, since nobody joined far-d on farbox.
+    - On farbox, `tc read far-d` shows it, from the gate's key name.
+    - As ben: `tc send --from ben --to far-d "ben over ann's card";
+      echo "exit $?"`. ann's card is the init user's, so ben's send
+      follows it too and runs ben's ssh; ben has no key on farbox, so it
+      exits 4 with `could not reach farbox-tc (...)`, as in step 39,
+      never the D43 refusal.
+    - Pass: ann's send exits 0 and lands on farbox, and ben's is tried
+      over ssh. Fail: either refused with step 45f's words.
+    - Put it back. As ben: `mv /srv/tc-shared/outbox/ben/to-far-d
+      ~/tc-qa-aside/step45h-ben-queue` (ben's own queue, so nothing of
+      his waits for far-d).
+
 ## Cleanup
 
 Nothing here removes anything. Each step moves what this walk made out
@@ -850,7 +916,9 @@ fixer, Claude Opus 5.5, 2026-10-15; steps 32, 33 and 44 added (D36 (2),
 D35 (1) with a planted watch lock, D36 (4) with a FIFO note), the steps
 after 31 renumbered by two and the last two by three, with the
 references to them, in P3 fix round 2 by the P3 fixer, Claude Opus 5.5,
-2026-10-15.
+2026-10-15; steps 45d to 45h (D43, a member's ssh card refused and
+marked, the init user's followed) added by the R10 lane agent, Claude
+Opus 5.5, 2026-10-17, numbered after 45c so no step moved.
 
 **The outbox section (D22).** Added by the SSH lane agent (Claude Opus
 5.5), 2026-10-15; rewritten for D32 and D33 in fix round 1 by the SSH

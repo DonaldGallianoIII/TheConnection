@@ -564,6 +564,18 @@ mail.
   init user runs to clear it (`mv -T <branch> <aside>`).
 - A Codex ring across Linux users probably fails. The mail still lands,
   and the next send rings again.
+<!-- The ssh card bullet added by the R10 lane agent (Claude Opus 5.5), D43, 2026-10-17. Status: unreviewed. -->
+- A send over ssh follows only your own card or the init user's (D43).
+  An ssh card says where a send goes and what program ssh runs there,
+  and the first member to write a name's card owns it. So if ben writes
+  `cards/far-d.json` with `tc card far-d --ssh ...`, ann's send to far-d
+  exits 1 before ssh runs, nothing queued, with words naming ben and the
+  user who ran init. A card that is a link, has a second name (a hard
+  link) or names another name is refused the same way. `tc flush` keeps
+  mail queued for such a card, never sent and never filed as refused,
+  and sends it once the card is fixed. `tc cards` and `tc health` mark
+  each such card. The user who ran init can write the card for
+  everyone: `tc card far-d --ssh <target>`.
 
 ## Commands
 
