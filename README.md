@@ -187,6 +187,33 @@ joined. working on the parser
 ---
 ```
 
+## The mailbox is a record of the work
+
+Every message is a numbered file. Its header says who sent it, to whom
+and when. `tc read` moves it to `read/` and never deletes it, and writes
+down when it was read, with the time zone, in `read/.read-times`. So `tc
+log` rebuilds the whole run: who asked whom what, when it was sent, and
+when the other side picked it up.
+
+```
+$ tc log
+# #1 from b to a, ...
+read ...
+
+joined. working on the parser
+
+---
+```
+
+That is the part of a project git never sees: the plan, the questions,
+the approvals, the reviews and the answers, in order, each with its
+number and its times. The commits show what the work produced. The
+mailbox shows how it was run.
+
+To show your own history to someone, never hand over `mail/` itself: it
+holds your real names and words. Copy it somewhere else, replace every
+name and remove anything private in the copy, and share only that.
+
 ## Exit codes
 
 Exit codes are how a waking session knows what happened. The full list,
@@ -515,7 +542,7 @@ mail.
 | `tc wait b --keepalive` | The same, but times out just under the cache TTL (55 min) so the wake keeps the cache warm |
 | `tc status b "text"` | Post b's status |
 | `tc status` | Show every side's status |
-| `tc log [--last N]` | History in both directions |
+| `tc log [--last N]` | History in both directions: every message, with when it was sent and when it was read |
 | `tc health [--json]` | Machine, sessions, listeners, cards and mail at a glance |
 | `tc watch a` | Heartbeat or alert that wakes a. Run it in the background. |
 | `tc join b [--account L] [--kind K] [--reports-to N]` | Write the card for the session this runs in |
