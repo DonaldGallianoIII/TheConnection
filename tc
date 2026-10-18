@@ -279,6 +279,21 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             record once and prints `read <time>`, `unread` or `read, time
             not recorded` after each message's header line. `peek` writes
             nothing.
+            DASH (Claude Opus 5.5, unreviewed): C7, D42. `report` loads
+            board/report.py (and through it board/serve.py) from tc's own
+            folder, from source, in memory, writing no bytecode; reads,
+            by tc log's pinned walk, each message's name, size, header
+            line and the tag and #N references of its first body line
+            (at most MESSAGE_HEADER_MAX_BYTES + report.py's
+            TAG_READ_MAX_BYTES of each file), each read/'s read-time
+            record and each card's reports_to; and writes one page, OUT:
+            its folder opened once and judged from that descriptor (one
+            inside mail/, status/, cards/ or outbox/ refuses, and so does
+            a name at ROOT's top level that is one of tc's own or starts
+            with a dot, even with --force, fix round 2), then a .tmp
+            by name in it, hard-linked to OUT's name (renamed over it with
+            --force) and the .tmp's name removed (fix round 1). It writes
+            nothing in the mailbox.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
             grp, hashlib, io, json, pathlib, pwd, re, resource, secrets,
             selectors, shlex, shutil, signal, stat, subprocess, time,
@@ -324,6 +339,13 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             and R bytes of the read-time records, one line per message
             ever read, each read once, its newest READ_TIMES_MAX_BYTES at
             most (READTIME; the tail since fix round 2).
+            report O(n log n + T + t log t + R + c + s x t) over n
+            inboxes, T names, t messages ever (each read at most
+            MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES), R record
+            bytes, c cards and s sessions (charts 3 and 4 pass over the
+            records once per session), plus one compile of report.py and
+            serve.py and a page O(t) bytes (DASH, Claude Opus 5.5,
+            unreviewed; the s x t term, fix round 1).
             health O(p + k + n log n + M + m log m + c): p processes on
             the machine (hundreds), k lines in /proc/locks (tens), n
             mailbox names and c cards (a few dozen each), M names in
@@ -413,7 +435,10 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             a retry. F1 fix round 1 (Claude Opus 5.5, unreviewed):
             secrets.token_hex(WAIT_EXIT_TMP_NONCE_BYTES) once per try of
             each wait exit record write, for its .tmp's name
-            (write_wait_exit). Nothing else draws randomness.
+            (write_wait_exit). DASH (Claude Opus 5.5, unreviewed):
+            secrets.token_hex(REPORT_TMP_NONCE_BYTES) once per tc report
+            run, for its page's .tmp name (publish_report). Nothing else
+            draws randomness.
 """
 
 import argparse
@@ -5706,6 +5731,272 @@ def cmd_log(args):
                  + [f"tc log: {printable(problem)}; the mail in it is not shown" for problem in unlisted])
 
 
+# ---------- report: the mailbox drawn as one static page (C7, D42) ----------
+# DASH (Claude Opus 5.5, unreviewed): tc report. The drawing lives in
+# board/report.py beside tc, loaded here from source; tc keeps only the
+# command line, the refusals and the write.
+# Where tc report finds its renderer, from the folder tc's own file is in.
+REPORT_SOURCE = pathlib.Path("board") / "report.py"
+# The page holds real names and times unless scrubbed, so only its owner
+# reads it; a --scrub copy is shared on purpose, by a person, after.
+REPORT_FILE_MODE = 0o600
+# A fresh random part per run in the .tmp's name, so two reports at once,
+# or one killed mid-write, never meet at one name. The name is short and
+# fixed in length, never built from OUT's, so it fits wherever OUT fits
+# (fix round 1, LOW-3).
+REPORT_TMP_NONCE_BYTES = 8
+REPORT_TMP_NAME = ".tc-report-{nonce}.tmp"
+# The .tmp is made new (never one already there, never through a link).
+REPORT_TMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+# OUT's folder, opened once to be judged and written in by name (fix
+# round 1, DEBT-1): read only, a folder, never blocking.
+REPORT_FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK
+# Each opens `tc report:` under any invoked name, as NAME rules for the
+# words that open a refusal (fix round 1, LOW-13).
+REPORT_EXISTS_WORDS = ("tc report: {out} already exists; nothing was written. Pass --force to replace it, "
+                       "or name another file.")
+REPORT_MISSING_WORDS = ("tc report: no renderer at {source} ({why}). tc report needs the board/ folder beside "
+                        "tc, as a full checkout has it; a one-file copy of tc cannot draw a report. Nothing was "
+                        "written.")
+# Fix round 1, LOW-7: serve.py is not the renderer; report.py takes C5's roles from it.
+REPORT_BOARD_MISSING_WORDS = ("tc report: no board/serve.py at {source} ({why}). The report takes each session's "
+                              "role from it, so tc report needs the board/ folder beside tc, as a full checkout "
+                              "has it. Nothing was written.")
+# C7, pause DASH-2 as a2 settled it: a page never lands in the mailbox.
+REPORT_INSIDE_WORDS = ("tc report: {folder} is inside the mailbox ({top}), and tc report writes nothing in the "
+                       "mailbox. Name a file outside mail/, status/, cards/ and outbox/; ROOT's own folder is fine.")
+# Fix round 2 (Claude Opus 5.5, unreviewed): LOW-4, as the relay ruled it
+# into C7. tc's own entries at ROOT's top level, which a page must never
+# replace, even with --force: the shared-mailbox marker, the four mailbox
+# folders, tc itself and the board's folder, and any name starting with a
+# dot (REPORT_HIDDEN_LEAD), so a later entry of tc's is covered too.
+REPORT_RESERVED_NAMES = (SHARED_MARKER_NAME, MAIL.name, STATUS.name, CARDS.name, OUTBOX_NAME, "tc", "board")
+REPORT_HIDDEN_LEAD = "."
+REPORT_RESERVED_WORDS = ("tc report: {out} would land on {entry}, one of tc's own entries at the mailbox's top level "
+                         "({root}); tc report never writes there, even with --force. Name another file.")
+# C7's words, exactly (pause DASH-2, settled).
+REPORT_WRITE_WORDS = "tc report: could not write {out} ({why}); nothing was written there."
+
+
+def report_time(text):
+    """`--at`'s argument as an aware datetime: an ISO time with its offset, as a message header writes one. Anything else is a usage error (exit 9, TcParser).
+
+    @interacts  none.
+    @deps       argparse, datetime.
+    @complexity O(c) over c characters.
+    @alloc      one datetime.
+    """
+    try:
+        when = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a time; give one with its offset, as "
+                                         f"2026-10-17T19:52:01-05:00") from None
+    if when.tzinfo is None:
+        raise argparse.ArgumentTypeError(f"{text!r} has no offset; give one, as 2026-10-17T19:52:01-05:00")
+    return when
+
+
+def report_inside(folder):
+    """The resolved mail/, status/, cards/ or outbox/ that the resolved folder `folder` is, or is under; None when it is none of them (C7).
+
+    @interacts  resolves MAIL, STATUS, CARDS and ROOT/outbox
+                (os.path.realpath).
+    @deps       os; MAIL, STATUS, CARDS, ROOT, OUTBOX_NAME.
+    @complexity O(1): four realpaths.
+    @alloc      four short strings, freed on return.
+    """
+    for top in (MAIL, STATUS, CARDS, ROOT / OUTBOX_NAME):
+        inside = os.path.realpath(top)
+        if folder == inside or folder.startswith(inside.rstrip(os.sep) + os.sep):
+            return inside
+    return None
+
+
+def report_folder(out):
+    """OUT's folder, opened once: (descriptor, its resolved path). Refuses, exit 1, a folder tc cannot open (REPORT_WRITE_WORDS), one inside the mailbox (REPORT_INSIDE_WORDS), and an OUT that lands on one of tc's own entries at ROOT's top level (REPORT_RESERVED_WORDS), even with --force.
+
+    The folder is opened by its path once (links on the way are followed,
+    as a person naming it expects), then resolved from the open
+    descriptor itself (/proc/self/fd/<n>), so the check judges the folder
+    tc holds, and every later step is by name in that descriptor (fix
+    round 1, DEBT-1): a folder swapped on OUT's path after the open leads
+    the write nowhere. The folder is inside the mailbox when it is, or is
+    under, the resolved mail/, status/, cards/ or outbox/ (C7, pause
+    DASH-2 as a2 settled it).
+
+    Fix round 2 (Claude Opus 5.5, unreviewed): LOW-4, as the relay ruled
+    it into C7. ROOT's own top level is allowed, but not an OUT there
+    named one of REPORT_RESERVED_NAMES or any name starting with a dot,
+    whether or not it is there now (a missing mail/ is still mail's
+    name). Judged after resolving: the folder as its descriptor resolves,
+    and, when OUT's own name in that folder is a link (lstat by name in
+    the descriptor), where the link leads too, read by name in the
+    descriptor (os.readlink) and resolved from there. A link that leads
+    into the mailbox's folders or onto a reserved entry is refused,
+    though tc would never write through it (publish_report links or
+    renames by name, replacing a link, never following it): C7 refuses
+    it all the same.
+
+    @interacts  opens one folder; reads its /proc/self/fd link; lstats
+                OUT's name in it and, for a link, reads the link by name
+                there; resolves ROOT and the four tops (report_inside); on
+                a refusal closes the folder, writes one line to stderr
+                and exits 1.
+    @deps       report_inside, refuse, printable; os, stat; ROOT,
+                REPORT_FOLDER_FLAGS, REPORT_RESERVED_NAMES,
+                REPORT_HIDDEN_LEAD, REPORT_WRITE_WORDS, REPORT_INSIDE_WORDS,
+                REPORT_RESERVED_WORDS, EXIT_REFUSED.
+    @complexity O(1): one open, two readlinks, one lstat and at most ten
+                realpaths.
+    @alloc      one descriptor, returned (the caller closes it).
+    """
+    try:
+        fd = os.open(out.parent, REPORT_FOLDER_FLAGS)
+    except OSError as err:
+        refuse(REPORT_WRITE_WORDS.format(out=printable(out), why=err.strerror), EXIT_REFUSED)
+    real = os.readlink(f"/proc/self/fd/{fd}")
+    places = [(real, out.name)]
+    try:
+        if out.name and stat.S_ISLNK(os.lstat(out.name, dir_fd=fd).st_mode):
+            led = os.path.realpath(os.path.join(real, os.readlink(out.name, dir_fd=fd)))
+            places.append(os.path.split(led))
+    except OSError:
+        pass  # nothing at the name yet, or nothing to follow: judged by the folder and the name alone
+    root = os.path.realpath(ROOT)
+    for folder, name in places:
+        inside = report_inside(folder)
+        if inside is not None:
+            os.close(fd)
+            refuse(REPORT_INSIDE_WORDS.format(folder=printable(folder), top=printable(inside)), EXIT_REFUSED)
+        if folder == root and (name in REPORT_RESERVED_NAMES or name.startswith(REPORT_HIDDEN_LEAD)):
+            os.close(fd)
+            refuse(REPORT_RESERVED_WORDS.format(out=printable(out), entry=printable(name), root=printable(root)),
+                   EXIT_REFUSED)
+    return fd, real
+
+
+def publish_report(folder_fd, name, page, force, out):
+    """Write `page` as `name` in the folder open at `folder_fd`, by name there only: a new .tmp (REPORT_TMP_FLAGS, a short random name of its own), then, without `force`, a hard link to `name` (it fails on anything already there, so nothing is replaced), or with `force` a rename over it; then the .tmp's name is removed. Refuses, exit 1, as REPORT_EXISTS_WORDS when `name` appeared meanwhile, or REPORT_WRITE_WORDS for a write that fails; either way this run's own .tmp is removed. `out` names OUT in the words only.
+
+    The same way tc publishes a message (publish_message): a reader never
+    sees half a page, and a file made at OUT between tc's check and this
+    publish is kept (fix round 1, LOW-5). The .tmp's name does not grow
+    with OUT's, so an OUT name at the name limit still writes (LOW-3). A
+    filesystem with no hard links refuses a publish without --force, in
+    REPORT_WRITE_WORDS, as it refuses a message.
+
+    @interacts  creates, writes, fsyncs and closes one .tmp by name in
+                `folder_fd`; links or renames it to `name` there; removes
+                the .tmp's name there; on a refusal, one line to stderr
+                and exit 1.
+    @deps       refuse, printable; contextlib, os, secrets;
+                REPORT_TMP_FLAGS, REPORT_FILE_MODE, REPORT_TMP_NAME,
+                REPORT_TMP_NONCE_BYTES, REPORT_EXISTS_WORDS,
+                REPORT_WRITE_WORDS, EXIT_REFUSED.
+    @complexity O(b) over b bytes of the page.
+    @alloc      the page's bytes while written; one file, `name`, kept.
+    @rng        secrets.token_hex(REPORT_TMP_NONCE_BYTES), once, for the
+                .tmp's name.
+    """
+    tmp = REPORT_TMP_NAME.format(nonce=secrets.token_hex(REPORT_TMP_NONCE_BYTES))
+    try:
+        fd = os.open(tmp, REPORT_TMP_FLAGS, REPORT_FILE_MODE, dir_fd=folder_fd)
+    except OSError as err:
+        refuse(REPORT_WRITE_WORDS.format(out=printable(out), why=err.strerror), EXIT_REFUSED)
+    words = None
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(page.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        if force:
+            os.rename(tmp, name, src_dir_fd=folder_fd, dst_dir_fd=folder_fd)
+        else:
+            os.link(tmp, name, src_dir_fd=folder_fd, dst_dir_fd=folder_fd, follow_symlinks=False)
+    except FileExistsError:
+        words = REPORT_EXISTS_WORDS.format(out=printable(out))  # made meanwhile: it stays
+    except OSError as err:
+        words = REPORT_WRITE_WORDS.format(out=printable(out), why=err.strerror)
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(tmp, dir_fd=folder_fd)  # this run's own .tmp, made above; gone already after a rename
+    if words is not None:
+        refuse(words, EXIT_REFUSED)
+
+
+def cmd_report(args):
+    """`tc report OUT.html [--scrub] [--force] [--at TIME]`: the mailbox drawn as one self-contained HTML page (C7, D42).
+
+    Thin. OUT's folder is opened once and judged from that descriptor
+    (report_folder): one inside the mailbox, one tc cannot open, or an OUT
+    landing on one of tc's own entries at ROOT's top level (fix round 2,
+    LOW-4) refuses, exit 1, with words. An existing OUT (anything at its name in
+    that folder, a link included) refuses, exit 1, unless --force.
+    board/report.py is read from the folder tc's own file is in and run
+    in memory, in a fresh module, so no bytecode is read or written
+    beside it (as board/serve.py loads tc), and board/serve.py is loaded
+    the same way; either missing refuses, exit 1, naming where tc looked
+    (REPORT_MISSING_WORDS, REPORT_BOARD_MISSING_WORDS). report.py reads
+    the mailbox and draws the page; publish_report writes it by name in
+    the open folder. Every refusal opens `tc report:` under any invoked
+    name (NAME). Prints one line: the resolved path written, the summary,
+    and the mailbox read, as tc health's R2 line names it. Words report.py
+    gives about what it could not read go to stderr, and the exit stays 0.
+    Writes nothing in the mailbox.
+
+    Fix round 1 (Claude Opus 5.5, unreviewed): DEBT-5. report.py gets a
+    module object holding this module's names, so cmd_report also runs
+    when tc is loaded as a module that sys.modules does not hold (the
+    tests' loader).
+
+    @interacts  see report_folder and publish_report; lstats OUT's name
+                in its open folder; reads board/report.py beside tc and
+                runs its top level, then board/serve.py's through it; see
+                report.py's extract for what it reads under ROOT; prints
+                to stdout and stderr; closes the folder on every way out.
+    @deps       report_folder, publish_report, name_taken, printable, refuse; os,
+                pathlib, sys; REPORT_SOURCE, ROOT, ROOT_FROM,
+                ROOT_FROM_WORDS, the REPORT_ words, EXIT_REFUSED;
+                board/report.py (load_board_module, SERVE_PATH, report).
+    @complexity one compile of report.py and serve.py (about 150 KB), then
+                report.py's: O(t log t + s x t) over t messages ever and
+                s sessions, each message read at most
+                MESSAGE_HEADER_MAX_BYTES + its TAG_READ_MAX_BYTES; the
+                page is O(t) bytes.
+    @alloc      the two modules and the page text, freed on exit; one
+                descriptor, closed on return; one file, OUT, kept.
+    """
+    out = pathlib.Path(args.out)
+    folder_fd, real = report_folder(out)
+    try:
+        if not out.name:
+            refuse(REPORT_WRITE_WORDS.format(out=printable(out), why="it names a folder, not a file"), EXIT_REFUSED)
+        if not args.force and name_taken(out.name, folder_fd):
+            refuse(REPORT_EXISTS_WORDS.format(out=printable(out)), EXIT_REFUSED)
+        source = pathlib.Path(__file__).resolve().parent / REPORT_SOURCE
+        try:
+            code = compile(source.read_bytes(), str(source), "exec", dont_inherit=True)
+        except OSError as err:
+            refuse(REPORT_MISSING_WORDS.format(source=printable(source), why=err.strerror), EXIT_REFUSED)
+        renderer = type(sys)("tc_report")  # a fresh module: type(sys) is the module type, and needs no import
+        renderer.__file__ = str(source)
+        exec(code, renderer.__dict__)
+        try:
+            board = renderer.load_board_module()
+        except OSError as err:
+            refuse(REPORT_BOARD_MISSING_WORDS.format(source=printable(renderer.SERVE_PATH), why=err.strerror),
+                   EXIT_REFUSED)
+        me = type(sys)(__name__)  # fix round 1, DEBT-5: this module's names, wherever it was loaded from
+        me.__dict__.update(globals())
+        page, summary, words = renderer.report(me, board, args.scrub, args.at)
+        for line in words:
+            print(f"tc report: {printable(line)}", file=sys.stderr)
+        publish_report(folder_fd, out.name, page, args.force, out)
+    finally:
+        os.close(folder_fd)
+    print(f"wrote {printable(os.path.join(real, out.name))}: {summary}. Mailbox {printable(ROOT)}, "
+          f"{ROOT_FROM_WORDS[ROOT_FROM]}.")
+
+
 # ---------- cards: who each name is and how mail reaches it (C1) ----------
 # CARDS R2 (Claude Opus 5.5, unreviewed). No card names a hub (D7):
 # reports_to is a hint for tc cards, tc health and the board, never a route.
@@ -10158,6 +10449,17 @@ def main():
     lg = sub.add_parser("log", help="full history, both directions")
     lg.add_argument("--last", type=int, default=0)
     lg.set_defaults(fn=cmd_log)
+
+    # DASH (Claude Opus 5.5, unreviewed): tc report (C7, D42).
+    rp = sub.add_parser("report", help="draw the mailbox as one self-contained HTML page")
+    rp.add_argument("out", metavar="OUT.html", help="the page to write; an existing file is refused without --force")
+    rp.add_argument("--scrub", action="store_true",
+                    help="role labels for names, elapsed times, ranks for numbers, off-list tags as other: "
+                         "safe to share")
+    rp.add_argument("--force", action="store_true", help="replace OUT.html when it exists")
+    rp.add_argument("--at", type=report_time, metavar="TIME",
+                    help="the page's as-of time, with its offset (default: the last message's)")
+    rp.set_defaults(fn=cmd_report)
 
     h = sub.add_parser("health", help="machine load, memory, GPU, sessions, listeners, cards, mail")
     h.add_argument("--json", action="store_true", help="machine-readable, for a board")
