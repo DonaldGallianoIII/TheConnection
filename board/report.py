@@ -140,9 +140,25 @@ INFERRED = "inferred"
 # The widest a chart draws by default: the page's column is 1000 px, and
 # a chart this wide leaves a margin inside it.
 CHART_WIDTH = 960
-# About how wide one character of the 13 px label text is, to size a node
-# box or a gutter from its words without measuring text (no script runs).
-CHAR_WIDTH = 7.4
+# About how wide one character of the bold TEXT_UNITS label text is, to
+# size a node box or fit a row's name without measuring text (no script
+# runs). Set from wide letters (a run of `q` or `w` in a sans bold face),
+# not the average, so a long name errs short of the edge. The plain small
+# text is narrower per character.
+CHAR_WIDTH = 9.0
+SMALL_CHAR_WIDTH = 6.8
+# Text sizes in the SVGs' own units: labels, and the smaller words under
+# and beside them, the smallest text any chart draws.
+TEXT_UNITS = 13
+SMALL_TEXT_UNITS = 12
+# The fewest pixels any text may draw at (fix round 1, MEDIUM-1). Each SVG
+# gets a CSS min-width of its width x MIN_TEXT_PX / SMALL_TEXT_UNITS, so on
+# a narrow screen its .figure scrolls sideways instead of the chart
+# shrinking its text below this.
+MIN_TEXT_PX = 11
+# What a cut name or line starts with, three periods (the voice rules ban
+# the one-character ellipsis); the end of the words is kept after it.
+CUT_MARK = "..."
 # Chart 1, the graph. A node is a box this tall, padded this much either
 # side of its words; boxes in one row sit this far apart, rows this far
 # apart center to center (room for the arrows and their counts between),
@@ -161,7 +177,8 @@ EDGE_BEND = 16
 # its ends instead of through them.
 EDGE_BEND_PER_LENGTH = 0.18
 # A level with more names than this wraps onto further lines, so the
-# graph keeps the page's width and its words stay readable when scaled.
+# graph stays near the page's width (and its width floor, MIN_TEXT_PX,
+# near the column) when names are short.
 GRAPH_LINE_MAX_NODES = 5
 EDGE_GAP = 4
 ARROW_LENGTH = 10
@@ -174,11 +191,13 @@ NODE_DASH = "5 3"
 NODE_CORNER = 4
 
 # The row charts (2 to 5). Each row's words sit in a gutter this wide at
-# the left (a name of up to C0's 64 characters is cut by nothing: the
-# words run left from the plot's edge); the plot runs from there to this
-# far short of the right edge. The charts keep this much room above the
-# first row and this much below the last for the time axis.
-LABEL_GUTTER = 230
+# the left, ending at its right edge; words wider than the room left of
+# that edge are cut by fit_words (fix round 1, MEDIUM-2: a name of up to
+# C0's 64 characters would otherwise run past x 0 and be clipped). The
+# plot runs from the gutter to this far short of the right edge. The
+# charts keep this much room above the first row and this much below the
+# last for the time axis.
+LABEL_GUTTER = 280
 PLOT_RIGHT_PAD = 24
 CHART_TOP = 16
 AXIS_HEIGHT = 40
@@ -271,8 +290,8 @@ p{margin:6px 0}
 .how{color:var(--ink-2);font-size:14px}
 .figure{overflow-x:auto}
 svg{display:block;max-width:100%;height:auto;margin-top:8px;background:var(--panel);border-radius:6px}
-svg text{font:13px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;fill:var(--ink)}
-svg .small{font-size:11px;fill:var(--ink-2)}
+svg text{font:TEXT_UNITSpx system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;fill:var(--ink)}
+svg .small{font-size:SMALL_TEXT_UNITSpx;fill:var(--ink-2)}
 svg .label{font-weight:600}
 svg .halo{paint-order:stroke;stroke:var(--panel);stroke-width:4px;stroke-linejoin:round}
 .node-box{fill:var(--node);stroke:var(--ink);stroke-width:1.5}
@@ -292,6 +311,9 @@ svg .halo{paint-order:stroke;stroke:var(--panel);stroke-width:4px;stroke-linejoi
 .hatch{fill:none;stroke:var(--quiet);stroke-width:1}
 footer{margin-top:40px;color:var(--ink-2);font-size:13px}
 """
+# The two text sizes, from their constants, so the CSS and the width floor
+# never disagree.
+PAGE_CSS = PAGE_CSS.replace("SMALL_TEXT_UNITSpx", f"{SMALL_TEXT_UNITS}px").replace("TEXT_UNITSpx", f"{TEXT_UNITS}px")
 
 # One message, closed (C7): exactly these eight facts. sent and read are
 # aware datetimes on a real page, whole seconds since the first message on
@@ -700,11 +722,11 @@ def element(name, attrs=(), children=None):
     return f"<{name}{attributes}>{''.join(children)}</{name}>"
 
 
-def text_at(x, y, words, css=None, anchor=None):
-    """An SVG <text> of `words` at (x, y), escaped, with an optional class and text-anchor.
+def text_at(x, y, words, css=None, anchor=None, whole=None):
+    """An SVG <text> of `words` at (x, y), escaped, with an optional class and text-anchor; `whole`, when given, goes in a <title> inside it (the full words of a cut line).
 
     @interacts  none.
-    @deps       element, esc, num.
+    @deps       element, esc, num, titled.
     @complexity O(c) over c characters.
     @alloc      one string, returned.
     """
@@ -713,7 +735,37 @@ def text_at(x, y, words, css=None, anchor=None):
         attrs.append(("class", css))
     if anchor:
         attrs.append(("text-anchor", anchor))
-    return element("text", attrs, [esc(words)])
+    return element("text", attrs, [esc(words)] + ([titled(whole)] if whole is not None else []))
+
+
+def char_width(css):
+    """The estimated width of one character of text with class list `css`: SMALL_CHAR_WIDTH for the small words, CHAR_WIDTH for the rest.
+
+    @interacts  none.
+    @deps       CHAR_WIDTH, SMALL_CHAR_WIDTH.
+    @complexity O(c) over c characters of `css`.
+    @alloc      none.
+    """
+    return SMALL_CHAR_WIDTH if "small" in (css or "").split() else CHAR_WIDTH
+
+
+def fit_words(words, room, css="label"):
+    """`words` as they fit in `room` units of width, for text of class list `css` (char_width): (words to draw, the whole words when cut, else None).
+
+    A cut keeps the end (session names differ most at their ends: the
+    `-api`, the `-2`) after CUT_MARK, and the caller puts the whole in a
+    <title> inside the text.
+
+    @interacts  none.
+    @deps       char_width; CUT_MARK.
+    @complexity O(c) over c characters.
+    @alloc      one string, returned.
+    """
+    fits = int(room // char_width(css))
+    if len(words) <= fits:
+        return words, None
+    keep = max(0, fits - len(CUT_MARK))
+    return CUT_MARK + (words[-keep:] if keep else ""), words
 
 
 def titled(words):
@@ -731,15 +783,21 @@ def svg_chart(key, width, height, title, desc, body, top=0):
     """One chart's SVG: its key, its size, a <title> and a <desc> (rule 9), and `body`. `top` is the y the drawing starts at (chart 1 draws arcs above its first row).
 
     No xmlns: inline SVG in HTML needs none, and the page holds no
-    address of any host.
+    address of any host. Its CSS min-width is its width x MIN_TEXT_PX /
+    SMALL_TEXT_UNITS, rounded up (fix round 1, MEDIUM-1): the page may
+    scale a chart down to fit its column, but never so far that its
+    smallest text draws under MIN_TEXT_PX; past that its .figure scrolls.
 
     @interacts  none.
     @deps       element, esc, num.
     @complexity O(b) over b characters of body.
     @alloc      one string.
     """
-    return element("svg", (("class", "chart"), ("data-chart", key), ("viewBox", f"0 {num(top)} {num(width)} {num(height)}"),
-                           ("width", num(width)), ("height", num(height)), ("role", "img"),
+    floor = math.ceil(width * MIN_TEXT_PX / SMALL_TEXT_UNITS)
+    return element("svg", (("class", "chart"), ("data-chart", key),
+                           ("viewBox", f"0 {num(top)} {num(width)} {num(height)}"),
+                           ("width", num(width)), ("height", num(height)), ("style", f"min-width:{floor}px"),
+                           ("role", "img"),
                            ("aria-labelledby", f"{key}-title {key}-desc")),
                    [element("title", (("id", f"{key}-title"),), [esc(title)]),
                     element("desc", (("id", f"{key}-desc"),), [esc(desc)]), *body])
@@ -826,6 +884,19 @@ def role_word(session):
     return f"{session.role} · {INFERRED}" if session.source == INFERRED else session.role
 
 
+def node_label(session, scrubbed):
+    """A node's words: its name and role word, or on a scrubbed page its label alone, which already names its role (`worker-1`, fix round 1, REC-10), with `· inferred` kept when its role is a guess.
+
+    @interacts  none.
+    @deps       role_word; INFERRED.
+    @complexity O(1).
+    @alloc      one string.
+    """
+    if scrubbed:
+        return f"{session.name} · {INFERRED}" if session.role and session.source == INFERRED else session.name
+    return f"{session.name} · {role_word(session)}"
+
+
 def node_shape(role, x, y, width):
     """The outline of a node of `role` centered at (x, y), `width` wide: C5's role as a shape.
 
@@ -891,7 +962,7 @@ def chart_graph(page):
     rows = {}
     for session in sessions:
         rows.setdefault(session.level if session.level is not None else deepest + 1, []).append(session)
-    labels = {s.name: f"{s.name} · {role_word(s)}" for s in sessions}
+    labels = {s.name: node_label(s, page.scrubbed) for s in sessions}
     widths = {name: len(label) * CHAR_WIDTH + 2 * NODE_PAD_X for name, label in labels.items()}
     slot = max(widths.values()) + NODE_GAP
     lines = [rows[level][first:first + GRAPH_LINE_MAX_NODES] for level in sorted(rows)
@@ -1072,15 +1143,18 @@ def empty_chart(key, number, heading, words):
 
 
 def row_label(y, name, detail, edge=None):
-    """A row's words at its left: the name, bold, and one line of detail under it, both ending at `edge` (the gutter's edge less LABEL_GAP when None).
+    """A row's words at its left: the name, bold, and one line of detail under it, both ending at `edge` (the gutter's edge less LABEL_GAP when None), each cut by fit_words so it starts no further left than LABEL_GAP (fix round 1, MEDIUM-2).
 
     @interacts  none.
-    @deps       text_at; LABEL_GUTTER, LABEL_GAP, LINE_GAP.
-    @complexity O(1).
+    @deps       text_at, fit_words; LABEL_GUTTER, LABEL_GAP, LINE_GAP.
+    @complexity O(c) over c characters of the two lines.
     @alloc      two strings.
     """
     edge = LABEL_GUTTER - LABEL_GAP if edge is None else edge
-    return [text_at(edge, y - LINE_GAP / 2, name, "label", "end"), text_at(edge, y + LINE_GAP / 2, detail, "small", "end")]
+    shown, whole = fit_words(name, edge - LABEL_GAP)
+    said, said_whole = fit_words(detail, edge - LABEL_GAP, "small")
+    return [text_at(edge, y - LINE_GAP / 2, shown, "label", "end", whole),
+            text_at(edge, y + LINE_GAP / 2, said, "small", "end", said_whole)]
 
 
 def chart_senders(page):
@@ -1163,7 +1237,8 @@ def delay_strips(key, rows, heading, desc, footer=()):
 
     `rows` is a list of (name, detail words, [(delay seconds, title)]). A
     strip is its own plot with one series, labeled at its left; a row with
-    no delays draws its words and no median. `footer` is lines of words
+    no delays draws its words and no median; a median's words are kept
+    inside the chart's width. `footer` is lines of words
     under the axis. The axis has a grid line at each of
     DELAY_TICKS_SECONDS the data reaches, each labeled, and the longest
     delay drawn labeled at its far end; a tick label closer to that end
@@ -1213,8 +1288,10 @@ def delay_strips(key, rows, heading, desc, footer=()):
             marks.append(element("line", (("class", "median"), ("x1", num(x_of(median))),
                                           ("y1", num(middle - MEDIAN_REACH)), ("x2", num(x_of(median))),
                                           ("y2", num(middle + MEDIAN_REACH)))))
-            marks.append(text_at(x_of(median), middle - MEDIAN_REACH - DOT_RADIUS, f"median {span_text(median)}",
-                                 "small halo", "middle"))
+            words = f"median {span_text(median)}"
+            half = len(words) * SMALL_CHAR_WIDTH / 2
+            marks.append(text_at(min(max(x_of(median), LABEL_GUTTER + half), CHART_WIDTH - half),
+                                 middle - MEDIAN_REACH - DOT_RADIUS, words, "small halo", "middle"))
         body.append(element("g", (("class", "plot"), ("data-plot", name)), [
             element("g", (("class", "series"), ("data-label", name), ("data-shape", "circle"), ("data-dash", "none")),
                     row_label(middle, name, detail) + marks)]))

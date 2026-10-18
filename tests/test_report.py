@@ -454,7 +454,7 @@ class GraphTest(unittest.TestCase):
     """
 
     def test_each_arrow_carries_its_count_and_each_node_its_role(self):
-        """Every edge's title and count label, exactly; every node's role, shape and word; the same on a scrubbed page under its labels.
+        """Every edge's title and count label, exactly; every node's role, shape and word; the same on a scrubbed page under its labels, where the label alone names the role (REC-10).
 
         @interacts  see the class.
         @deps       see the class.
@@ -477,11 +477,109 @@ class GraphTest(unittest.TestCase):
                         "".join(node.find("text").itertext())}
                 want = {}
                 for name, role in GRAPH_NODES.items():
-                    want.setdefault(role, set()).add(f"{names[name]} · {role}")
+                    want.setdefault(role, set()).add(names[name] if scrub else f"{names[name]} · {role}")
                 self.assertEqual(nodes, want)
                 shapes = {node.get("data-role"): node[1].tag + (node[1].get("rx") or "") +
                           (node[1].get("stroke-dasharray") or "") for node in groups(graph, "node")}
                 self.assertEqual(len(set(shapes.values())), len(shapes), shapes)
+
+
+# A C0 name of the most characters (64), different at its end, for the
+# tests that a long name never runs past the left edge.
+LONG_NAME = "lng" + "q" * 53 + "-endpart"
+# The fewest pixels a page's text may draw at (MEDIUM-1).
+MIN_TEXT_PX = 11
+
+
+def text_start(text, report):
+    """Where `text` (an SVG <text> element) starts, estimated as report.py estimates it (its char_width): its x less its width for an end anchor, half for a middle one.
+
+    @interacts  none.
+    @deps       report.char_width.
+    @complexity O(c) over c characters.
+    @alloc      none.
+    """
+    wide = len(text.text or "") * report.char_width(text.get("class"))
+    share = {"end": 1, "middle": 0.5}.get(text.get("text-anchor"), 0)
+    return float(text.get("x")) - wide * share
+
+
+class LegibleTest(unittest.TestCase):
+    """MEDIUM-1 and MEDIUM-2: no chart scales its text under MIN_TEXT_PX, and no text starts left of x 0, a 64-character name included.
+
+    @interacts  builds the fixture plus a long-named session; renders it.
+    @deps       modules_for, charts, text_start, fixture.
+    @complexity a few renders.
+    @alloc      one TcRoot per test.
+    """
+
+    def long_page(self, scrub=False):
+        """The fixture with a session named LONG_NAME that mails annika and is mailed back, rendered in process: (report, page).
+
+        @interacts  builds the fixture and two more messages and a
+                    read-time record under a TcRoot; loads tc and report.py.
+        @deps       fixture, modules_for.
+        @complexity one render.
+        @alloc      one TcRoot, removed before return.
+        """
+        with _root.TcRoot() as root:
+            fixture.build(root.path)
+            box = root.path / "mail" / f"to-{LONG_NAME}" / "read"
+            box.mkdir(parents=True)
+            (root.path / "mail" / "to-annika" / f"000013-from-{LONG_NAME}.md").write_text(
+                f"# #13 from {LONG_NAME} to annika, {fixture.at(18 * fixture.HOUR)}\n\nQUESTION #12\n", encoding="utf-8")
+            (box / "000014-from-annika.md").write_text(
+                f"# #14 from annika to {LONG_NAME}, {fixture.at(19 * fixture.HOUR)}\n\nANSWER re #13\n",
+                encoding="utf-8")
+            (box / ".read-times").write_text(
+                '{"name": "000014-from-annika.md", "number": 14, "read": "%s"}\n' % fixture.at(20 * fixture.HOUR),
+                encoding="utf-8")
+            tc, report = modules_for(root)
+            page = report.page_of(report.extract(tc), None)
+            return report, report.render(report.scrub(page) if scrub else page)
+
+    def test_no_text_starts_left_of_zero_and_a_cut_name_keeps_its_end_and_its_whole_in_a_title(self):
+        """In every chart, every text's estimated start is at x 0 or right of it; the long name, where cut, shows its end after three periods and holds itself whole in a <title>.
+
+        @interacts  see the class.
+        @deps       see the class.
+        @complexity one render.
+        @alloc      the page.
+        """
+        report, page = self.long_page()
+        cut = 0
+        for key, chart in charts(page).items():
+            for text in chart.iter("text"):
+                with self.subTest(chart=key, text=text.text):
+                    self.assertGreaterEqual(text_start(text, report), 0)
+                title = text.find("title")
+                if title is not None and title.text == LONG_NAME:
+                    cut += 1
+                    self.assertTrue(text.text.startswith("..."), text.text)
+                    self.assertTrue(text.text.endswith("-endpart"), text.text)
+        self.assertGreater(cut, 0, "the long name was never cut, so this test checked no cut")
+        self.assertIn(LONG_NAME, page)
+
+    def test_each_chart_has_a_width_floor_that_keeps_its_smallest_text_at_11_px(self):
+        """Each SVG's min-width is its width x MIN_TEXT_PX / SMALL_TEXT_UNITS, rounded up, and no SVG text rule is smaller than SMALL_TEXT_UNITS.
+
+        @interacts  see the class.
+        @deps       see the class; re.
+        @complexity two renders.
+        @alloc      the pages.
+        """
+        for scrub in (False, True):
+            report, page = self.long_page(scrub)
+            self.assertEqual(report.MIN_TEXT_PX, MIN_TEXT_PX)
+            sizes = [int(n) for n in re.findall(r"svg[^{]*\{[^}]*font-size:(\d+)px", report.PAGE_CSS)]
+            sizes += [int(n) for n in re.findall(r"svg text\{font:(\d+)px", report.PAGE_CSS)]
+            self.assertTrue(sizes)
+            self.assertEqual(min(sizes), report.SMALL_TEXT_UNITS)
+            for key, chart in charts(page).items():
+                with self.subTest(scrub=scrub, chart=key):
+                    width = float(chart.get("viewBox").split()[2])
+                    floor = -(-int(width * MIN_TEXT_PX) // report.SMALL_TEXT_UNITS)
+                    self.assertEqual(chart.get("style"), f"min-width:{floor}px")
 
 
 def series_of(plot):
