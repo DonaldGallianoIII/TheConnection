@@ -9,7 +9,11 @@ name. Anything else refuses, exit 1, nothing queued and no ssh run, with
 words naming the card's writer and the init user. A queued file whose
 card fails stays queued, never sent and never filed as refused, and goes
 once the card is fixed. `tc health` and `tc cards` mark such a card. A
-private mailbox is unchanged.
+private mailbox is unchanged. R10 fix round 1 (Claude Opus 5.5,
+unreviewed): a link gets its own fix and a mark that no send follows
+it, the second fix sentence says where the mail then goes, a card with
+no name says so, and tc flush says true words for such a card in its
+count of other members' files and in `--to` with nothing waiting.
 
 Model:  Claude Opus 5.5 (the R10 lane agent), 2026-10-17
 Status: unreviewed
@@ -43,13 +47,15 @@ afterwards, as a positive control.
 @deps       python3 stdlib (argparse, contextlib, json, os, pathlib,
             pwd, stat, sys, unittest, unittest.mock); tests/_root.py;
             UmaskTestCase, load_tc and primary_group from
-            test_shared.py; run_in_process from test_wake_files.py;
+            test_shared.py; HOLDER_UID_STEP and run_in_process from
+            test_wake_files.py;
             TARGET, FAKE_CONNECT_STDERR, SSH_CONNECT_FAILED,
             assert_called, outbox and queue from test_ssh_route.py;
             ../tc.
 @complexity O(1) per test: a handful of tc runs and fake calls per
             root, a few dozen entries per root; the hard link test has
-            three cases, the private test five, each a fresh root.
+            three cases, the private test five, the no-name test two,
+            each a fresh root.
 @alloc      one TcRoot per test or case, removed when its context exits,
             and one module per in-process run.
 """
@@ -75,16 +81,17 @@ import _root  # noqa: E402  (needs the path line above)
 from test_shared import UmaskTestCase, load_tc, primary_group  # noqa: E402
 from test_ssh_route import (FAKE_CONNECT_STDERR, SSH_CONNECT_FAILED, TARGET, assert_called,  # noqa: E402
                             outbox, queue)
-from test_wake_files import run_in_process  # noqa: E402
+from test_wake_files import HOLDER_UID_STEP, run_in_process  # noqa: E402
 
 # The names. Made up. ann is the sender; far-x, far-y and far-z are names
 # on another machine; ben is the other member (a user id, not a name).
 SENDER = "ann"
 FAR_X, FAR_Y, FAR_Z = "far-x", "far-y", "far-z"
 # The user ids the patched stats report: the init user one up from the
-# running user, another member two up (test_wake_files's HOLDER_UID_STEP).
+# running user, as test_shared.as_member reports it; another member
+# HOLDER_UID_STEP up, test_wake_files's name for it (R10 fix round 1,
+# Claude Opus 5.5, unreviewed: the review's LOW-11, one value, one name).
 INIT_UID_STEP = 1
-MEMBER_UID_STEP = 2
 # Exit codes (contracts.md): refused with words, kept in the outbox.
 EXIT_REFUSED = 1
 EXIT_QUEUED = 4
@@ -100,14 +107,32 @@ WHY_SECOND_NAME = "is a card {writer} owns with a second name (a hard link), and
 WHY_OTHER_NAME = "names {said}, not {name} (written by {writer}), and tc follows a card only for the name it names"
 WHY_JOIN = "; it "
 FIX_WORDS = ("The user who ran init ({init}) can write it for everyone: tc card {name} --ssh <target>. Or write "
-             "your own card under a name of your own: tc card <your-name> --ssh <target>.")
+             "your own card under a name of your own: tc card <your-name> --ssh <target>; the mail then goes to "
+             "<your-name> on that machine, so a session there must join as that name.")
+# R10 fix round 1 (Claude Opus 5.5, unreviewed): the review's LOW-3. A
+# link's own fix: moved aside ({aside}, tc's first .squatted name in
+# cards/), then the name's owner rejoins, or its ssh card is written.
+LINK_FIX_WORDS = ("Its writer ({writer}) or the user who ran init ({init}) moves it aside: mv {path} {aside}. Then "
+                  "{name}'s owner rejoins in that session (tc join {name}), or, if {name} lives on another machine, "
+                  "the user who ran init writes its card: tc card {name} --ssh <target>.")
+ASIDE_NAME = ".squatted-{name}.json-1"
+# The review's LOW-5: what a card with no name field, or a null one, names.
+NO_NAME = "no name"
+# The review's LOW-1 and LOW-2: tc flush's words for a name whose card is
+# an ssh card this user does not send over, in its count of other
+# members' files and in `--to` with nothing waiting.
+OTHERS_DISTRUST_WORDS = ("{k} waiting for {name}, an ssh card you do not send over (D43), from other members "
+                         "({names}); each member sends their own with tc flush\n")
+NOTHING_DISTRUST_WORDS = "nothing waiting for {name}: {name}'s card is an ssh card you do not send over (D43): {card}\n"
+# The other member's branch, made by hand. Made up.
+OTHER_BRANCH = "ben-member"
 SEND_WORDS = "tc send: {path} {why}. Nothing sent and no ssh run. {fix}\n"
 FLUSH_WORDS = ("tc flush: left {file}: {path} {why}. It stays queued, never sent and never filed as refused, and "
                "goes on the next tc flush once the card is fixed. {fix}\n")
 # What tc health and tc cards mark a card with, one per kind, joined by
 # MARK_JOIN, after the card's line and MARK_JOIN.
 MARK_NOT_OWN = "ssh card by {writer}: only its writer and {init} send over it"
-MARK_LINK = "a symlink by {writer}: no ssh send follows it"
+MARK_LINK = "a symlink by {writer}: no send follows it"
 MARK_SECOND_NAME = "a card by {writer} with a second name (a hard link): no ssh send follows it"
 MARK_OTHER_NAME = "names {said}, not {name}: no ssh send follows it"
 MARK_JOIN = "; "
@@ -117,7 +142,7 @@ PRIVATE_LINK_WORDS = ("tc send: the card {path} is unreadable (it is a symlink, 
 # What a card in health --json reads as when it has no ssh_trust key at all.
 NO_TRUST_KEY = "no ssh_trust key"
 # Words that only D43's refusals and marks say.
-D43_ONLY = ("the user who ran init", "no ssh send follows it", "only its writer")
+D43_ONLY = ("the user who ran init", "no ssh send follows it", "no send follows it", "only its writer")
 
 
 def card_path(root, name):
@@ -145,7 +170,7 @@ def identity(path):
 
 @contextlib.contextmanager
 def owners_patched(root_path, init=(), member=()):
-    """While entered, os.lstat, os.fstat and os.stat report ROOT and its .shared (when there) and each path in `init` as the init user's (INIT_UID_STEP up), and each path in `member` as another member's (MEMBER_UID_STEP up), matched by (st_dev, st_ino), so a hard link reads as its file's owner and a symlink's own entry as the link's.
+    """While entered, os.lstat, os.fstat and os.stat report ROOT and its .shared (when there) and each path in `init` as the init user's (INIT_UID_STEP up), and each path in `member` as another member's (HOLDER_UID_STEP up), matched by (st_dev, st_ino), so a hard link reads as its file's owner and a symlink's own entry as the link's.
 
     One Linux user cannot make a file another user owns, so the owner is
     shown by what tc's stats report, as the SHARED suites do.
@@ -165,7 +190,7 @@ def owners_patched(root_path, init=(), member=()):
 
     def owned(st):
         key = (st.st_dev, st.st_ino)
-        step = INIT_UID_STEP if key in init_ids else MEMBER_UID_STEP if key in member_ids else None
+        step = INIT_UID_STEP if key in init_ids else HOLDER_UID_STEP if key in member_ids else None
         if step is None:
             return st
         fields = list(st[:stat.ST_CTIME + 1])
@@ -247,15 +272,16 @@ def nothing_queued(root, to):
 
 
 def words(template, *whys, **fields):
-    """D43's refusal for `template` (SEND_WORDS or FLUSH_WORDS): the whys joined by WHY_JOIN, then FIX_WORDS, every field filled from `fields`.
+    """D43's refusal for `template` (SEND_WORDS or FLUSH_WORDS): the whys joined by WHY_JOIN, then the fix (LINK_FIX_WORDS for a link, else FIX_WORDS), every field filled from `fields`.
 
     @interacts  none; string work only.
-    @deps       FIX_WORDS, WHY_JOIN.
+    @deps       FIX_WORDS, LINK_FIX_WORDS, WHY_LINK, WHY_JOIN.
     @complexity O(1).
     @alloc      one string, returned.
     """
     why = WHY_JOIN.join(w.format(**fields) for w in whys)
-    return template.format(why=why, fix=FIX_WORDS.format(**fields), **fields)
+    fix = LINK_FIX_WORDS if whys == (WHY_LINK,) else FIX_WORDS
+    return template.format(why=why, fix=fix.format(**fields), **fields)
 
 
 def own_login():
@@ -380,7 +406,7 @@ class SshCardTrustTest(SharedCase):
             silent, empty = not_called(folder), nothing_queued(root, FAR_Y)
             good = in_process(root, tc, send(tc, FAR_X), member=[theirs])
             reachable = len(assert_called(self, folder, calls))
-            ben, init = tc.user_name(me + MEMBER_UID_STEP), tc.user_name(me + INIT_UID_STEP)
+            ben, init = tc.user_name(me + HOLDER_UID_STEP), tc.user_name(me + INIT_UID_STEP)
         self.assertEqual(refused, (EXIT_REFUSED, "", words(SEND_WORDS, WHY_NOT_OWN, path=theirs, writer=ben,
                                                            init=init, name=FAR_Y)))
         self.assertTrue(silent, "ssh ran over another member's card")
@@ -419,9 +445,10 @@ class SshCardTrustTest(SharedCase):
                     silent, empty = not_called(folder), nothing_queued(root, FAR_Y)
                     good = in_process(root, tc, send(tc, FAR_X), init=[real, target], member=[link])
                     reachable = len(assert_called(self, folder, calls))
-                    ben, init = tc.user_name(me + MEMBER_UID_STEP), tc.user_name(me + INIT_UID_STEP)
+                    ben, init = tc.user_name(me + HOLDER_UID_STEP), tc.user_name(me + INIT_UID_STEP)
                 self.assertEqual(refused, (EXIT_REFUSED, "", words(SEND_WORDS, WHY_LINK, path=link, writer=ben,
-                                                                   init=init, name=FAR_Y)))
+                                                                   init=init, name=FAR_Y,
+                                                                   aside=link.with_name(ASIDE_NAME.format(name=FAR_Y)))))
                 self.assertTrue(silent, "ssh ran through a linked card")
                 self.assertTrue(empty, "a refused send queued its message")
                 self.assertEqual(good[0], 0, good)
@@ -498,6 +525,65 @@ class SshCardTrustTest(SharedCase):
         self.assertEqual(reachable, 1)
 
 
+    # R10 fix round 1 (Claude Opus 5.5, unreviewed): the review's LOW-5.
+    def test_a_card_with_no_name_field_or_a_null_one_names_no_name_never_none(self):
+        """As a command: the running user's own ssh card at cards/far-y.json with its name field taken out, or set to null: the send exits 1 saying it `names no name, not far-y`, and tc cards marks it so; no word `None` anywhere.
+
+        @interacts  per case: init, one tc card, one file by hand, one send
+                    and one tc cards.
+        @deps       SharedCase.shared, SharedCase.card, words, card_path,
+                    not_called; json.
+        @complexity O(1): two cases.
+        @alloc      one TcRoot per case.
+        """
+        me = own_login()
+        for case in ("no name field", "name null"):
+            with self.subTest(case=case):
+                with _root.TcRoot() as root:
+                    folder, calls = self.shared(root)
+                    card = json.loads(self.card(root, FAR_X).read_text())
+                    if case == "no name field":
+                        del card["name"]
+                    else:
+                        card["name"] = None
+                    at = card_path(root, FAR_Y)
+                    at.write_text(json.dumps(card))
+                    refused = root.tc("send", "--from", SENDER, "--to", FAR_Y, "hi")
+                    listed = root.tc("cards")
+                    silent = not_called(folder)
+                self.assertEqual(refused, (EXIT_REFUSED, "", words(SEND_WORDS, WHY_OTHER_NAME, path=at, writer=me,
+                                                                   init=me, name=FAR_Y, said=NO_NAME)))
+                self.assertIn(MARK_OTHER_NAME.format(said=NO_NAME, name=FAR_Y), listed[1])
+                self.assertNotIn("None", refused[2] + listed[1] + listed[2])
+                self.assertTrue(silent, "ssh ran over a card that names no name")
+
+    # R10 fix round 1 (Claude Opus 5.5, unreviewed): the review's LOW-3.
+    def test_a_symlink_at_a_local_names_card_gets_its_own_fix_and_mark(self):
+        """As a command: b joined (a local card), and cards/c.json a symlink to it: a send to c exits 1 with the link's words and its own fix (move it aside, then rejoin, or write its ssh card), and tc cards marks it `no send follows it`, never only ssh.
+
+        Must reject a fix line that tells the init user to turn a local
+        name into an ssh card, and a mark that says only ssh sends are
+        refused.
+
+        @interacts  init, one tc join, one symlink by hand, one send and
+                    one tc cards.
+        @deps       SharedCase.shared, words, card_path.
+        @complexity O(1).
+        @alloc      one TcRoot.
+        """
+        me = own_login()
+        with _root.TcRoot() as root:
+            self.shared(root)
+            self.assertEqual(root.tc("join", "b", env={"CLAUDECODE": "1"})[0], 0)
+            link = card_path(root, "c")
+            link.symlink_to(card_path(root, "b"))
+            refused = root.tc("send", "--from", SENDER, "--to", "c", "hi")
+            listed = root.tc("cards")
+        self.assertEqual(refused, (EXIT_REFUSED, "", words(SEND_WORDS, WHY_LINK, path=link, writer=me, init=me,
+                                                           name="c", aside=link.with_name(ASIDE_NAME.format(name="c")))))
+        self.assertIn(f"c.json: unreadable card{MARK_JOIN}{MARK_LINK.format(writer=me)}\n", listed[1])
+
+
 class FlushTrustTest(SharedCase):
     """tc flush applies the same check per target: a queued file whose card fails stays queued with the words and goes once the card is fixed (D43).
 
@@ -533,7 +619,7 @@ class FlushTrustTest(SharedCase):
             after_left = (len(calls()), outbox(root, FAR_Y), outbox(root, FAR_Y, "refused"))
             fixed = in_process(root, tc, flush(tc), init=[path])
             after_fixed = (len(calls()), outbox(root, FAR_Y), outbox(root, FAR_Y, "sent"))
-            ben, init = tc.user_name(me + MEMBER_UID_STEP), tc.user_name(me + INIT_UID_STEP)
+            ben, init = tc.user_name(me + HOLDER_UID_STEP), tc.user_name(me + INIT_UID_STEP)
         self.assertEqual(kept[0], EXIT_QUEUED, kept)
         self.assertEqual(tries, 1)
         self.assertEqual(left[0], EXIT_QUEUED, left)
@@ -542,6 +628,37 @@ class FlushTrustTest(SharedCase):
         self.assertEqual(after_left, (1, [waiting.name], []), "flush ran ssh over, or filed away, mail to ben's card")
         self.assertEqual(fixed[0], 0, fixed)
         self.assertEqual(after_fixed, (2, [], [waiting.name]))
+
+
+    # R10 fix round 1 (Claude Opus 5.5, unreviewed): the review's LOW-1 and LOW-2, REC-1.
+    def test_flush_says_true_words_for_a_card_this_user_does_not_send_over(self):
+        """far-y's ssh card reads as ben's. ann's `tc flush --to far-y` with nothing waiting says far-y's card is one she does not send over (D43), with why and the fix, never `It stays queued`; then, with ben's file waiting in his own branch, ann's flush counts it under far-y as that card, never under `a name with no ssh card`.
+
+        @interacts  init, one tc card, one file by hand in another
+                    member's branch; two flushes in process.
+        @deps       SharedCase.shared, SharedCase.card, load_tc, in_process,
+                    words, card_path; argparse.
+        @complexity O(1).
+        @alloc      one TcRoot and one module.
+        """
+        me = os.geteuid()
+        with _root.TcRoot() as root:
+            self.shared(root)
+            path = self.card(root, FAR_Y)
+            tc = load_tc(root)
+            nothing = in_process(root, tc, lambda: tc.cmd_flush(argparse.Namespace(to=FAR_Y)), member=[path])
+            theirs = root.path / "outbox" / OTHER_BRANCH / f"to-{FAR_Y}" / "000001-from-ben.md"
+            theirs.parent.mkdir(parents=True)
+            theirs.write_text("# #1 from ben to far-y\n\nhi\n")
+            counted = in_process(root, tc, flush(tc), member=[path, theirs])
+            ben, init = tc.user_name(me + HOLDER_UID_STEP), tc.user_name(me + INIT_UID_STEP)
+        card = words("{path} {why}. {fix}", WHY_NOT_OWN, path=path, writer=ben, init=init, name=FAR_Y)
+        with self.subTest(part="--to with nothing waiting"):
+            self.assertEqual(nothing, (0, NOTHING_DISTRUST_WORDS.format(name=FAR_Y, card=card), ""))
+        with self.subTest(part="the other members' count"):
+            self.assertEqual(counted[0], 0, counted)
+            self.assertIn(OTHERS_DISTRUST_WORDS.format(k=1, name=FAR_Y, names=ben), counted[1])
+            self.assertNotIn("a name with no ssh card", counted[1] + counted[2])
 
 
 class PrivateMailboxTest(UmaskTestCase):
@@ -644,7 +761,7 @@ class MarkedTest(SharedCase):
             health = in_process(root, tc, lambda: tc.cmd_health(argparse.Namespace(json=False)), **patched)
             with owners_patched(root.path, **patched), mock.patch.object(tc, "gpu_stats", lambda: None):
                 snap = {c["name"]: c.get("ssh_trust", NO_TRUST_KEY) for c in tc.health_snapshot()["cards"]}
-            ann, ben, init = tc.user_name(me), tc.user_name(me + MEMBER_UID_STEP), tc.user_name(me + INIT_UID_STEP)
+            ann, ben, init = tc.user_name(me), tc.user_name(me + HOLDER_UID_STEP), tc.user_name(me + INIT_UID_STEP)
         marks = {FAR_X: MARK_NOT_OWN.format(writer=ann, init=init),
                  "far-m": MARK_NOT_OWN.format(writer=ben, init=init),
                  "far-h": MARK_SECOND_NAME.format(writer=init),

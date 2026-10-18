@@ -19,9 +19,10 @@ Status: unreviewed
   that copy, run as `python3 /path/to/tc` or `./tc`.
 - Two terminals for each user: some steps keep a wait running in one.
 - For steps 38 to 44 and 45h only: a far machine that ann's ssh key
-  reaches through `tc gate` and ben's does not. `qa/human/route-ssh.md` sets it
-  up; the next section says when. Those steps run real `ssh`. No step
-  runs real `codex`: step 31 uses a stand-in.
+  reaches through `tc gate` and ben's does not.
+  `qa/human/route-ssh.md` sets it up; the next section says when.
+  Those steps run real `ssh`. No step runs real `codex`: step 31 uses a
+  stand-in.
 
 The names here are made up: users `ann` and `ben`, group `tcshare`,
 mailbox `/srv/tc-shared`. Use your own. Record what you saw in
@@ -832,7 +833,9 @@ step 45h runs ssh, to route-ssh.md's alias `farbox-tc`, as step 41 does.
       (ann) send over it. Nothing sent and no ssh run. The user who ran
       init (ann) can write it for everyone: tc card far-d --ssh
       <target>. Or write your own card under a name of your own: tc
-      card <your-name> --ssh <target>.`, then `exit 1`.
+      card <your-name> --ssh <target>; the mail then goes to <your-name>
+      on that machine, so a session there must join as that name.`, then
+      `exit 1`.
     - `ls` lists no `to-far-d`: nothing was queued.
     - Pass: those words, `exit 1`, no `to-far-d`. Fail: `exit 0` or
       `exit 4`, or words with `sent over ssh` or `could not reach`: tc
@@ -918,7 +921,9 @@ after 31 renumbered by two and the last two by three, with the
 references to them, in P3 fix round 2 by the P3 fixer, Claude Opus 5.5,
 2026-10-15; steps 45d to 45h (D43, a member's ssh card refused and
 marked, the init user's followed) added by the R10 lane agent, Claude
-Opus 5.5, 2026-10-17, numbered after 45c so no step moved.
+Opus 5.5, 2026-10-17, numbered after 45c so no step moved; step 45f's
+words and the "What you need" wrap changed in R10 fix round 1 by the
+same agent, 2026-10-18.
 
 **The outbox section (D22).** Added by the SSH lane agent (Claude Opus
 5.5), 2026-10-15; rewritten for D32 and D33 in fix round 1 by the SSH
