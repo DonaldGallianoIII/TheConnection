@@ -403,28 +403,29 @@ class SshCardTrustTest(SharedCase):
         """
         me = os.geteuid()
         for case in ("to far-x", "to a far-y card outside cards/"):
-            with self.subTest(case=case), _root.TcRoot() as root:
-                folder, calls = self.shared(root)
-                real = self.card(root, FAR_X)
-                if case == "to far-x":
-                    target = real
-                else:
-                    target = root.base / f"{FAR_Y}.json"
-                    target.write_text(real.read_text().replace(f'"name": "{FAR_X}"', f'"name": "{FAR_Y}"'))
-                link = card_path(root, FAR_Y)
-                link.symlink_to(target)
-                tc = load_tc(root)
-                refused = in_process(root, tc, send(tc, FAR_Y), init=[real, target], member=[link])
-                silent, empty = not_called(folder), nothing_queued(root, FAR_Y)
-                good = in_process(root, tc, send(tc, FAR_X), init=[real, target], member=[link])
-                reachable = len(assert_called(self, folder, calls))
-                ben, init = tc.user_name(me + MEMBER_UID_STEP), tc.user_name(me + INIT_UID_STEP)
-            self.assertEqual(refused, (EXIT_REFUSED, "", words(SEND_WORDS, WHY_LINK, path=link, writer=ben,
-                                                               init=init, name=FAR_Y)))
-            self.assertTrue(silent, "ssh ran through a linked card")
-            self.assertTrue(empty, "a refused send queued its message")
-            self.assertEqual(good[0], 0, good)
-            self.assertEqual(reachable, 1)
+            with self.subTest(case=case):
+                with _root.TcRoot() as root:
+                    folder, calls = self.shared(root)
+                    real = self.card(root, FAR_X)
+                    if case == "to far-x":
+                        target = real
+                    else:
+                        target = root.base / f"{FAR_Y}.json"
+                        target.write_text(real.read_text().replace(f'"name": "{FAR_X}"', f'"name": "{FAR_Y}"'))
+                    link = card_path(root, FAR_Y)
+                    link.symlink_to(target)
+                    tc = load_tc(root)
+                    refused = in_process(root, tc, send(tc, FAR_Y), init=[real, target], member=[link])
+                    silent, empty = not_called(folder), nothing_queued(root, FAR_Y)
+                    good = in_process(root, tc, send(tc, FAR_X), init=[real, target], member=[link])
+                    reachable = len(assert_called(self, folder, calls))
+                    ben, init = tc.user_name(me + MEMBER_UID_STEP), tc.user_name(me + INIT_UID_STEP)
+                self.assertEqual(refused, (EXIT_REFUSED, "", words(SEND_WORDS, WHY_LINK, path=link, writer=ben,
+                                                                   init=init, name=FAR_Y)))
+                self.assertTrue(silent, "ssh ran through a linked card")
+                self.assertTrue(empty, "a refused send queued its message")
+                self.assertEqual(good[0], 0, good)
+                self.assertEqual(reachable, 1)
 
     def test_a_hard_link_is_refused_by_its_second_name_and_by_its_name_field_each_alone(self):
         """As a command (the running user the init user): far-x's card hard-linked as cards/far-y.json is refused naming both its second name and its name field; a far-y card with a second name outside cards/ by its second name alone; a one-name copy of far-x's card at cards/far-y.json by its name field alone. Each exits 1, no ssh; a send to a third card then calls the fake (a2's add 2).
@@ -445,29 +446,30 @@ class SshCardTrustTest(SharedCase):
                  "a far-y card with a second name outside cards/": (WHY_SECOND_NAME,),
                  "a one-name copy of far-x's card as far-y": (WHY_OTHER_NAME,)}
         for case, whys in cases.items():
-            with self.subTest(case=case), _root.TcRoot() as root:
-                folder, calls = self.shared(root)
-                real = self.card(root, FAR_X)
-                self.card(root, FAR_Z)
-                at = card_path(root, FAR_Y)
-                if case.startswith("far-x"):
-                    os.link(real, at)
-                elif case.startswith("a far-y"):
-                    self.card(root, FAR_Y)
-                    os.link(at, root.base / f"{FAR_Y}-second-name.json")
-                else:
-                    at.write_text(real.read_text())
-                code, out, err = root.tc("send", "--from", SENDER, "--to", FAR_Y, "hi")
-                silent, empty = not_called(folder), nothing_queued(root, FAR_Y)
-                good = root.tc("send", "--from", SENDER, "--to", FAR_Z, "hi")
-                reachable = len(assert_called(self, folder, calls))
-            said = FAR_X if WHY_OTHER_NAME in whys else FAR_Y
-            self.assertEqual((code, out, err), (EXIT_REFUSED, "", words(SEND_WORDS, *whys, path=at, writer=me,
-                                                                           init=me, name=FAR_Y, said=said)))
-            self.assertTrue(silent, "ssh ran over a card with a second name or another name's card")
-            self.assertTrue(empty, "a refused send queued its message")
-            self.assertEqual(good[0], 0, good)
-            self.assertEqual(reachable, 1)
+            with self.subTest(case=case):
+                with _root.TcRoot() as root:
+                    folder, calls = self.shared(root)
+                    real = self.card(root, FAR_X)
+                    self.card(root, FAR_Z)
+                    at = card_path(root, FAR_Y)
+                    if case.startswith("far-x"):
+                        os.link(real, at)
+                    elif case.startswith("a far-y"):
+                        self.card(root, FAR_Y)
+                        os.link(at, root.base / f"{FAR_Y}-second-name.json")
+                    else:
+                        at.write_text(real.read_text())
+                    code, out, err = root.tc("send", "--from", SENDER, "--to", FAR_Y, "hi")
+                    silent, empty = not_called(folder), nothing_queued(root, FAR_Y)
+                    good = root.tc("send", "--from", SENDER, "--to", FAR_Z, "hi")
+                    reachable = len(assert_called(self, folder, calls))
+                said = FAR_X if WHY_OTHER_NAME in whys else FAR_Y
+                self.assertEqual((code, out, err), (EXIT_REFUSED, "", words(SEND_WORDS, *whys, path=at, writer=me,
+                                                                               init=me, name=FAR_Y, said=said)))
+                self.assertTrue(silent, "ssh ran over a card with a second name or another name's card")
+                self.assertTrue(empty, "a refused send queued its message")
+                self.assertEqual(good[0], 0, good)
+                self.assertEqual(reachable, 1)
 
     def test_a_card_whose_name_field_differs_from_its_file_name_is_refused(self):
         """As a command: the running user's own card at cards/far-y.json saying name far-x, one name: exit 1 naming far-x, no ssh; the send to far-x itself then calls the fake.
@@ -564,42 +566,43 @@ class PrivateMailboxTest(UmaskTestCase):
         """
         for case in ("another user's card", "a hard link", "another name's card", "flush over another user's card",
                      "a symlink"):
-            with self.subTest(case=case), _root.TcRoot() as root:
-                codes = [SSH_CONNECT_FAILED, 0] if case.startswith("flush") else 0
-                folder, calls = root.fake_bin("ssh", codes, stderr=FAKE_CONNECT_STDERR)
-                self.assertEqual(root.tc("card", FAR_X, "--ssh", TARGET)[0], 0)
-                real, at = card_path(root, FAR_X), card_path(root, FAR_Y)
-                member = []
-                if case in ("another user's card", "flush over another user's card"):
-                    self.assertEqual(root.tc("card", FAR_Y, "--ssh", TARGET)[0], 0)
-                    member = [at]
-                elif case == "a hard link":
-                    os.link(real, at)
-                elif case == "another name's card":
-                    at.write_text(real.read_text())
+            with self.subTest(case=case):
+                with _root.TcRoot() as root:
+                    codes = [SSH_CONNECT_FAILED, 0] if case.startswith("flush") else 0
+                    folder, calls = root.fake_bin("ssh", codes, stderr=FAKE_CONNECT_STDERR)
+                    self.assertEqual(root.tc("card", FAR_X, "--ssh", TARGET)[0], 0)
+                    real, at = card_path(root, FAR_X), card_path(root, FAR_Y)
+                    member = []
+                    if case in ("another user's card", "flush over another user's card"):
+                        self.assertEqual(root.tc("card", FAR_Y, "--ssh", TARGET)[0], 0)
+                        member = [at]
+                    elif case == "a hard link":
+                        os.link(real, at)
+                    elif case == "another name's card":
+                        at.write_text(real.read_text())
+                    else:
+                        at.symlink_to(real)
+                    tc = load_tc(root)
+                    if case.startswith("flush"):
+                        self.assertEqual(root.tc("send", "--from", SENDER, "--to", FAR_Y, "hi")[0], EXIT_QUEUED)
+                        code, out, err = in_process(root, tc, flush(tc), member=member)
+                        seen = len(assert_called(self, folder, calls))
+                        want = 2
+                    else:
+                        code, out, err = in_process(root, tc, send(tc, FAR_Y), member=member)
+                        seen = 0 if not_called(folder) else len(calls())
+                        want = 0 if case == "a symlink" else 1
+                    good = root.tc("send", "--from", SENDER, "--to", FAR_X, "hi")
+                    reachable = len(assert_called(self, folder, calls))
+                if case == "a symlink":
+                    self.assertEqual(code, EXIT_REFUSED, err)
+                    self.assertTrue(err.startswith(PRIVATE_LINK_WORDS.format(path=at)), err)
                 else:
-                    at.symlink_to(real)
-                tc = load_tc(root)
-                if case.startswith("flush"):
-                    self.assertEqual(root.tc("send", "--from", SENDER, "--to", FAR_Y, "hi")[0], EXIT_QUEUED)
-                    code, out, err = in_process(root, tc, flush(tc), member=member)
-                    seen = len(assert_called(self, folder, calls))
-                    want = 2
-                else:
-                    code, out, err = in_process(root, tc, send(tc, FAR_Y), member=member)
-                    seen = 0 if not_called(folder) else len(calls())
-                    want = 0 if case == "a symlink" else 1
-                good = root.tc("send", "--from", SENDER, "--to", FAR_X, "hi")
-                reachable = len(assert_called(self, folder, calls))
-            if case == "a symlink":
-                self.assertEqual(code, EXIT_REFUSED, err)
-                self.assertTrue(err.startswith(PRIVATE_LINK_WORDS.format(path=at)), err)
-            else:
-                self.assertEqual(code, 0, err)
-            self.assertFalse([w for w in D43_ONLY if w in out + err], out + err)
-            self.assertEqual(seen, want)
-            self.assertEqual(good[0], 0, good)
-            self.assertEqual(reachable, want + 1)
+                    self.assertEqual(code, 0, err)
+                self.assertFalse([w for w in D43_ONLY if w in out + err], out + err)
+                self.assertEqual(seen, want)
+                self.assertEqual(good[0], 0, good)
+                self.assertEqual(reachable, want + 1)
 
 
 class MarkedTest(SharedCase):
