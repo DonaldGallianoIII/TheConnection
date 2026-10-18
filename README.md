@@ -866,8 +866,12 @@ $ python3 -c 'import glob, json; print("X-TC-Token:", json.load(open(sorted(glob
   says how many were not mailed. The run's first mail names its
   sources and filters; its last gives the counts and quotes each failed
   row and its note.
-- **Redacted before anything is kept or mailed:** values of keys like
-  password, secret, token, api key, authorization, cookie and session;
+- **Redacted before anything is kept or mailed:** values of keys whose
+  name holds `pass` (password, passwd, passphrase), `secret`, `token`,
+  `authoriz`, `cookie`, `session`, `credential`, `private_key`, or
+  `api_key`, `api-key` or `apikey` (and a JSON field named `api key`); a
+  key written with a space in plain text, like `api key:`, is not
+  caught, so add a `--redact` line for it;
   Bearer and Basic credentials; runs of 32 or more hex or base64
   characters; email addresses; and the patterns in a `--redact FILE`,
   one regex per line. A redacted value reads `[redacted]`. Control
@@ -903,7 +907,7 @@ ever taken for a run.
 tc                                    the whole tool (python3, stdlib only)
 JOIN.md                               what you point a new Claude session at
 JOIN-CODEX.md                         what you point a new Codex session at
-board/                                the live board: serve.py, live.html, look.js, theme.css, demo.html; report.py, tc report's page
+board/                                the live board: serve.py, live.html, look.js, theme.css, demo.html; report.py, tc report's page; qa.py, qa.html, qa.js, tc qa's run and page
 mail/to-<name>/NNNNNN-from-X.md       unread messages
 mail/to-<name>/read/                  read messages, kept as history
 mail/to-<name>/.wait.lock             the listener's lock, its owner's alone (0600); .watch.lock beside it
@@ -916,9 +920,10 @@ cards/<name>.json                     one address card per name
 status/<name>.md                      each side's latest status
 outbox/<user>/to-<name>/              ssh mail one Linux user queued, with sent/ and refused/
 .shared                               the group of a shared mailbox
+qaruns/<id>/                          one tc qa run: run.json (only you can read it), events.jsonl, results.md
 ```
 
-`mail/`, `status/`, `cards/`, `outbox/` and `.shared` are the mailbox, and gitignored.
+`mail/`, `status/`, `cards/`, `outbox/`, `.shared` and `qaruns/` are the mailbox, and gitignored.
 
 ## Resource safety
 

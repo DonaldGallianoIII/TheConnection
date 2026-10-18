@@ -43,9 +43,10 @@ and a README a stranger can follow. The plan's index is
 - The board (`board/`) is plain ES modules and CSS, no libraries, tested
   with `node --test` and a headless browser check. `board/serve.py`
   serves it and its live feed.
-- No installs and no network of its own. The one server is the board's
-  (`board/serve.py`, contract C6): bound to 127.0.0.1 only, its feed
-  behind a token made at start. The page asks no other host (D26). SSH
+- No installs and no network of its own. Two servers, both bound to
+  127.0.0.1 only and behind a token made at start: the board's
+  (`board/serve.py`, contract C6), and a `tc qa run`'s endpoint and
+  checklist page (`board/qa.py`, C8), alive only while a run is. The page asks no other host (D26). SSH
   is the only way off the machine, and only through the `ssh` route:
   `tc send` to an ssh card on this side, `tc gate` (a forced command in
   `authorized_keys`) on the other.
@@ -123,8 +124,9 @@ evening: read times (READTIME, D41) at `db142f9`, the README's
 record-of-work section (RECORD) at `e2be34f`, and `tc report` (DASH v1,
 D42) at `7b77092`. After midnight, on the owner's word that work goes
 on: R10, member trust in ssh cards (D43), at `3a4a113`, and the report's
-time window (D44), squashed at `ec60fc1`. Next are a main update and the
-owner's human walks.
+time window (D44), squashed at `ec60fc1`. On the owner's next ask, QA
+streaming (`tc qa`, C8, D45, D46), squashed at `397b40e`. Next are a main
+update and the owner's human walks.
 
 ### Off limits
 
@@ -148,7 +150,7 @@ owner's human walks.
 tc                                 the whole tool (python3, stdlib only)
 JOIN.md                            what you point a new Claude session at
 JOIN-CODEX.md                      what you point a new Codex session at
-board/                             the live board: serve.py (127.0.0.1, token), live.html, look.js, theme.css; demo.html shows every state; report.py draws tc report's page (C7)
+board/                             the live board: serve.py (127.0.0.1, token), live.html, look.js, theme.css; demo.html shows every state; report.py draws tc report's page (C7); qa.py, qa.html and qa.js are tc qa's run and page (C8)
 tests/test_*.py                    unittest suites (mailbox, names, cards, router, codex route, usage, health, shared, ssh, ...)
 tests/test_inbox_pinned.py         the class proof that every inbox act works inside one pinned folder (D35)
 tests/test_wake_files.py           the class proof that no member holds or redirects another's lock, ring record or exit record (D35, D36, F1)
@@ -156,6 +158,8 @@ tests/test_wait_exit.py            the wait exit record: writer, reader, tc watc
 tests/test_read_times.py           the read-time record: tc read writes it, tc log shows it, tc peek leaves it (D41)
 tests/test_report.py               tc report: the facts, the scrub, each chart, the refusals, the same bytes twice (C7, D42)
 tests/test_ssh_card_trust.py       the ssh route follows only the sender's own or the init user's card (D43)
+tests/test_qa.py                   tc qa: the event record, redaction in bounded time, filters, batching and caps, the run's life, the endpoint, the checklist (C8)
+tests/test_no_bidi.py              no tracked text file holds a bidi control character (D46)
 tests/*.test.mjs                   node --test suites for the board
 tests/board-browser-check.mjs      headless check of the live board (needs a Playwright install)
 tests/_root.py                     shared harness: throwaway TC_ROOT, proven listener, fake ssh and codex
@@ -178,6 +182,7 @@ outbox/<user>/.rang-<name>         that member's last ring of a codex name, 0600
 outbox/.origin-token               this mailbox's random origin token (D25)
 mail/.origins/<user>/<key-name>/   on the receiving side, the origin ids each far key delivered, so a retry never lands twice; init makes mail/.origins/ (D25, D33, D36)
 status/<name>.md                   each side's latest status (gitignored)
+qaruns/<id>/                       one tc qa run: run.json (0600: port, token, pid), events.jsonl, results.md (C8; gitignored)
 ```
 
 Lane worktrees live at `~/TheConnection-lanes/<lane>`, one branch per lane.
@@ -363,7 +368,7 @@ The tool runs today: send, read, peek, wait (with
 address cards; a router in send with the `local`, `codex` and `ssh`
 routes, with `flush` for queued ssh mail and `gate` for inbound ssh;
 `init --shared` for a mailbox several Linux users share; `report` for a
-static HTML page of the mailbox; plus the live board (`python3
+static HTML page of the mailbox; `qa` to stream a QA walk to a session; plus the live board (`python3
 board/serve.py`).
 `tests/test_mailbox.py` (CORE, K1 to K8) tests send, read, peek, wait,
 log, status and the counter, each test proven by a hand mutation of
@@ -415,5 +420,8 @@ as one static HTML page, safe to share when scrubbed (DASH v1, D42,
 `7b77092`; `qa/human/report.md` not yet walked by a person). Under a
 shared mailbox the ssh route follows only the sender's own or the init
 user's card (R10, D43, `3a4a113`; route-shared steps 45d to 45i not yet
-walked); `tc report --from --to` covers one span (D44, `ec60fc1`).
+walked); `tc report --from --to` covers one span (D44, `ec60fc1`); `tc qa run`
+streams a QA walk (a program's log, local events, notes and a checklist
+page's marks) to a session as batched, capped, redacted mail (C8, D45,
+D46, `397b40e`; `qa/human/qa-streaming.md` not yet walked).
 `main` stays the owner's alone.

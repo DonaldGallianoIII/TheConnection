@@ -173,6 +173,29 @@ card trust between two users, 45i walking the printed `mv -T` line) and
 **Added to the later list:** the board's own card reader shows no D43
 mark.
 
+### QA streaming, the afternoon of 2026-10-18
+
+The owner asked for a built-in way to tell a session what he does during
+human QA. The relay approved the shape with adds (D45, then D46 from the
+lane's pauses), and it merged, squashed, at `397b40e`: `tc qa run`
+follows a program's log, takes events on a local endpoint and a one-line
+`tc qa note`, and serves a checklist page with keys; events reach the
+session as mail from the reserved name `qa`, batched and capped,
+redacted before they are kept or mailed, and marked as data. A standard
+review (five MEDIUMs), two fix rounds and a lean re-review that caught a
+redaction regression the first round made. A new test refuses bidi
+control characters in any tracked file.
+
+**Added to the owner's walks:** `qa/human/qa-streaming.md`.
+
+**Added to the later list:** `tc send --to qa` and `tc wait qa` refuse,
+casefolded (the relay's ruling, REC-4); a hung-up terminal can still
+skip the run's summary on a failed write; `qaruns/` at 0700 blocks a
+shared mailbox's second user; the run's first mail names full local
+paths (the log, the checklist), which a shared mailbox shows to other
+members: check `tc report --scrub` and consider names relative to the
+run's folder.
+
 ## Update, 2026-10-16
 
 The relay said yes in the morning. P3FIX merged into dev at `8b9b59d`
