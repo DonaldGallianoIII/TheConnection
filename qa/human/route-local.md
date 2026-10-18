@@ -102,6 +102,16 @@ Every other terminal starts with `export TC_ROOT=<that path>`. Real
       `stopped`. Fail: a pid for b, or `stopped: b (mail, ...)`.
 13. In terminal 1: `./tc log`.
     - Every message so far, unread and read, in number order.
+    - Read times (READTIME, Claude Opus 5.5, unreviewed). Under each
+      header line, one more line: `read <time>`, with its offset, for a
+      message `tc read` moved, or `unread` for one still waiting. #1's
+      time is step 5's first `read`, not its `peek`, which marks nothing.
+    - `cat $TC_ROOT/mail/to-b/read/.read-times` prints one line per
+      message read, each with `name`, `number` and `read`, and the times
+      match the log's.
+    - Pass: every read message shows `read <time>` and none shows
+      `read, time not recorded`. Fail: no read line, or a message read
+      in this walk without a time.
 
 ## Part B: two real sessions (the owner)
 

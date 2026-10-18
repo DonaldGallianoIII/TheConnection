@@ -12,6 +12,10 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
 9, one line on stderr, nothing made: EMPTYROOT, Claude Opus 5.5, unreviewed):
   mail/to-<name>/NNNNNN-from-<sender>.md   unread
   mail/to-<name>/read/...                  read (moved there by `tc read`)
+  mail/to-<name>/read/.read-times          when each was read: one JSON line per message `tc read` moved, name,
+                                           number and read time; its owner's, 0640, appended, never rewritten;
+                                           .read-times.planted-<k> what else was at its name, moved aside
+                                           (READTIME, Claude Opus 5.5, unreviewed)
   status/<name>.md                         latest self-reported status
   mail/.seq                                message counter (flock guarded)
   mail/to-<name>/.wait.lock                held by `tc wait <name>` while it runs; its owner's alone, 0600 (D35)
@@ -264,6 +268,17 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             person a command to type, and the usage lines, say the name
             tc was run by (invoked_name: sys.argv[0]'s base name, else
             tc), so a link named tconn prints `Run: tconn read b`.
+            READTIME (Claude Opus 5.5, unreviewed): pause READTIME-1.
+            `read`, under the inbox lock and after its moves, appends one
+            JSON line per message it moved (name, number, read time) to
+            mail/to-<name>/read/.read-times, by name in read/'s descriptor,
+            never through a link, and only when this user owns read/;
+            anything else at that name is moved aside with words, and a
+            record it cannot write is one line on stderr, its exit
+            unchanged. No message file changes. `log` reads each read/'s
+            record once and prints `read <time>`, `unread` or `read, time
+            not recorded` after each message's header line. `peek` writes
+            nothing.
 @deps       python3 stdlib (argparse, collections, contextlib, errno, fcntl,
             grp, hashlib, io, json, pathlib, pwd, re, resource, secrets,
             selectors, shlex, shutil, signal, stat, subprocess, time,
@@ -300,9 +315,15 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             (F1; the listing, F1 fix round 2); read adds two lstats per message
             (before and after its move), and one per by-hand name already
             taken (plus a name-limit lookup and two owner lstats per
-            by-hand move). log O(n log n + T + t log t): n inboxes, T
+            by-hand move), plus, when anything moved, one open, one write
+            and one fsync of the read-time record, never a read of it
+            (READTIME, Claude Opus 5.5, unreviewed). log O(n log n + T + t
+            log t + R): n inboxes, T
             names in every inbox and read/, t total messages ever (low
-            hundreds per job), sorted per folder and then all together.
+            hundreds per job), sorted per folder and then all together,
+            and R bytes of the read-time records, one line per message
+            ever read, each read once and capped at READ_TIMES_MAX_BYTES
+            (READTIME).
             health O(p + k + n log n + M + m log m + c): p processes on
             the machine (hundreds), k lines in /proc/locks (tens), n
             mailbox names and c cards (a few dozen each), M names in
@@ -337,7 +358,11 @@ a TC_ROOT set but empty or only whitespace makes every command refuse, exit
             name in an open folder (pin_folder), and only a missing mail/
             goes through make_folder. Each read is one small file, O(1),
             and each make_folder call one group lookup when shared.
-@alloc      one file per message, kept forever (read/ is the history); one
+@alloc      one file per message, kept forever (read/ is the history), and
+            one read-time record per read/ that its owner's tc read moved
+            mail into, kept and grown by one line per message read, plus
+            one .planted-<k> file per entry moved aside from its name,
+            kept (READTIME, Claude Opus 5.5, unreviewed); one
             card per name, replaced on a rejoin; one inbox lock file per
             name (mail/.box-<name>.lock), kept; one ring marker per codex
             name (mail/.ring-pending-<name>), kept: rewritten, never
@@ -1206,6 +1231,49 @@ WAIT_EXIT_TRIES = 2
 # What a reader hands back: the word and the time as seconds since the
 # epoch, on the same scale as wall_clock().
 WaitExit = collections.namedtuple("WaitExit", "word at")
+# READTIME (Claude Opus 5.5, unreviewed): pause READTIME-1, settled by a2
+# (#1615). When each message was read: one record per inbox, in its
+# history, mail/to-<name>/read/READ_TIMES_NAME, append-only JSON lines,
+# one per message tc read moved: {"name": its name in read/, "number": the
+# number in the name it had in its inbox (MESSAGE_NAME_PATTERN), or null,
+# "read": the read's one now_iso()}. The message files never change. The
+# name starts with a dot and never ends in MESSAGE_SUFFIX, so no listing
+# of messages, tc's or the board's, reads it as mail.
+READ_TIMES_NAME = ".read-times"
+# The three keys of every line, in the order written. A contract (a2,
+# #1615; DASH reads them): a later change adds keys, never renames or
+# drops one.
+READ_TIMES_KEYS = ("name", "number", "read")
+# Its mode: the inbox's owner writes it; the group reads it, so every
+# member's tc log shows when the owner read its mail, as the wait exit
+# record's (WAIT_EXIT_MODE). The umask applies. init gives a file in read/
+# the same (SHARED_OWNED_FILE_MODE).
+READ_TIMES_MODE = 0o640
+# How tc read opens it for each append, by its name in read/'s
+# descriptor: made when missing, never through a link (O_NOFOLLOW), never
+# blocking on a FIFO (O_NONBLOCK), every write at its end (O_APPEND). Read
+# as well as write, so the append can look at the last byte first.
+READ_TIMES_FLAGS = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+# How many opens one read makes: a second only after anything at the name
+# that is not this user's own one-name regular file was moved aside.
+READ_TIMES_TRIES = 2
+# The most of a record tc log reads. A line is 80 to 140 bytes for a name
+# tc made, about 330 for a by-hand name at the 255-byte name limit, so
+# 8 MiB holds the times of about 60,000 messages read at 140 bytes a line,
+# far past the low hundreds a job reads. Past it, or unreadable, every message in that
+# read/ shows NOT_RECORDED_LINE and log says why in one line on stderr.
+READ_TIMES_MAX_BYTES = 8 * 1024 * 1024
+# What tc read says, on stderr, when it records nothing: the record could
+# not be written ({n} messages moved, {why} the reason), or this user does
+# not own read/ ({read}), whose owner ({owner}) keeps {name}'s read times
+# (D36's rule, only a name's owner listens for it, applied to reading).
+READ_TIMES_FAILED_WORDS = "tc read: read time not recorded for {n} messages ({why})"
+READ_TIMES_NOT_OWNER_WORDS = ("tc read: read times for {name} are kept by {owner}, who owns {read}; none recorded "
+                              "for {n} messages")
+# What tc log prints on the line after each message's header line.
+READ_LINE = "read {time}"
+UNREAD_LINE = "unread"
+NOT_RECORDED_LINE = "read, time not recorded"
 
 # Prompt cache. A Claude session's cache expires after this long with no
 # request. Waking a session sooner than that keeps its cache warm. Override
@@ -4164,7 +4232,7 @@ def cmd_send(args):
 
 # SHARED fix round 1 (Claude Opus 5.5, unreviewed): D19, every message
 # printed is read through read_regular_file.
-def show(messages):
+def show(messages, after_header=None):
     """Print each message in `messages`, then `---`; return (path, why) for each one read_regular_file will not read (D19).
 
     P3 fix round 1a (Claude Opus 5.5, unreviewed): D35. `messages` holds
@@ -4176,6 +4244,11 @@ def show(messages):
     fstat calls it a regular file of at most MESSAGE_READ_MAX_BYTES, so a
     link put in place of a message is never followed and a FIFO never
     blocks. Line ends print as read_text gave them (universal newlines).
+
+    READTIME (Claude Opus 5.5, unreviewed): `after_header`, when given,
+    maps a message's path to one line printed just after the message's
+    first line, its header (tc log's read time). Only the print gains it;
+    the file is never changed. A path not in it prints as before.
 
     @interacts  opens, fstats and reads each file by its name in its
                 folder's descriptor; prints to stdout.
@@ -4192,7 +4265,12 @@ def show(messages):
         except (OSError, ValueError) as err:
             unshown.append((p, err.strerror if isinstance(err, OSError) and err.strerror else str(err)))
             continue
-        print(text.replace("\r\n", "\n").replace("\r", "\n"))
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        line = after_header.get(p) if after_header else None
+        if line is not None:  # READTIME (Claude Opus 5.5, unreviewed): tc log's read time, after the header
+            head, newline, rest = text.partition("\n")
+            text = f"{head}\n{line}" + (f"\n{rest}" if newline else "")
+        print(text)
         print("---")
     return unshown
 
@@ -4333,6 +4411,206 @@ def still_in_inbox(path, target, box_fd, read_fd):
             f"just before, makes a move do nothing")
 
 
+# READTIME (Claude Opus 5.5, unreviewed): pause READTIME-1 and a2's ruling, the read-time record.
+def message_number(name):
+    """The number in the message name `name` (MESSAGE_NAME_PATTERN, all of it), as an int; None for a name not of that form.
+
+    @interacts  none; string work only.
+    @deps       MESSAGE_NAME_PATTERN.
+    @complexity O(c) over c characters of `name`.
+    @alloc      none past the match.
+    """
+    found = MESSAGE_NAME_PATTERN.fullmatch(name)
+    return int(found.group(1)) if found else None
+
+
+# READTIME (Claude Opus 5.5, unreviewed): item 4 of the pause, a file only its owner writes.
+def open_read_times(read_fd, read_path):
+    """This user's own read-time record in the read/ open at `read_fd` (its path `read_path`, for the words), opened for an append by its name there and never through a link: (descriptor or None, words, why). `words` holds one line per entry moved aside; `why` says, when no descriptor came back, why not.
+
+    Opened with READ_TIMES_FLAGS (O_APPEND | O_CREAT | O_NOFOLLOW |
+    O_NONBLOCK) at READ_TIMES_MODE, the umask applied, then fstat'ed: the
+    descriptor is kept only when it is a regular file with one name that
+    this user owns (own_wake_lock's test). Anything else at the name (a
+    link, which the open refuses; a FIFO; a folder; another member's file,
+    which fs.protected_regular may refuse to an O_CREAT open; a file with a
+    second name) is moved aside inside read/ with words (move_record_aside,
+    reused with the read-time record's words), and the open tried once
+    more, READ_TIMES_TRIES in all. An open that fails for another reason
+    (no space, a quota) finds nothing to move and fails again. Never
+    raises: the caller says why and the read's exit stays as it was.
+
+    @interacts  opens (creating it when missing) and fstats the record by
+                name in `read_fd`, at most READ_TIMES_TRIES times; may
+                lstat, rename and lstat an entry there (move_record_aside),
+                reading this process's user id and the user database for
+                the words.
+    @deps       own_wake_lock, entry_words, user_name, move_record_aside;
+                os; READ_TIMES_NAME, READ_TIMES_FLAGS, READ_TIMES_MODE,
+                READ_TIMES_TRIES.
+    @complexity O(READ_TIMES_TRIES x k) over k aside names already taken
+                (none in practice).
+    @alloc      one descriptor, returned open (the caller closes it), or
+                none; the words.
+    """
+    said, why = [], None
+    for _ in range(READ_TIMES_TRIES):
+        try:
+            fd = os.open(READ_TIMES_NAME, READ_TIMES_FLAGS, READ_TIMES_MODE, dir_fd=read_fd)
+        except OSError as err:
+            why = err.strerror
+        else:
+            try:
+                st = os.fstat(fd)
+                if own_wake_lock(st):
+                    os.set_blocking(fd, True)
+                    return fd, said, None
+                why = (f"{read_path / READ_TIMES_NAME} is {entry_words(st)} owned by {user_name(st.st_uid)}, not "
+                       f"this user's own")
+            except OSError as err:
+                why = err.strerror
+            os.close(fd)
+        moved = move_record_aside(read_fd, read_path, READ_TIMES_NAME, record=READ_TIMES_NAME, kind="read",
+                                  what="read-time record")
+        if moved is not None:
+            said.append(moved)
+    return None, said, why
+
+
+# READTIME (Claude Opus 5.5, unreviewed): items 1 to 5 of the pause, written by tc read.
+def write_read_times(inbox, name, moved):
+    """Append one line per message in `moved` to the read-time record in the read/ of `inbox` (the open Inbox of `name`): words for stderr, one line each, or None when written with nothing to say. `moved` holds (name in read/, name it had in the inbox) pairs, only messages tc read moved.
+
+    Only read/'s owner records (the uid of read/'s descriptor, fstat'ed
+    when pinned): any other user gets no line and READ_TIMES_NOT_OWNER_WORDS
+    (in a shared mailbox, a member's read of another name moves only that
+    member's own messages, which is not the recipient picking them up).
+    The owner's lines take one now_iso() for all, each a JSON object with
+    exactly READ_TIMES_KEYS: the name in read/ (a by-hand name for a
+    message moved to one), the number of the name it had in its inbox
+    (message_number, null when none), and the time. The record is opened
+    by name in read/'s descriptor (open_read_times); when its last byte is
+    not a newline (a line torn by a crash), a newline goes first, so this
+    read's first line still parses. Then one write of every line, and
+    fsync. A failure (the open, a short write, no space, the fsync) is one
+    line, READ_TIMES_FAILED_WORDS, after any words of a plant moved aside,
+    and never raises: the mail was read, and a waking session must not
+    stop over a missing timestamp.
+
+    @interacts  reads this process's user id, the clock (now_iso) and,
+                for the words, the user database; opens the record by name
+                in read/'s descriptor, moving aside a plant there
+                (open_read_times); reads its size and last byte, writes
+                once, fsyncs and closes it. Writes nothing when `moved` is
+                empty or this user does not own read/.
+    @deps       open_read_times, message_number, now_iso, user_name; json,
+                os; READ_TIMES_KEYS, READ_TIMES_FAILED_WORDS,
+                READ_TIMES_NOT_OWNER_WORDS.
+    @complexity O(m x c) over m messages moved (single digits) and c
+                characters of a name (at most 255); one open, one write and
+                one fsync whatever m is. The record grows one line per
+                message ever read and is never read here: its size is one
+                fstat.
+    @alloc      the lines while written; one descriptor, closed on return;
+                the record, made on the first read and kept; the words.
+    """
+    if not moved:
+        return None
+    read = inbox.read
+    if read.st.st_uid != os.geteuid():
+        return READ_TIMES_NOT_OWNER_WORDS.format(name=name, owner=user_name(read.st.st_uid),
+                                                 read=inbox.path / "read", n=len(moved))
+    at = now_iso()
+    data = "".join(json.dumps(dict(zip(READ_TIMES_KEYS, (now, message_number(was), at)))) + "\n"
+                   for now, was in moved).encode("utf-8")
+    fd, said, why = open_read_times(read.fd, inbox.path / "read")
+    if fd is not None:
+        try:
+            size = os.fstat(fd).st_size
+            if size and os.pread(fd, 1, size - 1) != b"\n":
+                data = b"\n" + data  # a line torn by a crash ends here, so this read's first line parses
+            wrote = os.write(fd, data)
+            if wrote == len(data):
+                os.fsync(fd)
+                why = None
+            else:
+                why = f"{wrote} of {len(data)} bytes written"
+        except OSError as err:
+            why = err.strerror
+        finally:
+            os.close(fd)
+    if why is not None:
+        said.append(READ_TIMES_FAILED_WORDS.format(n=len(moved), why=why))
+    return "\n".join(said) or None
+
+
+# READTIME (Claude Opus 5.5, unreviewed): item 6 of the pause, read by tc log.
+def read_times(read, read_path):
+    """The read-time record in the read/ pinned as `read` (its path `read_path`, for the words): ({name in read/: time text}, words or None). The words say why the record could not be read; then the map is empty and every message in that read/ shows NOT_RECORDED_LINE.
+
+    Opened by name in read/'s descriptor, read only, never through a link
+    (O_NOFOLLOW) and never blocking (O_NONBLOCK), and read only when fstat
+    finds a regular file with one name, owned by read/'s owner (the only
+    user who writes it: a file a member planted in a shared read/ is not
+    believed), of at most READ_TIMES_MAX_BYTES; the same checks as
+    read_regular_file, plus the owner's. Nothing at the name is an empty
+    map and no words: nothing read yet, or only before this change. Each
+    line is taken only when it is UTF-8 JSON, an object whose `name` is
+    text and whose `read` is a time with its offset; any other line (a
+    line torn by a crash, a hand-made one) is passed by. When a name has
+    two lines (tc writes one per move, and never moves a name in twice, so
+    only a hand-made line does this), the first wins.
+
+    @interacts  opens, fstats and reads one file by name in read/'s
+                descriptor, and closes it. Writes nothing.
+    @deps       entry_words, user_name; datetime, json, os, stat;
+                READ_TIMES_NAME, READ_TIMES_MAX_BYTES.
+    @complexity O(r) over r bytes of the record, at most
+                READ_TIMES_MAX_BYTES + 1: it grows one line per message
+                ever read into this read/, and tc log reads it whole, once.
+    @alloc      the bytes read and one dict entry per line, returned; one
+                descriptor, closed before return.
+    """
+    path = read_path / READ_TIMES_NAME
+    try:
+        fd = os.open(READ_TIMES_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=read.fd)
+    except FileNotFoundError:
+        return {}, None
+    except OSError as err:
+        why = "it is a symlink, which tc never follows" if err.errno == errno.ELOOP else err.strerror
+        return {}, f"{path} not read ({why})"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != read.st.st_uid:
+            return {}, (f"{path} not read (it is {entry_words(st)} owned by {user_name(st.st_uid)}, not "
+                        f"{user_name(read.st.st_uid)}'s own read-time record)")
+        chunks, left = [], READ_TIMES_MAX_BYTES + 1
+        while left > 0:
+            chunk = os.read(fd, left)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+    except OSError as err:
+        return {}, f"{path} not read ({err.strerror})"
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if len(data) > READ_TIMES_MAX_BYTES:
+        return {}, f"{path} not read (it is over {READ_TIMES_MAX_BYTES} bytes)"
+    times = {}
+    for raw in data.split(b"\n"):
+        try:
+            entry = json.loads(raw.decode("utf-8"))
+            name, when = entry["name"], entry["read"]
+            if not isinstance(name, str) or datetime.datetime.fromisoformat(when).tzinfo is None:
+                continue
+        except (ValueError, KeyError, TypeError):
+            continue  # a line torn by a crash, or not one tc wrote: passed by
+        times.setdefault(name, when)  # the first line for a name wins
+    return times, None
+
+
 def cmd_read(args):
     """`tc read <name>`: print unread mail and move it to read/.
 
@@ -4396,6 +4674,18 @@ def cmd_read(args):
     member who swaps the inbox, or its read/, for a link or another folder
     after it opened leads none of them elsewhere.
 
+    READTIME (Claude Opus 5.5, unreviewed): pause READTIME-1, settled by
+    a2 (#1615). Still under the lock, after the last move, tc read appends
+    one line per message it moved, and only those, to
+    read/READ_TIMES_NAME (write_read_times): the name in read/, the number
+    of the name it had in its inbox, and the read's one time, with its
+    offset. Only when this user owns read/; otherwise no line, and one
+    line on stderr says read times are kept by its owner. A plant at the
+    record's name is moved aside with words, and a record that cannot be
+    written is one line on stderr. Neither changes the exit code, and the
+    words print after the mail, with the lock released. No message file
+    changes.
+
     @interacts  checks the name first (C0, exit 6, nothing written); reads
                 ROOT/.shared (mailbox_share); opens mail/, the inbox and
                 its read/ once (pinned_inbox), refusing an inbox or read/
@@ -4413,24 +4703,34 @@ def cmd_read(args):
                 when it is taken, reads read/'s name limit and lstats
                 by-hand-<k>-<name> until one is free) and moves the file
                 there, then lstats the old name (and, when something is
-                still there, the target: still_in_inbox); then, with the
+                still there, the target: still_in_inbox); then, still
+                under the lock, reads the clock and appends the read-time
+                lines by name in read/'s descriptor, moving a plant there
+                aside (write_read_times; none when nothing moved or this
+                user does not own read/); then, with the
                 lock released, prints the by-hand note before each file
                 that has one (under a shared mailbox lstatting both files
                 and reading the user database for their owners), reads
                 each moved file (read_regular_file) and prints to stdout,
                 and names each one it will not show or could not move on
-                stderr. Every name is reached in the inbox's or read/'s
+                stderr, then the read-time words, if any, on stderr.
+                Every name is reached in the inbox's or read/'s
                 descriptor; both are closed when it returns.
     @deps       require_names, mailbox_share, pinned_inbox, inbox_lock,
                 inbox_messages, name_taken, by_hand_target, still_in_inbox,
-                owner_words, show, refuse_lines, printable; errno, os.
+                write_read_times, owner_words, show, refuse_lines,
+                printable, printable_lines; errno, os, sys.
     @complexity O(U + u log u + t * c) over U names in the inbox, the u of
                 them that are messages (single digits, sorted), t names
                 by-hand-<k>-<name> already in read/ (none in an honest
-                mailbox) and c characters of a by-hand name (at most 255).
+                mailbox) and c characters of a by-hand name (at most 255);
+                the read-time record adds one open, one write and one
+                fsync, never a read of the record (write_read_times).
     @alloc      the lists of paths and each file's text while printed; one
                 open lock file while the lock is held; two descriptors, the
-                inbox's and read/'s, until it returns.
+                inbox's and read/'s, until it returns, and one for the
+                record while it is written; the record, made on the first
+                read and kept, one line per message ever read.
     """
     require_names(args.name)  # CARDS R1 (Claude Opus 5.5, unreviewed)
     # CARDS fix round 1 (Claude Opus 5.5, unreviewed): D14. A codex send
@@ -4462,17 +4762,21 @@ def cmd_read(args):
                 if left is not None:
                     stuck.append((p, left))
                     continue
-                moved.append((target, twin))
+                moved.append((target, twin, p))
+            # READTIME (Claude Opus 5.5, unreviewed): under the lock, after the moves, only what moved.
+            recorded = write_read_times(inbox, args.name, [(target.name, p.name) for target, _, p in moved])
         if not moved and not stuck:  # mail it could not move is still unread
             print(f"no unread mail for {args.name}")
         unshown = []
-        for path, twin in moved:
+        for path, twin, _ in moved:
             if twin is not None:  # SHARED fix round 4 (Claude Opus 5.5, unreviewed): MEDIUM-1, neither file named the forgery
                 print(f"tc read: two files had the name {printable(twin.name)}, one in read/ and one in the inbox. "
                       f"tc never reuses a number, so one of them was not written by tc. Both are kept: "
                       f"{printable(twin)}{owner_words(twin, read_fd) if shared else ''}, unchanged, and "
                       f"{printable(path)}{owner_words(path, read_fd) if shared else ''}, from the inbox, shown below:")
             unshown += show([(path, read_fd)])
+    if recorded is not None:  # READTIME (Claude Opus 5.5, unreviewed): words, never a changed exit
+        print(printable_lines(recorded), file=sys.stderr)
     refuse_lines([f"tc read: {printable(p)} not shown and left in place ({why})" for p, why in skipped]
                  + [f"tc read: {printable(p)} not moved to read/ ({why}); left unread" for p, why in stuck]
                  + [f"tc read: {printable(p)} not shown ({why})" for p, why in unshown])
@@ -4501,7 +4805,9 @@ def cmd_peek(args):
                 message name and reads each regular file
                 (read_regular_file), by name in the inbox's descriptor;
                 prints to stdout, and names each one it will not show on
-                stderr.
+                stderr. READTIME (Claude Opus 5.5, unreviewed): it marks
+                nothing read: it never opens, makes or changes the
+                read-time record (tests/test_read_times.py pins it).
     @deps       require_names, pinned_inbox, inbox_messages, show,
                 refuse_lines, printable.
     @complexity O(U + u log u) over U names in the inbox and the u of
@@ -4861,8 +5167,8 @@ def hold_wake_lock(name, kind, share, keep_inbox=False):
 
 
 # F1 fix round 1 (Claude Opus 5.5, unreviewed): the audit's MEDIUM-1, a plant at the record's names moved aside.
-def move_record_aside(box_fd, box, name):
-    """Move what another user, a link, a FIFO, a folder or a second name has at `name` (WAIT_EXIT_NAME, WAIT_EXIT_OLD_TMP_NAME, or a name of WAIT_EXIT_TMP_PATTERN's form) in the inbox open at `box_fd` (its path `box`, for the words) to the first free PLANTED_ASIDE_NAME there: one line of words naming what it was, whose, and where it went; None when nothing was moved.
+def move_record_aside(box_fd, box, name, *, record=WAIT_EXIT_NAME, kind="wait", what="exit record"):
+    """Move what another user, a link, a FIFO, a folder or a second name has at `name` (WAIT_EXIT_NAME, WAIT_EXIT_OLD_TMP_NAME, or a name of WAIT_EXIT_TMP_PATTERN's form; READTIME, READ_TIMES_NAME) in the folder open at `box_fd` (its path `box`, for the words) to the first free PLANTED_ASIDE_NAME there: one line of words naming what it was, whose, and where it went; None when nothing was moved.
 
     As move_aside does at a wake lock's name, but it never exits: a
     record write must never change the wait's exit (write_wait_exit). The
@@ -4876,10 +5182,20 @@ def move_record_aside(box_fd, box, name):
     same descriptor, moves a link as itself, so what a link leads to is
     never touched. A rename that fails gives words, and the write goes on.
 
+    READTIME (Claude Opus 5.5, unreviewed): reused, not copied, for the
+    read-time record in read/ (open_read_times), which passes `record`
+    READ_TIMES_NAME (the one name where this user's own file is kept, never
+    removed), `kind` "read" and `what` "read-time record" for the words:
+    `tc <kind>: <path> was <entry> owned by <user>, not this user's own
+    <what>; moved it aside to <aside>`. The defaults are the wait exit
+    record's, word for word as before. The owner of read/ owns it, so
+    sticky lets its tc rename what a member made there too.
+
     @interacts  lstats `name` and each aside name tried, by name in
                 `box_fd`; renames one entry there, or removes this user's
-                own leftover .tmp; lstats it at its aside name; reads this
-                process's user id and the user database for the words.
+                own leftover .tmp (never at `record`); lstats it at its
+                aside name; reads this process's user id and the user
+                database for the words.
     @deps       own_wake_lock, name_taken, entry_words, user_name;
                 contextlib, os; WAIT_EXIT_NAME, PLANTED_ASIDE_NAME.
     @complexity O(k) over k aside names already taken (none in practice).
@@ -4890,7 +5206,7 @@ def move_record_aside(box_fd, box, name):
     except OSError:
         return None
     if own_wake_lock(st):
-        if name != WAIT_EXIT_NAME:
+        if name != record:  # READTIME (Claude Opus 5.5, unreviewed): the record's own name, whichever record
             with contextlib.suppress(OSError):
                 os.unlink(name, dir_fd=box_fd)  # this user's own .tmp, left by a wait killed between create and rename
         return None
@@ -4903,14 +5219,14 @@ def move_record_aside(box_fd, box, name):
     except FileNotFoundError:
         return None
     except OSError as err:
-        return (f"tc wait: {box / name} is {entry_words(st)} owned by {user_name(st.st_uid)}, not this user's own "
-                f"exit record, and tc could not move it aside ({err.strerror})")
+        return (f"tc {kind}: {box / name} is {entry_words(st)} owned by {user_name(st.st_uid)}, not this user's own "
+                f"{what}, and tc could not move it aside ({err.strerror})")
     try:
         moved = os.lstat(aside, dir_fd=box_fd)
     except OSError:
         moved = st
-    return (f"tc wait: {box / name} was {entry_words(moved)} owned by {user_name(moved.st_uid)}, not this user's own "
-            f"exit record; moved it aside to {box / aside}")
+    return (f"tc {kind}: {box / name} was {entry_words(moved)} owned by {user_name(moved.st_uid)}, not this user's "
+            f"own {what}; moved it aside to {box / aside}")
 
 
 # F1 (Claude Opus 5.5, unreviewed): the wait exit record (C5, D28, D37 part 2).
@@ -5210,26 +5526,50 @@ def cmd_log(args):
     is reached only through its inbox: the read/ of an inbox tc cannot
     open is not listed.
 
+    READTIME (Claude Opus 5.5, unreviewed): pause READTIME-1, item 6.
+    Sent and read times: each message prints with one more line just
+    after its header line (the header carries the sent time): `read
+    <time>` for a message in read/ whose name the read-time record holds,
+    `unread` for one still in its inbox, and `read, time not recorded` for
+    one in read/ the record does not name (read before this change, by a
+    member who does not own read/, or by a read killed between its last
+    move and its write). Each read/ that holds messages has its record
+    read once (read_times), by name in its descriptor, never through a
+    link, at most READ_TIMES_MAX_BYTES; a line that does not parse is
+    passed by, and when a name has two lines the first wins. A record over
+    the limit, not read/'s owner's, or unreadable gives every message in
+    that read/ `read, time not recorded` and one line on stderr saying
+    why, and never changes the exit code. No file is changed.
+
     @interacts  opens mail/ and lists it; opens each mail/to-*/ and its
                 read/ by name (open_inbox), lists each and stats each
                 message name in it, reads each message shown
-                (read_regular_file), all by name in their folders'
-                descriptors; prints to stdout, and to stderr for what it
-                will not show or could not list or look at. Writes
+                (read_regular_file), and the read-time record of each
+                read/ holding messages (read_times), all by name in their
+                folders' descriptors; reads the user database for the
+                words about a record it would not read; prints to stdout,
+                and to stderr for what it will not show or could not list
+                or look at, and for a record it would not read. Writes
                 nothing.
-    @deps       open_mail, open_inbox, unpin, message_files, show,
-                refuse_lines, printable; contextlib, os, stat.
-    @complexity O(n log n + T + t log t) over n inboxes, T names in every
-                inbox and read/, and t message files ever (low hundreds
-                per job): one listing per folder, one stat per message
-                name, a sort per folder and one of all t, and one read for
-                each one shown.
+    @deps       open_mail, open_inbox, unpin, message_files, read_times,
+                show, refuse_lines, printable; contextlib, os, stat, sys;
+                READ_LINE, UNREAD_LINE, NOT_RECORDED_LINE.
+    @complexity O(n log n + T + t log t + R) over n inboxes, T names in
+                every inbox and read/, t message files ever (low hundreds
+                per job) and R bytes of every read/'s read-time record
+                (one line per message ever read, each read/'s at most
+                READ_TIMES_MAX_BYTES): one listing per folder, one stat
+                per message name, a sort per folder and one of all t, one
+                read of each record, and one read for each message shown.
     @alloc      two descriptors per inbox, held until the log is printed;
-                the list of every message, the skipped entries and the
-                folders not listed, freed on exit; each file's text while
-                it prints.
+                the list of every message, its read line, the skipped
+                entries, the folders not listed and the records not read,
+                freed on exit; one record's bytes and map at a time while
+                it is read, and every message's read line; each file's
+                text while it prints.
     """
     every, skipped, unlisted = [], [], []
+    status, untimed = {}, []  # READTIME (Claude Opus 5.5, unreviewed): each message's read line; records not read
     with contextlib.ExitStack() as held:  # P3 fix round 1a (Claude Opus 5.5, unreviewed): D35, every descriptor closed
         try:
             mail_fd = open_mail()
@@ -5257,10 +5597,23 @@ def cmd_log(args):
                 skipped += bad
                 if problem is not None and not messages and not bad:  # SHARED fix round 3 (Claude Opus 5.5, unreviewed): REC-1
                     unlisted.append(problem)
+                # READTIME (Claude Opus 5.5, unreviewed): the line after each header; the record read once per read/.
+                times, why = read_times(pinned, folder) if pinned is inbox.read and messages else ({}, None)
+                if why is not None:
+                    untimed.append(why)
+                for path, _ in messages:
+                    if pinned is inbox.box:
+                        status[path] = UNREAD_LINE
+                    elif path.name in times:
+                        status[path] = READ_LINE.format(time=printable(times[path.name]))
+                    else:
+                        status[path] = NOT_RECORDED_LINE
         every.sort(key=lambda message: message[0].name)
         if not every and not unlisted:
             print("mailbox empty")
-        unshown = show(every[-args.last:] if args.last else every)
+        unshown = show(every[-args.last:] if args.last else every, status)
+    for why in untimed:  # READTIME (Claude Opus 5.5, unreviewed): words, never a changed exit
+        print(f"tc log: {printable(why)}; its read times are not shown", file=sys.stderr)
     refuse_lines([f"tc log: {printable(p)} not shown ({why})" for p, why in skipped + unshown]
                  + [f"tc log: {printable(problem)}; the mail in it is not shown" for problem in unlisted])
 
