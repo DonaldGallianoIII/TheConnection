@@ -10398,7 +10398,8 @@ def main():
     rp = sub.add_parser("report", help="draw the mailbox as one self-contained HTML page")
     rp.add_argument("out", metavar="OUT.html", help="the page to write; an existing file is refused without --force")
     rp.add_argument("--scrub", action="store_true",
-                    help="role labels for names, elapsed times, ranks for numbers, off-list tags as other: safe to share")
+                    help="role labels for names, elapsed times, ranks for numbers, off-list tags as other: "
+                         "safe to share")
     rp.add_argument("--force", action="store_true", help="replace OUT.html when it exists")
     rp.add_argument("--at", type=report_time, metavar="TIME",
                     help="the page's as-of time, with its offset (default: the last message's)")

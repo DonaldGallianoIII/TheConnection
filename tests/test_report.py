@@ -27,6 +27,7 @@ Status: unreviewed
 import argparse
 import datetime
 import importlib.util
+import json
 import os
 import pathlib
 import re
@@ -307,7 +308,8 @@ class ExtractTest(unittest.TestCase):
                     moved.append(entry)
                     os.rename(box / name, box / "read" / name)
                     with open(box / "read" / ".read-times", "a", encoding="utf-8") as record:
-                        record.write('{"name": "%s", "number": 12, "read": "%s"}\n' % (name, fixture.at(18 * fixture.HOUR)))
+                        line = {"name": name, "number": 12, "read": fixture.at(18 * fixture.HOUR)}
+                        record.write(json.dumps(line) + "\n")
                 return real(entry, folder_fd, limit)
 
             report.read_head = moving
@@ -422,8 +424,8 @@ class ScrubTest(unittest.TestCase):
         """
         report = _root.load_source("board_report", REPORT_PATH)
         record = report.Record(41, "ann", "ben", fixture.BASE, None, 10, "ANSWER", (7, 41))
-        page = report.Page((record,), (report.Session("ann", None, None, None), report.Session("ben", None, None, None)),
-                           0, False, None)
+        sessions = (report.Session("ann", None, None, None), report.Session("ben", None, None, None))
+        page = report.Page((record,), sessions, 0, False, None)
         self.assertEqual(report.scrub(page).records[0].refs, (1,))
 
 
@@ -718,7 +720,8 @@ class LegibleTest(unittest.TestCase):
             box = root.path / "mail" / f"to-{LONG_NAME}" / "read"
             box.mkdir(parents=True)
             (root.path / "mail" / "to-annika" / f"000013-from-{LONG_NAME}.md").write_text(
-                f"# #13 from {LONG_NAME} to annika, {fixture.at(18 * fixture.HOUR)}\n\nQUESTION #12\n", encoding="utf-8")
+                f"# #13 from {LONG_NAME} to annika, {fixture.at(18 * fixture.HOUR)}\n\nQUESTION #12\n",
+                encoding="utf-8")
             (box / "000014-from-annika.md").write_text(
                 f"# #14 from annika to {LONG_NAME}, {fixture.at(19 * fixture.HOUR)}\n\nANSWER re #13\n",
                 encoding="utf-8")
@@ -992,7 +995,8 @@ class AnswersTest(unittest.TestCase):
     # answer, its tag, time)). annika answered 2 (by 3, `ANSWER re #2`) and
     # 5 (by 6, `#5 got it`); bertil answered 1 (by 2) and 3 (by 4, `Re #3`).
     STRIPS = {
-        "annika": ("2 answers", "median 20m", [(2, "QUESTION", 3, "ANSWER", "10m"), (5, fixture.PLANTED_TAG, 6, None, "30m")]),
+        "annika": ("2 answers", "median 20m",
+                   [(2, "QUESTION", 3, "ANSWER", "10m"), (5, fixture.PLANTED_TAG, 6, None, "30m")]),
         "bertil": ("2 answers", "median 55m", [(1, "PLAN", 2, "QUESTION", "10m"), (3, "ANSWER", 4, None, "1h40m")]),
     }
 

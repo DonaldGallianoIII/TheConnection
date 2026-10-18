@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 report.py: `tc report`'s extractor, scrub and renderer (contract C7,
 decision D42). tc loads this file from its own folder, from source, in
@@ -55,13 +54,15 @@ ROOT.
             thousands after weeks of heavy use), each read at most
             MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES, R bytes of the
             read-time records and c cards; plus serve.py's hierarchy,
-            O(n + p + e). scrub O(t + r + s) over r references and s
-            sessions. render O(t x s + p + d log d + g x q) over p
-            directed pairs, d dots in charts 3 and 5 (each strip sorted
-            for its median), g quiet gaps and q hatch lines per gap (at
-            most CHART_WIDTH / HATCH_STEP + LANE_HEIGHT / HATCH_STEP);
-            the t x s term is chart 3's and chart 4's pass over the
-            records once per session (tens of sessions).
+            O(n + p + e), and first_mail_levels, O(t + n log n + e).
+            scrub O(t + r + s) over r references and s sessions. render
+            O(s x t + t log t + p + d log d + g x q) over p directed
+            pairs, d dots in charts 3 and 5 (each strip sorted for its
+            median), g quiet gaps and q hatch lines per gap (at most
+            CHART_WIDTH / HATCH_STEP + LANE_HEIGHT / HATCH_STEP); the
+            s x t term is chart 3's and chart 4's pass over the records
+            once per session (tens of sessions), the t log t chart 4's
+            sort of each lane's times.
 @alloc      extract: one Record per message and one Session per name,
             returned; each inbox's two descriptors, closed before it
             returns; each message's head bytes, freed per message. scrub:
@@ -85,10 +86,14 @@ import types
 BOARD_DIR = pathlib.Path(__file__).resolve().parent
 SERVE_PATH = BOARD_DIR / "serve.py"
 
-# How far into a message's body the tag read goes, past the header's own
-# bound (tc's MESSAGE_HEADER_MAX_BYTES). A tag is at most 24 characters and
-# a reply's first line names its #N within a few words; 256 bytes holds
-# that with room, and keeps the read of a 1 MiB body to one small block.
+# What C7's read window adds past the header's own bound (tc's
+# MESSAGE_HEADER_MAX_BYTES): each message is read from its start for at
+# most MESSAGE_HEADER_MAX_BYTES + TAG_READ_MAX_BYTES bytes, so its first
+# body line gets whatever of that window its header leaves. A header at the
+# bound leaves this much, enough for a tag (24 characters at most) and a
+# reply's #N; a usual header of about 60 bytes leaves about 4,300. Not a
+# bound on the body line by itself (fix round 1, LOW-20). It keeps the read
+# of a 1 MiB body to one small block.
 TAG_READ_MAX_BYTES = 256
 # A tag (C7): a leading token of capitals, digits and dashes, 2 to 24
 # characters, once one trailing colon is stripped.
@@ -682,12 +687,13 @@ def first_mail_levels(board, nodes, parents, records):
     @alloc      two maps of n names and the parent map in stand-ins,
                 freed on return; the levels, returned.
     """
-    order = []
+    order, seen = [], set()
     for record in records:
         for name in (record.sender, record.recipient):
-            if name in nodes and name not in order:
+            if name in nodes and name not in seen:
+                seen.add(name)
                 order.append(name)
-    order += sorted(set(nodes) - set(order))
+    order += sorted(set(nodes) - seen)
     key = {name: FIRST_MAIL_KEY.format(place=place) for place, name in enumerate(order)}
     back = {stand: name for name, stand in key.items()}
     levels = board.levels_of(set(key.values()), {key[child]: (key[parent], source)
@@ -808,7 +814,6 @@ def scrub(page):
                tuple(ranks[ref] for ref in record.refs if ref in ranks))
         for rank, record in enumerate(page.records, 1))
     return Page(records, tuple(sessions), page.unparsed, True, elapsed(page.as_of), page.unreadable)
-
 
 
 # ---------- the renderer ----------
@@ -1046,7 +1051,8 @@ def node_shape(role, x, y, width):
     if role == PEER:
         points = ((x - half_w, y), (x - half_w + half_h, y - half_h), (x + half_w - half_h, y - half_h),
                   (x + half_w, y), (x + half_w - half_h, y + half_h), (x - half_w + half_h, y + half_h))
-        return element("polygon", (("class", "node-box"), ("points", " ".join(f"{num(a)},{num(b)}" for a, b in points))))
+        corners = " ".join(f"{num(a)},{num(b)}" for a, b in points)
+        return element("polygon", (("class", "node-box"), ("points", corners)))
     return element("rect", box + (("rx", num(NODE_CORNER)), ("stroke-dasharray", NODE_DASH)))
 
 
@@ -1071,14 +1077,15 @@ def chart_graph(page):
     most GRAPH_LINE_MAX_NODES to a line, a longer level wrapping onto more
     lines. An arrow is a curve that bends to the right of its travel, so a
     pair's two directions part; one between two boxes on one line with
-    others between them bends further, with its length, to arc past them; its head is drawn as a triangle (no marker, which
-    would need a url() reference) and its count sits at its middle, with
-    the full words in its title. A message a name sent itself draws no
+    others between them bends further, with its length, to arc past
+    them. Its head is drawn as a triangle (no marker, which would need a
+    url() reference) and its count sits at its middle, with the full
+    words in its title. A message a name sent itself draws no
     arrow; the caption counts them.
 
     @interacts  none; pure.
     @deps       math; element, text_at, titled, svg_chart, figure,
-                node_shape, box_edge, role_word, plural, num; the graph
+                node_shape, node_label, box_edge, plural, num; the graph
                 constants.
     @complexity O(t + s + p) over t records, s sessions and p directed
                 pairs.
@@ -1168,7 +1175,7 @@ def summary_lines(page):
 
     @interacts  none; pure.
     @deps       element, esc, plural, time_text, seconds_of; REAL_WARNING,
-                SCRUBBED_WORDS.
+                SCRUBBED_WORDS; page.unreadable (fix round 1, REC-13).
     @complexity O(t) over t records.
     @alloc      a list of strings, returned.
     """
@@ -1459,7 +1466,9 @@ def chart_read(page):
     @interacts  none; pure.
     @deps       delay_strips, figure, empty_chart, dot_name, span_text,
                 seconds_of, plural.
-    @complexity O(t + d log d) over t records and d dots.
+    @complexity O(s x t + d log d) over s sessions, t records and d
+                dots: the records are filtered once per session (fix
+                round 1, LOW-18), and each strip is sorted for its median.
     @alloc      the SVG text, returned; one list per recipient.
     """
     heading = "From sent to read, per recipient"
@@ -1541,8 +1550,11 @@ def chart_quiet(page):
                 row_label, marker, hatch, time_axis, time_span, dot_name,
                 seconds_of, time_text, span_text, plural, plot_right, num;
                 the chart 4 constants.
-    @complexity O(t + s + g x (w + h) / HATCH_STEP) over t records, s
-                sessions and g quiet gaps, each hatched in its box.
+    @complexity O(s x t + t log t + g x (w + h) / HATCH_STEP) over s
+                sessions, t records and g quiet gaps: the records are
+                filtered twice per session (fix round 1, LOW-18), each
+                lane's times sorted, and each gap hatched in its box of
+                width w and height h.
     @alloc      the SVG text, returned; one event list per session.
     """
     heading = "Busy and quiet stretches"
@@ -1709,8 +1721,10 @@ def render(page):
 
     @interacts  none; pure.
     @deps       element, esc, summary_lines, CHARTS; PAGE_TITLE, PAGE_CSS.
-    @complexity O(t + s + p) over t records, s sessions and p pairs, as
-                each chart says.
+    @complexity O(s x t + t log t + p + d log d + g x q) over s sessions,
+                t records, p directed pairs, d dots in charts 3 and 5, and
+                g quiet gaps of at most q hatch lines each, as each chart
+                says (fix round 1, LOW-18).
     @alloc      the page text, returned; each chart's text while built.
     """
     body = [element("h1", (), [esc(PAGE_TITLE)]), *summary_lines(page), *(chart(page) for chart in CHARTS),
